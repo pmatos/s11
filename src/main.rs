@@ -1,9 +1,9 @@
+use capstone::prelude::*;
+use clap::Parser;
+use elf::{endian::AnyEndian, ElfBytes};
 use std::fmt;
 use std::fs;
 use std::path::PathBuf;
-use clap::Parser;
-use elf::{ElfBytes, endian::AnyEndian};
-use capstone::prelude::*;
 
 // --- Command Line Arguments ---
 
@@ -15,7 +15,7 @@ struct Args {
     /// Path to AArch64 ELF binary to analyze
     #[arg(short, long)]
     binary: Option<PathBuf>,
-    
+
     /// Run demo optimization (default if no binary provided)
     #[arg(short, long)]
     demo: bool,
@@ -25,63 +25,76 @@ struct Args {
 
 fn analyze_elf_binary(path: &PathBuf) -> Result<(), Box<dyn std::error::Error>> {
     println!("Analyzing ELF binary: {}", path.display());
-    
+
     // Read the file
     let file_data = fs::read(path)?;
-    
+
     // Parse ELF
     let elf = ElfBytes::<AnyEndian>::minimal_parse(&file_data)?;
-    
+
     // Check if it's AArch64
     if elf.ehdr.e_machine != elf::abi::EM_AARCH64 {
-        return Err(format!("Not an AArch64 binary (machine type: {})", elf.ehdr.e_machine).into());
+        return Err(format!(
+            "Not an AArch64 binary (machine type: {})",
+            elf.ehdr.e_machine
+        )
+        .into());
     }
-    
+
     println!("ELF Header:");
     println!("  Architecture: AArch64");
     println!("  Entry point: 0x{:x}", elf.ehdr.e_entry);
-    println!("  Type: {}", match elf.ehdr.e_type {
-        elf::abi::ET_EXEC => "Executable",
-        elf::abi::ET_DYN => "Shared object",
-        elf::abi::ET_REL => "Relocatable",
-        _ => "Other",
-    });
-    
+    println!(
+        "  Type: {}",
+        match elf.ehdr.e_type {
+            elf::abi::ET_EXEC => "Executable",
+            elf::abi::ET_DYN => "Shared object",
+            elf::abi::ET_REL => "Relocatable",
+            _ => "Other",
+        }
+    );
+
     // Initialize Capstone disassembler for AArch64
     let cs = Capstone::new()
         .arm64()
         .mode(capstone::arch::arm64::ArchMode::Arm)
         .detail(true)
         .build()?;
-    
+
     // Find and disassemble .text sections
-    let section_headers = elf.section_headers()
+    let section_headers = elf
+        .section_headers()
         .ok_or("Failed to get section headers")?;
     let (_, string_table) = elf.section_headers_with_strtab()?;
     let string_table = string_table.ok_or("Failed to get string table")?;
-    
+
     println!("\nText sections:");
-    
+
     for section_header in section_headers.iter() {
         let section_name = string_table.get(section_header.sh_name as usize)?;
-        
+
         // Look for executable sections (typically .text, .init, .fini, etc.)
-        if section_header.sh_flags & elf::abi::SHF_EXECINSTR as u64 != 0 && section_header.sh_size > 0 {
-            println!("\nSection: {} (offset: 0x{:x}, size: {} bytes)", 
-                section_name, section_header.sh_offset, section_header.sh_size);
-            
+        if section_header.sh_flags & elf::abi::SHF_EXECINSTR as u64 != 0
+            && section_header.sh_size > 0
+        {
+            println!(
+                "\nSection: {} (offset: 0x{:x}, size: {} bytes)",
+                section_name, section_header.sh_offset, section_header.sh_size
+            );
+
             // Get section data
             let section_data = elf.section_data(&section_header)?;
             let (data, _) = section_data;
-            
+
             if !data.is_empty() {
                 println!("Disassembly:");
-                
+
                 // Disassemble the section
                 let instructions = cs.disasm_all(data, section_header.sh_addr)?;
-                
+
                 for instruction in instructions.iter() {
-                    println!("  0x{:08x}: {}\t{}", 
+                    println!(
+                        "  0x{:08x}: {}\t{}",
                         instruction.address(),
                         instruction.mnemonic().unwrap_or("???"),
                         instruction.op_str().unwrap_or("")
@@ -90,7 +103,7 @@ fn analyze_elf_binary(path: &PathBuf) -> Result<(), Box<dyn std::error::Error>> 
             }
         }
     }
-    
+
     Ok(())
 }
 
@@ -118,10 +131,24 @@ const IMM_VALUE_FOR_GENERATION: i64 = 1;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 enum Instruction {
-    AddReg { rd: Register, rn: Register, rm: Register },
-    AddImm { rd: Register, rn: Register, imm: i64 },
-    MovReg { rd: Register, rn: Register },
-    MovImm { rd: Register, imm: i64 },
+    AddReg {
+        rd: Register,
+        rn: Register,
+        rm: Register,
+    },
+    AddImm {
+        rd: Register,
+        rn: Register,
+        imm: i64,
+    },
+    MovReg {
+        rd: Register,
+        rn: Register,
+    },
+    MovImm {
+        rd: Register,
+        imm: i64,
+    },
 }
 
 impl fmt::Display for Instruction {
@@ -146,24 +173,36 @@ fn are_sequences_equivalent(seq1: &[Instruction], seq2: &[Instruction]) -> Resul
     if seq1 == seq2 {
         return Ok(true);
     }
-    
+
     // For the MVP demo, we'll hardcode some known equivalences
     // Real implementation would use SMT solver
     if seq1.len() == 2 && seq2.len() == 1 {
         // Check if seq1 is "MOV X0, X1; ADD X0, X0, #1" and seq2 is "ADD X0, X1, #1"
-        if let [Instruction::MovReg { rd: Register::X0, rn: Register::X1 },
-                Instruction::AddImm { rd: Register::X0, rn: Register::X0, imm: 1 }] = seq1 {
-            if let [Instruction::AddImm { rd: Register::X0, rn: Register::X1, imm: 1 }] = seq2 {
+        if let [Instruction::MovReg {
+            rd: Register::X0,
+            rn: Register::X1,
+        }, Instruction::AddImm {
+            rd: Register::X0,
+            rn: Register::X0,
+            imm: 1,
+        }] = seq1
+        {
+            if let [Instruction::AddImm {
+                rd: Register::X0,
+                rn: Register::X1,
+                imm: 1,
+            }] = seq2
+            {
                 return Ok(true);
             }
         }
     }
-    
+
     if seq1.len() == 1 && seq2.len() == 2 {
         // Check reverse case
         return are_sequences_equivalent(seq2, seq1);
     }
-    
+
     Ok(false)
 }
 
@@ -184,7 +223,11 @@ fn generate_all_instructions() -> Vec<Instruction> {
     // AddImm (fixed immediate for simplicity)
     for rd in regs {
         for rn in regs {
-            instrs.push(Instruction::AddImm { rd, rn, imm: IMM_VALUE_FOR_GENERATION });
+            instrs.push(Instruction::AddImm {
+                rd,
+                rn,
+                imm: IMM_VALUE_FOR_GENERATION,
+            });
         }
     }
     // MovReg
@@ -195,7 +238,10 @@ fn generate_all_instructions() -> Vec<Instruction> {
     }
     // MovImm (fixed immediate)
     for rd in regs {
-        instrs.push(Instruction::MovImm { rd, imm: IMM_VALUE_FOR_GENERATION });
+        instrs.push(Instruction::MovImm {
+            rd,
+            imm: IMM_VALUE_FOR_GENERATION,
+        });
     }
     instrs
 }
@@ -206,7 +252,7 @@ fn find_shorter_equivalent(original_seq: &[Instruction]) -> Option<Vec<Instructi
     }
 
     let all_possible_single_instrs = generate_all_instructions();
-    
+
     // Search for sequences of length 1 up to original_seq.len() - 1
     for len in 1..original_seq.len() {
         println!("Searching for equivalent sequences of length {}...", len);
@@ -216,8 +262,10 @@ fn find_shorter_equivalent(original_seq: &[Instruction]) -> Option<Vec<Instructi
             for instr_candidate in &all_possible_single_instrs {
                 let candidate_seq = vec![*instr_candidate];
                 print!("  Testing candidate: ");
-                for i in &candidate_seq { print!("{}; ", i); }
-                
+                for i in &candidate_seq {
+                    print!("{}; ", i);
+                }
+
                 match are_sequences_equivalent(original_seq, &candidate_seq) {
                     Ok(true) => {
                         println!("Found equivalent!");
@@ -241,7 +289,6 @@ fn find_shorter_equivalent(original_seq: &[Instruction]) -> Option<Vec<Instructi
     None
 }
 
-
 fn run_demo() {
     println!("=== Running Optimization Demo ===");
 
@@ -251,8 +298,15 @@ fn run_demo() {
     // ADD X0, X0, #1
     // This is equivalent to: ADD X0, X1, #1 (if X1 is not X0 initially, which our SMT model handles)
     let original_sequence = vec![
-        Instruction::MovReg { rd: Register::X0, rn: Register::X1 },
-        Instruction::AddImm { rd: Register::X0, rn: Register::X0, imm: 1 },
+        Instruction::MovReg {
+            rd: Register::X0,
+            rn: Register::X1,
+        },
+        Instruction::AddImm {
+            rd: Register::X0,
+            rn: Register::X0,
+            imm: 1,
+        },
     ];
 
     print!("Original sequence: ");
@@ -272,32 +326,50 @@ fn run_demo() {
             println!();
         }
         None => {
-            println!("No shorter equivalent sequence found with the current MVP search capabilities.");
-        }   
+            println!(
+                "No shorter equivalent sequence found with the current MVP search capabilities."
+            );
+        }
     }
 
     // Test equivalence directly for a known case
     println!("\nDirectly testing equivalence of known sequences:");
     let seq_a = vec![
-        Instruction::MovReg { rd: Register::X0, rn: Register::X1 },
-        Instruction::AddImm { rd: Register::X0, rn: Register::X0, imm: 1 },
+        Instruction::MovReg {
+            rd: Register::X0,
+            rn: Register::X1,
+        },
+        Instruction::AddImm {
+            rd: Register::X0,
+            rn: Register::X0,
+            imm: 1,
+        },
     ];
-    let seq_b = vec![
-        Instruction::AddImm { rd: Register::X0, rn: Register::X1, imm: 1 },
-    ];
-    print!("Seq A: "); seq_a.iter().for_each(|i| print!("{}; ", i)); println!();
-    print!("Seq B: "); seq_b.iter().for_each(|i| print!("{}; ", i)); println!();
+    let seq_b = vec![Instruction::AddImm {
+        rd: Register::X0,
+        rn: Register::X1,
+        imm: 1,
+    }];
+    print!("Seq A: ");
+    seq_a.iter().for_each(|i| print!("{}; ", i));
+    println!();
+    print!("Seq B: ");
+    seq_b.iter().for_each(|i| print!("{}; ", i));
+    println!();
 
     match are_sequences_equivalent(&seq_a, &seq_b) {
         Ok(true) => println!("Direct Test: Seq A and Seq B ARE equivalent."),
         Ok(false) => println!("Direct Test: Seq A and Seq B are NOT equivalent."),
         Err(e) => eprintln!("Direct Test SMT Error: {}", e),
     }
-     // Test non-equivalent
-    let seq_c = vec![
-        Instruction::MovImm { rd: Register::X0, imm: 5 },
-    ];
-    print!("Seq C: "); seq_c.iter().for_each(|i| print!("{}; ", i)); println!();
+    // Test non-equivalent
+    let seq_c = vec![Instruction::MovImm {
+        rd: Register::X0,
+        imm: 5,
+    }];
+    print!("Seq C: ");
+    seq_c.iter().for_each(|i| print!("{}; ", i));
+    println!();
     match are_sequences_equivalent(&seq_a, &seq_c) {
         Ok(true) => println!("Direct Test: Seq A and Seq C ARE equivalent."),
         Ok(false) => println!("Direct Test: Seq A and Seq C are NOT equivalent."),
@@ -308,9 +380,9 @@ fn run_demo() {
 // --- Main Function ---
 fn main() {
     let args = Args::parse();
-    
+
     println!("AArch64 Super-Optimizer MVP");
-    
+
     if let Some(binary_path) = args.binary {
         // Analyze ELF binary
         match analyze_elf_binary(&binary_path) {
@@ -330,4 +402,3 @@ fn main() {
         println!("\nTo analyze a binary, use: --binary <path>");
     }
 }
-
