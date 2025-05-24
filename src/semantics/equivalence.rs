@@ -40,9 +40,7 @@ pub fn check_equivalence(seq1: &[Instruction], seq2: &[Instruction]) -> Equivale
     match solver.check() {
         SatResult::Unsat => EquivalenceResult::Equivalent,
         SatResult::Sat => EquivalenceResult::NotEquivalent,
-        SatResult::Unknown => {
-            EquivalenceResult::Unknown("SMT solver returned unknown".to_string())
-        }
+        SatResult::Unknown => EquivalenceResult::Unknown("SMT solver returned unknown".to_string()),
     }
 }
 
@@ -51,6 +49,7 @@ pub fn check_equivalence(seq1: &[Instruction], seq2: &[Instruction]) -> Equivale
 /// Returns Some((register, value1, value2)) if sequences differ,
 /// where register is the first differing register and value1/value2
 /// are the values in the respective final states.
+#[allow(dead_code)]
 pub fn find_counterexample(
     seq1: &[Instruction],
     seq2: &[Instruction],
@@ -116,7 +115,10 @@ mod tests {
             rm: Operand::Register(Register::X0),
         }];
 
-        assert_eq!(check_equivalence(&seq1, &seq2), EquivalenceResult::Equivalent);
+        assert_eq!(
+            check_equivalence(&seq1, &seq2),
+            EquivalenceResult::Equivalent
+        );
     }
 
     #[test]
@@ -135,7 +137,10 @@ mod tests {
             rm: Operand::Register(Register::X1),
         }];
 
-        assert_eq!(check_equivalence(&seq1, &seq2), EquivalenceResult::Equivalent);
+        assert_eq!(
+            check_equivalence(&seq1, &seq2),
+            EquivalenceResult::Equivalent
+        );
     }
 
     #[test]
@@ -160,7 +165,10 @@ mod tests {
             rm: Operand::Immediate(1),
         }];
 
-        assert_eq!(check_equivalence(&seq1, &seq2), EquivalenceResult::Equivalent);
+        assert_eq!(
+            check_equivalence(&seq1, &seq2),
+            EquivalenceResult::Equivalent
+        );
     }
 
     #[test]
@@ -199,7 +207,10 @@ mod tests {
                 rm: Operand::Register(reg),
             }];
 
-            assert_eq!(check_equivalence(&seq1, &seq2), EquivalenceResult::Equivalent);
+            assert_eq!(
+                check_equivalence(&seq1, &seq2),
+                EquivalenceResult::Equivalent
+            );
         }
     }
 
@@ -217,7 +228,10 @@ mod tests {
             imm: 0,
         }];
 
-        assert_eq!(check_equivalence(&seq1, &seq2), EquivalenceResult::Equivalent);
+        assert_eq!(
+            check_equivalence(&seq1, &seq2),
+            EquivalenceResult::Equivalent
+        );
     }
 
     #[test]
@@ -234,7 +248,10 @@ mod tests {
             rn: Register::X1,
         }];
 
-        assert_eq!(check_equivalence(&seq1, &seq2), EquivalenceResult::Equivalent);
+        assert_eq!(
+            check_equivalence(&seq1, &seq2),
+            EquivalenceResult::Equivalent
+        );
     }
 
     #[test]

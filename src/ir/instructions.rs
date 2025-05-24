@@ -5,6 +5,7 @@ use std::fmt;
 
 /// AArch64 instructions supported by the IR
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[allow(dead_code)]
 pub enum Instruction {
     // Data movement
     MovReg {
@@ -65,6 +66,7 @@ pub enum Instruction {
 
 impl Instruction {
     /// Get the destination register for this instruction
+    #[allow(dead_code)]
     pub fn destination(&self) -> Register {
         match self {
             Instruction::MovReg { rd, .. }
@@ -81,6 +83,7 @@ impl Instruction {
     }
 
     /// Get all source registers used by this instruction
+    #[allow(dead_code)]
     pub fn source_registers(&self) -> Vec<Register> {
         match self {
             Instruction::MovReg { rn, .. } => vec![*rn],

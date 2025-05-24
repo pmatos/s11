@@ -31,7 +31,10 @@ impl<'ctx> MachineState<'ctx> {
         registers.insert(Register::XZR, BV::from_i64(ctx, 0, 64));
 
         // SP is also symbolic
-        registers.insert(Register::SP, BV::new_const(ctx, format!("{}_sp", prefix), 64));
+        registers.insert(
+            Register::SP,
+            BV::new_const(ctx, format!("{}_sp", prefix), 64),
+        );
 
         MachineState { registers, ctx }
     }
@@ -139,7 +142,10 @@ pub fn apply_sequence<'ctx>(
 }
 
 /// Check if two machine states are not equal (for any register values)
-pub fn states_not_equal<'ctx>(state1: &MachineState<'ctx>, state2: &MachineState<'ctx>) -> z3::ast::Bool<'ctx> {
+pub fn states_not_equal<'ctx>(
+    state1: &MachineState<'ctx>,
+    state2: &MachineState<'ctx>,
+) -> z3::ast::Bool<'ctx> {
     let ctx = state1.ctx;
     let mut not_equal = z3::ast::Bool::from_bool(ctx, false);
 

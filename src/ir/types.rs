@@ -4,12 +4,40 @@ use std::fmt;
 
 /// AArch64 general-purpose registers
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[allow(clippy::upper_case_acronyms)]
 pub enum Register {
     // General purpose registers
-    X0, X1, X2, X3, X4, X5, X6, X7,
-    X8, X9, X10, X11, X12, X13, X14, X15,
-    X16, X17, X18, X19, X20, X21, X22, X23,
-    X24, X25, X26, X27, X28, X29, X30,
+    X0,
+    X1,
+    X2,
+    X3,
+    X4,
+    X5,
+    X6,
+    X7,
+    X8,
+    X9,
+    X10,
+    X11,
+    X12,
+    X13,
+    X14,
+    X15,
+    X16,
+    X17,
+    X18,
+    X19,
+    X20,
+    X21,
+    X22,
+    X23,
+    X24,
+    X25,
+    X26,
+    X27,
+    X28,
+    X29,
+    X30,
     // Special registers
     XZR, // Zero register
     SP,  // Stack pointer
@@ -17,6 +45,7 @@ pub enum Register {
 
 impl Register {
     /// Get register index for X0-X30
+    #[allow(dead_code)]
     pub fn index(&self) -> Option<u8> {
         match self {
             Register::X0 => Some(0),
@@ -153,6 +182,7 @@ impl fmt::Display for Operand {
 
 /// Condition codes for AArch64
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[allow(dead_code)]
 pub enum Condition {
     EQ, // Equal
     NE, // Not equal

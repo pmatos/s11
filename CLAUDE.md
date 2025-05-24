@@ -29,6 +29,18 @@ Standard Cargo commands also work:
 - `cargo test`
 - `cargo fmt`
 
+### CI Checks
+
+**IMPORTANT**: Before committing and pushing, always run `./ci_check.sh` to ensure your code will pass CI. This script runs:
+1. Code formatting check (`cargo fmt -- --check`)
+2. Clippy linting (`cargo clippy -- -D warnings`)
+3. Project build
+4. Unit tests
+5. Test binary builds
+6. Full test suite
+
+This prevents pushing code that will fail CI checks.
+
 ## Dependencies
 
 The project requires:

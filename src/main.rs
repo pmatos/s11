@@ -144,7 +144,7 @@ fn generate_all_instructions() -> Vec<Instruction> {
             }
         }
     }
-    
+
     // Add (immediate)
     for rd in regs {
         for rn in regs {
@@ -155,14 +155,14 @@ fn generate_all_instructions() -> Vec<Instruction> {
             });
         }
     }
-    
+
     // MovReg
     for rd in regs {
         for rn in regs {
             instrs.push(Instruction::MovReg { rd, rn });
         }
     }
-    
+
     // MovImm
     for rd in regs {
         instrs.push(Instruction::MovImm {
@@ -171,7 +171,7 @@ fn generate_all_instructions() -> Vec<Instruction> {
         });
         instrs.push(Instruction::MovImm { rd, imm: 0 });
     }
-    
+
     // Eor (for zeroing)
     for rd in regs {
         instrs.push(Instruction::Eor {
@@ -180,7 +180,7 @@ fn generate_all_instructions() -> Vec<Instruction> {
             rm: Operand::Register(rd),
         });
     }
-    
+
     instrs
 }
 
@@ -313,7 +313,7 @@ fn run_demo() {
         Ok(false) => println!("Direct Test: Seq A and Seq C are NOT equivalent."),
         Err(e) => eprintln!("Direct Test SMT Error: {}", e),
     }
-    
+
     // Test MOV #0 vs EOR equivalence
     println!("\nTesting MOV #0 vs EOR equivalence:");
     let mov_zero = vec![Instruction::MovImm {
@@ -332,7 +332,9 @@ fn run_demo() {
     eor_self.iter().for_each(|i| print!("{}; ", i));
     println!();
     match are_sequences_equivalent(&mov_zero, &eor_self) {
-        Ok(true) => println!("Direct Test: MOV #0 and EOR self ARE equivalent (register clearing)."),
+        Ok(true) => {
+            println!("Direct Test: MOV #0 and EOR self ARE equivalent (register clearing).")
+        }
         Ok(false) => println!("Direct Test: MOV #0 and EOR self are NOT equivalent."),
         Err(e) => eprintln!("Direct Test SMT Error: {}", e),
     }
