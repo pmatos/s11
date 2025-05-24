@@ -27,13 +27,10 @@ jobs:
       with:
         toolchain: stable
         override: true
-        components: rustfmt, clippy
+        components: rustfmt
 
     - name: Check formatting
       run: cargo fmt -- --check
-
-    - name: Run clippy
-      run: cargo clippy -- -D warnings
 
     - name: Build
       run: cargo build --verbose

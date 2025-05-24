@@ -33,13 +33,14 @@ Standard Cargo commands also work:
 
 **IMPORTANT**: Before committing and pushing, always run `./ci_check.sh` to ensure your code will pass CI. This script runs:
 1. Code formatting check (`cargo fmt -- --check`)
-2. Clippy linting (`cargo clippy -- -D warnings`)
-3. Project build
-4. Unit tests
-5. Test binary builds
-6. Full test suite
+2. Project build
+3. Unit tests
+4. Test binary builds
+5. Full test suite
 
 This prevents pushing code that will fail CI checks.
+
+Note: Clippy linting is run separately in the `rust-clippy.yml` workflow which performs security analysis and uploads results to GitHub's security tab.
 
 ## Dependencies
 
