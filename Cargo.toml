@@ -1,11 +1,11 @@
 [package]
 name = "s11"
 version = "0.1.0"
-edition = "2021"
-authors = ["Your Name <your.email@example.com>"] # TODO: Customize this
+edition = "2025"
+authors = ["Paulo Matos <p@ocmatos.com>"]
 description = "s11: AArch64 optimizer demonstrating IR, SMT-based equivalence checking, and basic enumerative search."
 license = "MIT OR Apache-2.0" # Choose one or keep both if you prefer dual licensing
-repository = "https://github.com/your_username/s11" # TODO: Customize this
+repository = "https://github.com/pmatos/s11"
 readme = "README.md"
 keywords = ["aarch64", "s11", "compiler", "optimization", "smt"]
 categories = ["compilers", "development-tools::testing", "science"]
