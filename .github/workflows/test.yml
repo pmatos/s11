@@ -20,6 +20,7 @@ jobs:
       run: |
         sudo apt-get update
         sudo apt-get install -y libcapstone-dev gcc-aarch64-linux-gnu
+        curl --proto '=https' --tlsv1.2 -sSf https://just.systems/install.sh | sudo bash -s -- --to /usr/local/bin
 
     - name: Setup Rust
       uses: actions-rs/toolchain@v1

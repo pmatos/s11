@@ -35,6 +35,7 @@ The project requires:
 - Rust toolchain with 2021 edition support
 - External crates: `elf`, `capstone`, `clap`
 - Capstone engine (usually installed via system package manager)
+- `just` command runner for running build tasks (required by test_all.sh)
 
 ## Architecture
 
