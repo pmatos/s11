@@ -14,10 +14,14 @@ categories = ["compilers", "development-tools::testing", "science"]
 elf = "0.7"
 capstone = "0.12"
 clap = { version = "4.0", features = ["derive"] }
-# Add other dependencies here as the project grows, for example:
-# dynasmrt = "1.0" # If you add assembly
-# petgraph = "0.6" # For CFG
-# rayon = "1.8" # For parallelism
+z3 = { version = "0.12", optional = true }
+
+[features]
+default = []
+z3 = ["dep:z3"]
+
+[dev-dependencies]
+proptest = "1.4"
 
 # Optional: Profile for release builds for better performance/smaller binary
 [profile.release]

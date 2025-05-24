@@ -1,9 +1,17 @@
 use capstone::prelude::*;
 use clap::Parser;
 use elf::{endian::AnyEndian, ElfBytes};
-use std::fmt;
 use std::fs;
 use std::path::PathBuf;
+
+mod ir;
+mod semantics;
+
+use ir::{Instruction, Operand, Register};
+#[cfg(feature = "z3")]
+use semantics::{check_equivalence, EquivalenceResult};
+#[cfg(not(feature = "z3"))]
+use semantics::check_equivalence;
 
 // --- Command Line Arguments ---
 
@@ -107,142 +115,82 @@ fn analyze_elf_binary(path: &PathBuf) -> Result<(), Box<dyn std::error::Error>> 
     Ok(())
 }
 
-// --- IR Definition ---
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-enum Register {
-    X0,
-    X1,
-    X2,
-}
-
-impl fmt::Display for Register {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Register::X0 => write!(f, "X0"),
-            Register::X1 => write!(f, "X1"),
-            Register::X2 => write!(f, "X2"),
-        }
-    }
-}
-
 // For simplicity in MVP, immediate is fixed for generation, but can be varied in input.
 const IMM_VALUE_FOR_GENERATION: i64 = 1;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-enum Instruction {
-    AddReg {
-        rd: Register,
-        rn: Register,
-        rm: Register,
-    },
-    AddImm {
-        rd: Register,
-        rn: Register,
-        imm: i64,
-    },
-    MovReg {
-        rd: Register,
-        rn: Register,
-    },
-    MovImm {
-        rd: Register,
-        imm: i64,
-    },
-}
-
-impl fmt::Display for Instruction {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Instruction::AddReg { rd, rn, rm } => write!(f, "ADD {}, {}, {}", rd, rn, rm),
-            Instruction::AddImm { rd, rn, imm } => write!(f, "ADD {}, {}, #{}", rd, rn, imm),
-            Instruction::MovReg { rd, rn } => write!(f, "MOV {}, {}", rd, rn),
-            Instruction::MovImm { rd, imm } => write!(f, "MOV {}, #{}", rd, imm),
-        }
-    }
-}
-
-// --- SMT Generation (Placeholder for future development) ---
-// The SMT generation functions have been removed for the MVP
-// They will be re-implemented when proper SMT solver integration is added
-
-// --- Equivalence Checker (Simplified for MVP) ---
+// --- Equivalence Checker ---
 
 fn are_sequences_equivalent(seq1: &[Instruction], seq2: &[Instruction]) -> Result<bool, String> {
-    // Simple case: identical sequences
-    if seq1 == seq2 {
-        return Ok(true);
-    }
-
-    // For the MVP demo, we'll hardcode some known equivalences
-    // Real implementation would use SMT solver
-    if seq1.len() == 2 && seq2.len() == 1 {
-        // Check if seq1 is "MOV X0, X1; ADD X0, X0, #1" and seq2 is "ADD X0, X1, #1"
-        if let [Instruction::MovReg {
-            rd: Register::X0,
-            rn: Register::X1,
-        }, Instruction::AddImm {
-            rd: Register::X0,
-            rn: Register::X0,
-            imm: 1,
-        }] = seq1
-        {
-            if let [Instruction::AddImm {
-                rd: Register::X0,
-                rn: Register::X1,
-                imm: 1,
-            }] = seq2
-            {
-                return Ok(true);
-            }
+    #[cfg(feature = "z3")]
+    {
+        match check_equivalence(seq1, seq2) {
+            EquivalenceResult::Equivalent => Ok(true),
+            EquivalenceResult::NotEquivalent => Ok(false),
+            EquivalenceResult::Unknown(msg) => Err(msg),
         }
     }
-
-    if seq1.len() == 1 && seq2.len() == 2 {
-        // Check reverse case
-        return are_sequences_equivalent(seq2, seq1);
+    #[cfg(not(feature = "z3"))]
+    {
+        Ok(check_equivalence(seq1, seq2))
     }
-
-    Ok(false)
 }
 
 // --- Enumerative Search ---
 
 fn generate_all_instructions() -> Vec<Instruction> {
     let mut instrs = Vec::new();
+    // Use only first few registers for MVP
     let regs = [Register::X0, Register::X1, Register::X2];
 
-    // AddReg
+    // Add (register)
     for rd in regs {
         for rn in regs {
             for rm in regs {
-                instrs.push(Instruction::AddReg { rd, rn, rm });
+                instrs.push(Instruction::Add {
+                    rd,
+                    rn,
+                    rm: Operand::Register(rm),
+                });
             }
         }
     }
-    // AddImm (fixed immediate for simplicity)
+    
+    // Add (immediate)
     for rd in regs {
         for rn in regs {
-            instrs.push(Instruction::AddImm {
+            instrs.push(Instruction::Add {
                 rd,
                 rn,
-                imm: IMM_VALUE_FOR_GENERATION,
+                rm: Operand::Immediate(IMM_VALUE_FOR_GENERATION),
             });
         }
     }
+    
     // MovReg
     for rd in regs {
         for rn in regs {
             instrs.push(Instruction::MovReg { rd, rn });
         }
     }
-    // MovImm (fixed immediate)
+    
+    // MovImm
     for rd in regs {
         instrs.push(Instruction::MovImm {
             rd,
             imm: IMM_VALUE_FOR_GENERATION,
         });
+        instrs.push(Instruction::MovImm { rd, imm: 0 });
     }
+    
+    // Eor (for zeroing)
+    for rd in regs {
+        instrs.push(Instruction::Eor {
+            rd,
+            rn: rd,
+            rm: Operand::Register(rd),
+        });
+    }
+    
     instrs
 }
 
@@ -302,10 +250,10 @@ fn run_demo() {
             rd: Register::X0,
             rn: Register::X1,
         },
-        Instruction::AddImm {
+        Instruction::Add {
             rd: Register::X0,
             rn: Register::X0,
-            imm: 1,
+            rm: Operand::Immediate(1),
         },
     ];
 
@@ -339,16 +287,16 @@ fn run_demo() {
             rd: Register::X0,
             rn: Register::X1,
         },
-        Instruction::AddImm {
+        Instruction::Add {
             rd: Register::X0,
             rn: Register::X0,
-            imm: 1,
+            rm: Operand::Immediate(1),
         },
     ];
-    let seq_b = vec![Instruction::AddImm {
+    let seq_b = vec![Instruction::Add {
         rd: Register::X0,
         rn: Register::X1,
-        imm: 1,
+        rm: Operand::Immediate(1),
     }];
     print!("Seq A: ");
     seq_a.iter().for_each(|i| print!("{}; ", i));
@@ -373,6 +321,29 @@ fn run_demo() {
     match are_sequences_equivalent(&seq_a, &seq_c) {
         Ok(true) => println!("Direct Test: Seq A and Seq C ARE equivalent."),
         Ok(false) => println!("Direct Test: Seq A and Seq C are NOT equivalent."),
+        Err(e) => eprintln!("Direct Test SMT Error: {}", e),
+    }
+    
+    // Test MOV #0 vs EOR equivalence
+    println!("\nTesting MOV #0 vs EOR equivalence:");
+    let mov_zero = vec![Instruction::MovImm {
+        rd: Register::X0,
+        imm: 0,
+    }];
+    let eor_self = vec![Instruction::Eor {
+        rd: Register::X0,
+        rn: Register::X0,
+        rm: Operand::Register(Register::X0),
+    }];
+    print!("MOV X0, #0: ");
+    mov_zero.iter().for_each(|i| print!("{}; ", i));
+    println!();
+    print!("EOR X0, X0, X0: ");
+    eor_self.iter().for_each(|i| print!("{}; ", i));
+    println!();
+    match are_sequences_equivalent(&mov_zero, &eor_self) {
+        Ok(true) => println!("Direct Test: MOV #0 and EOR self ARE equivalent (register clearing)."),
+        Ok(false) => println!("Direct Test: MOV #0 and EOR self are NOT equivalent."),
         Err(e) => eprintln!("Direct Test SMT Error: {}", e),
     }
 }

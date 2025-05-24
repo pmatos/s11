@@ -38,8 +38,16 @@ jobs:
     - name: Build
       run: cargo build --verbose
 
-    - name: Run tests
+    - name: Run unit tests
       run: cargo test --verbose
+
+    - name: Run tests with z3 (if available)
+      run: |
+        if command -v z3 &> /dev/null; then
+          cargo test --verbose --features z3
+        else
+          echo "Z3 not installed, skipping z3 tests"
+        fi
 
     - name: Build test binaries
       run: ./build_tests.sh
