@@ -1,0 +1,28 @@
+[package]
+name = "aarch64_superoptimizer_mvp"
+version = "0.1.0"
+edition = "2021"
+authors = ["Your Name <your.email@example.com>"] # TODO: Customize this
+description = "MVP for an AArch64 Super-Optimizer in Rust, demonstrating IR, SMT-based equivalence checking, and basic enumerative search."
+license = "MIT OR Apache-2.0" # Choose one or keep both if you prefer dual licensing
+repository = "https://github.com/your_username/aarch64_superoptimizer_mvp" # TODO: Customize this
+readme = "README.md"
+keywords = ["aarch64", "superoptimizer", "compiler", "optimization", "smt"]
+categories = ["compilers", "development-tools::testing", "science"]
+
+[dependencies]
+elf = "0.7"
+capstone = "0.12"
+clap = { version = "4.0", features = ["derive"] }
+# Add other dependencies here as the project grows, for example:
+# dynasmrt = "1.0" # If you add assembly
+# petgraph = "0.6" # For CFG
+# rayon = "1.8" # For parallelism
+
+# Optional: Profile for release builds for better performance/smaller binary
+[profile.release]
+lto = true           # Enable Link Time Optimization
+codegen-units = 1    # Maximize optimizations
+panic = 'abort'      # Abort on panic for smaller binary (no unwinding)
+strip = true         # Strip symbols from the binary
+opt-level = 3        # Ensure highest optimization level (default for release but explicit)
