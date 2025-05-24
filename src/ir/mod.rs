@@ -5,4 +5,4 @@ pub mod types;
 
 // Re-export commonly used types
 pub use instructions::Instruction;
-pub use types::{Condition, Operand, Register};
+pub use types::{Operand, Register};

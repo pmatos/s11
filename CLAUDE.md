@@ -33,19 +33,24 @@ Standard Cargo commands also work:
 
 The project requires:
 - Rust toolchain with 2021 edition support
-- External crates: `elf`, `capstone`, `clap`
+- External crates: `elf`, `capstone`, `clap`, `z3`
 - Capstone engine (usually installed via system package manager)
+- Z3 SMT solver and development libraries (for semantic equivalence checking)
 - `just` command runner for running build tasks (required by test_all.sh)
 
 ## Architecture
 
 ### Core Components
 
-- **Command Line Interface** (`main.rs:10-22`): Uses `clap` for argument parsing with `--binary` and `--demo` options
-- **ELF Binary Analysis** (`main.rs:26-95`): Reads AArch64 ELF files and disassembles executable sections using Capstone
-- **IR Definition** (`main.rs:97-135`): Defines `Register` enum (X0, X1, X2) and `Instruction` enum covering basic AArch64 operations  
-- **Equivalence Checker** (`main.rs:141-167`): Simplified pattern-based equivalence checking (hardcoded known optimizations)
-- **Enumerative Search** (`main.rs:169-267`): Searches for shorter equivalent sequences (currently limited to length-1 candidates)
+- **Command Line Interface** (`main.rs`): Uses `clap` for argument parsing with `--binary` and `--demo` options
+- **ELF Binary Analysis** (`main.rs`): Reads AArch64 ELF files and disassembles executable sections using Capstone
+- **IR Definition** (`ir/` module): 
+  - `types.rs`: Defines `Register` enum (X0-X30, XZR, SP), `Operand`, and `Condition` types
+  - `instructions.rs`: Defines `Instruction` enum covering AArch64 operations (MOV, ADD, SUB, AND, ORR, EOR, shifts)
+- **SMT-based Equivalence Checking** (`semantics/` module):
+  - `smt.rs`: Translates IR to SMT constraints using z3 bitvectors
+  - `equivalence.rs`: Checks semantic equivalence of instruction sequences using SMT solving
+- **Enumerative Search** (`main.rs`): Searches for shorter equivalent sequences (currently limited to length-1 candidates)
 
 ### Key Functions
 
@@ -55,4 +60,7 @@ The project requires:
 - `find_shorter_equivalent()` - Enumerative optimization search
 - `run_demo()` - Demonstrates IR optimization capabilities
 
-The application has two modes: binary analysis (reads and disassembles AArch64 ELF files) and demo mode (shows IR-level optimization). The optimizer currently works with hardcoded equivalence patterns. For example, it recognizes that `MOV X0, X1; ADD X0, X0, #1` is equivalent to `ADD X0, X1, #1`.
+The application has two modes: binary analysis (reads and disassembles AArch64 ELF files) and demo mode (shows IR-level optimization). The optimizer uses z3 SMT solver to verify semantic equivalence between instruction sequences. For example, it can prove that:
+- `MOV X0, X1; ADD X0, X0, #1` is equivalent to `ADD X0, X1, #1`
+- `MOV X0, #0` is equivalent to `EOR X0, X0, X0` (register clearing)
+- `ADD X0, X1, X2` is equivalent to `ADD X0, X2, X1` (commutativity)

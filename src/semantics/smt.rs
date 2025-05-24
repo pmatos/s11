@@ -3,9 +3,10 @@
 use crate::ir::{Instruction, Operand, Register};
 use std::collections::HashMap;
 use z3::ast::{Ast, BV};
-use z3::{Config, Context, Solver};
+use z3::Context;
 
 /// Machine state representation for SMT solving
+#[derive(Clone)]
 pub struct MachineState<'ctx> {
     /// Register values as 64-bit bitvectors
     pub registers: HashMap<Register, BV<'ctx>>,
@@ -138,9 +139,9 @@ pub fn apply_sequence<'ctx>(
 }
 
 /// Check if two machine states are not equal (for any register values)
-pub fn states_not_equal<'ctx>(state1: &MachineState<'ctx>, state2: &MachineState<'ctx>) -> BV<'ctx> {
+pub fn states_not_equal<'ctx>(state1: &MachineState<'ctx>, state2: &MachineState<'ctx>) -> z3::ast::Bool<'ctx> {
     let ctx = state1.ctx;
-    let mut not_equal = BV::from_bool(ctx, false);
+    let mut not_equal = z3::ast::Bool::from_bool(ctx, false);
 
     // Check all general purpose registers
     for i in 0..=30 {
@@ -148,7 +149,7 @@ pub fn states_not_equal<'ctx>(state1: &MachineState<'ctx>, state2: &MachineState
             let val1 = state1.get_register(reg);
             let val2 = state2.get_register(reg);
             let reg_not_equal = val1._eq(val2).not();
-            not_equal = not_equal.bvor(&reg_not_equal);
+            not_equal = z3::ast::Bool::or(ctx, &[&not_equal, &reg_not_equal]);
         }
     }
 
@@ -156,7 +157,7 @@ pub fn states_not_equal<'ctx>(state1: &MachineState<'ctx>, state2: &MachineState
     let sp1 = state1.get_register(Register::SP);
     let sp2 = state2.get_register(Register::SP);
     let sp_not_equal = sp1._eq(sp2).not();
-    not_equal = not_equal.bvor(&sp_not_equal);
+    not_equal = z3::ast::Bool::or(ctx, &[&not_equal, &sp_not_equal]);
 
     not_equal
 }
@@ -164,7 +165,7 @@ pub fn states_not_equal<'ctx>(state1: &MachineState<'ctx>, state2: &MachineState
 #[cfg(test)]
 mod tests {
     use super::*;
-    use z3::SatResult;
+    use z3::{Config, SatResult, Solver};
 
     #[test]
     fn test_mov_zero_equivalence() {

@@ -25,9 +25,6 @@ pub fn check_equivalence(seq1: &[Instruction], seq2: &[Instruction]) -> Equivale
     let ctx = Context::new(&cfg);
     let solver = Solver::new(&ctx);
 
-    // Set a reasonable timeout (5 seconds)
-    solver.set_timeout(5000);
-
     // Create symbolic initial state
     let initial_state = MachineState::new_symbolic(&ctx, "init");
 

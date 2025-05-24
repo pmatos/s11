@@ -8,10 +8,7 @@ mod ir;
 mod semantics;
 
 use ir::{Instruction, Operand, Register};
-#[cfg(feature = "z3")]
 use semantics::{check_equivalence, EquivalenceResult};
-#[cfg(not(feature = "z3"))]
-use semantics::check_equivalence;
 
 // --- Command Line Arguments ---
 
@@ -121,17 +118,10 @@ const IMM_VALUE_FOR_GENERATION: i64 = 1;
 // --- Equivalence Checker ---
 
 fn are_sequences_equivalent(seq1: &[Instruction], seq2: &[Instruction]) -> Result<bool, String> {
-    #[cfg(feature = "z3")]
-    {
-        match check_equivalence(seq1, seq2) {
-            EquivalenceResult::Equivalent => Ok(true),
-            EquivalenceResult::NotEquivalent => Ok(false),
-            EquivalenceResult::Unknown(msg) => Err(msg),
-        }
-    }
-    #[cfg(not(feature = "z3"))]
-    {
-        Ok(check_equivalence(seq1, seq2))
+    match check_equivalence(seq1, seq2) {
+        EquivalenceResult::Equivalent => Ok(true),
+        EquivalenceResult::NotEquivalent => Ok(false),
+        EquivalenceResult::Unknown(msg) => Err(msg),
     }
 }
 
