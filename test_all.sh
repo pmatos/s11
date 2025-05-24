@@ -1,9 +1,9 @@
 #!/bin/bash
 
-# Test script for AArch64 Super-Optimizer
+# Test script for s11
 set -e
 
-echo "=== AArch64 Super-Optimizer Test Suite ==="
+echo "=== s11 Test Suite ==="
 echo
 
 # Build test binaries if they don't exist

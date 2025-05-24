@@ -13,8 +13,8 @@ use semantics::{check_equivalence, EquivalenceResult};
 // --- Command Line Arguments ---
 
 #[derive(Parser)]
-#[command(name = "aarch64-superoptimizer")]
-#[command(about = "AArch64 Super-Optimizer MVP")]
+#[command(name = "s11")]
+#[command(about = "s11 - AArch64 Optimizer")]
 #[command(version)]
 struct Args {
     /// Path to AArch64 ELF binary to analyze
@@ -344,7 +344,7 @@ fn run_demo() {
 fn main() {
     let args = Args::parse();
 
-    println!("AArch64 Super-Optimizer MVP");
+    println!("s11 - AArch64 Optimizer");
 
     if let Some(binary_path) = args.binary {
         // Analyze ELF binary

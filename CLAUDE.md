@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-This is an AArch64 super-optimizer MVP written in Rust that demonstrates:
+This is s11, an AArch64 optimizer MVP written in Rust that demonstrates:
 - ELF binary reading and disassembly for AArch64 binaries using Capstone engine
 - IR representation for a subset of AArch64 instructions (ADD, MOV with register/immediate variants)
 - Simplified equivalence checking with hardcoded patterns (SMT integration planned for future)

@@ -31,7 +31,7 @@ run-release: release
     @echo "Running project (release)..."
     cargo run --release
     # Alternatively, run the executable directly:
-    # ./target/release/aarch64_superoptimizer_mvp
+    # ./target/release/s11
 
 # Run tests (currently, the MVP doesn't have dedicated unit tests beyond main's demo)
 test:

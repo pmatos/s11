@@ -104,7 +104,7 @@ cargo test
 
 - **Debug builds**: Located in `target/debug/`
 - **Release builds**: Located in `target/release/`
-- **Executable name**: `aarch64_superoptimizer_mvp`
+- **Executable name**: `s11`
 
 ## Performance Notes
 
