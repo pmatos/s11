@@ -22,14 +22,20 @@ struct Args {
     binary: Option<PathBuf>,
 
     /// Run demo optimization (default if no binary provided)
-    #[arg(short, long)]
+    #[arg(short, long, conflicts_with = "disasm")]
     demo: bool,
+
+    /// Disassemble the binary showing addresses and machine code
+    #[arg(long, conflicts_with = "demo")]
+    disasm: bool,
 }
 
 // --- ELF Binary Analysis ---
 
-fn analyze_elf_binary(path: &PathBuf) -> Result<(), Box<dyn std::error::Error>> {
-    println!("Analyzing ELF binary: {}", path.display());
+fn analyze_elf_binary(path: &PathBuf, disasm_mode: bool) -> Result<(), Box<dyn std::error::Error>> {
+    if !disasm_mode {
+        println!("Analyzing ELF binary: {}", path.display());
+    }
 
     // Read the file
     let file_data = fs::read(path)?;
@@ -46,18 +52,20 @@ fn analyze_elf_binary(path: &PathBuf) -> Result<(), Box<dyn std::error::Error>> 
         .into());
     }
 
-    println!("ELF Header:");
-    println!("  Architecture: AArch64");
-    println!("  Entry point: 0x{:x}", elf.ehdr.e_entry);
-    println!(
-        "  Type: {}",
-        match elf.ehdr.e_type {
-            elf::abi::ET_EXEC => "Executable",
-            elf::abi::ET_DYN => "Shared object",
-            elf::abi::ET_REL => "Relocatable",
-            _ => "Other",
-        }
-    );
+    if !disasm_mode {
+        println!("ELF Header:");
+        println!("  Architecture: AArch64");
+        println!("  Entry point: 0x{:x}", elf.ehdr.e_entry);
+        println!(
+            "  Type: {}",
+            match elf.ehdr.e_type {
+                elf::abi::ET_EXEC => "Executable",
+                elf::abi::ET_DYN => "Shared object",
+                elf::abi::ET_REL => "Relocatable",
+                _ => "Other",
+            }
+        );
+    }
 
     // Initialize Capstone disassembler for AArch64
     let cs = Capstone::new()
@@ -73,7 +81,9 @@ fn analyze_elf_binary(path: &PathBuf) -> Result<(), Box<dyn std::error::Error>> 
     let (_, string_table) = elf.section_headers_with_strtab()?;
     let string_table = string_table.ok_or("Failed to get string table")?;
 
-    println!("\nText sections:");
+    if !disasm_mode {
+        println!("\nText sections:");
+    }
 
     for section_header in section_headers.iter() {
         let section_name = string_table.get(section_header.sh_name as usize)?;
@@ -82,28 +92,49 @@ fn analyze_elf_binary(path: &PathBuf) -> Result<(), Box<dyn std::error::Error>> 
         if section_header.sh_flags & elf::abi::SHF_EXECINSTR as u64 != 0
             && section_header.sh_size > 0
         {
-            println!(
-                "\nSection: {} (offset: 0x{:x}, size: {} bytes)",
-                section_name, section_header.sh_offset, section_header.sh_size
-            );
+            if !disasm_mode {
+                println!(
+                    "\nSection: {} (offset: 0x{:x}, size: {} bytes)",
+                    section_name, section_header.sh_offset, section_header.sh_size
+                );
+            }
 
             // Get section data
             let section_data = elf.section_data(&section_header)?;
             let (data, _) = section_data;
 
             if !data.is_empty() {
-                println!("Disassembly:");
+                if !disasm_mode {
+                    println!("Disassembly:");
+                }
 
                 // Disassemble the section
                 let instructions = cs.disasm_all(data, section_header.sh_addr)?;
 
                 for instruction in instructions.iter() {
-                    println!(
-                        "  0x{:08x}: {}\t{}",
-                        instruction.address(),
-                        instruction.mnemonic().unwrap_or("???"),
-                        instruction.op_str().unwrap_or("")
-                    );
+                    if disasm_mode {
+                        // Format: address: bytes  mnemonic operands
+                        let bytes = instruction.bytes();
+                        let hex_bytes: String = bytes
+                            .iter()
+                            .map(|b| format!("{:02x}", b))
+                            .collect::<Vec<_>>()
+                            .join("");
+                        println!(
+                            "0x{:x}: {:8} {} {}",
+                            instruction.address(),
+                            hex_bytes,
+                            instruction.mnemonic().unwrap_or("???"),
+                            instruction.op_str().unwrap_or("")
+                        );
+                    } else {
+                        println!(
+                            "  0x{:08x}: {}\t{}",
+                            instruction.address(),
+                            instruction.mnemonic().unwrap_or("???"),
+                            instruction.op_str().unwrap_or("")
+                        );
+                    }
                 }
             }
         }
@@ -344,12 +375,18 @@ fn run_demo() {
 fn main() {
     let args = Args::parse();
 
-    println!("s11 - AArch64 Optimizer");
+    if !args.disasm {
+        println!("s11 - AArch64 Optimizer");
+    }
 
     if let Some(binary_path) = args.binary {
         // Analyze ELF binary
-        match analyze_elf_binary(&binary_path) {
-            Ok(()) => println!("\nBinary analysis completed successfully."),
+        match analyze_elf_binary(&binary_path, args.disasm) {
+            Ok(()) => {
+                if !args.disasm {
+                    println!("\nBinary analysis completed successfully.");
+                }
+            }
             Err(e) => {
                 eprintln!("Error analyzing binary: {}", e);
                 std::process::exit(1);
@@ -358,6 +395,9 @@ fn main() {
     } else if args.demo {
         // Run demo
         run_demo();
+    } else if args.disasm {
+        eprintln!("Error: --disasm requires --binary <path>");
+        std::process::exit(1);
     } else {
         // Default: run demo if no binary specified
         println!("No binary specified. Running demo mode.\n");
