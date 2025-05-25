@@ -1,6 +1,6 @@
 use capstone::prelude::*;
 use clap::Parser;
-use elf::{endian::AnyEndian, ElfBytes};
+use elf::{ElfBytes, endian::AnyEndian};
 use std::fs;
 use std::path::PathBuf;
 
@@ -8,7 +8,7 @@ mod ir;
 mod semantics;
 
 use ir::{Instruction, Operand, Register};
-use semantics::{check_equivalence, EquivalenceResult};
+use semantics::{EquivalenceResult, check_equivalence};
 
 // --- Command Line Arguments ---
 

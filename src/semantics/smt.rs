@@ -2,8 +2,8 @@
 
 use crate::ir::{Instruction, Operand, Register};
 use std::collections::HashMap;
-use z3::ast::{Ast, BV};
 use z3::Context;
+use z3::ast::{Ast, BV};
 
 /// Machine state representation for SMT solving
 #[derive(Clone)]

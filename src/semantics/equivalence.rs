@@ -1,7 +1,7 @@
 //! Semantic equivalence checking for instruction sequences
 
 use crate::ir::Instruction;
-use crate::semantics::smt::{apply_sequence, states_not_equal, MachineState};
+use crate::semantics::smt::{MachineState, apply_sequence, states_not_equal};
 use z3::{Config, Context, SatResult, Solver};
 
 /// Result of equivalence checking

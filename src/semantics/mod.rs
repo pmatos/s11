@@ -4,4 +4,4 @@ pub mod equivalence;
 pub mod smt;
 
 // Re-export main functionality
-pub use equivalence::{check_equivalence, EquivalenceResult};
+pub use equivalence::{EquivalenceResult, check_equivalence};
