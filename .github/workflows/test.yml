@@ -24,7 +24,7 @@ jobs:
 
     - name: Setup Rust
       run: |
-        curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal --default-toolchain nightly --component rustfmt
+        curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal --default-toolchain stable --component rustfmt
         echo "$HOME/.cargo/bin" >> $GITHUB_PATH
 
     - name: Check formatting
