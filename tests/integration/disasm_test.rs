@@ -1,6 +1,24 @@
 use std::path::PathBuf;
 use std::process::Command;
 
+fn check_test_binary(path: &PathBuf) {
+    if !path.exists() {
+        panic!(
+            "Test binary not found: {:?}\nCurrent directory: {:?}\nBinaries directory contents: {:?}",
+            path,
+            std::env::current_dir().unwrap(),
+            std::fs::read_dir("binaries")
+                .map(|entries| {
+                    entries
+                        .filter_map(|e| e.ok())
+                        .map(|e| e.file_name())
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_else(|_| vec![])
+        );
+    }
+}
+
 fn get_binary_path() -> PathBuf {
     let mut path = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     path.push("target");
@@ -15,6 +33,8 @@ fn test_disasm_simple_binary() {
     let test_elf = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("binaries")
         .join("simple_debug");
+
+    check_test_binary(&test_elf);
 
     let output = Command::new(binary)
         .arg("--binary")

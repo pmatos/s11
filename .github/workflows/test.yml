@@ -33,11 +33,32 @@ jobs:
     - name: Build
       run: cargo build --verbose
 
-    - name: Run unit tests
-      run: cargo test --verbose
+    - name: Run unit tests (lib only)
+      run: cargo test --lib --verbose
+      
+    - name: Check s11 binary exists
+      run: |
+        echo "Checking if s11 binary was built..."
+        ls -la target/debug/s11 || echo "s11 binary not found!"
 
     - name: Build test binaries
-      run: ./build_tests.sh
+      run: |
+        echo "Building test binaries..."
+        ./build_tests.sh
+        echo "Checking binaries directory:"
+        ls -la binaries/ || echo "binaries/ directory not found"
 
+    - name: Debug environment
+      run: |
+        echo "Current directory: $(pwd)"
+        echo "Architecture: $(uname -m)"
+        echo "Checking if we can run AArch64 binaries:"
+        file binaries/simple_debug || echo "simple_debug not found"
+        
+    - name: Run integration tests with debug output
+      run: |
+        export RUST_BACKTRACE=1
+        cargo test --test integration_tests -- --nocapture || true
+        
     - name: Run all tests
       run: ./test_all.sh

@@ -4,6 +4,9 @@
 set -e
 
 echo "Building AArch64 test binaries..."
+echo "Current directory: $(pwd)"
+echo "Checking for cross-compiler..."
+which aarch64-linux-gnu-gcc || (echo "ERROR: aarch64-linux-gnu-gcc not found!" && exit 1)
 
 # Create binaries directory
 mkdir -p binaries
