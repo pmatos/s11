@@ -37,9 +37,8 @@ fn test_disasm_simple_binary() {
     check_test_binary(&test_elf);
 
     let output = Command::new(binary)
-        .arg("--binary")
+        .arg("disasm")
         .arg(&test_elf)
-        .arg("--disasm")
         .output()
         .expect("Failed to execute s11");
 
@@ -89,9 +88,8 @@ fn test_disasm_optimized_binary() {
         .join("simple_opt3");
 
     let output = Command::new(binary)
-        .arg("--binary")
+        .arg("disasm")
         .arg(&test_elf)
-        .arg("--disasm")
         .output()
         .expect("Failed to execute s11");
 
@@ -122,9 +120,8 @@ fn test_disasm_arrays_binary() {
         .join("arrays_debug");
 
     let output = Command::new(binary)
-        .arg("--binary")
+        .arg("disasm")
         .arg(&test_elf)
-        .arg("--disasm")
         .output()
         .expect("Failed to execute s11");
 
@@ -150,9 +147,8 @@ fn test_disasm_functions_binary() {
         .join("functions_debug");
 
     let output = Command::new(binary)
-        .arg("--binary")
+        .arg("disasm")
         .arg(&test_elf)
-        .arg("--disasm")
         .output()
         .expect("Failed to execute s11");
 
@@ -172,7 +168,7 @@ fn test_disasm_requires_binary() {
     let binary = get_binary_path();
 
     let output = Command::new(binary)
-        .arg("--disasm")
+        .arg("disasm")
         .output()
         .expect("Failed to execute s11");
 
@@ -183,7 +179,7 @@ fn test_disasm_requires_binary() {
 
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
-        stderr.contains("--disasm requires --binary"),
+        stderr.contains("required"),
         "Should print error about missing binary"
     );
 }

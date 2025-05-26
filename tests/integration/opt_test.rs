@@ -38,9 +38,8 @@ fn test_opt_basic_functionality() {
     check_test_binary(&test_elf);
 
     let output = Command::new(binary)
-        .arg("--binary")
+        .arg("opt")
         .arg(&test_elf)
-        .arg("--opt")
         .arg("--start-addr")
         .arg("0x5c8")
         .arg("--end-addr")
@@ -114,7 +113,7 @@ fn test_opt_requires_binary() {
     let binary = get_binary_path();
 
     let output = Command::new(binary)
-        .arg("--opt")
+        .arg("opt")
         .arg("--start-addr")
         .arg("0x1000")
         .arg("--end-addr")
@@ -129,8 +128,8 @@ fn test_opt_requires_binary() {
 
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
-        stderr.contains("--opt requires --binary"),
-        "Should print error about missing binary"
+        stderr.contains("the following required arguments were not provided"),
+        "Should print error about missing binary argument"
     );
 }
 
@@ -142,9 +141,8 @@ fn test_opt_requires_start_addr() {
         .join("simple_debug");
 
     let output = Command::new(binary)
-        .arg("--binary")
+        .arg("opt")
         .arg(&test_elf)
-        .arg("--opt")
         .arg("--end-addr")
         .arg("0x1004")
         .output()
@@ -164,9 +162,8 @@ fn test_opt_requires_end_addr() {
         .join("simple_debug");
 
     let output = Command::new(binary)
-        .arg("--binary")
+        .arg("opt")
         .arg(&test_elf)
-        .arg("--opt")
         .arg("--start-addr")
         .arg("0x1000")
         .output()
@@ -186,9 +183,8 @@ fn test_opt_invalid_address_format() {
         .join("simple_debug");
 
     let output = Command::new(binary)
-        .arg("--binary")
+        .arg("opt")
         .arg(&test_elf)
-        .arg("--opt")
         .arg("--start-addr")
         .arg("invalid")
         .arg("--end-addr")
@@ -216,9 +212,8 @@ fn test_opt_address_out_of_bounds() {
         .join("simple_debug");
 
     let output = Command::new(binary)
-        .arg("--binary")
+        .arg("opt")
         .arg(&test_elf)
-        .arg("--opt")
         .arg("--start-addr")
         .arg("0x1000000") // Way out of bounds
         .arg("--end-addr")
@@ -246,10 +241,9 @@ fn test_opt_conflicts_with_disasm() {
         .join("simple_debug");
 
     let output = Command::new(binary)
-        .arg("--binary")
+        .arg("opt")
+        .arg("disasm")
         .arg(&test_elf)
-        .arg("--opt")
-        .arg("--disasm")
         .arg("--start-addr")
         .arg("0x1000")
         .arg("--end-addr")
@@ -272,9 +266,8 @@ fn test_opt_address_alignment() {
 
     // Test with unaligned addresses (not 4-byte aligned)
     let output = Command::new(binary)
-        .arg("--binary")
+        .arg("opt")
         .arg(&test_elf)
-        .arg("--opt")
         .arg("--start-addr")
         .arg("0x5c9") // Unaligned
         .arg("--end-addr")
@@ -310,9 +303,8 @@ fn test_opt_hex_address_formats() {
 
     for (start, end) in test_cases {
         let output = Command::new(&binary)
-            .arg("--binary")
+            .arg("opt")
             .arg(&test_elf)
-            .arg("--opt")
             .arg("--start-addr")
             .arg(start)
             .arg("--end-addr")
