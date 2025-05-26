@@ -4,9 +4,13 @@ use elf::{ElfBytes, endian::AnyEndian};
 use std::fs;
 use std::path::PathBuf;
 
+mod assembler;
+mod elf_patcher;
 mod ir;
 mod semantics;
 
+use assembler::AArch64Assembler;
+use elf_patcher::{AddressWindow, ElfPatcher, parse_hex_address};
 use ir::{Instruction, Operand, Register};
 use semantics::{EquivalenceResult, check_equivalence};
 
@@ -22,12 +26,24 @@ struct Args {
     binary: Option<PathBuf>,
 
     /// Run demo optimization (default if no binary provided)
-    #[arg(short, long, conflicts_with = "disasm")]
+    #[arg(short, long, conflicts_with_all = ["disasm", "opt"])]
     demo: bool,
 
     /// Disassemble the binary showing addresses and machine code
-    #[arg(long, conflicts_with = "demo")]
+    #[arg(long, conflicts_with_all = ["demo", "opt"])]
     disasm: bool,
+
+    /// Optimize a window of instructions from start to end address
+    #[arg(long, conflicts_with_all = ["demo", "disasm"])]
+    opt: bool,
+
+    /// Start address of optimization window (hex, e.g., 0x1000)
+    #[arg(long, requires = "opt")]
+    start_addr: Option<String>,
+
+    /// End address of optimization window (hex, e.g., 0x1100)
+    #[arg(long, requires = "opt")]
+    end_addr: Option<String>,
 }
 
 // --- ELF Binary Analysis ---
@@ -141,6 +157,224 @@ fn analyze_elf_binary(path: &PathBuf, disasm_mode: bool) -> Result<(), Box<dyn s
     }
 
     Ok(())
+}
+
+// --- Optimization Function ---
+
+fn optimize_elf_binary(
+    path: &PathBuf,
+    start_addr: u64,
+    end_addr: u64,
+) -> Result<(), Box<dyn std::error::Error>> {
+    println!("Optimizing ELF binary: {}", path.display());
+    println!("Address window: 0x{:x} - 0x{:x}", start_addr, end_addr);
+
+    // Create address window
+    let window = AddressWindow {
+        start: start_addr,
+        end: end_addr,
+    };
+
+    // Load and validate the ELF file
+    let elf_patcher = ElfPatcher::new(path)?;
+    let section = elf_patcher.validate_address_window(&window)?;
+    println!("Window is within section: {}", section.name);
+
+    // Get the original instructions in the window
+    let original_bytes = elf_patcher.get_instructions_in_window(&window)?;
+    println!("Original code: {} bytes", original_bytes.len());
+
+    // For MVP: Just reassemble the same instructions (no actual optimization yet)
+    // This demonstrates the full pipeline: disasm -> IR -> assembly -> patch
+
+    // Initialize Capstone disassembler
+    let cs = Capstone::new()
+        .arm64()
+        .mode(capstone::arch::arm64::ArchMode::Arm)
+        .detail(true)
+        .build()?;
+
+    // Disassemble instructions in the window
+    let instructions = cs.disasm_all(&original_bytes, start_addr)?;
+    println!("Disassembled {} instructions:", instructions.len());
+
+    for instruction in instructions.iter() {
+        println!(
+            "  0x{:x}: {} {}",
+            instruction.address(),
+            instruction.mnemonic().unwrap_or("???"),
+            instruction.op_str().unwrap_or("")
+        );
+    }
+
+    // Convert to IR (for MVP, we'll create simple IR for demonstrable instructions)
+    let ir_instructions = convert_to_ir(&instructions)?;
+    println!("Converted {} instructions to IR:", ir_instructions.len());
+
+    for instr in &ir_instructions {
+        println!("  {}", instr);
+    }
+
+    // Reassemble the IR instructions
+    let mut assembler = AArch64Assembler::new();
+    let assembled_bytes = assembler.assemble_instructions(&ir_instructions)?;
+    println!("Reassembled to {} bytes", assembled_bytes.len());
+
+    // Create output filename
+    let output_path = {
+        let mut new_path = path.clone();
+        let stem = new_path.file_stem().unwrap().to_str().unwrap();
+        let extension = new_path.extension().map(|e| e.to_str().unwrap());
+
+        let new_name = if let Some(ext) = extension {
+            format!("{}_optimized.{}", stem, ext)
+        } else {
+            format!("{}_optimized", stem)
+        };
+
+        new_path.set_file_name(new_name);
+        new_path
+    };
+
+    // Create patched ELF file
+    elf_patcher.create_patched_copy(&output_path, &window, &assembled_bytes)?;
+    println!("Created optimized binary: {}", output_path.display());
+
+    Ok(())
+}
+
+fn convert_to_ir(instructions: &capstone::Instructions) -> Result<Vec<Instruction>, String> {
+    let mut ir_instructions = Vec::new();
+
+    for instruction in instructions.iter() {
+        let mnemonic = instruction.mnemonic().unwrap_or("");
+        let op_str = instruction.op_str().unwrap_or("");
+
+        // For MVP, only convert basic instructions we can handle
+        match mnemonic {
+            "mov" => {
+                if let Some(ir_instr) = parse_mov_instruction(op_str)? {
+                    ir_instructions.push(ir_instr);
+                }
+            }
+            "add" => {
+                if let Some(ir_instr) = parse_add_instruction(op_str)? {
+                    ir_instructions.push(ir_instr);
+                }
+            }
+            "nop" => {
+                // Skip NOPs for now, they'll be added back if needed during assembly
+            }
+            _ => {
+                println!(
+                    "Warning: Skipping unsupported instruction: {} {}",
+                    mnemonic, op_str
+                );
+            }
+        }
+    }
+
+    Ok(ir_instructions)
+}
+
+fn parse_mov_instruction(op_str: &str) -> Result<Option<Instruction>, String> {
+    let parts: Vec<&str> = op_str.split(',').map(|s| s.trim()).collect();
+    if parts.len() != 2 {
+        return Ok(None); // Skip complex MOV instructions for MVP
+    }
+
+    let dst = parse_register(parts[0])?;
+
+    // Check if source is register or immediate
+    if parts[1].starts_with('#') {
+        // Immediate
+        let imm_str = &parts[1][1..]; // Remove '#'
+        let imm = if imm_str.starts_with("0x") {
+            i64::from_str_radix(&imm_str[2..], 16)
+        } else {
+            imm_str.parse::<i64>()
+        }
+        .map_err(|_| format!("Invalid immediate: {}", imm_str))?;
+
+        Ok(Some(Instruction::MovImm { rd: dst, imm }))
+    } else {
+        // Register
+        let src = parse_register(parts[1])?;
+        Ok(Some(Instruction::MovReg { rd: dst, rn: src }))
+    }
+}
+
+fn parse_add_instruction(op_str: &str) -> Result<Option<Instruction>, String> {
+    let parts: Vec<&str> = op_str.split(',').map(|s| s.trim()).collect();
+    if parts.len() != 3 {
+        return Ok(None); // Skip complex ADD instructions for MVP
+    }
+
+    let dst = parse_register(parts[0])?;
+    let src1 = parse_register(parts[1])?;
+
+    // Check if third operand is register or immediate
+    let src2 = if parts[2].starts_with('#') {
+        // Immediate
+        let imm_str = &parts[2][1..]; // Remove '#'
+        let imm = if imm_str.starts_with("0x") {
+            i64::from_str_radix(&imm_str[2..], 16)
+        } else {
+            imm_str.parse::<i64>()
+        }
+        .map_err(|_| format!("Invalid immediate: {}", imm_str))?;
+
+        Operand::Immediate(imm)
+    } else {
+        // Register
+        let reg = parse_register(parts[2])?;
+        Operand::Register(reg)
+    };
+
+    Ok(Some(Instruction::Add {
+        rd: dst,
+        rn: src1,
+        rm: src2,
+    }))
+}
+
+fn parse_register(reg_str: &str) -> Result<Register, String> {
+    match reg_str.to_lowercase().as_str() {
+        "x0" => Ok(Register::X0),
+        "x1" => Ok(Register::X1),
+        "x2" => Ok(Register::X2),
+        "x3" => Ok(Register::X3),
+        "x4" => Ok(Register::X4),
+        "x5" => Ok(Register::X5),
+        "x6" => Ok(Register::X6),
+        "x7" => Ok(Register::X7),
+        "x8" => Ok(Register::X8),
+        "x9" => Ok(Register::X9),
+        "x10" => Ok(Register::X10),
+        "x11" => Ok(Register::X11),
+        "x12" => Ok(Register::X12),
+        "x13" => Ok(Register::X13),
+        "x14" => Ok(Register::X14),
+        "x15" => Ok(Register::X15),
+        "x16" => Ok(Register::X16),
+        "x17" => Ok(Register::X17),
+        "x18" => Ok(Register::X18),
+        "x19" => Ok(Register::X19),
+        "x20" => Ok(Register::X20),
+        "x21" => Ok(Register::X21),
+        "x22" => Ok(Register::X22),
+        "x23" => Ok(Register::X23),
+        "x24" => Ok(Register::X24),
+        "x25" => Ok(Register::X25),
+        "x26" => Ok(Register::X26),
+        "x27" => Ok(Register::X27),
+        "x28" => Ok(Register::X28),
+        "x29" => Ok(Register::X29),
+        "x30" => Ok(Register::X30),
+        "xzr" => Ok(Register::XZR),
+        "sp" => Ok(Register::SP),
+        _ => Err(format!("Unknown register: {}", reg_str)),
+    }
 }
 
 // For simplicity in MVP, immediate is fixed for generation, but can be varied in input.
@@ -375,21 +609,60 @@ fn run_demo() {
 fn main() {
     let args = Args::parse();
 
-    if !args.disasm {
+    if !args.disasm && !args.opt {
         println!("s11 - AArch64 Optimizer");
     }
 
     if let Some(binary_path) = args.binary {
-        // Analyze ELF binary
-        match analyze_elf_binary(&binary_path, args.disasm) {
-            Ok(()) => {
-                if !args.disasm {
-                    println!("\nBinary analysis completed successfully.");
+        if args.opt {
+            // Optimization mode
+            let start_addr = match args.start_addr {
+                Some(s) => match parse_hex_address(&s) {
+                    Ok(addr) => addr,
+                    Err(e) => {
+                        eprintln!("Error parsing start address: {}", e);
+                        std::process::exit(1);
+                    }
+                },
+                None => {
+                    eprintln!("Error: --opt requires --start-addr");
+                    std::process::exit(1);
+                }
+            };
+
+            let end_addr = match args.end_addr {
+                Some(s) => match parse_hex_address(&s) {
+                    Ok(addr) => addr,
+                    Err(e) => {
+                        eprintln!("Error parsing end address: {}", e);
+                        std::process::exit(1);
+                    }
+                },
+                None => {
+                    eprintln!("Error: --opt requires --end-addr");
+                    std::process::exit(1);
+                }
+            };
+
+            match optimize_elf_binary(&binary_path, start_addr, end_addr) {
+                Ok(()) => println!("\nOptimization completed successfully."),
+                Err(e) => {
+                    eprintln!("Error during optimization: {}", e);
+                    std::process::exit(1);
                 }
             }
-            Err(e) => {
-                eprintln!("Error analyzing binary: {}", e);
-                std::process::exit(1);
+        } else {
+            // Analyze ELF binary
+            match analyze_elf_binary(&binary_path, args.disasm) {
+                Ok(()) => {
+                    if !args.disasm {
+                        println!("\nBinary analysis completed successfully.");
+                    }
+                }
+                Err(e) => {
+                    eprintln!("Error analyzing binary: {}", e);
+                    std::process::exit(1);
+                }
             }
         }
     } else if args.demo {
@@ -397,6 +670,9 @@ fn main() {
         run_demo();
     } else if args.disasm {
         eprintln!("Error: --disasm requires --binary <path>");
+        std::process::exit(1);
+    } else if args.opt {
+        eprintln!("Error: --opt requires --binary <path>");
         std::process::exit(1);
     } else {
         // Default: run demo if no binary specified
