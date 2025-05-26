@@ -1,5 +1,5 @@
 use capstone::prelude::*;
-use clap::Parser;
+use clap::{Parser, Subcommand};
 use elf::{ElfBytes, endian::AnyEndian};
 use std::fs;
 use std::path::PathBuf;
@@ -20,26 +20,31 @@ use semantics::{EquivalenceResult, check_equivalence};
 #[command(name = "s11")]
 #[command(about = "s11 - AArch64 Optimizer")]
 #[command(version)]
+#[command(subcommand_required = true)]
+#[command(arg_required_else_help = true)]
 struct Args {
-    /// Path to AArch64 ELF binary to analyze
-    #[arg(short, long)]
-    binary: Option<PathBuf>,
+    #[command(subcommand)]
+    command: Commands,
+}
 
-    /// Disassemble the binary showing addresses and machine code
-    #[arg(long, conflicts_with_all = ["opt"])]
-    disasm: bool,
-
-    /// Optimize a window of instructions from start to end address
-    #[arg(long, conflicts_with_all = ["disasm"])]
-    opt: bool,
-
-    /// Start address of optimization window (hex, e.g., 0x1000)
-    #[arg(long, requires = "opt")]
-    start_addr: Option<String>,
-
-    /// End address of optimization window (hex, e.g., 0x1100)
-    #[arg(long, requires = "opt")]
-    end_addr: Option<String>,
+#[derive(Subcommand)]
+enum Commands {
+    /// Disassemble an AArch64 ELF binary showing addresses and machine code
+    Disasm {
+        /// Path to AArch64 ELF binary to disassemble
+        binary: PathBuf,
+    },
+    /// Optimize a window of instructions in an AArch64 ELF binary
+    Opt {
+        /// Path to AArch64 ELF binary to optimize
+        binary: PathBuf,
+        /// Start address of optimization window (hex, e.g., 0x1000)
+        #[arg(long)]
+        start_addr: String,
+        /// End address of optimization window (hex, e.g., 0x1100)
+        #[arg(long)]
+        end_addr: String,
+    },
 }
 
 // --- ELF Binary Analysis ---
@@ -492,70 +497,46 @@ fn find_shorter_equivalent(original_seq: &[Instruction]) -> Option<Vec<Instructi
 fn main() {
     let args = Args::parse();
 
-    if !args.disasm && !args.opt {
-        println!("s11 - AArch64 Optimizer");
-    }
-
-    if let Some(binary_path) = args.binary {
-        if args.opt {
-            // Optimization mode
-            let start_addr = match args.start_addr {
-                Some(s) => match parse_hex_address(&s) {
-                    Ok(addr) => addr,
-                    Err(e) => {
-                        eprintln!("Error parsing start address: {}", e);
-                        std::process::exit(1);
-                    }
-                },
-                None => {
-                    eprintln!("Error: --opt requires --start-addr");
-                    std::process::exit(1);
-                }
-            };
-
-            let end_addr = match args.end_addr {
-                Some(s) => match parse_hex_address(&s) {
-                    Ok(addr) => addr,
-                    Err(e) => {
-                        eprintln!("Error parsing end address: {}", e);
-                        std::process::exit(1);
-                    }
-                },
-                None => {
-                    eprintln!("Error: --opt requires --end-addr");
-                    std::process::exit(1);
-                }
-            };
-
-            match optimize_elf_binary(&binary_path, start_addr, end_addr) {
-                Ok(()) => println!("\nOptimization completed successfully."),
-                Err(e) => {
-                    eprintln!("Error during optimization: {}", e);
-                    std::process::exit(1);
-                }
-            }
-        } else {
-            // Analyze ELF binary
-            match analyze_elf_binary(&binary_path, args.disasm) {
-                Ok(()) => {
-                    if !args.disasm {
-                        println!("\nBinary analysis completed successfully.");
-                    }
-                }
+    match args.command {
+        Commands::Disasm { binary } => {
+            // Disassemble mode
+            match analyze_elf_binary(&binary, true) {
+                Ok(()) => {}
                 Err(e) => {
                     eprintln!("Error analyzing binary: {}", e);
                     std::process::exit(1);
                 }
             }
         }
-    } else if args.disasm {
-        eprintln!("Error: --disasm requires --binary <path>");
-        std::process::exit(1);
-    } else if args.opt {
-        eprintln!("Error: --opt requires --binary <path>");
-        std::process::exit(1);
-    } else {
-        eprintln!("\nNo command line arguments use: --binary or --opt");
-        std::process::exit(1);
+        Commands::Opt {
+            binary,
+            start_addr,
+            end_addr,
+        } => {
+            // Optimization mode
+            let start_addr = match parse_hex_address(&start_addr) {
+                Ok(addr) => addr,
+                Err(e) => {
+                    eprintln!("Error parsing start address: {}", e);
+                    std::process::exit(1);
+                }
+            };
+
+            let end_addr = match parse_hex_address(&end_addr) {
+                Ok(addr) => addr,
+                Err(e) => {
+                    eprintln!("Error parsing end address: {}", e);
+                    std::process::exit(1);
+                }
+            };
+
+            match optimize_elf_binary(&binary, start_addr, end_addr) {
+                Ok(()) => println!("\nOptimization completed successfully."),
+                Err(e) => {
+                    eprintln!("Error during optimization: {}", e);
+                    std::process::exit(1);
+                }
+            }
+        }
     }
 }
