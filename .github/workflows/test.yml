@@ -33,8 +33,8 @@ jobs:
     - name: Build
       run: cargo build --verbose
 
-    - name: Run unit tests (lib only)
-      run: cargo test --lib --verbose
+    - name: Run unit tests only
+      run: cargo test --bins --verbose
       
     - name: Check s11 binary exists
       run: |
