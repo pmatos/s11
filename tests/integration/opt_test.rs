@@ -239,26 +239,6 @@ fn test_opt_address_out_of_bounds() {
 }
 
 #[test]
-fn test_opt_conflicts_with_demo() {
-    let binary = get_binary_path();
-
-    let output = Command::new(binary)
-        .arg("--opt")
-        .arg("--demo")
-        .arg("--start-addr")
-        .arg("0x1000")
-        .arg("--end-addr")
-        .arg("0x1004")
-        .output()
-        .expect("Failed to execute s11");
-
-    assert!(
-        !output.status.success(),
-        "Command should fail with conflicting flags"
-    );
-}
-
-#[test]
 fn test_opt_conflicts_with_disasm() {
     let binary = get_binary_path();
     let test_elf = PathBuf::from(env!("CARGO_MANIFEST_DIR"))

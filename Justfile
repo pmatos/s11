@@ -62,11 +62,6 @@ analyze binary_path: build
     @echo "Analyzing binary: {{binary_path}}"
     cargo run -- --binary "{{binary_path}}"
 
-# Run demo mode explicitly
-demo: build
-    @echo "Running optimization demo..."
-    cargo run -- --demo
-
 # Build test binaries
 build-tests:
     @echo "Building AArch64 test binaries..."
@@ -85,7 +80,6 @@ help:
     @echo "  run           - Build and run the project (debug mode)"
     @echo "  run-release   - Build and run the project (release mode)"
     @echo "  analyze PATH  - Analyze an AArch64 ELF binary at PATH"
-    @echo "  demo          - Run optimization demo"
     @echo "  test          - Run tests"
     @echo "  build-tests   - Build AArch64 test binaries"
     @echo "  test-all      - Run complete test suite"

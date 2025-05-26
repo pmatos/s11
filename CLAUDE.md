@@ -71,7 +71,6 @@ The project requires:
 - `are_sequences_equivalent()` - Pattern-based equivalence verification with hardcoded rules
 - `generate_all_instructions()` - Generates all possible single instructions for search
 - `find_shorter_equivalent()` - Enumerative optimization search
-- `run_demo()` - Demonstrates IR optimization capabilities
 
 The application has two modes: binary analysis (reads and disassembles AArch64 ELF files) and demo mode (shows IR-level optimization). The optimizer uses z3 SMT solver to verify semantic equivalence between instruction sequences. For example, it can prove that:
 - `MOV X0, X1; ADD X0, X0, #1` is equivalent to `ADD X0, X1, #1`

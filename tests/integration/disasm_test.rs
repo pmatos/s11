@@ -188,18 +188,3 @@ fn test_disasm_requires_binary() {
     );
 }
 
-#[test]
-fn test_disasm_conflicts_with_demo() {
-    let binary = get_binary_path();
-
-    let output = Command::new(binary)
-        .arg("--disasm")
-        .arg("--demo")
-        .output()
-        .expect("Failed to execute s11");
-
-    assert!(
-        !output.status.success(),
-        "Command should fail with conflicting flags"
-    );
-}

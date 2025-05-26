@@ -143,27 +143,7 @@ cargo run -- --binary /path/to/aarch64_binary
 just run -- --binary /path/to/aarch64_binary
 ```
 
-#### Run Optimization Demo
-```bash
-# Run demo mode (default)
-cargo run
-
-# Explicitly run demo
-cargo run -- --demo
-```
-
 ### Example Output
-
-**Demo Mode:**
-```
-AArch64 Super-Optimizer MVP
-=== Running Optimization Demo ===
-Original sequence: MOV X0, X1; ADD X0, X0, #1; 
-
-Searching for optimizations...
-  Testing candidate: ADD X0, X1, #1; Found equivalent!
-Found shorter equivalent sequence: ADD X0, X1, #1; 
-```
 
 **Binary Analysis:**
 ```

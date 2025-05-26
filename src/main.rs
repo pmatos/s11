@@ -25,16 +25,12 @@ struct Args {
     #[arg(short, long)]
     binary: Option<PathBuf>,
 
-    /// Run demo optimization (default if no binary provided)
-    #[arg(short, long, conflicts_with_all = ["disasm", "opt"])]
-    demo: bool,
-
     /// Disassemble the binary showing addresses and machine code
-    #[arg(long, conflicts_with_all = ["demo", "opt"])]
+    #[arg(long, conflicts_with_all = ["opt"])]
     disasm: bool,
 
     /// Optimize a window of instructions from start to end address
-    #[arg(long, conflicts_with_all = ["demo", "disasm"])]
+    #[arg(long, conflicts_with_all = ["disasm"])]
     opt: bool,
 
     /// Start address of optimization window (hex, e.g., 0x1000)
@@ -492,119 +488,6 @@ fn find_shorter_equivalent(original_seq: &[Instruction]) -> Option<Vec<Instructi
     None
 }
 
-fn run_demo() {
-    println!("=== Running Optimization Demo ===");
-
-    // Example: Original Sequence
-    // Let's try to optimize:
-    // MOV X0, X1
-    // ADD X0, X0, #1
-    // This is equivalent to: ADD X0, X1, #1 (if X1 is not X0 initially, which our SMT model handles)
-    let original_sequence = vec![
-        Instruction::MovReg {
-            rd: Register::X0,
-            rn: Register::X1,
-        },
-        Instruction::Add {
-            rd: Register::X0,
-            rn: Register::X0,
-            rm: Operand::Immediate(1),
-        },
-    ];
-
-    print!("Original sequence: ");
-    for instr in &original_sequence {
-        print!("{}; ", instr);
-    }
-    println!();
-
-    println!("\nSearching for optimizations...");
-
-    match find_shorter_equivalent(&original_sequence) {
-        Some(optimized_seq) => {
-            print!("Found shorter equivalent sequence: ");
-            for instr in &optimized_seq {
-                print!("{}; ", instr);
-            }
-            println!();
-        }
-        None => {
-            println!(
-                "No shorter equivalent sequence found with the current MVP search capabilities."
-            );
-        }
-    }
-
-    // Test equivalence directly for a known case
-    println!("\nDirectly testing equivalence of known sequences:");
-    let seq_a = vec![
-        Instruction::MovReg {
-            rd: Register::X0,
-            rn: Register::X1,
-        },
-        Instruction::Add {
-            rd: Register::X0,
-            rn: Register::X0,
-            rm: Operand::Immediate(1),
-        },
-    ];
-    let seq_b = vec![Instruction::Add {
-        rd: Register::X0,
-        rn: Register::X1,
-        rm: Operand::Immediate(1),
-    }];
-    print!("Seq A: ");
-    seq_a.iter().for_each(|i| print!("{}; ", i));
-    println!();
-    print!("Seq B: ");
-    seq_b.iter().for_each(|i| print!("{}; ", i));
-    println!();
-
-    match are_sequences_equivalent(&seq_a, &seq_b) {
-        Ok(true) => println!("Direct Test: Seq A and Seq B ARE equivalent."),
-        Ok(false) => println!("Direct Test: Seq A and Seq B are NOT equivalent."),
-        Err(e) => eprintln!("Direct Test SMT Error: {}", e),
-    }
-    // Test non-equivalent
-    let seq_c = vec![Instruction::MovImm {
-        rd: Register::X0,
-        imm: 5,
-    }];
-    print!("Seq C: ");
-    seq_c.iter().for_each(|i| print!("{}; ", i));
-    println!();
-    match are_sequences_equivalent(&seq_a, &seq_c) {
-        Ok(true) => println!("Direct Test: Seq A and Seq C ARE equivalent."),
-        Ok(false) => println!("Direct Test: Seq A and Seq C are NOT equivalent."),
-        Err(e) => eprintln!("Direct Test SMT Error: {}", e),
-    }
-
-    // Test MOV #0 vs EOR equivalence
-    println!("\nTesting MOV #0 vs EOR equivalence:");
-    let mov_zero = vec![Instruction::MovImm {
-        rd: Register::X0,
-        imm: 0,
-    }];
-    let eor_self = vec![Instruction::Eor {
-        rd: Register::X0,
-        rn: Register::X0,
-        rm: Operand::Register(Register::X0),
-    }];
-    print!("MOV X0, #0: ");
-    mov_zero.iter().for_each(|i| print!("{}; ", i));
-    println!();
-    print!("EOR X0, X0, X0: ");
-    eor_self.iter().for_each(|i| print!("{}; ", i));
-    println!();
-    match are_sequences_equivalent(&mov_zero, &eor_self) {
-        Ok(true) => {
-            println!("Direct Test: MOV #0 and EOR self ARE equivalent (register clearing).")
-        }
-        Ok(false) => println!("Direct Test: MOV #0 and EOR self are NOT equivalent."),
-        Err(e) => eprintln!("Direct Test SMT Error: {}", e),
-    }
-}
-
 // --- Main Function ---
 fn main() {
     let args = Args::parse();
@@ -665,9 +548,6 @@ fn main() {
                 }
             }
         }
-    } else if args.demo {
-        // Run demo
-        run_demo();
     } else if args.disasm {
         eprintln!("Error: --disasm requires --binary <path>");
         std::process::exit(1);
@@ -675,9 +555,7 @@ fn main() {
         eprintln!("Error: --opt requires --binary <path>");
         std::process::exit(1);
     } else {
-        // Default: run demo if no binary specified
-        println!("No binary specified. Running demo mode.\n");
-        run_demo();
-        println!("\nTo analyze a binary, use: --binary <path>");
+        eprintln!("\nNo command line arguments use: --binary or --opt");
+        std::process::exit(1);
     }
 }
