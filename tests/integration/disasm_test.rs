@@ -187,4 +187,3 @@ fn test_disasm_requires_binary() {
         "Should print error about missing binary"
     );
 }
-
