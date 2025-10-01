@@ -11,7 +11,7 @@ keywords = ["aarch64", "s11", "compiler", "optimization", "smt"]
 categories = ["compilers", "development-tools::testing", "science"]
 
 [dependencies]
-elf = "0.7"
+elf = "0.8"
 capstone = "0.12"
 clap = { version = "4.5", features = ["derive"] }
 z3 = { version = "0.12", optional = true }
