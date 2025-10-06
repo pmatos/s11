@@ -1,13 +1,14 @@
 use crate::ir::{Instruction, Operand, Register};
+use dynasmrt::{DynasmApi, dynasm};
 
 pub struct AArch64Assembler {
-    instructions: Vec<u32>,
+    ops: dynasmrt::aarch64::Assembler,
 }
 
 impl AArch64Assembler {
     pub fn new() -> Self {
         Self {
-            instructions: Vec::new(),
+            ops: dynasmrt::aarch64::Assembler::new().unwrap(),
         }
     }
 
@@ -15,84 +16,68 @@ impl AArch64Assembler {
         &mut self,
         instructions: &[Instruction],
     ) -> Result<Vec<u8>, String> {
-        self.instructions.clear();
+        // Create a new assembler for this operation
+        let mut ops = dynasmrt::aarch64::Assembler::new().unwrap();
 
         for instr in instructions {
-            let encoded = self.encode_instruction(instr)?;
-            self.instructions.push(encoded);
+            self.encode_instruction_on(&mut ops, instr)?;
         }
 
-        // Convert u32 instructions to bytes (little-endian)
-        let mut bytes = Vec::new();
-        for instr in &self.instructions {
-            bytes.extend_from_slice(&instr.to_le_bytes());
-        }
-
-        Ok(bytes)
+        Ok(ops.finalize().unwrap().to_vec())
     }
 
-    fn encode_instruction(&self, instr: &Instruction) -> Result<u32, String> {
+    fn encode_instruction_on(
+        &self,
+        ops: &mut dynasmrt::aarch64::Assembler,
+        instr: &Instruction,
+    ) -> Result<(), String> {
         match instr {
             Instruction::MovReg { rd, rn } => {
-                // MOV (register) - actually ORR Wd, WZR, Wm
-                // Encoding: sf|01|01010|shift|0|Rm|imm6|Rn|Rd
-                // For 64-bit: 1|01|01010|00|0|Rm|000000|11111|Rd
-                let rd_bits = register_to_bits(*rd)?;
-                let rn_bits = register_to_bits(*rn)?;
+                let rd_reg = register_to_dynasm(*rd)?;
+                let rn_reg = register_to_dynasm(*rn)?;
 
-                // MOV Xd, Xn is encoded as ORR Xd, XZR, Xn
-                let encoding = 0xAA000000u32 // Base ORR (shifted register) encoding
-                    | (rn_bits << 16)        // Rm field (source)
-                    | (0x1F << 5)            // Rn field (XZR)
-                    | rd_bits; // Rd field
-
-                Ok(encoding)
+                dynasm!(ops
+                    ; .arch aarch64
+                    ; mov X(rd_reg), X(rn_reg)
+                );
+                Ok(())
             }
             Instruction::MovImm { rd, imm } => {
-                // MOV (wide immediate) - MOVZ with LSL #0
-                // Encoding: sf|10|100101|hw|imm16|Rd
-                let rd_bits = register_to_bits(*rd)?;
+                let rd_reg = register_to_dynasm(*rd)?;
 
                 if *imm < 0 || *imm > 0xFFFF {
-                    return Err(format!("Immediate {} out of range for simple MOV", imm));
+                    return Err(format!("Immediate {} out of range for MOV", imm));
                 }
 
-                let encoding = 0xD2800000u32  // MOVZ 64-bit, LSL #0
-                    | ((*imm as u32 & 0xFFFF) << 5)  // imm16 field
-                    | rd_bits; // Rd field
-
-                Ok(encoding)
+                dynasm!(ops
+                    ; .arch aarch64
+                    ; mov X(rd_reg), *imm as u64
+                );
+                Ok(())
             }
             Instruction::Add { rd, rn, rm } => {
-                let rd_bits = register_to_bits(*rd)?;
-                let rn_bits = register_to_bits(*rn)?;
+                let rd_reg = register_to_dynasm(*rd)?;
+                let rn_reg = register_to_dynasm(*rn)?;
 
                 match rm {
                     Operand::Register(rm_reg) => {
-                        // ADD (shifted register) - no shift
-                        // Encoding: sf|00|01011|shift|0|Rm|imm6|Rn|Rd
-                        let rm_bits = register_to_bits(*rm_reg)?;
-
-                        let encoding = 0x8B000000u32  // ADD 64-bit (shifted register)
-                            | (rm_bits << 16)         // Rm field
-                            | (rn_bits << 5)          // Rn field
-                            | rd_bits; // Rd field
-
-                        Ok(encoding)
+                        let rm_reg_num = register_to_dynasm(*rm_reg)?;
+                        dynasm!(ops
+                            ; .arch aarch64
+                            ; add X(rd_reg), X(rn_reg), X(rm_reg_num)
+                        );
+                        Ok(())
                     }
                     Operand::Immediate(imm) => {
-                        // ADD (immediate)
-                        // Encoding: sf|00|100010|shift|imm12|Rn|Rd
                         if *imm < 0 || *imm > 0xFFF {
                             return Err(format!("Immediate {} out of range for ADD", imm));
                         }
-
-                        let encoding = 0x91000000u32  // ADD 64-bit (immediate)
-                            | ((*imm as u32 & 0xFFF) << 10)  // imm12 field
-                            | (rn_bits << 5)                  // Rn field
-                            | rd_bits; // Rd field
-
-                        Ok(encoding)
+                        // Use XSP register type for ADD immediate (allows SP addressing)
+                        dynasm!(ops
+                            ; .arch aarch64
+                            ; add XSP(rd_reg), XSP(rn_reg), #*imm as u32
+                        );
+                        Ok(())
                     }
                 }
             }
@@ -101,7 +86,7 @@ impl AArch64Assembler {
     }
 }
 
-fn register_to_bits(reg: Register) -> Result<u32, String> {
+fn register_to_dynasm(reg: Register) -> Result<u32, String> {
     match reg {
         Register::X0 => Ok(0),
         Register::X1 => Ok(1),
@@ -135,7 +120,7 @@ fn register_to_bits(reg: Register) -> Result<u32, String> {
         Register::X29 => Ok(29),
         Register::X30 => Ok(30),
         Register::XZR => Ok(31),
-        Register::SP => Err("SP register encoding not supported in basic assembler".to_string()),
+        Register::SP => Err("SP register encoding not supported".to_string()),
     }
 }
 
@@ -155,10 +140,7 @@ mod tests {
         assert!(result.is_ok());
         let bytes = result.unwrap();
         assert_eq!(bytes.len(), 4); // One 32-bit instruction
-
-        // Check that we got some encoded instruction
-        let instr = u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]);
-        assert_ne!(instr, 0);
+        assert_ne!(bytes, [0, 0, 0, 0]); // Should not be empty
     }
 
     #[test]
@@ -173,6 +155,7 @@ mod tests {
         assert!(result.is_ok());
         let bytes = result.unwrap();
         assert_eq!(bytes.len(), 4);
+        assert_ne!(bytes, [0, 0, 0, 0]);
     }
 
     #[test]
@@ -188,6 +171,7 @@ mod tests {
         assert!(result.is_ok());
         let bytes = result.unwrap();
         assert_eq!(bytes.len(), 4);
+        assert_ne!(bytes, [0, 0, 0, 0]);
     }
 
     #[test]
@@ -203,6 +187,7 @@ mod tests {
         assert!(result.is_ok());
         let bytes = result.unwrap();
         assert_eq!(bytes.len(), 4);
+        assert_ne!(bytes, [0, 0, 0, 0]);
     }
 
     #[test]
@@ -215,5 +200,26 @@ mod tests {
 
         let result = assembler.assemble_instructions(&instructions);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_multiple_instructions() {
+        let mut assembler = AArch64Assembler::new();
+        let instructions = vec![
+            Instruction::MovImm {
+                rd: Register::X0,
+                imm: 42,
+            },
+            Instruction::Add {
+                rd: Register::X1,
+                rn: Register::X0,
+                rm: Operand::Immediate(1),
+            },
+        ];
+
+        let result = assembler.assemble_instructions(&instructions);
+        assert!(result.is_ok());
+        let bytes = result.unwrap();
+        assert_eq!(bytes.len(), 8); // Two 32-bit instructions
     }
 }
