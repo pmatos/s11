@@ -2,7 +2,7 @@
 
 use crate::ir::Instruction;
 use crate::semantics::smt::{MachineState, apply_sequence, states_not_equal};
-use z3::{Config, Context, SatResult, Solver};
+use z3::{SatResult, Solver};
 
 /// Result of equivalence checking
 #[derive(Debug, Clone, PartialEq)]
@@ -20,13 +20,11 @@ pub enum EquivalenceResult {
 /// Returns true if for all possible initial states, both sequences
 /// produce the same final state.
 pub fn check_equivalence(seq1: &[Instruction], seq2: &[Instruction]) -> EquivalenceResult {
-    // Create Z3 context and solver
-    let cfg = Config::new();
-    let ctx = Context::new(&cfg);
-    let solver = Solver::new(&ctx);
+    // Create Z3 solver
+    let solver = Solver::new();
 
     // Create symbolic initial state
-    let initial_state = MachineState::new_symbolic(&ctx, "init");
+    let initial_state = MachineState::new_symbolic("init");
 
     // Apply both sequences
     let final_state1 = apply_sequence(initial_state.clone(), seq1);
@@ -54,12 +52,10 @@ pub fn find_counterexample(
     seq1: &[Instruction],
     seq2: &[Instruction],
 ) -> Option<(String, i64, i64)> {
-    let cfg = Config::new();
-    let ctx = Context::new(&cfg);
-    let solver = Solver::new(&ctx);
+    let solver = Solver::new();
 
     // Create symbolic initial state
-    let initial_state = MachineState::new_symbolic(&ctx, "init");
+    let initial_state = MachineState::new_symbolic("init");
 
     // Apply both sequences
     let final_state1 = apply_sequence(initial_state.clone(), seq1);

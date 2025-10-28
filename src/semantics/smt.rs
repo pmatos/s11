@@ -2,50 +2,44 @@
 
 use crate::ir::{Instruction, Operand, Register};
 use std::collections::HashMap;
-use z3::Context;
-use z3::ast::{Ast, BV};
+use z3::ast::BV;
 
 /// Machine state representation for SMT solving
 #[derive(Clone)]
-pub struct MachineState<'ctx> {
+pub struct MachineState {
     /// Register values as 64-bit bitvectors
-    pub registers: HashMap<Register, BV<'ctx>>,
-    /// The Z3 context
-    ctx: &'ctx Context,
+    pub registers: HashMap<Register, BV>,
 }
 
-impl<'ctx> MachineState<'ctx> {
+impl MachineState {
     /// Create a new symbolic machine state
-    pub fn new_symbolic(ctx: &'ctx Context, prefix: &str) -> Self {
+    pub fn new_symbolic(prefix: &str) -> Self {
         let mut registers = HashMap::new();
 
         // Create symbolic variables for all registers
         for i in 0..=30 {
             if let Some(reg) = Register::from_index(i) {
                 let name = format!("{}_x{}", prefix, i);
-                registers.insert(reg, BV::new_const(ctx, name, 64));
+                registers.insert(reg, BV::new_const(name, 64));
             }
         }
 
         // XZR is always zero
-        registers.insert(Register::XZR, BV::from_i64(ctx, 0, 64));
+        registers.insert(Register::XZR, BV::from_i64(0, 64));
 
         // SP is also symbolic
-        registers.insert(
-            Register::SP,
-            BV::new_const(ctx, format!("{}_sp", prefix), 64),
-        );
+        registers.insert(Register::SP, BV::new_const(format!("{}_sp", prefix), 64));
 
-        MachineState { registers, ctx }
+        MachineState { registers }
     }
 
     /// Get the value of a register
-    pub fn get_register(&self, reg: Register) -> &BV<'ctx> {
+    pub fn get_register(&self, reg: Register) -> &BV {
         self.registers.get(&reg).expect("Register not found")
     }
 
     /// Set the value of a register
-    pub fn set_register(&mut self, reg: Register, value: BV<'ctx>) {
+    pub fn set_register(&mut self, reg: Register, value: BV) {
         // XZR writes are ignored (always zero)
         if reg != Register::XZR {
             self.registers.insert(reg, value);
@@ -53,26 +47,23 @@ impl<'ctx> MachineState<'ctx> {
     }
 
     /// Evaluate an operand to get its value
-    pub fn eval_operand(&self, operand: &Operand) -> BV<'ctx> {
+    pub fn eval_operand(&self, operand: &Operand) -> BV {
         match operand {
             Operand::Register(reg) => self.get_register(*reg).clone(),
-            Operand::Immediate(imm) => BV::from_i64(self.ctx, *imm, 64),
+            Operand::Immediate(imm) => BV::from_i64(*imm, 64),
         }
     }
 }
 
 /// Apply an instruction to a machine state, returning the new state
-pub fn apply_instruction<'ctx>(
-    mut state: MachineState<'ctx>,
-    instruction: &Instruction,
-) -> MachineState<'ctx> {
+pub fn apply_instruction(mut state: MachineState, instruction: &Instruction) -> MachineState {
     match instruction {
         Instruction::MovReg { rd, rn } => {
             let value = state.get_register(*rn).clone();
             state.set_register(*rd, value);
         }
         Instruction::MovImm { rd, imm } => {
-            let value = BV::from_i64(state.ctx, *imm, 64);
+            let value = BV::from_i64(*imm, 64);
             state.set_register(*rd, value);
         }
         Instruction::Add { rd, rn, rm } => {
@@ -131,10 +122,7 @@ pub fn apply_instruction<'ctx>(
 }
 
 /// Apply a sequence of instructions to a machine state
-pub fn apply_sequence<'ctx>(
-    mut state: MachineState<'ctx>,
-    instructions: &[Instruction],
-) -> MachineState<'ctx> {
+pub fn apply_sequence(mut state: MachineState, instructions: &[Instruction]) -> MachineState {
     for instruction in instructions {
         state = apply_instruction(state, instruction);
     }
@@ -142,28 +130,24 @@ pub fn apply_sequence<'ctx>(
 }
 
 /// Check if two machine states are not equal (for any register values)
-pub fn states_not_equal<'ctx>(
-    state1: &MachineState<'ctx>,
-    state2: &MachineState<'ctx>,
-) -> z3::ast::Bool<'ctx> {
-    let ctx = state1.ctx;
-    let mut not_equal = z3::ast::Bool::from_bool(ctx, false);
+pub fn states_not_equal(state1: &MachineState, state2: &MachineState) -> z3::ast::Bool {
+    let mut not_equal = z3::ast::Bool::from_bool(false);
 
     // Check all general purpose registers
     for i in 0..=30 {
         if let Some(reg) = Register::from_index(i) {
             let val1 = state1.get_register(reg);
             let val2 = state2.get_register(reg);
-            let reg_not_equal = val1._eq(val2).not();
-            not_equal = z3::ast::Bool::or(ctx, &[&not_equal, &reg_not_equal]);
+            let reg_not_equal = val1.eq(val2).not();
+            not_equal = z3::ast::Bool::or(&[&not_equal, &reg_not_equal]);
         }
     }
 
     // Also check SP
     let sp1 = state1.get_register(Register::SP);
     let sp2 = state2.get_register(Register::SP);
-    let sp_not_equal = sp1._eq(sp2).not();
-    not_equal = z3::ast::Bool::or(ctx, &[&not_equal, &sp_not_equal]);
+    let sp_not_equal = sp1.eq(sp2).not();
+    not_equal = z3::ast::Bool::or(&[&not_equal, &sp_not_equal]);
 
     not_equal
 }
@@ -171,16 +155,14 @@ pub fn states_not_equal<'ctx>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use z3::{Config, SatResult, Solver};
+    use z3::{SatResult, Solver};
 
     #[test]
     fn test_mov_zero_equivalence() {
-        let cfg = Config::new();
-        let ctx = Context::new(&cfg);
-        let solver = Solver::new(&ctx);
+        let solver = Solver::new();
 
         // Create initial symbolic state
-        let initial_state = MachineState::new_symbolic(&ctx, "pre");
+        let initial_state = MachineState::new_symbolic("pre");
 
         // Sequence 1: MOV X0, #0
         let seq1 = vec![Instruction::MovImm {
@@ -206,13 +188,10 @@ mod tests {
 
     #[test]
     fn test_add_immediate() {
-        let cfg = Config::new();
-        let ctx = Context::new(&cfg);
-
-        let mut state = MachineState::new_symbolic(&ctx, "test");
+        let mut state = MachineState::new_symbolic("test");
 
         // Set X1 = 10
-        state.set_register(Register::X1, BV::from_i64(&ctx, 10, 64));
+        state.set_register(Register::X1, BV::from_i64(10, 64));
 
         // ADD X0, X1, #5
         let add = Instruction::Add {
@@ -225,10 +204,10 @@ mod tests {
 
         // X0 should be 15
         let x0_val = new_state.get_register(Register::X0);
-        let expected = BV::from_i64(&ctx, 15, 64);
+        let expected = BV::from_i64(15, 64);
 
-        let solver = Solver::new(&ctx);
-        solver.assert(&x0_val._eq(&expected).not());
+        let solver = Solver::new();
+        solver.assert(&x0_val.eq(&expected).not());
         assert_eq!(solver.check(), SatResult::Unsat);
     }
 }
