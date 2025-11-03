@@ -16,7 +16,7 @@ capstone = "0.13"
 clap = { version = "4.5", features = ["derive"] }
 z3 = { version = "0.19", optional = true }
 dynasmrt = "3.2.0"
-dynasm = "3.2.0"
+dynasm = "4.0.1"
 
 [features]
 default = ["z3"]
