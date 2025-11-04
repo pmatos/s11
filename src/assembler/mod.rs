@@ -262,9 +262,9 @@ impl Default for AArch64Assembler {
     }
 }
 
-fn register_to_dynasm(reg: Register) -> Result<u32, String> {
+fn register_to_dynasm(reg: Register) -> Result<u8, String> {
     reg.index()
-        .map(|idx| idx as u32)
+        .map(|idx| idx as u8)
         .ok_or_else(|| format!("Register {:?} not supported in dynasm encoding", reg))
 }
 
