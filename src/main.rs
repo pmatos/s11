@@ -8,6 +8,7 @@ mod assembler;
 mod elf_patcher;
 mod ir;
 mod semantics;
+mod validation;
 
 use assembler::AArch64Assembler;
 use elf_patcher::{AddressWindow, ElfPatcher, parse_hex_address};
@@ -386,7 +387,7 @@ const IMM_VALUE_FOR_GENERATION: i64 = 1;
 fn are_sequences_equivalent(seq1: &[Instruction], seq2: &[Instruction]) -> Result<bool, String> {
     match check_equivalence(seq1, seq2) {
         EquivalenceResult::Equivalent => Ok(true),
-        EquivalenceResult::NotEquivalent => Ok(false),
+        EquivalenceResult::NotEquivalent | EquivalenceResult::NotEquivalentFast(_) => Ok(false),
         EquivalenceResult::Unknown(msg) => Err(msg),
     }
 }

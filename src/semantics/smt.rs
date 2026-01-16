@@ -1,8 +1,58 @@
 //! SMT constraint generation for AArch64 instructions
 
 use crate::ir::{Instruction, Operand, Register};
+use crate::semantics::state::LiveOutMask;
 use std::collections::HashMap;
+use std::time::Duration;
 use z3::ast::BV;
+use z3::{Params, Solver};
+
+/// Configuration for the SMT solver
+#[derive(Debug, Clone)]
+pub struct SolverConfig {
+    /// Timeout for SMT solving (None means no timeout)
+    pub timeout: Option<Duration>,
+}
+
+impl Default for SolverConfig {
+    fn default() -> Self {
+        Self {
+            timeout: Some(Duration::from_secs(30)),
+        }
+    }
+}
+
+impl SolverConfig {
+    /// Create a config with no timeout
+    pub fn no_timeout() -> Self {
+        Self { timeout: None }
+    }
+
+    /// Create a config with a specific timeout in seconds
+    pub fn with_timeout_secs(secs: u64) -> Self {
+        Self {
+            timeout: Some(Duration::from_secs(secs)),
+        }
+    }
+
+    /// Create a config with a specific timeout
+    pub fn with_timeout(timeout: Duration) -> Self {
+        Self {
+            timeout: Some(timeout),
+        }
+    }
+}
+
+/// Create a Z3 solver with the given configuration
+pub fn create_solver_with_config(cfg: &SolverConfig) -> Solver {
+    let solver = Solver::new();
+    if let Some(timeout) = cfg.timeout {
+        let mut params = Params::new();
+        params.set_u32("timeout", timeout.as_millis() as u32);
+        solver.set_params(&params);
+    }
+    solver
+}
 
 /// Machine state representation for SMT solving
 #[derive(Clone)]
@@ -148,6 +198,24 @@ pub fn states_not_equal(state1: &MachineState, state2: &MachineState) -> z3::ast
     let sp2 = state2.get_register(Register::SP);
     let sp_not_equal = sp1.eq(sp2).not();
     not_equal = z3::ast::Bool::or(&[&not_equal, &sp_not_equal]);
+
+    not_equal
+}
+
+/// Check if two machine states are not equal for the specified live-out registers
+pub fn states_not_equal_for_live_out(
+    state1: &MachineState,
+    state2: &MachineState,
+    live_out: &LiveOutMask,
+) -> z3::ast::Bool {
+    let mut not_equal = z3::ast::Bool::from_bool(false);
+
+    for reg in live_out.iter() {
+        let val1 = state1.get_register(*reg);
+        let val2 = state2.get_register(*reg);
+        let reg_not_equal = val1.eq(val2).not();
+        not_equal = z3::ast::Bool::or(&[&not_equal, &reg_not_equal]);
+    }
 
     not_equal
 }
