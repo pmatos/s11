@@ -12,7 +12,7 @@ categories = ["compilers", "development-tools::testing", "science"]
 
 [dependencies]
 elf = "0.8"
-capstone = "0.13"
+capstone = "0.14"
 clap = { version = "4.5", features = ["derive"] }
 z3 = { version = "0.19", optional = true }
 dynasmrt = "4.0.1"
