@@ -10,4 +10,5 @@ pub mod state;
 pub use equivalence::{
     EquivalenceConfig, EquivalenceResult, check_equivalence, check_equivalence_with_config,
 };
+#[allow(unused_imports)]
 pub use state::{ConcreteMachineState, ConcreteValue, ConditionFlags, LiveOutMask};
