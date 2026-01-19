@@ -7,7 +7,7 @@
 //! 4. Instruction mutation (18%): Replace an entire instruction
 
 use crate::ir::{Instruction, Operand, Register};
-use crate::search::candidate::{generate_random_instruction, is_binary_op, is_shift_op};
+use crate::search::candidate::generate_random_instruction;
 use crate::search::config::MutationWeights;
 use rand::Rng;
 
