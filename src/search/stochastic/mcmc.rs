@@ -241,7 +241,7 @@ impl SearchAlgorithm for StochasticSearch {
 /// Returns high cost for programs that fail tests
 pub fn evaluate_with_tests(
     proposal: &[Instruction],
-    target: &[Instruction],
+    _target: &[Instruction],
     test_inputs: &[ConcreteMachineState],
     target_outputs: &[ConcreteMachineState],
     live_out: &LiveOutMask,
