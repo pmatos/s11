@@ -9,7 +9,7 @@ This document tracks the porting progress from s10 (Racket superoptimizer) to s1
 | Primary ISA | RISC-V 32-bit | AArch64 64-bit | ✅ Changed by design |
 | Code Size | ~6,946 LOC | ~2,318 LOC | MVP |
 | Search Algorithms | Symbolic + Stochastic + Hybrid | Enumerative + Stochastic + Symbolic | ✅ Implemented |
-| Parallelism | Multi-core (loci framework) | Single-threaded | ❌ Missing |
+| Parallelism | Multi-core (loci framework) | Multi-threaded (rayon/crossbeam) | ✅ Implemented |
 | SMT Solver | Rosette/Z3 | Z3 direct | ✅ Implemented |
 | Binary Input | Assembly text files | ELF binaries | ✅ Enhanced |
 
@@ -51,18 +51,18 @@ S10's `stochastic.rkt` implements Metropolis-Hastings:
 
 **Implementation**: `src/search/stochastic/` (~500 LOC)
 
-#### 1.3 Hybrid Search (MISSING)
+#### 1.3 Hybrid Search (IMPLEMENTED)
 
 S10's `driver.rkt` coordinates multi-algorithm search:
 
 | Feature | S10 | S11 | Priority |
 |---------|-----|-----|----------|
-| Algorithm selection | ✅ --symbolic/--stochastic/--hybrid | ❌ | High |
-| Core distribution | ✅ 1 symbolic + (N-1) stochastic | ❌ | Medium |
-| Best program broadcast | ✅ Cross-worker propagation | ❌ | Medium |
-| Solution merging | ✅ Master aggregation | ❌ | Medium |
+| Algorithm selection | ✅ --symbolic/--stochastic/--hybrid | ✅ --algorithm hybrid | ✅ |
+| Core distribution | ✅ 1 symbolic + (N-1) stochastic | ✅ --cores/-j | ✅ |
+| Best program broadcast | ✅ Cross-worker propagation | ✅ SharedBest + channels | ✅ |
+| Solution merging | ✅ Master aggregation | ✅ Coordinator | ✅ |
 
-**Files to port**: `driver.rkt` coordination logic (~200 LOC)
+**Implementation**: `src/search/parallel/` (~400 LOC)
 
 #### 1.4 Enumerative Search (PARTIAL)
 
@@ -75,21 +75,19 @@ S10's `driver.rkt` coordinates multi-algorithm search:
 
 ---
 
-### 2. Parallelism & Job Management (MISSING)
+### 2. Parallelism & Job Management (IMPLEMENTED)
 
 S10 uses the `loci` framework for distributed computation:
 
 | Feature | S10 | S11 | Priority |
 |---------|-----|-----|----------|
-| Locus spawning | ✅ jobs.rkt | ❌ | High |
-| Message passing | ✅ messaging.rkt | ❌ | High |
-| Worker coordination | ✅ Master/worker protocol | ❌ | High |
-| Core allocation | ✅ -j/--cores option | ❌ | Medium |
-| Dynamic locus creation | ✅ Runtime spawning | ❌ | Low |
+| Locus spawning | ✅ jobs.rkt | ✅ std::thread + rayon | ✅ |
+| Message passing | ✅ messaging.rkt | ✅ crossbeam-channel | ✅ |
+| Worker coordination | ✅ Master/worker protocol | ✅ Coordinator pattern | ✅ |
+| Core allocation | ✅ -j/--cores option | ✅ --cores/-j | ✅ |
+| Dynamic locus creation | ✅ Runtime spawning | ❌ (not needed) | Low |
 
-**Files to port**: `s10/jobs.rkt`, `s10/messaging.rkt` (~250 LOC total)
-
-**Rust alternatives**: `rayon`, `crossbeam`, `tokio` for parallelism
+**Implementation**: `src/search/parallel/` using rayon, crossbeam-channel, num_cpus
 
 ---
 
@@ -248,7 +246,7 @@ S10 has `simulator-racket.rkt` for actual execution:
 | Disassembly | ❌ | ✅ disasm subcommand | ✅ |
 | Address window | ❌ | ✅ --start-addr/--end-addr | ✅ |
 | Algorithm selection | ✅ --symbolic/--stochastic/--hybrid | ✅ --algorithm | ✅ |
-| Core count | ✅ -j/--cores | ❌ | High |
+| Core count | ✅ -j/--cores | ✅ --cores/-j | ✅ |
 | Timeout | ✅ -t/--timeout | ✅ --timeout | ✅ |
 | Verbose mode | ✅ --verbose | ✅ --verbose | ✅ |
 | Statistics output | ✅ --statistics | Partial (printed) | Low |
@@ -334,10 +332,10 @@ pub trait ISA {
 2. [x] Symbolic search with SMT-based synthesis (linear cost search)
 3. [x] CLI options for algorithm selection (--algorithm, --beta, --iterations, etc.)
 
-### Phase 3: Parallelism (Medium Priority)
-1. [ ] Multi-threaded execution framework
-2. [ ] Worker coordination
-3. [ ] Core allocation CLI
+### Phase 3: Parallelism (Medium Priority) ✅ COMPLETE
+1. [x] Multi-threaded execution framework (rayon + crossbeam-channel)
+2. [x] Worker coordination (Coordinator pattern with SharedBest)
+3. [x] Core allocation CLI (--cores/-j, --no-symbolic)
 
 ### Phase 4: ISA Abstraction (Medium Priority)
 1. [ ] Trait-based ISA abstraction
@@ -361,11 +359,11 @@ pub trait ISA {
 
 | Category | S10 Features | S11 Implemented | S11 Missing |
 |----------|--------------|-----------------|-------------|
-| Search Algorithms | 3 | 3 (enumerative, stochastic, symbolic) | Hybrid coordination |
-| Parallelism | Full | None | Full |
+| Search Algorithms | 3 | 4 (enumerative, stochastic, symbolic, hybrid) | - |
+| Parallelism | Full | Full (rayon + crossbeam) | - |
 | IR/Instructions | ~20 opcodes | 10 opcodes | ~10 |
 | Validation | 3 modes | 2 modes (fast+SMT) | 1 mode |
-| CLI Options | ~15 | ~12 | ~3 |
+| CLI Options | ~15 | ~14 | ~1 |
 | Documentation | 5 guides | 1 file | 4 guides |
 
-**Overall Port Progress**: ~60% (Phase 1 + Phase 2 complete, parallelism and hybrid mode missing)
+**Overall Port Progress**: ~75% (Phase 1-3 complete, ISA abstraction and extended instructions remaining)
