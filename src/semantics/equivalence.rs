@@ -1,5 +1,7 @@
 //! Semantic equivalence checking for instruction sequences
 
+#![allow(dead_code)]
+
 use crate::ir::Instruction;
 use crate::semantics::concrete::{
     apply_sequence_concrete, find_first_difference, states_equal_for_live_out,

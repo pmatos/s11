@@ -1,5 +1,7 @@
 //! Shared state types for concrete and symbolic execution
 
+#![allow(dead_code)]
+
 use crate::ir::Register;
 use crate::ir::types::Condition;
 use std::collections::{HashMap, HashSet};

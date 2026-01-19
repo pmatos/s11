@@ -1,5 +1,7 @@
 //! Cost model for instruction sequences
 
+#![allow(dead_code)]
+
 use crate::ir::Instruction;
 
 /// Cost metric for evaluating instruction sequences

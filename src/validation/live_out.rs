@@ -1,5 +1,7 @@
 //! Live-out register computation and parsing
 
+#![allow(dead_code)]
+
 use crate::ir::{Instruction, Register};
 use crate::semantics::state::LiveOutMask;
 use std::str::FromStr;

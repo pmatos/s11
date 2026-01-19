@@ -1,5 +1,7 @@
 //! SMT constraint generation for AArch64 instructions
 
+#![allow(dead_code)]
+
 use crate::ir::{Instruction, Operand, Register};
 use crate::semantics::state::LiveOutMask;
 use std::collections::HashMap;
