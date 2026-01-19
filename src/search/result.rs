@@ -1,5 +1,7 @@
 //! Search result types and statistics
 
+#![allow(dead_code)]
+
 use crate::ir::Instruction;
 use crate::search::config::Algorithm;
 use std::time::Duration;

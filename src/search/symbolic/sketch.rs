@@ -7,6 +7,8 @@
 //! The actual synthesis in this implementation uses a hybrid approach:
 //! enumerate concrete candidates and verify with SMT.
 
+#![allow(dead_code)]
+
 use crate::ir::{Instruction, Operand, Register};
 use z3::Model;
 use z3::ast::{Bool, Int};

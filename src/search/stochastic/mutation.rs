@@ -6,6 +6,8 @@
 //! 3. Swap mutation (16%): Swap two instructions
 //! 4. Instruction mutation (18%): Replace an entire instruction
 
+#![allow(dead_code)]
+
 use crate::ir::{Instruction, Operand, Register};
 use crate::search::candidate::generate_random_instruction;
 use crate::search::config::MutationWeights;

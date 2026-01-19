@@ -8,6 +8,8 @@
 //!    a. Mutate current program
 //!    b. Evaluate on tests (fast rejection if fails)
 //!    c. If passes tests with zero cost → verify with SMT
+
+#![allow(dead_code)]
 //!    d. Accept/reject based on Metropolis-Hastings criterion
 //! 4. Return best found optimization
 
