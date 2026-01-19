@@ -25,6 +25,7 @@ use crate::ir::Instruction;
 use crate::semantics::state::LiveOutMask;
 
 /// Trait for search algorithms that find equivalent instruction sequences
+#[allow(dead_code)]
 pub trait SearchAlgorithm {
     /// Search for an equivalent sequence that is cheaper than the target
     ///

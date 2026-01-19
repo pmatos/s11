@@ -82,7 +82,7 @@ impl ElfPatcher {
                 }
 
                 // Ensure addresses are 4-byte aligned (AArch64 instruction alignment)
-                if window.start % 4 != 0 || window.end % 4 != 0 {
+                if !window.start.is_multiple_of(4) || !window.end.is_multiple_of(4) {
                     return Err(
                         "Addresses must be 4-byte aligned for AArch64 instructions".to_string()
                     );

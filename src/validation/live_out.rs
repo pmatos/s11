@@ -31,12 +31,11 @@ fn parse_register(s: &str) -> Result<Register, ParseLiveOutError> {
         return Ok(Register::XZR);
     }
 
-    if let Some(num_str) = s.strip_prefix('x') {
-        if let Ok(num) = num_str.parse::<u8>() {
-            if let Some(reg) = Register::from_index(num) {
-                return Ok(reg);
-            }
-        }
+    if let Some(num_str) = s.strip_prefix('x')
+        && let Ok(num) = num_str.parse::<u8>()
+        && let Some(reg) = Register::from_index(num)
+    {
+        return Ok(reg);
     }
 
     Err(ParseLiveOutError {

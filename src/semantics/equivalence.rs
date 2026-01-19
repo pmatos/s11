@@ -115,7 +115,7 @@ pub fn check_equivalence(seq1: &[Instruction], seq2: &[Instruction]) -> Equivale
     let final_state1 = apply_sequence(initial_state.clone(), seq1);
     let final_state2 = apply_sequence(initial_state, seq2);
 
-    solver.assert(&states_not_equal(&final_state1, &final_state2));
+    solver.assert(states_not_equal(&final_state1, &final_state2));
 
     match solver.check() {
         SatResult::Unsat => EquivalenceResult::Equivalent,
@@ -171,7 +171,7 @@ pub fn check_equivalence_with_config(
     let final_state1 = apply_sequence(initial_state.clone(), seq1);
     let final_state2 = apply_sequence(initial_state, seq2);
 
-    solver.assert(&states_not_equal_for_live_out(
+    solver.assert(states_not_equal_for_live_out(
         &final_state1,
         &final_state2,
         &config.live_out,
@@ -204,7 +204,7 @@ pub fn find_counterexample(
     let final_state1 = apply_sequence(initial_state.clone(), seq1);
     let final_state2 = apply_sequence(initial_state, seq2);
 
-    solver.assert(&states_not_equal(&final_state1, &final_state2));
+    solver.assert(states_not_equal(&final_state1, &final_state2));
 
     if solver.check() == SatResult::Sat {
         let model = solver.get_model().unwrap();
@@ -217,10 +217,10 @@ pub fn find_counterexample(
                 let eval1 = model.eval(val1, true).unwrap();
                 let eval2 = model.eval(val2, true).unwrap();
 
-                if let (Some(v1), Some(v2)) = (eval1.as_i64(), eval2.as_i64()) {
-                    if v1 != v2 {
-                        return Some((format!("x{}", i), v1, v2));
-                    }
+                if let (Some(v1), Some(v2)) = (eval1.as_i64(), eval2.as_i64())
+                    && v1 != v2
+                {
+                    return Some((format!("x{}", i), v1, v2));
                 }
             }
         }

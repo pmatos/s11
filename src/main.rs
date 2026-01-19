@@ -616,8 +616,8 @@ fn parse_mov_instruction(op_str: &str) -> Result<Option<Instruction>, String> {
     if parts[1].starts_with('#') {
         // Immediate
         let imm_str = &parts[1][1..]; // Remove '#'
-        let imm = if imm_str.starts_with("0x") {
-            i64::from_str_radix(&imm_str[2..], 16)
+        let imm = if let Some(hex_str) = imm_str.strip_prefix("0x") {
+            i64::from_str_radix(hex_str, 16)
         } else {
             imm_str.parse::<i64>()
         }
@@ -644,8 +644,8 @@ fn parse_add_instruction(op_str: &str) -> Result<Option<Instruction>, String> {
     let src2 = if parts[2].starts_with('#') {
         // Immediate
         let imm_str = &parts[2][1..]; // Remove '#'
-        let imm = if imm_str.starts_with("0x") {
-            i64::from_str_radix(&imm_str[2..], 16)
+        let imm = if let Some(hex_str) = imm_str.strip_prefix("0x") {
+            i64::from_str_radix(hex_str, 16)
         } else {
             imm_str.parse::<i64>()
         }
