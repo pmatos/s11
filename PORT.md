@@ -338,7 +338,7 @@ pub trait ISA {
 3. [x] Core allocation CLI (--cores/-j, --no-symbolic)
 
 ### Phase 4: ISA Abstraction (Medium Priority)
-1. [ ] Trait-based ISA abstraction
+1. [x] Trait-based ISA abstraction
 2. [ ] RISC-V backend implementation
 3. [ ] Backend selection CLI
 

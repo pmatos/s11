@@ -8,6 +8,7 @@ use std::time::Duration;
 mod assembler;
 mod elf_patcher;
 mod ir;
+mod isa;
 mod search;
 mod semantics;
 mod validation;
