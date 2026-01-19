@@ -99,16 +99,31 @@ impl From<CliSearchMode> for SearchMode {
     }
 }
 
+/// CLI target architecture selection
+#[derive(Clone, Copy, Debug, Default, ValueEnum)]
+pub enum CliArch {
+    /// AArch64 (ARM64) architecture
+    #[default]
+    Aarch64,
+    /// RISC-V 32-bit architecture
+    Riscv32,
+    /// RISC-V 64-bit architecture
+    Riscv64,
+}
+
 #[derive(Subcommand)]
 enum Commands {
-    /// Disassemble an AArch64 ELF binary showing addresses and machine code
+    /// Disassemble an ELF binary showing addresses and machine code
     Disasm {
-        /// Path to AArch64 ELF binary to disassemble
+        /// Path to ELF binary to disassemble
         binary: PathBuf,
+        /// Target architecture (auto-detected from ELF if not specified)
+        #[arg(long, value_enum)]
+        arch: Option<CliArch>,
     },
-    /// Optimize a window of instructions in an AArch64 ELF binary
+    /// Optimize a window of instructions in an ELF binary
     Opt {
-        /// Path to AArch64 ELF binary to optimize
+        /// Path to ELF binary to optimize
         binary: PathBuf,
         /// Start address of optimization window (hex, e.g., 0x1000)
         #[arg(long)]
@@ -116,6 +131,11 @@ enum Commands {
         /// End address of optimization window (hex, e.g., 0x1100)
         #[arg(long)]
         end_addr: String,
+
+        // --- Architecture selection ---
+        /// Target architecture (auto-detected from ELF if not specified)
+        #[arg(long, value_enum)]
+        arch: Option<CliArch>,
 
         // --- Algorithm selection ---
         /// Search algorithm to use
@@ -800,8 +820,18 @@ fn main() {
     let args = Args::parse();
 
     match args.command {
-        Commands::Disasm { binary } => {
+        Commands::Disasm { binary, arch } => {
             // Disassemble mode
+            if let Some(a) = arch {
+                // For now, only AArch64 is fully supported for disassembly
+                match a {
+                    CliArch::Aarch64 => {}
+                    CliArch::Riscv32 | CliArch::Riscv64 => {
+                        eprintln!("RISC-V disassembly is not yet supported");
+                        std::process::exit(1);
+                    }
+                }
+            }
             match analyze_elf_binary(&binary, true) {
                 Ok(()) => {}
                 Err(e) => {
@@ -814,6 +844,7 @@ fn main() {
             binary,
             start_addr,
             end_addr,
+            arch,
             algorithm,
             timeout,
             cost_metric,
@@ -826,6 +857,17 @@ fn main() {
             cores,
             no_symbolic,
         } => {
+            // Architecture selection
+            if let Some(a) = arch {
+                // For now, only AArch64 is fully supported for optimization
+                match a {
+                    CliArch::Aarch64 => {}
+                    CliArch::Riscv32 | CliArch::Riscv64 => {
+                        eprintln!("RISC-V optimization is not yet supported (ISA traits available but not integrated)");
+                        std::process::exit(1);
+                    }
+                }
+            }
             // Optimization mode
             let start_addr = match parse_hex_address(&start_addr) {
                 Ok(addr) => addr,

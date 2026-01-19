@@ -337,10 +337,10 @@ pub trait ISA {
 2. [x] Worker coordination (Coordinator pattern with SharedBest)
 3. [x] Core allocation CLI (--cores/-j, --no-symbolic)
 
-### Phase 4: ISA Abstraction (Medium Priority)
+### Phase 4: ISA Abstraction (Medium Priority) ✅ COMPLETE
 1. [x] Trait-based ISA abstraction
 2. [x] RISC-V backend implementation
-3. [ ] Backend selection CLI
+3. [x] Backend selection CLI
 
 ### Phase 5: Extended Instructions (Medium Priority)
 1. [ ] Multiplication/division
@@ -366,4 +366,4 @@ pub trait ISA {
 | CLI Options | ~15 | ~14 | ~1 |
 | Documentation | 5 guides | 1 file | 4 guides |
 
-**Overall Port Progress**: ~75% (Phase 1-3 complete, ISA abstraction and extended instructions remaining)
+**Overall Port Progress**: ~85% (Phase 1-4 complete, extended instructions and polish remaining)
