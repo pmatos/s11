@@ -2,6 +2,8 @@
 //!
 //! This module provides the AArch64-specific implementation of the ISA traits.
 
+#![allow(dead_code)]
+
 use crate::ir::{Instruction, Operand, Register};
 use crate::isa::traits::{ISA, InstructionGenerator, InstructionType, OperandType, RegisterType};
 

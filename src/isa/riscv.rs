@@ -2,6 +2,8 @@
 //!
 //! This module provides the RISC-V (RV32I/RV64I) implementation of the ISA traits.
 
+#![allow(dead_code)]
+
 use crate::isa::traits::{ISA, InstructionGenerator, InstructionType, OperandType, RegisterType};
 use std::fmt;
 use std::hash::Hash;

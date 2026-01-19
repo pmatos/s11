@@ -2,6 +2,8 @@
 //!
 //! These traits define the interface that any ISA implementation must provide.
 
+#![allow(dead_code)]
+
 use std::collections::HashMap;
 use std::fmt::{Debug, Display};
 use std::hash::Hash;
