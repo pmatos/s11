@@ -1,18 +1,24 @@
 use capstone::prelude::*;
-use clap::{Parser, Subcommand};
+use clap::{Parser, Subcommand, ValueEnum};
 use elf::{ElfBytes, endian::AnyEndian};
 use std::fs;
 use std::path::PathBuf;
+use std::time::Duration;
 
 mod assembler;
 mod elf_patcher;
 mod ir;
+mod search;
 mod semantics;
 mod validation;
 
 use assembler::AArch64Assembler;
 use elf_patcher::{AddressWindow, ElfPatcher, parse_hex_address};
 use ir::{Instruction, Operand, Register};
+use search::config::{Algorithm, SearchConfig, SearchMode, StochasticConfig, SymbolicConfig};
+use search::{SearchAlgorithm, StochasticSearch, SymbolicSearch};
+use semantics::cost::CostMetric;
+use semantics::state::LiveOutMask;
 use semantics::{EquivalenceResult, check_equivalence};
 
 // --- Command Line Arguments ---
@@ -26,6 +32,66 @@ use semantics::{EquivalenceResult, check_equivalence};
 struct Args {
     #[command(subcommand)]
     command: Commands,
+}
+
+/// CLI algorithm selection
+#[derive(Clone, Copy, Debug, ValueEnum)]
+enum CliAlgorithm {
+    /// Enumerative search (exhaustive)
+    Enumerative,
+    /// Stochastic search using MCMC
+    Stochastic,
+    /// Symbolic search using SMT solver
+    Symbolic,
+}
+
+impl From<CliAlgorithm> for Algorithm {
+    fn from(cli: CliAlgorithm) -> Self {
+        match cli {
+            CliAlgorithm::Enumerative => Algorithm::Enumerative,
+            CliAlgorithm::Stochastic => Algorithm::Stochastic,
+            CliAlgorithm::Symbolic => Algorithm::Symbolic,
+        }
+    }
+}
+
+/// CLI cost metric selection
+#[derive(Clone, Copy, Debug, ValueEnum)]
+enum CliCostMetric {
+    /// Count number of instructions
+    InstructionCount,
+    /// Estimate latency cycles
+    Latency,
+    /// Estimate code size in bytes
+    CodeSize,
+}
+
+impl From<CliCostMetric> for CostMetric {
+    fn from(cli: CliCostMetric) -> Self {
+        match cli {
+            CliCostMetric::InstructionCount => CostMetric::InstructionCount,
+            CliCostMetric::Latency => CostMetric::Latency,
+            CliCostMetric::CodeSize => CostMetric::CodeSize,
+        }
+    }
+}
+
+/// CLI search mode selection for symbolic search
+#[derive(Clone, Copy, Debug, ValueEnum)]
+enum CliSearchMode {
+    /// Linear cost search (try each cost bound in order)
+    Linear,
+    /// Binary search on cost bound
+    Binary,
+}
+
+impl From<CliSearchMode> for SearchMode {
+    fn from(cli: CliSearchMode) -> Self {
+        match cli {
+            CliSearchMode::Linear => SearchMode::Linear,
+            CliSearchMode::Binary => SearchMode::Binary,
+        }
+    }
 }
 
 #[derive(Subcommand)]
@@ -45,6 +111,41 @@ enum Commands {
         /// End address of optimization window (hex, e.g., 0x1100)
         #[arg(long)]
         end_addr: String,
+
+        // --- Algorithm selection ---
+        /// Search algorithm to use
+        #[arg(long, value_enum, default_value = "enumerative")]
+        algorithm: CliAlgorithm,
+
+        // --- Common options ---
+        /// Timeout in seconds for the search
+        #[arg(long)]
+        timeout: Option<u64>,
+        /// Cost metric to optimize
+        #[arg(long, value_enum, default_value = "instruction-count")]
+        cost_metric: CliCostMetric,
+        /// Enable verbose output
+        #[arg(long, short)]
+        verbose: bool,
+
+        // --- Stochastic search options ---
+        /// Inverse temperature for MCMC (higher = more greedy)
+        #[arg(long, default_value = "1.0")]
+        beta: f64,
+        /// Number of MCMC iterations
+        #[arg(long, default_value = "1000000")]
+        iterations: u64,
+        /// Random seed for reproducibility
+        #[arg(long)]
+        seed: Option<u64>,
+
+        // --- Symbolic search options ---
+        /// Search mode for symbolic synthesis
+        #[arg(long, value_enum, default_value = "linear")]
+        search_mode: CliSearchMode,
+        /// Solver timeout in seconds
+        #[arg(long, default_value = "5")]
+        solver_timeout: u64,
     },
 }
 
@@ -161,15 +262,30 @@ fn analyze_elf_binary(path: &PathBuf, disasm_mode: bool) -> Result<(), Box<dyn s
     Ok(())
 }
 
+/// Options for the optimization process
+struct OptimizationOptions {
+    algorithm: Algorithm,
+    timeout: Option<Duration>,
+    cost_metric: CostMetric,
+    verbose: bool,
+    beta: f64,
+    iterations: u64,
+    seed: Option<u64>,
+    search_mode: SearchMode,
+    solver_timeout: Duration,
+}
+
 // --- Optimization Function ---
 
 fn optimize_elf_binary(
     path: &PathBuf,
     start_addr: u64,
     end_addr: u64,
+    options: &OptimizationOptions,
 ) -> Result<(), Box<dyn std::error::Error>> {
     println!("Optimizing ELF binary: {}", path.display());
     println!("Address window: 0x{:x} - 0x{:x}", start_addr, end_addr);
+    println!("Algorithm: {:?}", options.algorithm);
 
     // Create address window
     let window = AddressWindow {
@@ -185,9 +301,6 @@ fn optimize_elf_binary(
     // Get the original instructions in the window
     let original_bytes = elf_patcher.get_instructions_in_window(&window)?;
     println!("Original code: {} bytes", original_bytes.len());
-
-    // For MVP: Just reassemble the same instructions (no actual optimization yet)
-    // This demonstrates the full pipeline: disasm -> IR -> assembly -> patch
 
     // Initialize Capstone disassembler
     let cs = Capstone::new()
@@ -209,7 +322,7 @@ fn optimize_elf_binary(
         );
     }
 
-    // Convert to IR (for MVP, we'll create simple IR for demonstrable instructions)
+    // Convert to IR
     let ir_instructions = convert_to_ir(&instructions)?;
     println!("Converted {} instructions to IR:", ir_instructions.len());
 
@@ -217,9 +330,24 @@ fn optimize_elf_binary(
         println!("  {}", instr);
     }
 
-    // Reassemble the IR instructions
+    // Run optimization based on selected algorithm
+    let optimized_instructions = run_optimization(&ir_instructions, options)?;
+
+    // Use optimized instructions if found, otherwise use original
+    let final_instructions = optimized_instructions.as_ref().unwrap_or(&ir_instructions);
+
+    if optimized_instructions.is_some() {
+        println!("Optimized to {} instructions:", final_instructions.len());
+        for instr in final_instructions {
+            println!("  {}", instr);
+        }
+    } else {
+        println!("No optimization found, using original instructions.");
+    }
+
+    // Reassemble the instructions
     let mut assembler = AArch64Assembler::new();
-    let assembled_bytes = assembler.assemble_instructions(&ir_instructions)?;
+    let assembled_bytes = assembler.assemble_instructions(final_instructions)?;
     println!("Reassembled to {} bytes", assembled_bytes.len());
 
     // Create output filename
@@ -243,6 +371,122 @@ fn optimize_elf_binary(
     println!("Created optimized binary: {}", output_path.display());
 
     Ok(())
+}
+
+/// Run optimization using the selected algorithm
+fn run_optimization(
+    target: &[Instruction],
+    options: &OptimizationOptions,
+) -> Result<Option<Vec<Instruction>>, Box<dyn std::error::Error>> {
+    if target.is_empty() {
+        return Ok(None);
+    }
+
+    // Default registers and immediates for search
+    let available_registers = vec![
+        Register::X0,
+        Register::X1,
+        Register::X2,
+        Register::X3,
+        Register::X4,
+        Register::X5,
+        Register::X6,
+        Register::X7,
+    ];
+    let available_immediates = vec![-1, 0, 1, 2, 4, 8];
+
+    // Create live-out mask (assume all modified registers are live-out for now)
+    let live_out =
+        LiveOutMask::from_registers(target.iter().map(|instr| instr.destination()).collect());
+
+    match options.algorithm {
+        Algorithm::Enumerative => {
+            // Use existing enumerative search
+            println!("\nRunning enumerative search...");
+            Ok(find_shorter_equivalent(target))
+        }
+        Algorithm::Stochastic => {
+            println!("\nRunning stochastic (MCMC) search...");
+            println!("  Beta: {}", options.beta);
+            println!("  Iterations: {}", options.iterations);
+            if let Some(seed) = options.seed {
+                println!("  Seed: {}", seed);
+            }
+
+            let stochastic_config = StochasticConfig::default()
+                .with_beta(options.beta)
+                .with_iterations(options.iterations)
+                .with_seed_option(options.seed);
+
+            let config = SearchConfig::default()
+                .with_stochastic(stochastic_config)
+                .with_cost_metric(options.cost_metric)
+                .with_timeout_option(options.timeout)
+                .with_verbose(options.verbose)
+                .with_registers(available_registers)
+                .with_immediates(available_immediates);
+
+            let mut search = StochasticSearch::new();
+            let result = search.search(target, &live_out, &config);
+
+            print_search_statistics(&result.statistics);
+
+            if result.found_optimization {
+                Ok(result.optimized_sequence)
+            } else {
+                Ok(None)
+            }
+        }
+        Algorithm::Symbolic => {
+            println!("\nRunning symbolic (SMT) search...");
+            println!("  Search mode: {:?}", options.search_mode);
+            println!("  Solver timeout: {:?}", options.solver_timeout);
+
+            let symbolic_config = SymbolicConfig::default()
+                .with_search_mode(options.search_mode)
+                .with_timeout(options.solver_timeout);
+
+            let config = SearchConfig::default()
+                .with_symbolic(symbolic_config)
+                .with_cost_metric(options.cost_metric)
+                .with_timeout_option(options.timeout)
+                .with_verbose(options.verbose)
+                .with_registers(available_registers)
+                .with_immediates(available_immediates);
+
+            let mut search = SymbolicSearch::new();
+            let result = search.search(target, &live_out, &config);
+
+            print_search_statistics(&result.statistics);
+
+            if result.found_optimization {
+                Ok(result.optimized_sequence)
+            } else {
+                Ok(None)
+            }
+        }
+    }
+}
+
+/// Print search statistics
+fn print_search_statistics(stats: &search::result::SearchStatistics) {
+    println!("\nSearch Statistics:");
+    println!("  Algorithm: {:?}", stats.algorithm);
+    println!("  Elapsed time: {:?}", stats.elapsed_time);
+    println!("  Candidates evaluated: {}", stats.candidates_evaluated);
+    println!(
+        "  Candidates passed fast test: {}",
+        stats.candidates_passed_fast
+    );
+    println!("  SMT queries: {}", stats.smt_queries);
+    println!("  SMT equivalent: {}", stats.smt_equivalent);
+    println!("  Improvements found: {}", stats.improvements_found);
+    println!("  Original cost: {}", stats.original_cost);
+    println!("  Best cost found: {}", stats.best_cost_found);
+    if stats.iterations > 0 {
+        println!("  Iterations: {}", stats.iterations);
+        println!("  Acceptance rate: {:.2}%", stats.acceptance_rate() * 100.0);
+    }
 }
 
 fn convert_to_ir(instructions: &capstone::Instructions) -> Result<Vec<Instruction>, String> {
@@ -513,6 +757,15 @@ fn main() {
             binary,
             start_addr,
             end_addr,
+            algorithm,
+            timeout,
+            cost_metric,
+            verbose,
+            beta,
+            iterations,
+            seed,
+            search_mode,
+            solver_timeout,
         } => {
             // Optimization mode
             let start_addr = match parse_hex_address(&start_addr) {
@@ -531,7 +784,19 @@ fn main() {
                 }
             };
 
-            match optimize_elf_binary(&binary, start_addr, end_addr) {
+            let options = OptimizationOptions {
+                algorithm: algorithm.into(),
+                timeout: timeout.map(Duration::from_secs),
+                cost_metric: cost_metric.into(),
+                verbose,
+                beta,
+                iterations,
+                seed,
+                search_mode: search_mode.into(),
+                solver_timeout: Duration::from_secs(solver_timeout),
+            };
+
+            match optimize_elf_binary(&binary, start_addr, end_addr, &options) {
                 Ok(()) => println!("\nOptimization completed successfully."),
                 Err(e) => {
                     eprintln!("Error during optimization: {}", e);

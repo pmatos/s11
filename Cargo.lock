@@ -665,6 +665,7 @@ dependencies = [
  "elf",
  "proptest",
  "rand",
+ "rand_chacha",
  "z3",
 ]
 
