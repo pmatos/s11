@@ -88,7 +88,7 @@ pub fn run_parallel_search(
 /// Coordinator loop that receives messages from workers and aggregates results.
 fn run_coordinator(
     target: &[Instruction],
-    live_out: &LiveOutMask,
+    _live_out: &LiveOutMask,
     channels: CoordinatorChannels,
     config: &ParallelConfig,
     start_time: Instant,
@@ -247,11 +247,10 @@ fn run_symbolic_worker(
     channels: WorkerChannels,
 ) {
     let mut search = SymbolicSearch::new();
-    let mut candidates_evaluated = 0u64;
 
     // Run search in chunks, checking for stop signal periodically
     let result = search.search(target, live_out, config);
-    candidates_evaluated = result.statistics.candidates_evaluated;
+    let candidates_evaluated = result.statistics.candidates_evaluated;
 
     if result.found_optimization
         && let Some(ref optimized) = result.optimized_sequence
@@ -280,25 +279,17 @@ fn run_stochastic_worker(
     channels: WorkerChannels,
 ) {
     let mut search = StochasticSearch::new();
-    let mut best_cost = crate::semantics::cost::sequence_cost(target, &config.cost_metric);
-    let mut best_sequence = target.to_vec();
-    let mut candidates_evaluated = 0u64;
-
-    // Check for better solutions from other workers periodically
-    let check_interval = 1000u64;
+    let best_cost = crate::semantics::cost::sequence_cost(target, &config.cost_metric);
 
     // Run stochastic search
     let result = search.search(target, live_out, config);
-    candidates_evaluated = result.statistics.candidates_evaluated;
+    let candidates_evaluated = result.statistics.candidates_evaluated;
 
     if result.found_optimization
         && let Some(ref optimized) = result.optimized_sequence
     {
         let cost = crate::semantics::cost::sequence_cost(optimized, &config.cost_metric);
         if cost < best_cost {
-            best_cost = cost;
-            best_sequence = optimized.clone();
-
             // Report improvement
             let _ = channels.to_coordinator.send(WorkerMessage::Improvement {
                 worker_id,
