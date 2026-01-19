@@ -13,7 +13,9 @@ pub mod result;
 pub mod stochastic;
 pub mod symbolic;
 
+#[allow(unused_imports)]
 pub use config::{Algorithm, SearchConfig, StochasticConfig, SymbolicConfig};
+#[allow(unused_imports)]
 pub use parallel::{ParallelConfig, ParallelResult, run_parallel_search};
 pub use result::{SearchResult, SearchStatistics};
 pub use stochastic::StochasticSearch;
