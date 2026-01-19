@@ -1,5 +1,7 @@
 //! Solution sharing channel for parallel search workers.
 
+#![allow(dead_code)]
+
 use crate::ir::Instruction;
 use crate::search::config::Algorithm;
 use crossbeam_channel::{Receiver, Sender, bounded, unbounded};

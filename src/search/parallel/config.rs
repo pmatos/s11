@@ -1,5 +1,7 @@
 //! Configuration for parallel search execution.
 
+#![allow(dead_code)]
+
 use std::time::Duration;
 
 /// Configuration for parallel search execution.

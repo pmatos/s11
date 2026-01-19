@@ -1,5 +1,7 @@
 //! Parallel search coordinator that manages worker threads.
 
+#![allow(dead_code)]
+
 use crate::ir::Instruction;
 use crate::search::SearchAlgorithm;
 use crate::search::config::{Algorithm, SearchConfig};
