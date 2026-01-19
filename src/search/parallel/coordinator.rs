@@ -103,13 +103,11 @@ fn run_coordinator(
 
     loop {
         // Check if we've exceeded timeout
-        if let Some(deadline) = deadline {
-            if Instant::now() >= deadline {
-                channels.shared.signal_stop();
-                // Broadcast stop to all workers
-                for tx in &channels.to_workers {
-                    let _ = tx.send(CoordinatorMessage::Stop);
-                }
+        if deadline.is_some_and(|d| Instant::now() >= d) {
+            channels.shared.signal_stop();
+            // Broadcast stop to all workers
+            for tx in &channels.to_workers {
+                let _ = tx.send(CoordinatorMessage::Stop);
             }
         }
 
@@ -255,16 +253,16 @@ fn run_symbolic_worker(
     let result = search.search(target, live_out, config);
     candidates_evaluated = result.statistics.candidates_evaluated;
 
-    if result.found_optimization {
-        if let Some(ref optimized) = result.optimized_sequence {
-            let cost = crate::semantics::cost::sequence_cost(optimized, &config.cost_metric);
-            let _ = channels.to_coordinator.send(WorkerMessage::Improvement {
-                worker_id,
-                sequence: optimized.clone(),
-                cost,
-                algorithm: Algorithm::Symbolic,
-            });
-        }
+    if result.found_optimization
+        && let Some(ref optimized) = result.optimized_sequence
+    {
+        let cost = crate::semantics::cost::sequence_cost(optimized, &config.cost_metric);
+        let _ = channels.to_coordinator.send(WorkerMessage::Improvement {
+            worker_id,
+            sequence: optimized.clone(),
+            cost,
+            algorithm: Algorithm::Symbolic,
+        });
     }
 
     let _ = channels.to_coordinator.send(WorkerMessage::Finished {
@@ -293,21 +291,21 @@ fn run_stochastic_worker(
     let result = search.search(target, live_out, config);
     candidates_evaluated = result.statistics.candidates_evaluated;
 
-    if result.found_optimization {
-        if let Some(ref optimized) = result.optimized_sequence {
-            let cost = crate::semantics::cost::sequence_cost(optimized, &config.cost_metric);
-            if cost < best_cost {
-                best_cost = cost;
-                best_sequence = optimized.clone();
+    if result.found_optimization
+        && let Some(ref optimized) = result.optimized_sequence
+    {
+        let cost = crate::semantics::cost::sequence_cost(optimized, &config.cost_metric);
+        if cost < best_cost {
+            best_cost = cost;
+            best_sequence = optimized.clone();
 
-                // Report improvement
-                let _ = channels.to_coordinator.send(WorkerMessage::Improvement {
-                    worker_id,
-                    sequence: optimized.clone(),
-                    cost,
-                    algorithm: Algorithm::Stochastic,
-                });
-            }
+            // Report improvement
+            let _ = channels.to_coordinator.send(WorkerMessage::Improvement {
+                worker_id,
+                sequence: optimized.clone(),
+                cost,
+                algorithm: Algorithm::Stochastic,
+            });
         }
     }
 

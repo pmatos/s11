@@ -53,13 +53,11 @@ impl SymbolicSearch {
             }
 
             // Check timeout
-            if let Some(timeout) = config.timeout {
-                if start_time.elapsed() >= timeout {
-                    if config.verbose {
-                        println!("Search timed out");
-                    }
-                    break;
+            if config.timeout.is_some_and(|t| start_time.elapsed() >= t) {
+                if config.verbose {
+                    println!("Search timed out");
                 }
+                break;
             }
 
             // Generate and test all sequences of this length
@@ -84,6 +82,7 @@ impl SymbolicSearch {
     }
 
     /// Search for equivalent sequences at a specific length
+    #[allow(clippy::too_many_arguments)]
     fn search_at_length(
         &mut self,
         target: &[Instruction],
@@ -100,10 +99,8 @@ impl SymbolicSearch {
             // Single instruction search
             for instr in all_instructions {
                 // Check timeout
-                if let Some(timeout) = config.timeout {
-                    if start_time.elapsed() >= timeout {
-                        return best_at_length;
-                    }
+                if config.timeout.is_some_and(|t| start_time.elapsed() >= t) {
+                    return best_at_length;
                 }
 
                 let candidate = vec![*instr];
@@ -129,10 +126,8 @@ impl SymbolicSearch {
             // Two instruction search
             for instr1 in all_instructions {
                 // Check timeout periodically
-                if let Some(timeout) = config.timeout {
-                    if start_time.elapsed() >= timeout {
-                        return best_at_length;
-                    }
+                if config.timeout.is_some_and(|t| start_time.elapsed() >= t) {
+                    return best_at_length;
                 }
 
                 for instr2 in all_instructions {
@@ -169,10 +164,8 @@ impl SymbolicSearch {
                 if count >= sample_size {
                     break;
                 }
-                if let Some(timeout) = config.timeout {
-                    if start_time.elapsed() >= timeout {
-                        return best_at_length;
-                    }
+                if config.timeout.is_some_and(|t| start_time.elapsed() >= t) {
+                    return best_at_length;
                 }
 
                 for instr2 in all_instructions {

@@ -26,6 +26,7 @@ impl AArch64Assembler {
             .map_err(|e| format!("Failed to finalize assembly: {:?}", e))
     }
 
+    #[allow(clippy::useless_conversion)]
     fn encode_instruction_on(
         &self,
         ops: &mut dynasmrt::aarch64::Assembler,

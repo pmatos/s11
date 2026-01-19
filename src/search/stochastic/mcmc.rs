@@ -88,10 +88,7 @@ impl SearchAlgorithm for StochasticSearch {
             .chain(edge_inputs.iter())
             .map(|input| apply_sequence_concrete(input.clone(), target))
             .collect();
-        let all_inputs: Vec<_> = test_inputs
-            .into_iter()
-            .chain(edge_inputs.into_iter())
-            .collect();
+        let all_inputs: Vec<_> = test_inputs.into_iter().chain(edge_inputs).collect();
 
         // Initialize current state
         let mutator = Mutator::new(
@@ -126,13 +123,11 @@ impl SearchAlgorithm for StochasticSearch {
             self.statistics.iterations = iteration + 1;
 
             // Check timeout
-            if let Some(timeout) = config.timeout {
-                if start_time.elapsed() >= timeout {
-                    if config.verbose {
-                        println!("Search timed out after {} iterations", iteration);
-                    }
-                    break;
+            if config.timeout.is_some_and(|t| start_time.elapsed() >= t) {
+                if config.verbose {
+                    println!("Search timed out after {} iterations", iteration);
                 }
+                break;
             }
 
             // Occasionally try a different length

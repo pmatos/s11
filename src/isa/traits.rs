@@ -90,6 +90,7 @@ pub trait InstructionType:
 }
 
 /// High-level ISA trait that combines all ISA-specific types
+#[allow(clippy::upper_case_acronyms)]
 pub trait ISA: Send + Sync + Clone {
     /// The register type for this ISA
     type Register: RegisterType;

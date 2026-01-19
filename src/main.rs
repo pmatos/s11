@@ -2,7 +2,7 @@ use capstone::prelude::*;
 use clap::{Parser, Subcommand, ValueEnum};
 use elf::{ElfBytes, endian::AnyEndian};
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 mod assembler;
@@ -314,7 +314,7 @@ struct OptimizationOptions {
 // --- Optimization Function ---
 
 fn optimize_elf_binary(
-    path: &PathBuf,
+    path: &Path,
     start_addr: u64,
     end_addr: u64,
     options: &OptimizationOptions,
@@ -388,7 +388,7 @@ fn optimize_elf_binary(
 
     // Create output filename
     let output_path = {
-        let mut new_path = path.clone();
+        let mut new_path = path.to_path_buf();
         let stem = new_path.file_stem().unwrap().to_str().unwrap();
         let extension = new_path.extension().map(|e| e.to_str().unwrap());
 

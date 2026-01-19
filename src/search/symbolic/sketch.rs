@@ -133,7 +133,7 @@ impl SymbolicSketch {
         // Combine all constraints with AND
         let mut result = constraints[0].clone();
         for c in constraints.iter().skip(1) {
-            result = result & c.clone();
+            result &= c.clone();
         }
         result
     }
