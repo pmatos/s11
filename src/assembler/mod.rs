@@ -375,6 +375,7 @@ fn register_to_dynasm(reg: Register) -> Result<u8, String> {
         .ok_or_else(|| format!("Register {:?} not supported in dynasm encoding", reg))
 }
 
+#[allow(dead_code)]
 fn condition_to_dynasm(cond: Condition) -> Result<u8, String> {
     Ok(match cond {
         Condition::EQ => 0b0000,
