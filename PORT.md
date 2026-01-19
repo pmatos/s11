@@ -339,7 +339,7 @@ pub trait ISA {
 
 ### Phase 4: ISA Abstraction (Medium Priority)
 1. [x] Trait-based ISA abstraction
-2. [ ] RISC-V backend implementation
+2. [x] RISC-V backend implementation
 3. [ ] Backend selection CLI
 
 ### Phase 5: Extended Instructions (Medium Priority)
