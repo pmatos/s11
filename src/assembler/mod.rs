@@ -252,6 +252,39 @@ impl AArch64Assembler {
                     }
                 }
             }
+            Instruction::Mul { rd, rn, rm } => {
+                let rd_reg = register_to_dynasm(*rd)?;
+                let rn_reg = register_to_dynasm(*rn)?;
+                let rm_reg = register_to_dynasm(*rm)?;
+
+                dynasm!(ops
+                    ; .arch aarch64
+                    ; mul X(rd_reg), X(rn_reg), X(rm_reg)
+                );
+                Ok(())
+            }
+            Instruction::Sdiv { rd, rn, rm } => {
+                let rd_reg = register_to_dynasm(*rd)?;
+                let rn_reg = register_to_dynasm(*rn)?;
+                let rm_reg = register_to_dynasm(*rm)?;
+
+                dynasm!(ops
+                    ; .arch aarch64
+                    ; sdiv X(rd_reg), X(rn_reg), X(rm_reg)
+                );
+                Ok(())
+            }
+            Instruction::Udiv { rd, rn, rm } => {
+                let rd_reg = register_to_dynasm(*rd)?;
+                let rn_reg = register_to_dynasm(*rn)?;
+                let rm_reg = register_to_dynasm(*rm)?;
+
+                dynasm!(ops
+                    ; .arch aarch64
+                    ; udiv X(rd_reg), X(rn_reg), X(rm_reg)
+                );
+                Ok(())
+            }
         }
     }
 }

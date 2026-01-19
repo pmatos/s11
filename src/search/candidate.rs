@@ -214,6 +214,9 @@ pub fn opcode_id(instr: &Instruction) -> u8 {
         Instruction::Lsl { .. } => 7,
         Instruction::Lsr { .. } => 8,
         Instruction::Asr { .. } => 9,
+        Instruction::Mul { .. } => 10,
+        Instruction::Sdiv { .. } => 11,
+        Instruction::Udiv { .. } => 12,
     }
 }
 

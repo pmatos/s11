@@ -8,7 +8,9 @@ use std::hash::Hash;
 
 use rand::Rng;
 /// Trait for register types
-pub trait RegisterType: Clone + Copy + PartialEq + Eq + Hash + Debug + Display + Send + Sync {
+pub trait RegisterType:
+    Clone + Copy + PartialEq + Eq + Hash + Debug + Display + Send + Sync
+{
     /// Get the numeric index of this register (for iteration)
     fn index(&self) -> Option<u8>;
 
@@ -27,7 +29,9 @@ pub trait RegisterType: Clone + Copy + PartialEq + Eq + Hash + Debug + Display +
 /// Note: The associated `Register` type here must match the register type used by this operand.
 /// To avoid ambiguity when implementing this trait, use concrete types instead of `Self::Register`
 /// in the method signatures.
-pub trait OperandType: Clone + Copy + PartialEq + Eq + Hash + Debug + Display + Send + Sync {
+pub trait OperandType:
+    Clone + Copy + PartialEq + Eq + Hash + Debug + Display + Send + Sync
+{
     /// The register type used by this operand
     type Register: RegisterType;
 
@@ -57,7 +61,9 @@ pub trait OperandType: Clone + Copy + PartialEq + Eq + Hash + Debug + Display + 
 }
 
 /// Trait for instruction types
-pub trait InstructionType: Clone + Copy + PartialEq + Eq + Hash + Debug + Display + Send + Sync {
+pub trait InstructionType:
+    Clone + Copy + PartialEq + Eq + Hash + Debug + Display + Send + Sync
+{
     /// The register type used by this instruction
     type Register: RegisterType;
     /// The operand type used by this instruction
@@ -173,10 +179,7 @@ pub trait CostModel<I: InstructionType>: Send + Sync {
 
     /// Calculate the total cost of an instruction sequence
     fn sequence_cost(&self, instructions: &[I]) -> u64 {
-        instructions
-            .iter()
-            .map(|i| self.instruction_cost(i))
-            .sum()
+        instructions.iter().map(|i| self.instruction_cost(i)).sum()
     }
 }
 

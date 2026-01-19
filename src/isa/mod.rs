@@ -13,4 +13,6 @@ pub use traits::{
 };
 
 pub use aarch64::AArch64;
-pub use riscv::{RiscV32, RiscV64, RiscVInstruction, RiscVInstructionGenerator, RiscVOperand, RiscVRegister};
+pub use riscv::{
+    RiscV32, RiscV64, RiscVInstruction, RiscVInstructionGenerator, RiscVOperand, RiscVRegister,
+};

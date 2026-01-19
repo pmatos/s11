@@ -73,6 +73,34 @@ pub fn apply_instruction_concrete(
             let result = value >> shift_amount;
             state.set_register(*rd, ConcreteValue::from_i64(result));
         }
+        Instruction::Mul { rd, rn, rm } => {
+            let lhs = state.get_register(*rn).as_u64();
+            let rhs = state.get_register(*rm).as_u64();
+            let result = lhs.wrapping_mul(rhs);
+            state.set_register(*rd, ConcreteValue::new(result));
+        }
+        Instruction::Sdiv { rd, rn, rm } => {
+            let lhs = state.get_register(*rn).as_i64();
+            let rhs = state.get_register(*rm).as_i64();
+            let result = if rhs == 0 {
+                0 // Division by zero returns 0 in AArch64
+            } else if lhs == i64::MIN && rhs == -1 {
+                i64::MIN // Overflow case returns dividend
+            } else {
+                lhs / rhs
+            };
+            state.set_register(*rd, ConcreteValue::from_i64(result));
+        }
+        Instruction::Udiv { rd, rn, rm } => {
+            let lhs = state.get_register(*rn).as_u64();
+            let rhs = state.get_register(*rm).as_u64();
+            let result = if rhs == 0 {
+                0 // Division by zero returns 0 in AArch64
+            } else {
+                lhs / rhs
+            };
+            state.set_register(*rd, ConcreteValue::new(result));
+        }
     }
     state
 }
@@ -435,5 +463,123 @@ mod tests {
 
         let live_out = LiveOutMask::from_registers(vec![Register::X0]);
         assert!(states_equal_for_live_out(&state1, &state2, &live_out));
+    }
+
+    #[test]
+    fn test_mul() {
+        let state = state_with(vec![(Register::X1, 6), (Register::X2, 7)]);
+        let instr = Instruction::Mul {
+            rd: Register::X0,
+            rn: Register::X1,
+            rm: Register::X2,
+        };
+        let new_state = apply_instruction_concrete(state, &instr);
+        assert_eq!(new_state.get_register(Register::X0).as_u64(), 42);
+    }
+
+    #[test]
+    fn test_mul_wrapping() {
+        let state = state_with(vec![(Register::X1, u64::MAX), (Register::X2, 2)]);
+        let instr = Instruction::Mul {
+            rd: Register::X0,
+            rn: Register::X1,
+            rm: Register::X2,
+        };
+        let new_state = apply_instruction_concrete(state, &instr);
+        // u64::MAX * 2 wraps around
+        assert_eq!(
+            new_state.get_register(Register::X0).as_u64(),
+            u64::MAX.wrapping_mul(2)
+        );
+    }
+
+    #[test]
+    fn test_sdiv() {
+        let state = state_with(vec![(Register::X1, 42), (Register::X2, 7)]);
+        let instr = Instruction::Sdiv {
+            rd: Register::X0,
+            rn: Register::X1,
+            rm: Register::X2,
+        };
+        let new_state = apply_instruction_concrete(state, &instr);
+        assert_eq!(new_state.get_register(Register::X0).as_u64(), 6);
+    }
+
+    #[test]
+    fn test_sdiv_negative() {
+        let state = state_with(vec![(Register::X1, (-42i64) as u64), (Register::X2, 7)]);
+        let instr = Instruction::Sdiv {
+            rd: Register::X0,
+            rn: Register::X1,
+            rm: Register::X2,
+        };
+        let new_state = apply_instruction_concrete(state, &instr);
+        assert_eq!(new_state.get_register(Register::X0).as_i64(), -6);
+    }
+
+    #[test]
+    fn test_sdiv_by_zero() {
+        let state = state_with(vec![(Register::X1, 42), (Register::X2, 0)]);
+        let instr = Instruction::Sdiv {
+            rd: Register::X0,
+            rn: Register::X1,
+            rm: Register::X2,
+        };
+        let new_state = apply_instruction_concrete(state, &instr);
+        // AArch64: Division by zero returns 0
+        assert_eq!(new_state.get_register(Register::X0).as_u64(), 0);
+    }
+
+    #[test]
+    fn test_sdiv_overflow() {
+        let state = state_with(vec![
+            (Register::X1, i64::MIN as u64),
+            (Register::X2, (-1i64) as u64),
+        ]);
+        let instr = Instruction::Sdiv {
+            rd: Register::X0,
+            rn: Register::X1,
+            rm: Register::X2,
+        };
+        let new_state = apply_instruction_concrete(state, &instr);
+        // AArch64: MIN / -1 overflow returns MIN (the dividend)
+        assert_eq!(new_state.get_register(Register::X0).as_i64(), i64::MIN);
+    }
+
+    #[test]
+    fn test_udiv() {
+        let state = state_with(vec![(Register::X1, 42), (Register::X2, 7)]);
+        let instr = Instruction::Udiv {
+            rd: Register::X0,
+            rn: Register::X1,
+            rm: Register::X2,
+        };
+        let new_state = apply_instruction_concrete(state, &instr);
+        assert_eq!(new_state.get_register(Register::X0).as_u64(), 6);
+    }
+
+    #[test]
+    fn test_udiv_by_zero() {
+        let state = state_with(vec![(Register::X1, 42), (Register::X2, 0)]);
+        let instr = Instruction::Udiv {
+            rd: Register::X0,
+            rn: Register::X1,
+            rm: Register::X2,
+        };
+        let new_state = apply_instruction_concrete(state, &instr);
+        // AArch64: Division by zero returns 0
+        assert_eq!(new_state.get_register(Register::X0).as_u64(), 0);
+    }
+
+    #[test]
+    fn test_udiv_large() {
+        let state = state_with(vec![(Register::X1, u64::MAX), (Register::X2, 3)]);
+        let instr = Instruction::Udiv {
+            rd: Register::X0,
+            rn: Register::X1,
+            rm: Register::X2,
+        };
+        let new_state = apply_instruction_concrete(state, &instr);
+        assert_eq!(new_state.get_register(Register::X0).as_u64(), u64::MAX / 3);
     }
 }

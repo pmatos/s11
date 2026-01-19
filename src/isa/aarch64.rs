@@ -109,6 +109,9 @@ impl InstructionType for Instruction {
             Instruction::Lsl { .. } => 7,
             Instruction::Lsr { .. } => 8,
             Instruction::Asr { .. } => 9,
+            Instruction::Mul { .. } => 10,
+            Instruction::Sdiv { .. } => 11,
+            Instruction::Udiv { .. } => 12,
         }
     }
 
@@ -123,6 +126,9 @@ impl InstructionType for Instruction {
             Instruction::Lsl { .. } => "lsl",
             Instruction::Lsr { .. } => "lsr",
             Instruction::Asr { .. } => "asr",
+            Instruction::Mul { .. } => "mul",
+            Instruction::Sdiv { .. } => "sdiv",
+            Instruction::Udiv { .. } => "udiv",
         }
     }
 
@@ -185,9 +191,21 @@ impl InstructionGenerator<Instruction> for AArch64InstructionGenerator {
                 // Register shifts
                 for &rm in registers {
                     let rm_op = Operand::Register(rm);
-                    instructions.push(Instruction::Lsl { rd, rn, shift: rm_op });
-                    instructions.push(Instruction::Lsr { rd, rn, shift: rm_op });
-                    instructions.push(Instruction::Asr { rd, rn, shift: rm_op });
+                    instructions.push(Instruction::Lsl {
+                        rd,
+                        rn,
+                        shift: rm_op,
+                    });
+                    instructions.push(Instruction::Lsr {
+                        rd,
+                        rn,
+                        shift: rm_op,
+                    });
+                    instructions.push(Instruction::Asr {
+                        rd,
+                        rn,
+                        shift: rm_op,
+                    });
                 }
                 // Immediate shifts
                 for &shift in &shift_amounts {
@@ -211,6 +229,17 @@ impl InstructionGenerator<Instruction> for AArch64InstructionGenerator {
             }
         }
 
+        // Multiplication and division (register-register only)
+        for &rd in registers {
+            for &rn in registers {
+                for &rm in registers {
+                    instructions.push(Instruction::Mul { rd, rn, rm });
+                    instructions.push(Instruction::Sdiv { rd, rn, rm });
+                    instructions.push(Instruction::Udiv { rd, rn, rm });
+                }
+            }
+        }
+
         instructions
     }
 
@@ -220,7 +249,7 @@ impl InstructionGenerator<Instruction> for AArch64InstructionGenerator {
         registers: &[Register],
         immediates: &[i64],
     ) -> Instruction {
-        let opcode = rng.random_range(0..10);
+        let opcode = rng.random_range(0..13);
         let rd = registers[rng.random_range(0..registers.len())];
         let rn = registers[rng.random_range(0..registers.len())];
 
@@ -261,6 +290,15 @@ impl InstructionGenerator<Instruction> for AArch64InstructionGenerator {
                     _ => unreachable!(),
                 }
             }
+            10..=12 => {
+                let rm = registers[rng.random_range(0..registers.len())];
+                match opcode {
+                    10 => Instruction::Mul { rd, rn, rm },
+                    11 => Instruction::Sdiv { rd, rn, rm },
+                    12 => Instruction::Udiv { rd, rn, rm },
+                    _ => unreachable!(),
+                }
+            }
             _ => unreachable!(),
         }
     }
@@ -291,15 +329,24 @@ impl InstructionGenerator<Instruction> for AArch64InstructionGenerator {
                     Instruction::And { rn, rm, .. } => Instruction::And { rd: new_rd, rn, rm },
                     Instruction::Orr { rn, rm, .. } => Instruction::Orr { rd: new_rd, rn, rm },
                     Instruction::Eor { rn, rm, .. } => Instruction::Eor { rd: new_rd, rn, rm },
-                    Instruction::Lsl { rn, shift, .. } => {
-                        Instruction::Lsl { rd: new_rd, rn, shift }
-                    }
-                    Instruction::Lsr { rn, shift, .. } => {
-                        Instruction::Lsr { rd: new_rd, rn, shift }
-                    }
-                    Instruction::Asr { rn, shift, .. } => {
-                        Instruction::Asr { rd: new_rd, rn, shift }
-                    }
+                    Instruction::Lsl { rn, shift, .. } => Instruction::Lsl {
+                        rd: new_rd,
+                        rn,
+                        shift,
+                    },
+                    Instruction::Lsr { rn, shift, .. } => Instruction::Lsr {
+                        rd: new_rd,
+                        rn,
+                        shift,
+                    },
+                    Instruction::Asr { rn, shift, .. } => Instruction::Asr {
+                        rd: new_rd,
+                        rn,
+                        shift,
+                    },
+                    Instruction::Mul { rn, rm, .. } => Instruction::Mul { rd: new_rd, rn, rm },
+                    Instruction::Sdiv { rn, rm, .. } => Instruction::Sdiv { rd: new_rd, rn, rm },
+                    Instruction::Udiv { rn, rm, .. } => Instruction::Udiv { rd: new_rd, rn, rm },
                 }
             }
             2 => {
@@ -361,6 +408,18 @@ impl InstructionGenerator<Instruction> for AArch64InstructionGenerator {
                             shift: new_shift,
                         }
                     }
+                    Instruction::Mul { rd, rn, .. } => {
+                        let new_rm = registers[rng.random_range(0..registers.len())];
+                        Instruction::Mul { rd, rn, rm: new_rm }
+                    }
+                    Instruction::Sdiv { rd, rn, .. } => {
+                        let new_rm = registers[rng.random_range(0..registers.len())];
+                        Instruction::Sdiv { rd, rn, rm: new_rm }
+                    }
+                    Instruction::Udiv { rd, rn, .. } => {
+                        let new_rm = registers[rng.random_range(0..registers.len())];
+                        Instruction::Udiv { rd, rn, rm: new_rm }
+                    }
                 }
             }
             _ => unreachable!(),
@@ -368,7 +427,7 @@ impl InstructionGenerator<Instruction> for AArch64InstructionGenerator {
     }
 
     fn opcode_count(&self) -> u8 {
-        10 // MovReg, MovImm, Add, Sub, And, Orr, Eor, Lsl, Lsr, Asr
+        13 // MovReg, MovImm, Add, Sub, And, Orr, Eor, Lsl, Lsr, Asr, Mul, Sdiv, Udiv
     }
 }
 
@@ -441,9 +500,18 @@ mod tests {
         assert!(Register::XZR.is_special());
         assert!(!Register::X0.is_special());
 
-        assert_eq!(<Register as RegisterType>::from_index(0), Some(Register::X0));
-        assert_eq!(<Register as RegisterType>::from_index(30), Some(Register::X30));
-        assert_eq!(<Register as RegisterType>::from_index(31), Some(Register::XZR));
+        assert_eq!(
+            <Register as RegisterType>::from_index(0),
+            Some(Register::X0)
+        );
+        assert_eq!(
+            <Register as RegisterType>::from_index(30),
+            Some(Register::X30)
+        );
+        assert_eq!(
+            <Register as RegisterType>::from_index(31),
+            Some(Register::XZR)
+        );
         assert_eq!(<Register as RegisterType>::from_index(32), None);
     }
 
@@ -511,7 +579,7 @@ mod tests {
         for _ in 0..100 {
             let instr = generator.generate_random(&mut rng, &regs, &imms);
             // Just verify it doesn't panic and produces valid instructions
-            assert!(instr.opcode_id() < 10);
+            assert!(instr.opcode_id() < 13);
         }
     }
 
@@ -532,7 +600,7 @@ mod tests {
         // Mutate several times and verify we get valid instructions
         for _ in 0..100 {
             let mutated = generator.mutate(&mut rng, &original, &regs, &imms);
-            assert!(mutated.opcode_id() < 10);
+            assert!(mutated.opcode_id() < 13);
         }
     }
 }

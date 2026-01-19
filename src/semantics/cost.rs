@@ -30,6 +30,10 @@ fn instruction_latency(instr: &Instruction) -> u64 {
         Instruction::Add { .. } | Instruction::Sub { .. } => 1,
         Instruction::And { .. } | Instruction::Orr { .. } | Instruction::Eor { .. } => 1,
         Instruction::Lsl { .. } | Instruction::Lsr { .. } | Instruction::Asr { .. } => 1,
+        // Multiply has higher latency than simple ALU ops
+        Instruction::Mul { .. } => 3,
+        // Division has the highest latency
+        Instruction::Sdiv { .. } | Instruction::Udiv { .. } => 12,
     }
 }
 
@@ -247,6 +251,21 @@ mod tests {
                 rn: Register::X1,
                 shift: Operand::Immediate(1),
             },
+            Instruction::Mul {
+                rd: Register::X0,
+                rn: Register::X1,
+                rm: Register::X2,
+            },
+            Instruction::Sdiv {
+                rd: Register::X0,
+                rn: Register::X1,
+                rm: Register::X2,
+            },
+            Instruction::Udiv {
+                rd: Register::X0,
+                rn: Register::X1,
+                rm: Register::X2,
+            },
         ];
 
         for instr in &instructions {
@@ -254,5 +273,44 @@ mod tests {
             assert!(instruction_cost(instr, &CostMetric::Latency) > 0);
             assert!(instruction_cost(instr, &CostMetric::CodeSize) > 0);
         }
+    }
+
+    #[test]
+    fn test_mul_div_latency() {
+        let mul = Instruction::Mul {
+            rd: Register::X0,
+            rn: Register::X1,
+            rm: Register::X2,
+        };
+        let sdiv = Instruction::Sdiv {
+            rd: Register::X0,
+            rn: Register::X1,
+            rm: Register::X2,
+        };
+        let udiv = Instruction::Udiv {
+            rd: Register::X0,
+            rn: Register::X1,
+            rm: Register::X2,
+        };
+        let add = Instruction::Add {
+            rd: Register::X0,
+            rn: Register::X1,
+            rm: Operand::Immediate(1),
+        };
+
+        // MUL has higher latency than ADD
+        assert!(
+            instruction_cost(&mul, &CostMetric::Latency)
+                > instruction_cost(&add, &CostMetric::Latency)
+        );
+        // DIV has higher latency than MUL
+        assert!(
+            instruction_cost(&sdiv, &CostMetric::Latency)
+                > instruction_cost(&mul, &CostMetric::Latency)
+        );
+        assert!(
+            instruction_cost(&udiv, &CostMetric::Latency)
+                > instruction_cost(&mul, &CostMetric::Latency)
+        );
     }
 }

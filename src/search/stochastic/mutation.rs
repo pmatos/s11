@@ -121,6 +121,16 @@ impl Mutator {
                     _ => *shift = self.random_shift_operand(rng),
                 }
             }
+            Instruction::Mul { rd, rn, rm }
+            | Instruction::Sdiv { rd, rn, rm }
+            | Instruction::Udiv { rd, rn, rm } => {
+                let choice = rng.random_range(0..3);
+                match choice {
+                    0 => *rd = self.random_register(rng),
+                    1 => *rn = self.random_register(rng),
+                    _ => *rm = self.random_register(rng),
+                }
+            }
         }
     }
 
@@ -206,6 +216,21 @@ impl Mutator {
                 0 => Instruction::Lsl { rd, rn, shift },
                 1 => Instruction::Lsr { rd, rn, shift },
                 _ => Instruction::Asr { rd, rn, shift },
+            },
+            Instruction::Mul { rd, rn, rm } => match rng.random_range(0..3) {
+                0 => Instruction::Sdiv { rd, rn, rm },
+                1 => Instruction::Udiv { rd, rn, rm },
+                _ => Instruction::Mul { rd, rn, rm },
+            },
+            Instruction::Sdiv { rd, rn, rm } => match rng.random_range(0..3) {
+                0 => Instruction::Mul { rd, rn, rm },
+                1 => Instruction::Udiv { rd, rn, rm },
+                _ => Instruction::Sdiv { rd, rn, rm },
+            },
+            Instruction::Udiv { rd, rn, rm } => match rng.random_range(0..3) {
+                0 => Instruction::Mul { rd, rn, rm },
+                1 => Instruction::Sdiv { rd, rn, rm },
+                _ => Instruction::Udiv { rd, rn, rm },
             },
         };
     }

@@ -863,7 +863,9 @@ fn main() {
                 match a {
                     CliArch::Aarch64 => {}
                     CliArch::Riscv32 | CliArch::Riscv64 => {
-                        eprintln!("RISC-V optimization is not yet supported (ISA traits available but not integrated)");
+                        eprintln!(
+                            "RISC-V optimization is not yet supported (ISA traits available but not integrated)"
+                        );
                         std::process::exit(1);
                     }
                 }

@@ -167,6 +167,33 @@ pub fn apply_instruction(mut state: MachineState, instruction: &Instruction) -> 
             let result = value.bvashr(&shift_amount);
             state.set_register(*rd, result);
         }
+        Instruction::Mul { rd, rn, rm } => {
+            let lhs = state.get_register(*rn).clone();
+            let rhs = state.get_register(*rm).clone();
+            let result = lhs.bvmul(&rhs);
+            state.set_register(*rd, result);
+        }
+        Instruction::Sdiv { rd, rn, rm } => {
+            let lhs = state.get_register(*rn).clone();
+            let rhs = state.get_register(*rm).clone();
+            let zero = BV::from_i64(0, 64);
+            let is_zero = rhs.eq(&zero);
+            // AArch64: division by zero returns 0
+            // For overflow case (MIN / -1), we handle it with bvsdiv which wraps correctly
+            let div_result = lhs.bvsdiv(&rhs);
+            let result = is_zero.ite(&zero, &div_result);
+            state.set_register(*rd, result);
+        }
+        Instruction::Udiv { rd, rn, rm } => {
+            let lhs = state.get_register(*rn).clone();
+            let rhs = state.get_register(*rm).clone();
+            let zero = BV::from_u64(0, 64);
+            let is_zero = rhs.eq(&zero);
+            // AArch64: division by zero returns 0
+            let div_result = lhs.bvudiv(&rhs);
+            let result = is_zero.ite(&zero, &div_result);
+            state.set_register(*rd, result);
+        }
     }
     state
 }

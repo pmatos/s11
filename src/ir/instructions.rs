@@ -62,6 +62,23 @@ pub enum Instruction {
         rn: Register,
         shift: Operand,
     },
+
+    // Multiplication and division
+    Mul {
+        rd: Register,
+        rn: Register,
+        rm: Register,
+    },
+    Sdiv {
+        rd: Register,
+        rn: Register,
+        rm: Register,
+    },
+    Udiv {
+        rd: Register,
+        rn: Register,
+        rm: Register,
+    },
 }
 
 impl Instruction {
@@ -78,7 +95,10 @@ impl Instruction {
             | Instruction::Eor { rd, .. }
             | Instruction::Lsl { rd, .. }
             | Instruction::Lsr { rd, .. }
-            | Instruction::Asr { rd, .. } => *rd,
+            | Instruction::Asr { rd, .. }
+            | Instruction::Mul { rd, .. }
+            | Instruction::Sdiv { rd, .. }
+            | Instruction::Udiv { rd, .. } => *rd,
         }
     }
 
@@ -108,6 +128,9 @@ impl Instruction {
                 }
                 regs
             }
+            Instruction::Mul { rn, rm, .. }
+            | Instruction::Sdiv { rn, rm, .. }
+            | Instruction::Udiv { rn, rm, .. } => vec![*rn, *rm],
         }
     }
 }
@@ -125,6 +148,9 @@ impl fmt::Display for Instruction {
             Instruction::Lsl { rd, rn, shift } => write!(f, "lsl {}, {}, {}", rd, rn, shift),
             Instruction::Lsr { rd, rn, shift } => write!(f, "lsr {}, {}, {}", rd, rn, shift),
             Instruction::Asr { rd, rn, shift } => write!(f, "asr {}, {}, {}", rd, rn, shift),
+            Instruction::Mul { rd, rn, rm } => write!(f, "mul {}, {}, {}", rd, rn, rm),
+            Instruction::Sdiv { rd, rn, rm } => write!(f, "sdiv {}, {}, {}", rd, rn, rm),
+            Instruction::Udiv { rd, rn, rm } => write!(f, "udiv {}, {}, {}", rd, rn, rm),
         }
     }
 }

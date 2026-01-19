@@ -109,9 +109,9 @@ S10 uses the `loci` framework for distributed computation:
 - ✅ ADD/SUB (register, immediate)
 - ✅ AND/ORR/EOR (register, immediate)
 - ✅ LSL/LSR/ASR (register, immediate)
+- ✅ MUL/SDIV/UDIV (multiplication, division)
 
 **AArch64 Instructions Missing** (for parity with RISC-V capabilities):
-- ❌ MUL/SDIV/UDIV (multiplication, division)
 - ❌ MADD/MSUB (multiply-add/subtract)
 - ❌ CMP/CMN/TST (comparison)
 - ❌ CSEL/CSINC/CSINV/CSNEG (conditional select)
@@ -343,7 +343,7 @@ pub trait ISA {
 3. [x] Backend selection CLI
 
 ### Phase 5: Extended Instructions (Medium Priority)
-1. [ ] Multiplication/division
+1. [x] Multiplication/division (MUL, SDIV, UDIV)
 2. [ ] Conditional operations
 3. [ ] Memory operations (if needed)
 
@@ -361,7 +361,7 @@ pub trait ISA {
 |----------|--------------|-----------------|-------------|
 | Search Algorithms | 3 | 4 (enumerative, stochastic, symbolic, hybrid) | - |
 | Parallelism | Full | Full (rayon + crossbeam) | - |
-| IR/Instructions | ~20 opcodes | 10 opcodes | ~10 |
+| IR/Instructions | ~20 opcodes | 13 opcodes | ~7 |
 | Validation | 3 modes | 2 modes (fast+SMT) | 1 mode |
 | CLI Options | ~15 | ~14 | ~1 |
 | Documentation | 5 guides | 1 file | 4 guides |

@@ -230,26 +230,89 @@ impl OperandType for RiscVOperand {
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub enum RiscVInstruction {
     // Register-Register operations
-    Add { rd: RiscVRegister, rs1: RiscVRegister, rs2: RiscVRegister },
-    Sub { rd: RiscVRegister, rs1: RiscVRegister, rs2: RiscVRegister },
-    And { rd: RiscVRegister, rs1: RiscVRegister, rs2: RiscVRegister },
-    Or { rd: RiscVRegister, rs1: RiscVRegister, rs2: RiscVRegister },
-    Xor { rd: RiscVRegister, rs1: RiscVRegister, rs2: RiscVRegister },
-    Sll { rd: RiscVRegister, rs1: RiscVRegister, rs2: RiscVRegister },
-    Srl { rd: RiscVRegister, rs1: RiscVRegister, rs2: RiscVRegister },
-    Sra { rd: RiscVRegister, rs1: RiscVRegister, rs2: RiscVRegister },
+    Add {
+        rd: RiscVRegister,
+        rs1: RiscVRegister,
+        rs2: RiscVRegister,
+    },
+    Sub {
+        rd: RiscVRegister,
+        rs1: RiscVRegister,
+        rs2: RiscVRegister,
+    },
+    And {
+        rd: RiscVRegister,
+        rs1: RiscVRegister,
+        rs2: RiscVRegister,
+    },
+    Or {
+        rd: RiscVRegister,
+        rs1: RiscVRegister,
+        rs2: RiscVRegister,
+    },
+    Xor {
+        rd: RiscVRegister,
+        rs1: RiscVRegister,
+        rs2: RiscVRegister,
+    },
+    Sll {
+        rd: RiscVRegister,
+        rs1: RiscVRegister,
+        rs2: RiscVRegister,
+    },
+    Srl {
+        rd: RiscVRegister,
+        rs1: RiscVRegister,
+        rs2: RiscVRegister,
+    },
+    Sra {
+        rd: RiscVRegister,
+        rs1: RiscVRegister,
+        rs2: RiscVRegister,
+    },
 
     // Register-Immediate operations
-    Addi { rd: RiscVRegister, rs1: RiscVRegister, imm: i64 },
-    Andi { rd: RiscVRegister, rs1: RiscVRegister, imm: i64 },
-    Ori { rd: RiscVRegister, rs1: RiscVRegister, imm: i64 },
-    Xori { rd: RiscVRegister, rs1: RiscVRegister, imm: i64 },
-    Slli { rd: RiscVRegister, rs1: RiscVRegister, shamt: u8 },
-    Srli { rd: RiscVRegister, rs1: RiscVRegister, shamt: u8 },
-    Srai { rd: RiscVRegister, rs1: RiscVRegister, shamt: u8 },
+    Addi {
+        rd: RiscVRegister,
+        rs1: RiscVRegister,
+        imm: i64,
+    },
+    Andi {
+        rd: RiscVRegister,
+        rs1: RiscVRegister,
+        imm: i64,
+    },
+    Ori {
+        rd: RiscVRegister,
+        rs1: RiscVRegister,
+        imm: i64,
+    },
+    Xori {
+        rd: RiscVRegister,
+        rs1: RiscVRegister,
+        imm: i64,
+    },
+    Slli {
+        rd: RiscVRegister,
+        rs1: RiscVRegister,
+        shamt: u8,
+    },
+    Srli {
+        rd: RiscVRegister,
+        rs1: RiscVRegister,
+        shamt: u8,
+    },
+    Srai {
+        rd: RiscVRegister,
+        rs1: RiscVRegister,
+        shamt: u8,
+    },
 
     // Load upper immediate
-    Lui { rd: RiscVRegister, imm: i64 },
+    Lui {
+        rd: RiscVRegister,
+        imm: i64,
+    },
 }
 
 impl RiscVInstruction {
@@ -569,51 +632,81 @@ impl InstructionGenerator<RiscVInstruction> for RiscVInstructionGenerator {
                 // Change destination register
                 let new_rd = registers[rng.random_range(0..registers.len())];
                 match *instruction {
-                    RiscVInstruction::Add { rs1, rs2, .. } => {
-                        RiscVInstruction::Add { rd: new_rd, rs1, rs2 }
-                    }
-                    RiscVInstruction::Sub { rs1, rs2, .. } => {
-                        RiscVInstruction::Sub { rd: new_rd, rs1, rs2 }
-                    }
-                    RiscVInstruction::And { rs1, rs2, .. } => {
-                        RiscVInstruction::And { rd: new_rd, rs1, rs2 }
-                    }
-                    RiscVInstruction::Or { rs1, rs2, .. } => {
-                        RiscVInstruction::Or { rd: new_rd, rs1, rs2 }
-                    }
-                    RiscVInstruction::Xor { rs1, rs2, .. } => {
-                        RiscVInstruction::Xor { rd: new_rd, rs1, rs2 }
-                    }
-                    RiscVInstruction::Sll { rs1, rs2, .. } => {
-                        RiscVInstruction::Sll { rd: new_rd, rs1, rs2 }
-                    }
-                    RiscVInstruction::Srl { rs1, rs2, .. } => {
-                        RiscVInstruction::Srl { rd: new_rd, rs1, rs2 }
-                    }
-                    RiscVInstruction::Sra { rs1, rs2, .. } => {
-                        RiscVInstruction::Sra { rd: new_rd, rs1, rs2 }
-                    }
-                    RiscVInstruction::Addi { rs1, imm, .. } => {
-                        RiscVInstruction::Addi { rd: new_rd, rs1, imm }
-                    }
-                    RiscVInstruction::Andi { rs1, imm, .. } => {
-                        RiscVInstruction::Andi { rd: new_rd, rs1, imm }
-                    }
-                    RiscVInstruction::Ori { rs1, imm, .. } => {
-                        RiscVInstruction::Ori { rd: new_rd, rs1, imm }
-                    }
-                    RiscVInstruction::Xori { rs1, imm, .. } => {
-                        RiscVInstruction::Xori { rd: new_rd, rs1, imm }
-                    }
-                    RiscVInstruction::Slli { rs1, shamt, .. } => {
-                        RiscVInstruction::Slli { rd: new_rd, rs1, shamt }
-                    }
-                    RiscVInstruction::Srli { rs1, shamt, .. } => {
-                        RiscVInstruction::Srli { rd: new_rd, rs1, shamt }
-                    }
-                    RiscVInstruction::Srai { rs1, shamt, .. } => {
-                        RiscVInstruction::Srai { rd: new_rd, rs1, shamt }
-                    }
+                    RiscVInstruction::Add { rs1, rs2, .. } => RiscVInstruction::Add {
+                        rd: new_rd,
+                        rs1,
+                        rs2,
+                    },
+                    RiscVInstruction::Sub { rs1, rs2, .. } => RiscVInstruction::Sub {
+                        rd: new_rd,
+                        rs1,
+                        rs2,
+                    },
+                    RiscVInstruction::And { rs1, rs2, .. } => RiscVInstruction::And {
+                        rd: new_rd,
+                        rs1,
+                        rs2,
+                    },
+                    RiscVInstruction::Or { rs1, rs2, .. } => RiscVInstruction::Or {
+                        rd: new_rd,
+                        rs1,
+                        rs2,
+                    },
+                    RiscVInstruction::Xor { rs1, rs2, .. } => RiscVInstruction::Xor {
+                        rd: new_rd,
+                        rs1,
+                        rs2,
+                    },
+                    RiscVInstruction::Sll { rs1, rs2, .. } => RiscVInstruction::Sll {
+                        rd: new_rd,
+                        rs1,
+                        rs2,
+                    },
+                    RiscVInstruction::Srl { rs1, rs2, .. } => RiscVInstruction::Srl {
+                        rd: new_rd,
+                        rs1,
+                        rs2,
+                    },
+                    RiscVInstruction::Sra { rs1, rs2, .. } => RiscVInstruction::Sra {
+                        rd: new_rd,
+                        rs1,
+                        rs2,
+                    },
+                    RiscVInstruction::Addi { rs1, imm, .. } => RiscVInstruction::Addi {
+                        rd: new_rd,
+                        rs1,
+                        imm,
+                    },
+                    RiscVInstruction::Andi { rs1, imm, .. } => RiscVInstruction::Andi {
+                        rd: new_rd,
+                        rs1,
+                        imm,
+                    },
+                    RiscVInstruction::Ori { rs1, imm, .. } => RiscVInstruction::Ori {
+                        rd: new_rd,
+                        rs1,
+                        imm,
+                    },
+                    RiscVInstruction::Xori { rs1, imm, .. } => RiscVInstruction::Xori {
+                        rd: new_rd,
+                        rs1,
+                        imm,
+                    },
+                    RiscVInstruction::Slli { rs1, shamt, .. } => RiscVInstruction::Slli {
+                        rd: new_rd,
+                        rs1,
+                        shamt,
+                    },
+                    RiscVInstruction::Srli { rs1, shamt, .. } => RiscVInstruction::Srli {
+                        rd: new_rd,
+                        rs1,
+                        shamt,
+                    },
+                    RiscVInstruction::Srai { rs1, shamt, .. } => RiscVInstruction::Srai {
+                        rd: new_rd,
+                        rs1,
+                        shamt,
+                    },
                     RiscVInstruction::Lui { imm, .. } => RiscVInstruction::Lui { rd: new_rd, imm },
                 }
             }
@@ -626,54 +719,82 @@ impl InstructionGenerator<RiscVInstruction> for RiscVInstructionGenerator {
                 let new_shamt = shift_amounts[rng.random_range(0..shift_amounts.len())];
 
                 match *instruction {
-                    RiscVInstruction::Add { rd, .. } => {
-                        RiscVInstruction::Add { rd, rs1: new_rs1, rs2: new_rs2 }
-                    }
-                    RiscVInstruction::Sub { rd, .. } => {
-                        RiscVInstruction::Sub { rd, rs1: new_rs1, rs2: new_rs2 }
-                    }
-                    RiscVInstruction::And { rd, .. } => {
-                        RiscVInstruction::And { rd, rs1: new_rs1, rs2: new_rs2 }
-                    }
-                    RiscVInstruction::Or { rd, .. } => {
-                        RiscVInstruction::Or { rd, rs1: new_rs1, rs2: new_rs2 }
-                    }
-                    RiscVInstruction::Xor { rd, .. } => {
-                        RiscVInstruction::Xor { rd, rs1: new_rs1, rs2: new_rs2 }
-                    }
-                    RiscVInstruction::Sll { rd, .. } => {
-                        RiscVInstruction::Sll { rd, rs1: new_rs1, rs2: new_rs2 }
-                    }
-                    RiscVInstruction::Srl { rd, .. } => {
-                        RiscVInstruction::Srl { rd, rs1: new_rs1, rs2: new_rs2 }
-                    }
-                    RiscVInstruction::Sra { rd, .. } => {
-                        RiscVInstruction::Sra { rd, rs1: new_rs1, rs2: new_rs2 }
-                    }
-                    RiscVInstruction::Addi { rd, .. } => {
-                        RiscVInstruction::Addi { rd, rs1: new_rs1, imm: new_imm }
-                    }
-                    RiscVInstruction::Andi { rd, .. } => {
-                        RiscVInstruction::Andi { rd, rs1: new_rs1, imm: new_imm }
-                    }
-                    RiscVInstruction::Ori { rd, .. } => {
-                        RiscVInstruction::Ori { rd, rs1: new_rs1, imm: new_imm }
-                    }
-                    RiscVInstruction::Xori { rd, .. } => {
-                        RiscVInstruction::Xori { rd, rs1: new_rs1, imm: new_imm }
-                    }
-                    RiscVInstruction::Slli { rd, .. } => {
-                        RiscVInstruction::Slli { rd, rs1: new_rs1, shamt: new_shamt }
-                    }
-                    RiscVInstruction::Srli { rd, .. } => {
-                        RiscVInstruction::Srli { rd, rs1: new_rs1, shamt: new_shamt }
-                    }
-                    RiscVInstruction::Srai { rd, .. } => {
-                        RiscVInstruction::Srai { rd, rs1: new_rs1, shamt: new_shamt }
-                    }
-                    RiscVInstruction::Lui { rd, .. } => {
-                        RiscVInstruction::Lui { rd, imm: new_imm }
-                    }
+                    RiscVInstruction::Add { rd, .. } => RiscVInstruction::Add {
+                        rd,
+                        rs1: new_rs1,
+                        rs2: new_rs2,
+                    },
+                    RiscVInstruction::Sub { rd, .. } => RiscVInstruction::Sub {
+                        rd,
+                        rs1: new_rs1,
+                        rs2: new_rs2,
+                    },
+                    RiscVInstruction::And { rd, .. } => RiscVInstruction::And {
+                        rd,
+                        rs1: new_rs1,
+                        rs2: new_rs2,
+                    },
+                    RiscVInstruction::Or { rd, .. } => RiscVInstruction::Or {
+                        rd,
+                        rs1: new_rs1,
+                        rs2: new_rs2,
+                    },
+                    RiscVInstruction::Xor { rd, .. } => RiscVInstruction::Xor {
+                        rd,
+                        rs1: new_rs1,
+                        rs2: new_rs2,
+                    },
+                    RiscVInstruction::Sll { rd, .. } => RiscVInstruction::Sll {
+                        rd,
+                        rs1: new_rs1,
+                        rs2: new_rs2,
+                    },
+                    RiscVInstruction::Srl { rd, .. } => RiscVInstruction::Srl {
+                        rd,
+                        rs1: new_rs1,
+                        rs2: new_rs2,
+                    },
+                    RiscVInstruction::Sra { rd, .. } => RiscVInstruction::Sra {
+                        rd,
+                        rs1: new_rs1,
+                        rs2: new_rs2,
+                    },
+                    RiscVInstruction::Addi { rd, .. } => RiscVInstruction::Addi {
+                        rd,
+                        rs1: new_rs1,
+                        imm: new_imm,
+                    },
+                    RiscVInstruction::Andi { rd, .. } => RiscVInstruction::Andi {
+                        rd,
+                        rs1: new_rs1,
+                        imm: new_imm,
+                    },
+                    RiscVInstruction::Ori { rd, .. } => RiscVInstruction::Ori {
+                        rd,
+                        rs1: new_rs1,
+                        imm: new_imm,
+                    },
+                    RiscVInstruction::Xori { rd, .. } => RiscVInstruction::Xori {
+                        rd,
+                        rs1: new_rs1,
+                        imm: new_imm,
+                    },
+                    RiscVInstruction::Slli { rd, .. } => RiscVInstruction::Slli {
+                        rd,
+                        rs1: new_rs1,
+                        shamt: new_shamt,
+                    },
+                    RiscVInstruction::Srli { rd, .. } => RiscVInstruction::Srli {
+                        rd,
+                        rs1: new_rs1,
+                        shamt: new_shamt,
+                    },
+                    RiscVInstruction::Srai { rd, .. } => RiscVInstruction::Srai {
+                        rd,
+                        rs1: new_rs1,
+                        shamt: new_shamt,
+                    },
+                    RiscVInstruction::Lui { rd, .. } => RiscVInstruction::Lui { rd, imm: new_imm },
                 }
             }
             _ => unreachable!(),
