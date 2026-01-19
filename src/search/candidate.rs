@@ -202,6 +202,7 @@ pub fn generate_random_sequence<R: rand::Rng>(
 }
 
 /// Get the opcode type as a numeric identifier (for mutation)
+#[allow(dead_code)]
 pub fn opcode_id(instr: &Instruction) -> u8 {
     match instr {
         Instruction::MovReg { .. } => 0,
@@ -228,6 +229,7 @@ pub fn opcode_id(instr: &Instruction) -> u8 {
 }
 
 /// Check if an instruction has immediate operand support
+#[allow(dead_code)]
 pub fn supports_immediate(instr: &Instruction) -> bool {
     matches!(
         instr,
@@ -244,6 +246,7 @@ pub fn supports_immediate(instr: &Instruction) -> bool {
 }
 
 /// Check if an instruction is a binary operation (has rd, rn, rm)
+#[allow(dead_code)]
 pub fn is_binary_op(instr: &Instruction) -> bool {
     matches!(
         instr,
@@ -256,6 +259,7 @@ pub fn is_binary_op(instr: &Instruction) -> bool {
 }
 
 /// Check if an instruction is a shift operation
+#[allow(dead_code)]
 pub fn is_shift_op(instr: &Instruction) -> bool {
     matches!(
         instr,
@@ -264,6 +268,7 @@ pub fn is_shift_op(instr: &Instruction) -> bool {
 }
 
 /// Check if an instruction is a move operation
+#[allow(dead_code)]
 pub fn is_move_op(instr: &Instruction) -> bool {
     matches!(
         instr,
