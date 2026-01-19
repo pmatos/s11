@@ -1,5 +1,7 @@
 //! Configuration types for search algorithms
 
+#![allow(dead_code)]
+
 use crate::ir::Register;
 use crate::semantics::cost::CostMetric;
 use std::time::Duration;
