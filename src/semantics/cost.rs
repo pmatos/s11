@@ -34,6 +34,13 @@ fn instruction_latency(instr: &Instruction) -> u64 {
         Instruction::Mul { .. } => 3,
         // Division has the highest latency
         Instruction::Sdiv { .. } | Instruction::Udiv { .. } => 12,
+        // Comparison instructions (just set flags)
+        Instruction::Cmp { .. } | Instruction::Cmn { .. } | Instruction::Tst { .. } => 1,
+        // Conditional selects
+        Instruction::Csel { .. }
+        | Instruction::Csinc { .. }
+        | Instruction::Csinv { .. }
+        | Instruction::Csneg { .. } => 1,
     }
 }
 

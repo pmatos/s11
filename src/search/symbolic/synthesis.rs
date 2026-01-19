@@ -406,7 +406,7 @@ mod tests {
         if let Some(ref optimized) = result.optimized_sequence {
             assert_eq!(optimized.len(), 1);
             // The instruction should write to X0
-            assert_eq!(optimized[0].destination(), Register::X0);
+            assert_eq!(optimized[0].destination(), Some(Register::X0));
         }
     }
 

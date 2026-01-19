@@ -1,6 +1,6 @@
 //! AArch64 instruction definitions for the IR
 
-use crate::ir::types::{Operand, Register};
+use crate::ir::types::{Condition, Operand, Register};
 use std::fmt;
 
 /// AArch64 instructions supported by the IR
@@ -79,12 +79,52 @@ pub enum Instruction {
         rn: Register,
         rm: Register,
     },
+
+    // Comparison (set NZCV flags, no destination register)
+    Cmp {
+        rn: Register,
+        rm: Operand,
+    },
+    Cmn {
+        rn: Register,
+        rm: Operand,
+    },
+    Tst {
+        rn: Register,
+        rm: Operand,
+    },
+
+    // Conditional select
+    Csel {
+        rd: Register,
+        rn: Register,
+        rm: Register,
+        cond: Condition,
+    },
+    Csinc {
+        rd: Register,
+        rn: Register,
+        rm: Register,
+        cond: Condition,
+    },
+    Csinv {
+        rd: Register,
+        rn: Register,
+        rm: Register,
+        cond: Condition,
+    },
+    Csneg {
+        rd: Register,
+        rn: Register,
+        rm: Register,
+        cond: Condition,
+    },
 }
 
 impl Instruction {
-    /// Get the destination register for this instruction
+    /// Get the destination register for this instruction (None for comparison instructions)
     #[allow(dead_code)]
-    pub fn destination(&self) -> Register {
+    pub fn destination(&self) -> Option<Register> {
         match self {
             Instruction::MovReg { rd, .. }
             | Instruction::MovImm { rd, .. }
@@ -98,8 +138,35 @@ impl Instruction {
             | Instruction::Asr { rd, .. }
             | Instruction::Mul { rd, .. }
             | Instruction::Sdiv { rd, .. }
-            | Instruction::Udiv { rd, .. } => *rd,
+            | Instruction::Udiv { rd, .. }
+            | Instruction::Csel { rd, .. }
+            | Instruction::Csinc { rd, .. }
+            | Instruction::Csinv { rd, .. }
+            | Instruction::Csneg { rd, .. } => Some(*rd),
+            // Comparison instructions only set flags, no destination register
+            Instruction::Cmp { .. } | Instruction::Cmn { .. } | Instruction::Tst { .. } => None,
         }
+    }
+
+    /// Returns true if this instruction modifies NZCV flags
+    #[allow(dead_code)]
+    pub fn modifies_flags(&self) -> bool {
+        matches!(
+            self,
+            Instruction::Cmp { .. } | Instruction::Cmn { .. } | Instruction::Tst { .. }
+        )
+    }
+
+    /// Returns true if this instruction reads NZCV flags
+    #[allow(dead_code)]
+    pub fn reads_flags(&self) -> bool {
+        matches!(
+            self,
+            Instruction::Csel { .. }
+                | Instruction::Csinc { .. }
+                | Instruction::Csinv { .. }
+                | Instruction::Csneg { .. }
+        )
     }
 
     /// Get all source registers used by this instruction
@@ -131,6 +198,21 @@ impl Instruction {
             Instruction::Mul { rn, rm, .. }
             | Instruction::Sdiv { rn, rm, .. }
             | Instruction::Udiv { rn, rm, .. } => vec![*rn, *rm],
+            // Comparison instructions read rn and rm (if register)
+            Instruction::Cmp { rn, rm }
+            | Instruction::Cmn { rn, rm }
+            | Instruction::Tst { rn, rm } => {
+                let mut regs = vec![*rn];
+                if let Operand::Register(r) = rm {
+                    regs.push(*r);
+                }
+                regs
+            }
+            // Conditional select instructions read rn and rm
+            Instruction::Csel { rn, rm, .. }
+            | Instruction::Csinc { rn, rm, .. }
+            | Instruction::Csinv { rn, rm, .. }
+            | Instruction::Csneg { rn, rm, .. } => vec![*rn, *rm],
         }
     }
 }
@@ -151,6 +233,23 @@ impl fmt::Display for Instruction {
             Instruction::Mul { rd, rn, rm } => write!(f, "mul {}, {}, {}", rd, rn, rm),
             Instruction::Sdiv { rd, rn, rm } => write!(f, "sdiv {}, {}, {}", rd, rn, rm),
             Instruction::Udiv { rd, rn, rm } => write!(f, "udiv {}, {}, {}", rd, rn, rm),
+            // Comparison instructions
+            Instruction::Cmp { rn, rm } => write!(f, "cmp {}, {}", rn, rm),
+            Instruction::Cmn { rn, rm } => write!(f, "cmn {}, {}", rn, rm),
+            Instruction::Tst { rn, rm } => write!(f, "tst {}, {}", rn, rm),
+            // Conditional select instructions
+            Instruction::Csel { rd, rn, rm, cond } => {
+                write!(f, "csel {}, {}, {}, {}", rd, rn, rm, cond)
+            }
+            Instruction::Csinc { rd, rn, rm, cond } => {
+                write!(f, "csinc {}, {}, {}, {}", rd, rn, rm, cond)
+            }
+            Instruction::Csinv { rd, rn, rm, cond } => {
+                write!(f, "csinv {}, {}, {}, {}", rd, rn, rm, cond)
+            }
+            Instruction::Csneg { rd, rn, rm, cond } => {
+                write!(f, "csneg {}, {}, {}, {}", rd, rn, rm, cond)
+            }
         }
     }
 }
@@ -195,7 +294,14 @@ mod tests {
             rn: Register::X1,
             rm: Operand::Immediate(10),
         };
-        assert_eq!(instr.destination(), Register::X5);
+        assert_eq!(instr.destination(), Some(Register::X5));
+
+        // Comparison instructions have no destination
+        let cmp = Instruction::Cmp {
+            rn: Register::X0,
+            rm: Operand::Register(Register::X1),
+        };
+        assert_eq!(cmp.destination(), None);
     }
 
     #[test]

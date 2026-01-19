@@ -89,7 +89,7 @@ impl InstructionType for Instruction {
     type Register = Register;
     type Operand = Operand;
 
-    fn destination(&self) -> Register {
+    fn destination(&self) -> Option<Register> {
         Instruction::destination(self)
     }
 
@@ -112,6 +112,13 @@ impl InstructionType for Instruction {
             Instruction::Mul { .. } => 10,
             Instruction::Sdiv { .. } => 11,
             Instruction::Udiv { .. } => 12,
+            Instruction::Cmp { .. } => 13,
+            Instruction::Cmn { .. } => 14,
+            Instruction::Tst { .. } => 15,
+            Instruction::Csel { .. } => 16,
+            Instruction::Csinc { .. } => 17,
+            Instruction::Csinv { .. } => 18,
+            Instruction::Csneg { .. } => 19,
         }
     }
 
@@ -129,6 +136,13 @@ impl InstructionType for Instruction {
             Instruction::Mul { .. } => "mul",
             Instruction::Sdiv { .. } => "sdiv",
             Instruction::Udiv { .. } => "udiv",
+            Instruction::Cmp { .. } => "cmp",
+            Instruction::Cmn { .. } => "cmn",
+            Instruction::Tst { .. } => "tst",
+            Instruction::Csel { .. } => "csel",
+            Instruction::Csinc { .. } => "csinc",
+            Instruction::Csinv { .. } => "csinv",
+            Instruction::Csneg { .. } => "csneg",
         }
     }
 
@@ -347,6 +361,35 @@ impl InstructionGenerator<Instruction> for AArch64InstructionGenerator {
                     Instruction::Mul { rn, rm, .. } => Instruction::Mul { rd: new_rd, rn, rm },
                     Instruction::Sdiv { rn, rm, .. } => Instruction::Sdiv { rd: new_rd, rn, rm },
                     Instruction::Udiv { rn, rm, .. } => Instruction::Udiv { rd: new_rd, rn, rm },
+                    // Comparison instructions have no destination - generate random instead
+                    Instruction::Cmp { .. } | Instruction::Cmn { .. } | Instruction::Tst { .. } => {
+                        self.generate_random(rng, registers, immediates)
+                    }
+                    // Conditional select instructions
+                    Instruction::Csel { rn, rm, cond, .. } => Instruction::Csel {
+                        rd: new_rd,
+                        rn,
+                        rm,
+                        cond,
+                    },
+                    Instruction::Csinc { rn, rm, cond, .. } => Instruction::Csinc {
+                        rd: new_rd,
+                        rn,
+                        rm,
+                        cond,
+                    },
+                    Instruction::Csinv { rn, rm, cond, .. } => Instruction::Csinv {
+                        rd: new_rd,
+                        rn,
+                        rm,
+                        cond,
+                    },
+                    Instruction::Csneg { rn, rm, cond, .. } => Instruction::Csneg {
+                        rd: new_rd,
+                        rn,
+                        rm,
+                        cond,
+                    },
                 }
             }
             2 => {
@@ -420,6 +463,57 @@ impl InstructionGenerator<Instruction> for AArch64InstructionGenerator {
                         let new_rm = registers[rng.random_range(0..registers.len())];
                         Instruction::Udiv { rd, rn, rm: new_rm }
                     }
+                    // Comparison instructions - change operand
+                    Instruction::Cmp { rn, rm } => {
+                        let new_rm = mutate_operand(rng, rm, registers, immediates);
+                        Instruction::Cmp { rn, rm: new_rm }
+                    }
+                    Instruction::Cmn { rn, rm } => {
+                        let new_rm = mutate_operand(rng, rm, registers, immediates);
+                        Instruction::Cmn { rn, rm: new_rm }
+                    }
+                    Instruction::Tst { rn, rm: _ } => {
+                        let new_rm =
+                            Operand::Register(registers[rng.random_range(0..registers.len())]);
+                        Instruction::Tst { rn, rm: new_rm }
+                    }
+                    // Conditional select - change operands
+                    Instruction::Csel { rd, rn, cond, .. } => {
+                        let new_rm = registers[rng.random_range(0..registers.len())];
+                        Instruction::Csel {
+                            rd,
+                            rn,
+                            rm: new_rm,
+                            cond,
+                        }
+                    }
+                    Instruction::Csinc { rd, rn, cond, .. } => {
+                        let new_rm = registers[rng.random_range(0..registers.len())];
+                        Instruction::Csinc {
+                            rd,
+                            rn,
+                            rm: new_rm,
+                            cond,
+                        }
+                    }
+                    Instruction::Csinv { rd, rn, cond, .. } => {
+                        let new_rm = registers[rng.random_range(0..registers.len())];
+                        Instruction::Csinv {
+                            rd,
+                            rn,
+                            rm: new_rm,
+                            cond,
+                        }
+                    }
+                    Instruction::Csneg { rd, rn, cond, .. } => {
+                        let new_rm = registers[rng.random_range(0..registers.len())];
+                        Instruction::Csneg {
+                            rd,
+                            rn,
+                            rm: new_rm,
+                            cond,
+                        }
+                    }
                 }
             }
             _ => unreachable!(),
@@ -427,7 +521,7 @@ impl InstructionGenerator<Instruction> for AArch64InstructionGenerator {
     }
 
     fn opcode_count(&self) -> u8 {
-        13 // MovReg, MovImm, Add, Sub, And, Orr, Eor, Lsl, Lsr, Asr, Mul, Sdiv, Udiv
+        20 // MovReg, MovImm, Add, Sub, And, Orr, Eor, Lsl, Lsr, Asr, Mul, Sdiv, Udiv, Cmp, Cmn, Tst, Csel, Csinc, Csinv, Csneg
     }
 }
 
@@ -538,7 +632,7 @@ mod tests {
             rm: Operand::Register(Register::X2),
         };
 
-        assert_eq!(add.destination(), Register::X0);
+        assert_eq!(add.destination(), Some(Register::X0));
         assert_eq!(add.source_registers(), vec![Register::X1, Register::X2]);
         assert_eq!(add.opcode_id(), 2);
         assert_eq!(add.mnemonic(), "add");

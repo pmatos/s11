@@ -1,3 +1,4 @@
+use crate::ir::types::Condition;
 use crate::ir::{Instruction, Operand, Register};
 use dynasmrt::{DynasmApi, dynasm};
 
@@ -285,6 +286,79 @@ impl AArch64Assembler {
                 );
                 Ok(())
             }
+            Instruction::Cmp { rn, rm } => {
+                let rn_reg = register_to_dynasm(*rn)?;
+
+                match rm {
+                    Operand::Register(rm_reg) => {
+                        let rm_reg_num = register_to_dynasm(*rm_reg)?;
+                        dynasm!(ops
+                            ; .arch aarch64
+                            ; cmp X(rn_reg), X(rm_reg_num)
+                        );
+                        Ok(())
+                    }
+                    Operand::Immediate(imm) => {
+                        if *imm < 0 || *imm > 0xFFF {
+                            return Err(format!("Immediate {} out of range for CMP", imm));
+                        }
+                        dynasm!(ops
+                            ; .arch aarch64
+                            ; cmp XSP(rn_reg), #*imm as u32
+                        );
+                        Ok(())
+                    }
+                }
+            }
+            Instruction::Cmn { rn, rm } => {
+                let rn_reg = register_to_dynasm(*rn)?;
+
+                match rm {
+                    Operand::Register(rm_reg) => {
+                        let rm_reg_num = register_to_dynasm(*rm_reg)?;
+                        dynasm!(ops
+                            ; .arch aarch64
+                            ; cmn X(rn_reg), X(rm_reg_num)
+                        );
+                        Ok(())
+                    }
+                    Operand::Immediate(imm) => {
+                        if *imm < 0 || *imm > 0xFFF {
+                            return Err(format!("Immediate {} out of range for CMN", imm));
+                        }
+                        dynasm!(ops
+                            ; .arch aarch64
+                            ; cmn XSP(rn_reg), #*imm as u32
+                        );
+                        Ok(())
+                    }
+                }
+            }
+            Instruction::Tst { rn, rm } => {
+                let rn_reg = register_to_dynasm(*rn)?;
+
+                match rm {
+                    Operand::Register(rm_reg) => {
+                        let rm_reg_num = register_to_dynasm(*rm_reg)?;
+                        dynasm!(ops
+                            ; .arch aarch64
+                            ; tst X(rn_reg), X(rm_reg_num)
+                        );
+                        Ok(())
+                    }
+                    Operand::Immediate(_imm) => {
+                        Err("TST immediate encoding not yet supported".to_string())
+                    }
+                }
+            }
+            Instruction::Csel { .. } => {
+                // TODO: dynasm doesn't easily support condition code operands
+                // This requires raw encoding or dynasm macro extension
+                Err("CSEL encoding not yet supported".to_string())
+            }
+            Instruction::Csinc { .. } => Err("CSINC encoding not yet supported".to_string()),
+            Instruction::Csinv { .. } => Err("CSINV encoding not yet supported".to_string()),
+            Instruction::Csneg { .. } => Err("CSNEG encoding not yet supported".to_string()),
         }
     }
 }
@@ -298,6 +372,27 @@ impl Default for AArch64Assembler {
 fn register_to_dynasm(reg: Register) -> Result<u8, String> {
     reg.index()
         .ok_or_else(|| format!("Register {:?} not supported in dynasm encoding", reg))
+}
+
+fn condition_to_dynasm(cond: Condition) -> Result<u8, String> {
+    Ok(match cond {
+        Condition::EQ => 0b0000,
+        Condition::NE => 0b0001,
+        Condition::CS => 0b0010,
+        Condition::CC => 0b0011,
+        Condition::MI => 0b0100,
+        Condition::PL => 0b0101,
+        Condition::VS => 0b0110,
+        Condition::VC => 0b0111,
+        Condition::HI => 0b1000,
+        Condition::LS => 0b1001,
+        Condition::GE => 0b1010,
+        Condition::LT => 0b1011,
+        Condition::GT => 0b1100,
+        Condition::LE => 0b1101,
+        Condition::AL => 0b1110,
+        Condition::NV => 0b1111,
+    })
 }
 
 #[cfg(test)]

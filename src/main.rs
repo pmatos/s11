@@ -432,8 +432,12 @@ fn run_optimization(
     let available_immediates = vec![-1, 0, 1, 2, 4, 8];
 
     // Create live-out mask (assume all modified registers are live-out for now)
-    let live_out =
-        LiveOutMask::from_registers(target.iter().map(|instr| instr.destination()).collect());
+    let live_out = LiveOutMask::from_registers(
+        target
+            .iter()
+            .filter_map(|instr| instr.destination())
+            .collect(),
+    );
 
     match options.algorithm {
         Algorithm::Enumerative => {

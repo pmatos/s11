@@ -1,7 +1,7 @@
 //! Concrete interpreter for fast validation of instruction sequences
 
-use crate::ir::{Instruction, Operand, Register};
-use crate::semantics::state::{ConcreteMachineState, ConcreteValue, LiveOutMask};
+use crate::ir::{Condition, Instruction, Operand, Register};
+use crate::semantics::state::{ConcreteMachineState, ConcreteValue, ConditionFlags, LiveOutMask};
 
 /// Evaluate an operand to get its concrete value
 fn eval_operand(state: &ConcreteMachineState, operand: &Operand) -> ConcreteValue {
@@ -101,8 +101,99 @@ pub fn apply_instruction_concrete(
             };
             state.set_register(*rd, ConcreteValue::new(result));
         }
+        // CMP: Compare (subtract and set flags, discard result)
+        Instruction::Cmp { rn, rm } => {
+            let lhs = state.get_register(*rn).as_u64();
+            let rhs = eval_operand(&state, rm).as_u64();
+            let flags = ConditionFlags::from_sub(lhs, rhs, lhs.wrapping_sub(rhs));
+            state.set_flags(flags);
+        }
+        // CMN: Compare negative (add and set flags, discard result)
+        Instruction::Cmn { rn, rm } => {
+            let lhs = state.get_register(*rn).as_u64();
+            let rhs = eval_operand(&state, rm).as_u64();
+            let flags = ConditionFlags::from_add(lhs, rhs, lhs.wrapping_add(rhs));
+            state.set_flags(flags);
+        }
+        // TST: Test (AND and set flags, discard result)
+        Instruction::Tst { rn, rm } => {
+            let lhs = state.get_register(*rn).as_u64();
+            let rhs = eval_operand(&state, rm).as_u64();
+            let result = lhs & rhs;
+            // TST sets N and Z based on result, clears C and V
+            let flags = ConditionFlags {
+                n: (result as i64) < 0,
+                z: result == 0,
+                c: false,
+                v: false,
+            };
+            state.set_flags(flags);
+        }
+        // CSEL: Conditional select
+        Instruction::Csel { rd, rn, rm, cond } => {
+            let cond_true = evaluate_condition(&state, *cond);
+            let result = if cond_true {
+                state.get_register(*rn)
+            } else {
+                state.get_register(*rm)
+            };
+            state.set_register(*rd, result);
+        }
+        // CSINC: Conditional select increment
+        Instruction::Csinc { rd, rn, rm, cond } => {
+            let cond_true = evaluate_condition(&state, *cond);
+            let result = if cond_true {
+                state.get_register(*rn)
+            } else {
+                ConcreteValue::new(state.get_register(*rm).as_u64().wrapping_add(1))
+            };
+            state.set_register(*rd, result);
+        }
+        // CSINV: Conditional select invert
+        Instruction::Csinv { rd, rn, rm, cond } => {
+            let cond_true = evaluate_condition(&state, *cond);
+            let result = if cond_true {
+                state.get_register(*rn)
+            } else {
+                ConcreteValue::new(!state.get_register(*rm).as_u64())
+            };
+            state.set_register(*rd, result);
+        }
+        // CSNEG: Conditional select negate
+        Instruction::Csneg { rd, rn, rm, cond } => {
+            let cond_true = evaluate_condition(&state, *cond);
+            let result = if cond_true {
+                state.get_register(*rn)
+            } else {
+                ConcreteValue::from_i64(-(state.get_register(*rm).as_i64()))
+            };
+            state.set_register(*rd, result);
+        }
     }
     state
+}
+
+/// Evaluate a condition code against the current flags
+fn evaluate_condition(state: &ConcreteMachineState, cond: Condition) -> bool {
+    let flags = state.get_flags();
+    match cond {
+        Condition::EQ => flags.z,                          // Equal (Z=1)
+        Condition::NE => !flags.z,                         // Not equal (Z=0)
+        Condition::CS => flags.c,                          // Carry set (C=1)
+        Condition::CC => !flags.c,                         // Carry clear (C=0)
+        Condition::MI => flags.n,                          // Minus/negative (N=1)
+        Condition::PL => !flags.n,                         // Plus/positive or zero (N=0)
+        Condition::VS => flags.v,                          // Overflow (V=1)
+        Condition::VC => !flags.v,                         // No overflow (V=0)
+        Condition::HI => flags.c && !flags.z,              // Unsigned higher (C=1 && Z=0)
+        Condition::LS => !flags.c || flags.z,              // Unsigned lower or same (C=0 || Z=1)
+        Condition::GE => flags.n == flags.v,               // Signed greater or equal (N=V)
+        Condition::LT => flags.n != flags.v,               // Signed less than (N!=V)
+        Condition::GT => !flags.z && (flags.n == flags.v), // Signed greater than (Z=0 && N=V)
+        Condition::LE => flags.z || (flags.n != flags.v),  // Signed less or equal (Z=1 || N!=V)
+        Condition::AL => true,                             // Always
+        Condition::NV => true, // Never (but executes as always on AArch64)
+    }
 }
 
 /// Apply a sequence of instructions to a concrete machine state

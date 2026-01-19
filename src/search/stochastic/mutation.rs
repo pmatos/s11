@@ -131,6 +131,33 @@ impl Mutator {
                     _ => *rm = self.random_register(rng),
                 }
             }
+            // Comparison instructions (no destination)
+            Instruction::Cmp { rn, rm } | Instruction::Cmn { rn, rm } => {
+                if rng.random_bool(0.5) {
+                    *rn = self.random_register(rng);
+                } else {
+                    *rm = self.random_operand(rng);
+                }
+            }
+            Instruction::Tst { rn, rm } => {
+                if rng.random_bool(0.5) {
+                    *rn = self.random_register(rng);
+                } else {
+                    *rm = Operand::Register(self.random_register(rng));
+                }
+            }
+            // Conditional select instructions
+            Instruction::Csel { rd, rn, rm, .. }
+            | Instruction::Csinc { rd, rn, rm, .. }
+            | Instruction::Csinv { rd, rn, rm, .. }
+            | Instruction::Csneg { rd, rn, rm, .. } => {
+                let choice = rng.random_range(0..3);
+                match choice {
+                    0 => *rd = self.random_register(rng),
+                    1 => *rn = self.random_register(rng),
+                    _ => *rm = self.random_register(rng),
+                }
+            }
         }
     }
 
@@ -231,6 +258,47 @@ impl Mutator {
                 0 => Instruction::Mul { rd, rn, rm },
                 1 => Instruction::Sdiv { rd, rn, rm },
                 _ => Instruction::Udiv { rd, rn, rm },
+            },
+            // Comparison instructions can mutate between each other
+            Instruction::Cmp { rn, rm } => match rng.random_range(0..3) {
+                0 => Instruction::Cmn { rn, rm },
+                1 => Instruction::Tst { rn, rm },
+                _ => Instruction::Cmp { rn, rm },
+            },
+            Instruction::Cmn { rn, rm } => match rng.random_range(0..3) {
+                0 => Instruction::Cmp { rn, rm },
+                1 => Instruction::Tst { rn, rm },
+                _ => Instruction::Cmn { rn, rm },
+            },
+            Instruction::Tst { rn, rm } => match rng.random_range(0..3) {
+                0 => Instruction::Cmp { rn, rm },
+                1 => Instruction::Cmn { rn, rm },
+                _ => Instruction::Tst { rn, rm },
+            },
+            // Conditional select instructions can mutate between each other
+            Instruction::Csel { rd, rn, rm, cond } => match rng.random_range(0..4) {
+                0 => Instruction::Csinc { rd, rn, rm, cond },
+                1 => Instruction::Csinv { rd, rn, rm, cond },
+                2 => Instruction::Csneg { rd, rn, rm, cond },
+                _ => Instruction::Csel { rd, rn, rm, cond },
+            },
+            Instruction::Csinc { rd, rn, rm, cond } => match rng.random_range(0..4) {
+                0 => Instruction::Csel { rd, rn, rm, cond },
+                1 => Instruction::Csinv { rd, rn, rm, cond },
+                2 => Instruction::Csneg { rd, rn, rm, cond },
+                _ => Instruction::Csinc { rd, rn, rm, cond },
+            },
+            Instruction::Csinv { rd, rn, rm, cond } => match rng.random_range(0..4) {
+                0 => Instruction::Csel { rd, rn, rm, cond },
+                1 => Instruction::Csinc { rd, rn, rm, cond },
+                2 => Instruction::Csneg { rd, rn, rm, cond },
+                _ => Instruction::Csinv { rd, rn, rm, cond },
+            },
+            Instruction::Csneg { rd, rn, rm, cond } => match rng.random_range(0..4) {
+                0 => Instruction::Csel { rd, rn, rm, cond },
+                1 => Instruction::Csinc { rd, rn, rm, cond },
+                2 => Instruction::Csinv { rd, rn, rm, cond },
+                _ => Instruction::Csneg { rd, rn, rm, cond },
             },
         };
     }

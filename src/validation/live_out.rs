@@ -73,7 +73,9 @@ impl FromStr for LiveOutMask {
 pub fn compute_written_registers(instructions: &[Instruction]) -> LiveOutMask {
     let mut mask = LiveOutMask::empty();
     for instr in instructions {
-        mask.add(instr.destination());
+        if let Some(dest) = instr.destination() {
+            mask.add(dest);
+        }
     }
     mask
 }

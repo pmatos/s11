@@ -394,8 +394,8 @@ impl InstructionType for RiscVInstruction {
     type Register = RiscVRegister;
     type Operand = RiscVOperand;
 
-    fn destination(&self) -> RiscVRegister {
-        RiscVInstruction::destination(self)
+    fn destination(&self) -> Option<RiscVRegister> {
+        Some(RiscVInstruction::destination(self))
     }
 
     fn source_registers(&self) -> Vec<RiscVRegister> {

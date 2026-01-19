@@ -70,7 +70,8 @@ pub trait InstructionType:
     type Operand: OperandType<Register = Self::Register>;
 
     /// Get the destination register of this instruction (if any)
-    fn destination(&self) -> Self::Register;
+    /// Returns None for instructions that don't write to a register (e.g., CMP)
+    fn destination(&self) -> Option<Self::Register>;
 
     /// Get all source registers used by this instruction
     fn source_registers(&self) -> Vec<Self::Register>;

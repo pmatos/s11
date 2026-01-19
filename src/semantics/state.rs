@@ -1,8 +1,101 @@
 //! Shared state types for concrete and symbolic execution
 
 use crate::ir::Register;
+use crate::ir::types::Condition;
 use std::collections::{HashMap, HashSet};
 use std::fmt;
+
+/// NZCV condition flags (Negative, Zero, Carry, oVerflow)
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub struct ConditionFlags {
+    pub n: bool, // Negative: result is negative (MSB is 1)
+    pub z: bool, // Zero: result is zero
+    pub c: bool, // Carry: unsigned overflow occurred
+    pub v: bool, // oVerflow: signed overflow occurred
+}
+
+impl ConditionFlags {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Compute flags from an arithmetic result (addition)
+    pub fn from_add(lhs: u64, rhs: u64, result: u64) -> Self {
+        let n = (result as i64) < 0;
+        let z = result == 0;
+        // Carry: unsigned overflow
+        let c = result < lhs;
+        // Overflow: signed overflow when signs of inputs match but differ from result
+        let v = {
+            let lhs_neg = (lhs as i64) < 0;
+            let rhs_neg = (rhs as i64) < 0;
+            let res_neg = (result as i64) < 0;
+            (lhs_neg == rhs_neg) && (lhs_neg != res_neg)
+        };
+        Self { n, z, c, v }
+    }
+
+    /// Compute flags from a subtraction result (comparison)
+    pub fn from_sub(lhs: u64, rhs: u64, result: u64) -> Self {
+        let n = (result as i64) < 0;
+        let z = result == 0;
+        // Carry: no borrow occurred (lhs >= rhs unsigned)
+        let c = lhs >= rhs;
+        // Overflow: signed overflow
+        let v = {
+            let lhs_neg = (lhs as i64) < 0;
+            let rhs_neg = (rhs as i64) < 0;
+            let res_neg = (result as i64) < 0;
+            (lhs_neg != rhs_neg) && (lhs_neg != res_neg)
+        };
+        Self { n, z, c, v }
+    }
+
+    /// Compute flags from a logical operation result (AND, ORR, EOR, TST)
+    pub fn from_logical(result: u64) -> Self {
+        Self {
+            n: (result as i64) < 0,
+            z: result == 0,
+            c: false, // Logical ops clear C
+            v: false, // Logical ops clear V
+        }
+    }
+
+    /// Evaluate if a condition code is satisfied by these flags
+    pub fn evaluate(&self, cond: Condition) -> bool {
+        match cond {
+            Condition::EQ => self.z,                        // Z==1
+            Condition::NE => !self.z,                       // Z==0
+            Condition::CS => self.c,                        // C==1 (unsigned >=)
+            Condition::CC => !self.c,                       // C==0 (unsigned <)
+            Condition::MI => self.n,                        // N==1
+            Condition::PL => !self.n,                       // N==0
+            Condition::VS => self.v,                        // V==1
+            Condition::VC => !self.v,                       // V==0
+            Condition::HI => self.c && !self.z,             // C==1 && Z==0 (unsigned >)
+            Condition::LS => !self.c || self.z,             // C==0 || Z==1 (unsigned <=)
+            Condition::GE => self.n == self.v,              // N==V (signed >=)
+            Condition::LT => self.n != self.v,              // N!=V (signed <)
+            Condition::GT => !self.z && (self.n == self.v), // Z==0 && N==V (signed >)
+            Condition::LE => self.z || (self.n != self.v),  // Z==1 || N!=V (signed <=)
+            Condition::AL => true,                          // Always
+            Condition::NV => false,                         // Never (reserved, treat as false)
+        }
+    }
+}
+
+impl std::fmt::Display for ConditionFlags {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "NZCV={}{}{}{}",
+            if self.n { "N" } else { "n" },
+            if self.z { "Z" } else { "z" },
+            if self.c { "C" } else { "c" },
+            if self.v { "V" } else { "v" },
+        )
+    }
+}
 
 /// Wrapper for concrete 64-bit values
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -36,6 +129,7 @@ impl fmt::Display for ConcreteValue {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ConcreteMachineState {
     registers: HashMap<Register, ConcreteValue>,
+    flags: ConditionFlags,
 }
 
 impl ConcreteMachineState {
@@ -52,7 +146,10 @@ impl ConcreteMachineState {
         registers.insert(Register::XZR, ConcreteValue::new(0));
         registers.insert(Register::SP, ConcreteValue::new(0));
 
-        ConcreteMachineState { registers }
+        ConcreteMachineState {
+            registers,
+            flags: ConditionFlags::new(),
+        }
     }
 
     /// Create state from a map of register values
@@ -84,6 +181,16 @@ impl ConcreteMachineState {
     pub fn registers(&self) -> &HashMap<Register, ConcreteValue> {
         &self.registers
     }
+
+    /// Get the condition flags
+    pub fn get_flags(&self) -> ConditionFlags {
+        self.flags
+    }
+
+    /// Set the condition flags
+    pub fn set_flags(&mut self, flags: ConditionFlags) {
+        self.flags = flags;
+    }
 }
 
 impl fmt::Display for ConcreteMachineState {
@@ -101,6 +208,7 @@ impl fmt::Display for ConcreteMachineState {
         if sp.0 != 0 {
             writeln!(f, "  sp: {}", sp)?;
         }
+        writeln!(f, "  {}", self.flags)?;
         write!(f, "}}")
     }
 }

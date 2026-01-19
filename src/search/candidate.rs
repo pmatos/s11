@@ -217,6 +217,13 @@ pub fn opcode_id(instr: &Instruction) -> u8 {
         Instruction::Mul { .. } => 10,
         Instruction::Sdiv { .. } => 11,
         Instruction::Udiv { .. } => 12,
+        Instruction::Cmp { .. } => 13,
+        Instruction::Cmn { .. } => 14,
+        Instruction::Tst { .. } => 15,
+        Instruction::Csel { .. } => 16,
+        Instruction::Csinc { .. } => 17,
+        Instruction::Csinv { .. } => 18,
+        Instruction::Csneg { .. } => 19,
     }
 }
 
@@ -313,8 +320,9 @@ mod tests {
 
         for _ in 0..100 {
             let instr = generate_random_instruction(&mut rng, &regs, &imms);
-            let dest = instr.destination();
-            assert!(regs.contains(&dest));
+            if let Some(dest) = instr.destination() {
+                assert!(regs.contains(&dest));
+            }
         }
     }
 

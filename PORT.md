@@ -99,7 +99,7 @@ S10 uses the `loci` framework for distributed computation:
 |---------|-----|-----|--------|
 | Register enum | ✅ x0-x31 (RISC-V) | ✅ X0-X30, XZR, SP (AArch64) | ✅ |
 | Operand abstraction | ✅ Register/Immediate | ✅ | ✅ |
-| Condition codes | ✅ | ✅ (defined, not used) | Partial |
+| Condition codes | ✅ | ✅ (used by CMP/CSEL) | ✅ |
 | Instruction struct | ✅ rv-insn | ✅ Instruction enum | ✅ |
 
 #### 3.2 Instruction Coverage
@@ -110,11 +110,11 @@ S10 uses the `loci` framework for distributed computation:
 - ✅ AND/ORR/EOR (register, immediate)
 - ✅ LSL/LSR/ASR (register, immediate)
 - ✅ MUL/SDIV/UDIV (multiplication, division)
+- ✅ CMP/CMN/TST (comparison - set NZCV flags)
+- ✅ CSEL/CSINC/CSINV/CSNEG (conditional select)
 
 **AArch64 Instructions Missing** (for parity with RISC-V capabilities):
 - ❌ MADD/MSUB (multiply-add/subtract)
-- ❌ CMP/CMN/TST (comparison)
-- ❌ CSEL/CSINC/CSINV/CSNEG (conditional select)
 - ❌ B/BL/BR/BLR/RET (branches)
 - ❌ LDR/STR variants (memory operations)
 - ❌ SXTB/SXTH/SXTW/UXTB/UXTH (sign/zero extend)
@@ -344,7 +344,7 @@ pub trait ISA {
 
 ### Phase 5: Extended Instructions (Medium Priority)
 1. [x] Multiplication/division (MUL, SDIV, UDIV)
-2. [ ] Conditional operations
+2. [x] Conditional operations (CMP, CMN, TST, CSEL, CSINC, CSINV, CSNEG)
 3. [ ] Memory operations (if needed)
 
 ### Phase 6: Polish (Low Priority)
@@ -361,9 +361,9 @@ pub trait ISA {
 |----------|--------------|-----------------|-------------|
 | Search Algorithms | 3 | 4 (enumerative, stochastic, symbolic, hybrid) | - |
 | Parallelism | Full | Full (rayon + crossbeam) | - |
-| IR/Instructions | ~20 opcodes | 13 opcodes | ~7 |
+| IR/Instructions | ~20 opcodes | 20 opcodes | ~5 |
 | Validation | 3 modes | 2 modes (fast+SMT) | 1 mode |
 | CLI Options | ~15 | ~14 | ~1 |
 | Documentation | 5 guides | 1 file | 4 guides |
 
-**Overall Port Progress**: ~85% (Phase 1-4 complete, extended instructions and polish remaining)
+**Overall Port Progress**: ~90% (Phase 1-5 mostly complete, memory operations and polish remaining)
