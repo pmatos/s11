@@ -19,6 +19,9 @@ dynasmrt = "4.0.1"
 dynasm = "4.0.1"
 rand = "0.9"
 rand_chacha = "0.9"
+rayon = "1.10"
+crossbeam-channel = "0.5"
+num_cpus = "1.16"
 
 [features]
 default = ["z3"]

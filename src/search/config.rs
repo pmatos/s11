@@ -14,6 +14,8 @@ pub enum Algorithm {
     Stochastic,
     /// SMT-based symbolic synthesis
     Symbolic,
+    /// Hybrid: parallel execution with symbolic + multiple stochastic workers
+    Hybrid,
 }
 
 impl std::fmt::Display for Algorithm {
@@ -22,6 +24,7 @@ impl std::fmt::Display for Algorithm {
             Algorithm::Enumerative => write!(f, "enumerative"),
             Algorithm::Stochastic => write!(f, "stochastic"),
             Algorithm::Symbolic => write!(f, "symbolic"),
+            Algorithm::Hybrid => write!(f, "hybrid"),
         }
     }
 }
@@ -34,8 +37,9 @@ impl std::str::FromStr for Algorithm {
             "enumerative" | "enum" => Ok(Algorithm::Enumerative),
             "stochastic" | "stoch" | "mcmc" => Ok(Algorithm::Stochastic),
             "symbolic" | "sym" | "smt" => Ok(Algorithm::Symbolic),
+            "hybrid" | "parallel" => Ok(Algorithm::Hybrid),
             _ => Err(format!(
-                "Unknown algorithm: '{}'. Valid options: enumerative, stochastic, symbolic",
+                "Unknown algorithm: '{}'. Valid options: enumerative, stochastic, symbolic, hybrid",
                 s
             )),
         }

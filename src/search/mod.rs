@@ -4,14 +4,17 @@
 //! - Enumerative: exhaustive search over instruction sequences
 //! - Stochastic: MCMC-based search using Metropolis-Hastings acceptance
 //! - Symbolic: SMT-based synthesis using Z3
+//! - Hybrid: parallel execution combining symbolic + multiple stochastic workers
 
 pub mod candidate;
 pub mod config;
+pub mod parallel;
 pub mod result;
 pub mod stochastic;
 pub mod symbolic;
 
 pub use config::{Algorithm, SearchConfig, StochasticConfig, SymbolicConfig};
+pub use parallel::{ParallelConfig, ParallelResult, run_parallel_search};
 pub use result::{SearchResult, SearchStatistics};
 pub use stochastic::StochasticSearch;
 pub use symbolic::SymbolicSearch;

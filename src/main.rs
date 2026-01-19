@@ -16,6 +16,7 @@ use assembler::AArch64Assembler;
 use elf_patcher::{AddressWindow, ElfPatcher, parse_hex_address};
 use ir::{Instruction, Operand, Register};
 use search::config::{Algorithm, SearchConfig, SearchMode, StochasticConfig, SymbolicConfig};
+use search::parallel::{ParallelConfig, run_parallel_search};
 use search::{SearchAlgorithm, StochasticSearch, SymbolicSearch};
 use semantics::cost::CostMetric;
 use semantics::state::LiveOutMask;
@@ -43,6 +44,8 @@ enum CliAlgorithm {
     Stochastic,
     /// Symbolic search using SMT solver
     Symbolic,
+    /// Hybrid parallel search (symbolic + multiple stochastic workers)
+    Hybrid,
 }
 
 impl From<CliAlgorithm> for Algorithm {
@@ -51,6 +54,7 @@ impl From<CliAlgorithm> for Algorithm {
             CliAlgorithm::Enumerative => Algorithm::Enumerative,
             CliAlgorithm::Stochastic => Algorithm::Stochastic,
             CliAlgorithm::Symbolic => Algorithm::Symbolic,
+            CliAlgorithm::Hybrid => Algorithm::Hybrid,
         }
     }
 }
@@ -146,6 +150,14 @@ enum Commands {
         /// Solver timeout in seconds
         #[arg(long, default_value = "5")]
         solver_timeout: u64,
+
+        // --- Parallel/Hybrid search options ---
+        /// Number of worker threads for hybrid search
+        #[arg(long, short = 'j')]
+        cores: Option<usize>,
+        /// Disable symbolic worker in hybrid mode (all workers run stochastic)
+        #[arg(long)]
+        no_symbolic: bool,
     },
 }
 
@@ -273,6 +285,9 @@ struct OptimizationOptions {
     seed: Option<u64>,
     search_mode: SearchMode,
     solver_timeout: Duration,
+    // Parallel/Hybrid options
+    cores: Option<usize>,
+    no_symbolic: bool,
 }
 
 // --- Optimization Function ---
@@ -461,6 +476,47 @@ fn run_optimization(
 
             if result.found_optimization {
                 Ok(result.optimized_sequence)
+            } else {
+                Ok(None)
+            }
+        }
+        Algorithm::Hybrid => {
+            let num_cores = options.cores.unwrap_or_else(num_cpus::get);
+            println!("\nRunning hybrid parallel search...");
+            println!("  Workers: {}", num_cores);
+            println!("  Symbolic worker: {}", !options.no_symbolic);
+            if let Some(seed) = options.seed {
+                println!("  Base seed: {}", seed);
+            }
+
+            let stochastic_config = StochasticConfig::default()
+                .with_beta(options.beta)
+                .with_iterations(options.iterations);
+
+            let symbolic_config = SymbolicConfig::default()
+                .with_search_mode(options.search_mode)
+                .with_timeout(options.solver_timeout);
+
+            let config = SearchConfig::default()
+                .with_stochastic(stochastic_config)
+                .with_symbolic(symbolic_config)
+                .with_cost_metric(options.cost_metric)
+                .with_verbose(options.verbose)
+                .with_registers(available_registers)
+                .with_immediates(available_immediates);
+
+            let parallel_config = ParallelConfig::default()
+                .with_workers(num_cores)
+                .with_symbolic(!options.no_symbolic)
+                .with_seed_option(options.seed)
+                .with_timeout_option(options.timeout);
+
+            let result = run_parallel_search(target, &live_out, &config, &parallel_config);
+
+            print_search_statistics(&result.total_statistics);
+
+            if result.best_result.found_optimization {
+                Ok(result.best_result.optimized_sequence)
             } else {
                 Ok(None)
             }
@@ -766,6 +822,8 @@ fn main() {
             seed,
             search_mode,
             solver_timeout,
+            cores,
+            no_symbolic,
         } => {
             // Optimization mode
             let start_addr = match parse_hex_address(&start_addr) {
@@ -794,6 +852,8 @@ fn main() {
                 seed,
                 search_mode: search_mode.into(),
                 solver_timeout: Duration::from_secs(solver_timeout),
+                cores,
+                no_symbolic,
             };
 
             match optimize_elf_binary(&binary, start_addr, end_addr, &options) {
