@@ -4,11 +4,16 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-This is s11, an AArch64 optimizer MVP written in Rust that demonstrates:
-- ELF binary reading and disassembly for AArch64 binaries using Capstone engine
-- IR representation for a subset of AArch64 instructions (ADD, MOV with register/immediate variants)
-- Simplified equivalence checking with hardcoded patterns (SMT integration planned for future)
-- Basic enumerative search for shorter equivalent instruction sequences
+s11 is an AArch64 superoptimizer written in Rust. It finds shorter or faster equivalent instruction sequences using multiple search strategies and SMT-based equivalence checking.
+
+**Key Features:**
+- ELF binary reading and disassembly using Capstone engine
+- 20 AArch64 instructions: MOV, ADD, SUB, AND, ORR, EOR, LSL, LSR, ASR, MUL, SDIV, UDIV, CMP, CMN, TST, CSEL, CSINC, CSINV, CSNEG
+- Four search algorithms: enumerative, stochastic (MCMC), symbolic (SMT synthesis), and hybrid
+- SMT-based equivalence checking using Z3
+- Multi-threaded parallel search with worker coordination
+- ISA abstraction supporting AArch64 (primary) and RISC-V (secondary)
+- Binary patching for applying optimizations
 
 ## Development Commands
 
@@ -46,36 +51,78 @@ Note: Clippy linting is run separately in the `rust-clippy.yml` workflow which p
 
 The project requires:
 - Rust toolchain with 2021 edition support
-- External crates: `elf`, `capstone`, `clap`, `z3`
+- External crates: `elf`, `capstone`, `clap`, `z3`, `rayon`, `crossbeam-channel`
 - Capstone engine (usually installed via system package manager)
 - Z3 SMT solver and development libraries (for semantic equivalence checking)
 - `just` command runner for running build tasks (required by test_all.sh)
 
 ## Architecture
 
-### Core Components
+### Module Structure
 
-- **Command Line Interface** (`main.rs`): Uses `clap` for argument parsing with `--binary` and `--demo` options
-- **ELF Binary Analysis** (`main.rs`): Reads AArch64 ELF files and disassembles executable sections using Capstone
-- **IR Definition** (`ir/` module): 
-  - `types.rs`: Defines `Register` enum (X0-X30, XZR, SP), `Operand`, and `Condition` types
-  - `instructions.rs`: Defines `Instruction` enum covering AArch64 operations (MOV, ADD, SUB, AND, ORR, EOR, shifts)
-- **SMT-based Equivalence Checking** (`semantics/` module):
-  - `smt.rs`: Translates IR to SMT constraints using z3 bitvectors
-  - `equivalence.rs`: Checks semantic equivalence of instruction sequences using SMT solving
-- **Enumerative Search** (`main.rs`): Searches for shorter equivalent sequences (currently limited to length-1 candidates)
+```
+src/
+├── main.rs              # CLI and ELF binary analysis
+├── ir/                  # Intermediate Representation
+│   ├── types.rs         # Register, Operand, Condition enums
+│   └── instructions.rs  # Instruction enum (20 opcodes)
+├── isa/                 # ISA Abstraction Layer
+│   ├── traits.rs        # ISA trait definitions
+│   ├── aarch64.rs       # AArch64 backend
+│   └── riscv.rs         # RISC-V backend
+├── semantics/           # Execution semantics
+│   ├── concrete.rs      # Concrete interpreter
+│   ├── smt.rs           # Symbolic interpreter (Z3)
+│   ├── equivalence.rs   # SMT equivalence checking
+│   ├── cost.rs          # Instruction cost model
+│   └── state.rs         # Machine state (registers, flags)
+├── search/              # Search algorithms
+│   ├── enumerative/     # Exhaustive search
+│   ├── stochastic/      # MCMC with Metropolis-Hastings
+│   ├── symbolic/        # SMT-based synthesis
+│   └── parallel/        # Multi-threaded coordination
+├── validation/          # Input validation
+│   ├── live_out.rs      # Live-out register tracking
+│   └── random.rs        # Random input generation
+└── assembler/           # Machine code generation (dynasm)
+```
 
-### Key Functions
+### Search Algorithms
 
-- `analyze_elf_binary()` - Parses ELF files and disassembles text sections
-- `are_sequences_equivalent()` - Pattern-based equivalence verification with hardcoded rules
-- `generate_all_instructions()` - Generates all possible single instructions for search
-- `find_shorter_equivalent()` - Enumerative optimization search
+1. **Enumerative**: Exhaustively enumerate candidate sequences
+2. **Stochastic**: MCMC with mutation operators (opcode, operand, swap, instruction)
+3. **Symbolic**: SMT-based synthesis with cost bounding
+4. **Hybrid**: Parallel combination of symbolic + stochastic workers
 
-The application has two modes: binary analysis (reads and disassembles AArch64 ELF files) and demo mode (shows IR-level optimization). The optimizer uses z3 SMT solver to verify semantic equivalence between instruction sequences. For example, it can prove that:
-- `MOV X0, X1; ADD X0, X0, #1` is equivalent to `ADD X0, X1, #1`
-- `MOV X0, #0` is equivalent to `EOR X0, X0, X0` (register clearing)
-- `ADD X0, X1, X2` is equivalent to `ADD X0, X2, X1` (commutativity)
+### Key CLI Options
+
+```bash
+# Disassemble a binary
+s11 disasm --binary <file>
+
+# Optimize a code region
+s11 opt --binary <file> --start-addr <hex> --end-addr <hex>
+
+# Algorithm selection
+s11 opt ... --algorithm [enumerative|stochastic|symbolic|hybrid]
+
+# Parallel execution
+s11 opt ... --cores <n> --timeout <seconds>
+
+# Stochastic parameters
+s11 opt ... --beta <inverse-temp> --iterations <n>
+```
+
+### Equivalence Checking
+
+The optimizer verifies semantic equivalence using:
+1. **Fast validation**: Random input testing (16 test cases)
+2. **SMT verification**: Z3 bitvector constraints for formal proof
+
+Example equivalences the optimizer can prove:
+- `MOV X0, X1; ADD X0, X0, #1` ≡ `ADD X0, X1, #1`
+- `MOV X0, #0` ≡ `EOR X0, X0, X0`
+- `ADD X0, X1, X2` ≡ `ADD X0, X2, X1` (commutativity)
 
 ## Commit Guidelines
 
