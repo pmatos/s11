@@ -9,8 +9,8 @@ mod traits;
 
 #[allow(unused_imports)]
 pub use traits::{
-    Assembler, ConcreteExecutor, CostModel, InstructionGenerator, InstructionType, OperandType,
-    RegisterType, SymbolicExecutor, ISA,
+    Assembler, ConcreteExecutor, CostModel, ISA, InstructionGenerator, InstructionType,
+    OperandType, RegisterType, SymbolicExecutor,
 };
 
 #[allow(unused_imports)]

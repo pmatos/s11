@@ -429,7 +429,9 @@ fn run_optimization(
         Register::X6,
         Register::X7,
     ];
-    let available_immediates = vec![-1, 0, 1, 2, 4, 8];
+    let available_immediates = vec![
+        0, 1, 2, 3, 4, 5, 7, 8, 10, 15, 16, 31, 32, 63, 64, 100, 255, 256, 1000, 4095,
+    ];
 
     // Create live-out mask (assume all modified registers are live-out for now)
     let live_out = LiveOutMask::from_registers(

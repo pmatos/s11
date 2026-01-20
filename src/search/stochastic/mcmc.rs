@@ -104,12 +104,18 @@ impl SearchAlgorithm for StochasticSearch {
         let mut current = if rng.random_bool(0.5) {
             target.to_vec()
         } else {
-            generate_random_sequence(
-                &mut rng,
-                target.len(),
-                &config.available_registers,
-                &config.available_immediates,
-            )
+            // Generate encodable random sequence
+            loop {
+                let seq = generate_random_sequence(
+                    &mut rng,
+                    target.len(),
+                    &config.available_registers,
+                    &config.available_immediates,
+                );
+                if crate::search::candidate::is_sequence_encodable(&seq) {
+                    break seq;
+                }
+            }
         };
         let mut current_cost = sequence_cost(&current, &config.cost_metric);
 
@@ -136,18 +142,31 @@ impl SearchAlgorithm for StochasticSearch {
             if rng.random_bool(0.1) && max_length > min_length {
                 let new_len = rng.random_range(min_length..=max_length);
                 if new_len != current.len() {
-                    current = generate_random_sequence(
-                        &mut rng,
-                        new_len,
-                        &config.available_registers,
-                        &config.available_immediates,
-                    );
+                    // Generate encodable random sequence
+                    loop {
+                        let seq = generate_random_sequence(
+                            &mut rng,
+                            new_len,
+                            &config.available_registers,
+                            &config.available_immediates,
+                        );
+                        if crate::search::candidate::is_sequence_encodable(&seq) {
+                            current = seq;
+                            break;
+                        }
+                    }
                     current_cost = sequence_cost(&current, &config.cost_metric);
                 }
             }
 
             // Mutate current sequence
             let proposal = mutator.mutate(&mut rng, &current);
+
+            // Skip unencodable sequences early
+            if !crate::search::candidate::is_sequence_encodable(&proposal) {
+                continue;
+            }
+
             let proposal_cost = sequence_cost(&proposal, &config.cost_metric);
 
             self.statistics.candidates_evaluated += 1;

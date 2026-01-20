@@ -2,6 +2,25 @@
 
 use crate::ir::{Instruction, Operand, Register};
 
+/// Check if all instructions in a sequence can be encoded in AArch64 machine code.
+pub fn is_sequence_encodable(sequence: &[Instruction]) -> bool {
+    sequence.iter().all(|instr| instr.is_encodable_aarch64())
+}
+
+/// Generate all encodable instructions using the given registers and immediates.
+///
+/// This filters out instructions that cannot be encoded in AArch64 machine code,
+/// such as SUB with negative immediates or AND with immediate operands.
+pub fn generate_all_encodable_instructions(
+    registers: &[Register],
+    immediates: &[i64],
+) -> Vec<Instruction> {
+    generate_all_instructions(registers, immediates)
+        .into_iter()
+        .filter(|instr| instr.is_encodable_aarch64())
+        .collect()
+}
+
 /// Generate all possible instructions using the given registers and immediates
 pub fn generate_all_instructions(registers: &[Register], immediates: &[i64]) -> Vec<Instruction> {
     let mut instrs = Vec::new();

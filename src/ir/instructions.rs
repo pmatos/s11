@@ -169,6 +169,62 @@ impl Instruction {
         )
     }
 
+    /// Check if this instruction can be encoded in AArch64 machine code.
+    ///
+    /// This validates immediate operand ranges against AArch64 encoding constraints:
+    /// - MOV immediate: 0 to 0xFFFF (16-bit)
+    /// - ADD/SUB immediate: 0 to 0xFFF (12-bit unsigned)
+    /// - CMP/CMN immediate: 0 to 0xFFF (12-bit unsigned)
+    /// - LSL/LSR/ASR immediate: 0 to 63
+    /// - AND/ORR/EOR immediate: register only (bitmask encoding not supported)
+    /// - TST immediate: register only (bitmask encoding not supported)
+    pub fn is_encodable_aarch64(&self) -> bool {
+        match self {
+            // MovReg is always encodable
+            Instruction::MovReg { .. } => true,
+
+            // MOV immediate: 16-bit range
+            Instruction::MovImm { imm, .. } => *imm >= 0 && *imm <= 0xFFFF,
+
+            // ADD/SUB immediate: 12-bit unsigned range
+            Instruction::Add { rm, .. } | Instruction::Sub { rm, .. } => match rm {
+                Operand::Register(_) => true,
+                Operand::Immediate(imm) => *imm >= 0 && *imm <= 0xFFF,
+            },
+
+            // AND/ORR/EOR: only register operands supported (bitmask immediates are complex)
+            Instruction::And { rm, .. }
+            | Instruction::Orr { rm, .. }
+            | Instruction::Eor { rm, .. } => matches!(rm, Operand::Register(_)),
+
+            // Shift instructions: shift amount 0-63 for 64-bit registers
+            Instruction::Lsl { shift, .. }
+            | Instruction::Lsr { shift, .. }
+            | Instruction::Asr { shift, .. } => match shift {
+                Operand::Register(_) => true,
+                Operand::Immediate(amt) => *amt >= 0 && *amt <= 63,
+            },
+
+            // MUL/SDIV/UDIV: always register operands, always encodable
+            Instruction::Mul { .. } | Instruction::Sdiv { .. } | Instruction::Udiv { .. } => true,
+
+            // CMP/CMN immediate: 12-bit unsigned range
+            Instruction::Cmp { rm, .. } | Instruction::Cmn { rm, .. } => match rm {
+                Operand::Register(_) => true,
+                Operand::Immediate(imm) => *imm >= 0 && *imm <= 0xFFF,
+            },
+
+            // TST: only register operands supported
+            Instruction::Tst { rm, .. } => matches!(rm, Operand::Register(_)),
+
+            // Conditional select: always encodable (register-only)
+            Instruction::Csel { .. }
+            | Instruction::Csinc { .. }
+            | Instruction::Csinv { .. }
+            | Instruction::Csneg { .. } => true,
+        }
+    }
+
     /// Get all source registers used by this instruction
     #[allow(dead_code)]
     pub fn source_registers(&self) -> Vec<Register> {
@@ -325,5 +381,236 @@ mod tests {
             rm: Operand::Immediate(5),
         };
         assert_eq!(add_imm.source_registers(), vec![Register::X1]);
+    }
+
+    #[test]
+    fn test_is_encodable_mov() {
+        // MovReg is always encodable
+        assert!(
+            Instruction::MovReg {
+                rd: Register::X0,
+                rn: Register::X1
+            }
+            .is_encodable_aarch64()
+        );
+
+        // MovImm in range
+        assert!(
+            Instruction::MovImm {
+                rd: Register::X0,
+                imm: 0
+            }
+            .is_encodable_aarch64()
+        );
+        assert!(
+            Instruction::MovImm {
+                rd: Register::X0,
+                imm: 0xFFFF
+            }
+            .is_encodable_aarch64()
+        );
+
+        // MovImm out of range
+        assert!(
+            !Instruction::MovImm {
+                rd: Register::X0,
+                imm: -1
+            }
+            .is_encodable_aarch64()
+        );
+        assert!(
+            !Instruction::MovImm {
+                rd: Register::X0,
+                imm: 0x10000
+            }
+            .is_encodable_aarch64()
+        );
+    }
+
+    #[test]
+    fn test_is_encodable_add_sub() {
+        // Register operand is always valid
+        assert!(
+            Instruction::Add {
+                rd: Register::X0,
+                rn: Register::X1,
+                rm: Operand::Register(Register::X2)
+            }
+            .is_encodable_aarch64()
+        );
+
+        // Valid immediate range (0-4095)
+        assert!(
+            Instruction::Add {
+                rd: Register::X0,
+                rn: Register::X1,
+                rm: Operand::Immediate(0)
+            }
+            .is_encodable_aarch64()
+        );
+        assert!(
+            Instruction::Add {
+                rd: Register::X0,
+                rn: Register::X1,
+                rm: Operand::Immediate(0xFFF)
+            }
+            .is_encodable_aarch64()
+        );
+
+        // Invalid: negative immediate
+        assert!(
+            !Instruction::Sub {
+                rd: Register::X0,
+                rn: Register::X1,
+                rm: Operand::Immediate(-1)
+            }
+            .is_encodable_aarch64()
+        );
+
+        // Invalid: immediate too large
+        assert!(
+            !Instruction::Add {
+                rd: Register::X0,
+                rn: Register::X1,
+                rm: Operand::Immediate(0x1000)
+            }
+            .is_encodable_aarch64()
+        );
+    }
+
+    #[test]
+    fn test_is_encodable_logical() {
+        // Register operand is valid
+        assert!(
+            Instruction::And {
+                rd: Register::X0,
+                rn: Register::X1,
+                rm: Operand::Register(Register::X2)
+            }
+            .is_encodable_aarch64()
+        );
+
+        // Immediate operand not supported for AND/ORR/EOR
+        assert!(
+            !Instruction::And {
+                rd: Register::X0,
+                rn: Register::X1,
+                rm: Operand::Immediate(0xFF)
+            }
+            .is_encodable_aarch64()
+        );
+        assert!(
+            !Instruction::Orr {
+                rd: Register::X0,
+                rn: Register::X1,
+                rm: Operand::Immediate(1)
+            }
+            .is_encodable_aarch64()
+        );
+        assert!(
+            !Instruction::Eor {
+                rd: Register::X0,
+                rn: Register::X1,
+                rm: Operand::Immediate(0)
+            }
+            .is_encodable_aarch64()
+        );
+    }
+
+    #[test]
+    fn test_is_encodable_shift() {
+        // Register shift is valid
+        assert!(
+            Instruction::Lsl {
+                rd: Register::X0,
+                rn: Register::X1,
+                shift: Operand::Register(Register::X2)
+            }
+            .is_encodable_aarch64()
+        );
+
+        // Valid shift range (0-63)
+        assert!(
+            Instruction::Lsl {
+                rd: Register::X0,
+                rn: Register::X1,
+                shift: Operand::Immediate(0)
+            }
+            .is_encodable_aarch64()
+        );
+        assert!(
+            Instruction::Lsr {
+                rd: Register::X0,
+                rn: Register::X1,
+                shift: Operand::Immediate(63)
+            }
+            .is_encodable_aarch64()
+        );
+
+        // Invalid: negative shift
+        assert!(
+            !Instruction::Asr {
+                rd: Register::X0,
+                rn: Register::X1,
+                shift: Operand::Immediate(-1)
+            }
+            .is_encodable_aarch64()
+        );
+
+        // Invalid: shift too large
+        assert!(
+            !Instruction::Lsl {
+                rd: Register::X0,
+                rn: Register::X1,
+                shift: Operand::Immediate(64)
+            }
+            .is_encodable_aarch64()
+        );
+    }
+
+    #[test]
+    fn test_is_encodable_cmp() {
+        // Register operand is valid
+        assert!(
+            Instruction::Cmp {
+                rn: Register::X0,
+                rm: Operand::Register(Register::X1)
+            }
+            .is_encodable_aarch64()
+        );
+
+        // Valid immediate range
+        assert!(
+            Instruction::Cmp {
+                rn: Register::X0,
+                rm: Operand::Immediate(0xFFF)
+            }
+            .is_encodable_aarch64()
+        );
+
+        // Invalid immediate
+        assert!(
+            !Instruction::Cmp {
+                rn: Register::X0,
+                rm: Operand::Immediate(-1)
+            }
+            .is_encodable_aarch64()
+        );
+
+        // TST only supports register operands
+        assert!(
+            Instruction::Tst {
+                rn: Register::X0,
+                rm: Operand::Register(Register::X1)
+            }
+            .is_encodable_aarch64()
+        );
+        assert!(
+            !Instruction::Tst {
+                rn: Register::X0,
+                rm: Operand::Immediate(1)
+            }
+            .is_encodable_aarch64()
+        );
     }
 }

@@ -10,7 +10,7 @@
 //! and verify them with SMT, rather than synthesizing from purely symbolic sketches.
 
 use crate::ir::Instruction;
-use crate::search::candidate::generate_all_instructions;
+use crate::search::candidate::generate_all_encodable_instructions;
 use crate::search::config::{SearchConfig, SearchMode};
 use crate::search::result::{SearchResult, SearchStatistics};
 use crate::search::{Algorithm, SearchAlgorithm};
@@ -39,8 +39,10 @@ impl SymbolicSearch {
         config: &SearchConfig,
         start_time: Instant,
     ) -> Option<Vec<Instruction>> {
-        let all_instructions =
-            generate_all_instructions(&config.available_registers, &config.available_immediates);
+        let all_instructions = generate_all_encodable_instructions(
+            &config.available_registers,
+            &config.available_immediates,
+        );
 
         let original_cost = sequence_cost(target, &config.cost_metric);
         let mut best_solution: Option<Vec<Instruction>> = None;

@@ -286,7 +286,9 @@ impl Default for SearchConfig {
                 Register::X4,
                 Register::X5,
             ],
-            available_immediates: vec![-1, 0, 1, 2, 4, 8, 16, 32, 64],
+            available_immediates: vec![
+                0, 1, 2, 3, 4, 5, 7, 8, 10, 15, 16, 31, 32, 63, 64, 100, 255, 256, 1000, 4095,
+            ],
             stochastic: StochasticConfig::default(),
             symbolic: SymbolicConfig::default(),
             verbose: false,
