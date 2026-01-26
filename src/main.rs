@@ -9,6 +9,7 @@ mod assembler;
 mod elf_patcher;
 mod ir;
 mod isa;
+mod parser;
 mod search;
 mod semantics;
 mod validation;
@@ -179,6 +180,25 @@ enum Commands {
         /// Disable symbolic worker in hybrid mode (all workers run stochastic)
         #[arg(long)]
         no_symbolic: bool,
+    },
+    /// Check semantic equivalence of two assembly files
+    Equiv {
+        /// First assembly file
+        file1: PathBuf,
+        /// Second assembly file
+        file2: PathBuf,
+        /// Registers that must match (comma-separated, e.g., "x0,x1")
+        #[arg(long, default_value = "x0,x1,x2,x3,x4,x5,x6,x7")]
+        live_out: String,
+        /// Timeout in seconds for SMT solver
+        #[arg(long, default_value = "30")]
+        timeout: u64,
+        /// Use fast path only (random testing, no SMT)
+        #[arg(long)]
+        fast_only: bool,
+        /// Enable verbose output
+        #[arg(short, long)]
+        verbose: bool,
     },
 }
 
@@ -821,6 +841,129 @@ fn find_shorter_equivalent(original_seq: &[Instruction]) -> Option<Vec<Instructi
     None
 }
 
+// --- Equivalence Checking Command ---
+
+fn run_equiv(
+    file1: &Path,
+    file2: &Path,
+    live_out_str: &str,
+    timeout: u64,
+    fast_only: bool,
+    verbose: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    use semantics::{EquivalenceConfig, EquivalenceResult, check_equivalence_with_config};
+
+    // Parse assembly files
+    if verbose {
+        println!("Parsing {}...", file1.display());
+    }
+    let seq1 = parser::parse_assembly_file(file1)?;
+    if verbose {
+        println!("  Parsed {} instructions:", seq1.len());
+        for instr in &seq1 {
+            println!("    {}", instr);
+        }
+    }
+
+    if verbose {
+        println!("Parsing {}...", file2.display());
+    }
+    let seq2 = parser::parse_assembly_file(file2)?;
+    if verbose {
+        println!("  Parsed {} instructions:", seq2.len());
+        for instr in &seq2 {
+            println!("    {}", instr);
+        }
+    }
+
+    // Parse live-out registers
+    let live_out_regs: Vec<Register> = live_out_str
+        .split(',')
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty())
+        .map(|s| parser::parse_register(s))
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| format!("invalid live-out register: {}", e))?;
+
+    if verbose {
+        println!(
+            "Live-out registers: {}",
+            live_out_regs
+                .iter()
+                .map(|r| format!("{}", r))
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
+    }
+
+    let live_out = LiveOutMask::from_registers(live_out_regs);
+
+    // Build config
+    let config = EquivalenceConfig::default()
+        .live_out(live_out)
+        .timeout(Duration::from_secs(timeout))
+        .set_fast_only(fast_only);
+
+    if verbose {
+        println!("\nChecking equivalence...");
+        if fast_only {
+            println!("  Mode: fast path only (random testing)");
+        } else {
+            println!("  Mode: random testing + SMT verification");
+            println!("  Timeout: {}s", timeout);
+        }
+    }
+
+    // Check equivalence
+    let result = check_equivalence_with_config(&seq1, &seq2, &config);
+
+    match result {
+        EquivalenceResult::Equivalent => {
+            println!("EQUIVALENT: The two sequences are semantically equivalent.");
+            Ok(())
+        }
+        EquivalenceResult::NotEquivalent => {
+            println!(
+                "NOT EQUIVALENT: The two sequences produce different results (verified by SMT)."
+            );
+            std::process::exit(1);
+        }
+        EquivalenceResult::NotEquivalentFast(input_state) => {
+            println!("NOT EQUIVALENT: The two sequences produce different results.");
+            println!("\nCounterexample found:");
+
+            // Run both sequences on the counterexample input
+            let output1 = semantics::apply_sequence_concrete(input_state.clone(), &seq1);
+            let output2 = semantics::apply_sequence_concrete(input_state.clone(), &seq2);
+
+            println!("  Input state:");
+            for (reg, val) in input_state.registers() {
+                if config.live_out.contains(*reg) {
+                    println!("    {} = 0x{:016x}", reg, val.as_u64());
+                }
+            }
+            println!("  Output from sequence 1:");
+            for (reg, val) in output1.registers() {
+                if config.live_out.contains(*reg) {
+                    println!("    {} = 0x{:016x}", reg, val.as_u64());
+                }
+            }
+            println!("  Output from sequence 2:");
+            for (reg, val) in output2.registers() {
+                if config.live_out.contains(*reg) {
+                    println!("    {} = 0x{:016x}", reg, val.as_u64());
+                }
+            }
+            std::process::exit(1);
+        }
+        EquivalenceResult::Unknown(reason) => {
+            println!("UNKNOWN: Could not determine equivalence.");
+            println!("  Reason: {}", reason);
+            std::process::exit(2);
+        }
+    }
+}
+
 // --- Main Function ---
 fn main() {
     let args = Args::parse();
@@ -915,5 +1058,19 @@ fn main() {
                 }
             }
         }
+        Commands::Equiv {
+            file1,
+            file2,
+            live_out,
+            timeout,
+            fast_only,
+            verbose,
+        } => match run_equiv(&file1, &file2, &live_out, timeout, fast_only, verbose) {
+            Ok(()) => {}
+            Err(e) => {
+                eprintln!("Error: {}", e);
+                std::process::exit(1);
+            }
+        },
     }
 }

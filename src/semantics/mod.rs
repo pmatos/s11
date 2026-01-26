@@ -7,6 +7,7 @@ pub mod smt;
 pub mod state;
 
 // Re-export main functionality
+pub use concrete::apply_sequence_concrete;
 pub use equivalence::{
     EquivalenceConfig, EquivalenceResult, check_equivalence, check_equivalence_with_config,
 };
