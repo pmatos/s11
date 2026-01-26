@@ -146,6 +146,144 @@ The second instruction became a NOP to maintain binary size/alignment.
 
 ---
 
+## Command 3: Equivalence Checking (`equiv`)
+
+The `equiv` command checks if two assembly files are semantically equivalent using SMT-based verification.
+
+### Basic Usage
+
+```bash
+./target/release/s11 equiv tests/asm/seq1.s tests/asm/seq2.s --verbose
+```
+
+**Output:**
+```
+Parsing tests/asm/seq1.s...
+  Parsed 2 instructions:
+    mov x0, x1
+    add x0, x0, #1
+Parsing tests/asm/seq2.s...
+  Parsed 1 instructions:
+    add x0, x1, #1
+Live-out registers: x0, x1, x2, x3, x4, x5, x6, x7
+
+Checking equivalence...
+  Mode: random testing + SMT verification
+  Timeout: 30s
+EQUIVALENT: The two sequences are semantically equivalent.
+```
+
+### Options
+
+- `--live-out <REGS>`: Registers that must match (comma-separated). Default: `x0,x1,x2,x3,x4,x5,x6,x7`
+- `--timeout <SECS>`: SMT solver timeout in seconds. Default: 30
+- `--fast-only`: Use random testing only, skip SMT verification
+- `-v, --verbose`: Show detailed output
+
+### Example: Specifying Live-Out Registers
+
+If you only care about specific output registers:
+
+```bash
+./target/release/s11 equiv tests/asm/seq1.s tests/asm/seq2.s --live-out "x0" --verbose
+```
+
+This is useful when intermediate registers are used differently but final outputs match.
+
+### Example: Non-Equivalent Sequences
+
+When sequences are not equivalent, `equiv` shows a counterexample:
+
+```bash
+./target/release/s11 equiv tests/asm/seq1.s tests/asm/seq3.s --verbose
+```
+
+**Output:**
+```
+Parsing tests/asm/seq1.s...
+  Parsed 2 instructions:
+    mov x0, x1
+    add x0, x0, #1
+Parsing tests/asm/seq3.s...
+  Parsed 1 instructions:
+    add x0, x1, #2
+...
+NOT EQUIVALENT: The two sequences produce different results.
+
+Counterexample found:
+  Input state:
+    x1 = 0xb5a308b226faa80e
+    ...
+  Output from sequence 1:
+    x0 = 0xb5a308b226faa80f
+  Output from sequence 2:
+    x0 = 0xb5a308b226faa810
+```
+
+### Example: Zero Register Patterns
+
+Check if `mov x0, #0` and `eor x0, x0, x0` are equivalent:
+
+```bash
+# Create test files
+echo "mov x0, #0" > /tmp/zero1.s
+echo "eor x0, x0, x0" > /tmp/zero2.s
+
+./target/release/s11 equiv /tmp/zero1.s /tmp/zero2.s --live-out "x0"
+```
+
+**Output:**
+```
+EQUIVALENT: The two sequences are semantically equivalent.
+```
+
+### Example: Commutativity
+
+Verify that addition is commutative:
+
+```bash
+echo "add x0, x1, x2" > /tmp/add1.s
+echo "add x0, x2, x1" > /tmp/add2.s
+
+./target/release/s11 equiv /tmp/add1.s /tmp/add2.s --live-out "x0"
+```
+
+**Output:**
+```
+EQUIVALENT: The two sequences are semantically equivalent.
+```
+
+### Example: Fast Mode
+
+For quick checks without SMT verification:
+
+```bash
+./target/release/s11 equiv tests/asm/seq1.s tests/asm/seq2.s --fast-only --verbose
+```
+
+This runs random testing only, which is faster but may not catch all differences.
+
+### Assembly File Format
+
+Assembly files support:
+- GNU assembler syntax
+- Comments: `//`, `;`, or `@`
+- Directives: `.text`, `.global`, etc. (ignored)
+- Labels: `_start:`, `loop:`, etc. (ignored)
+- Case-insensitive opcodes and registers
+
+Example file:
+```asm
+// my_sequence.s - Example assembly file
+    .text
+    .global _start
+_start:
+    mov x0, x1          // copy x1 to x0
+    add x0, x0, #1      ; increment by 1
+```
+
+---
+
 ## Search Algorithms
 
 s11 provides four search algorithms, each with different tradeoffs.
@@ -343,4 +481,9 @@ Unsupported instructions (memory operations, branches, etc.) are skipped with a 
 4. **Verify the result**:
    ```bash
    ./target/release/s11 disasm mybinary_optimized
+   ```
+
+5. **(Optional) Check equivalence** of two sequences you're curious about:
+   ```bash
+   ./target/release/s11 equiv original.s optimized.s --live-out "x0,x1"
    ```
