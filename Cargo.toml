@@ -28,7 +28,7 @@ default = ["z3"]
 z3 = ["dep:z3"]
 
 [dev-dependencies]
-proptest = "1.9"
+proptest = "1.10"
 
 # Optional: Profile for release builds for better performance/smaller binary
 [profile.release]
