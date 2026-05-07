@@ -17,6 +17,10 @@ TARGETS=(
   "05_sub_via_add.s|x0"
   "06_double_via_shift.s|x0"
   "07_dead_compute.s|x0"
+  "08_chain05.s|x0"
+  "09_chain10.s|x0"
+  "10_chain15.s|x0"
+  "11_chain20.s|x0"
 )
 
 cd "$ROOT"
