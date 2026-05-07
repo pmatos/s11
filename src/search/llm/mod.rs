@@ -29,10 +29,25 @@ use self::prompt::{OUTPUT_SCHEMA, build_prompt};
 /// times, sequentially, with fresh prompts. The first candidate that parses,
 /// is strictly shorter than the target, and is provably equivalent (per the
 /// existing fast + SMT pipeline) is returned.
+/// Per-phase timing breakdown for one `LlmSearch::search` run.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct LlmTimings {
+    /// Number of times `codex exec` was invoked.
+    pub codex_calls: u32,
+    /// Wall-clock time spent inside `codex exec` invocations.
+    pub codex_time: Duration,
+    /// Number of candidate verifications attempted (one per parseable response).
+    pub verifications: u32,
+    /// Wall-clock time spent in the verification pipeline (parse + fast-path
+    /// random testing + Z3 SMT). Dominated by SMT for non-parse-fail outcomes.
+    pub verify_time: Duration,
+}
+
 #[derive(Default)]
 pub struct LlmSearch {
     last_stats: SearchStatistics,
     last_ledger: UnsupportedMnemonicLedger,
+    last_timings: LlmTimings,
 }
 
 impl LlmSearch {
@@ -43,6 +58,11 @@ impl LlmSearch {
     /// The unsupported-mnemonic ledger from the most recent search.
     pub fn ledger(&self) -> &UnsupportedMnemonicLedger {
         &self.last_ledger
+    }
+
+    /// Per-phase timing breakdown for the most recent search.
+    pub fn timings(&self) -> &LlmTimings {
+        &self.last_timings
     }
 }
 
@@ -57,6 +77,7 @@ impl SearchAlgorithm for LlmSearch {
         stats.original_cost = target.len() as u64;
         stats.best_cost_found = target.len() as u64;
         let mut ledger = UnsupportedMnemonicLedger::new();
+        let mut timings = LlmTimings::default();
         let started = Instant::now();
 
         // Per ADR-0002: refuse targets where flags are live-out.
@@ -68,6 +89,7 @@ impl SearchAlgorithm for LlmSearch {
             stats.elapsed_time = started.elapsed();
             self.last_stats = stats.clone();
             self.last_ledger = ledger;
+            self.last_timings = timings;
             return SearchResult::no_optimization(target.to_vec(), stats);
         }
 
@@ -96,14 +118,18 @@ impl SearchAlgorithm for LlmSearch {
                 );
             }
             let call_start = Instant::now();
-            let raw = match invoke_codex(&config.llm, &prompt, OUTPUT_SCHEMA) {
+            let codex_result = invoke_codex(&config.llm, &prompt, OUTPUT_SCHEMA);
+            let codex_elapsed = call_start.elapsed();
+            timings.codex_calls += 1;
+            timings.codex_time += codex_elapsed;
+            let raw = match codex_result {
                 Ok(s) => {
                     if config.verbose {
                         eprintln!(
                             "llm-search: [{:>2}/{}]   ← codex returned in {:.2}s",
                             call_idx + 1,
                             max_calls,
-                            call_start.elapsed().as_secs_f64()
+                            codex_elapsed.as_secs_f64()
                         );
                     }
                     s
@@ -114,7 +140,7 @@ impl SearchAlgorithm for LlmSearch {
                             "llm-search: [{:>2}/{}]   ✗ codex error after {:.2}s: {}",
                             call_idx + 1,
                             max_calls,
-                            call_start.elapsed().as_secs_f64(),
+                            codex_elapsed.as_secs_f64(),
                             e
                         );
                     }
@@ -122,7 +148,11 @@ impl SearchAlgorithm for LlmSearch {
                 }
             };
 
-            match classify(target, &raw, live_out) {
+            let verify_start = Instant::now();
+            let outcome = classify(target, &raw, live_out);
+            timings.verifications += 1;
+            timings.verify_time += verify_start.elapsed();
+            match outcome {
                 IterationOutcome::Success(seq) => {
                     if config.verbose {
                         eprintln!(
@@ -176,6 +206,7 @@ impl SearchAlgorithm for LlmSearch {
         stats.elapsed_time = started.elapsed();
         self.last_stats = stats.clone();
         self.last_ledger = ledger;
+        self.last_timings = timings;
 
         match found {
             Some(seq) => SearchResult::with_optimization(target.to_vec(), seq, stats),
@@ -190,5 +221,6 @@ impl SearchAlgorithm for LlmSearch {
     fn reset(&mut self) {
         self.last_stats = SearchStatistics::default();
         self.last_ledger = UnsupportedMnemonicLedger::new();
+        self.last_timings = LlmTimings::default();
     }
 }

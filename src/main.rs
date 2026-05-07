@@ -580,6 +580,7 @@ fn run_optimization(
             let result = search.search(target, &live_out, &config);
 
             print_search_statistics(&result.statistics);
+            print_llm_timings(search.timings(), result.statistics.elapsed_time);
             print_unsupported_mnemonic_ledger(search.ledger());
 
             if result.found_optimization {
@@ -629,6 +630,38 @@ fn run_optimization(
                 Ok(None)
             }
         }
+    }
+}
+
+/// Print the per-phase timing breakdown from an LLM-assisted run.
+fn print_llm_timings(timings: &search::llm::LlmTimings, total: Duration) {
+    let codex = timings.codex_time.as_secs_f64();
+    let verify = timings.verify_time.as_secs_f64();
+    let other = (total.as_secs_f64() - codex - verify).max(0.0);
+    println!("\nLLM phase timing:");
+    println!(
+        "  Codex calls:      {:>7.2}s   ({} call{})",
+        codex,
+        timings.codex_calls,
+        if timings.codex_calls == 1 { "" } else { "s" }
+    );
+    println!(
+        "  Verification:     {:>7.2}s   ({} verification{}, parse + fast + SMT)",
+        verify,
+        timings.verifications,
+        if timings.verifications == 1 { "" } else { "s" }
+    );
+    println!("  Other:            {:>7.2}s", other);
+    println!("  Total:            {:>7.2}s", total.as_secs_f64());
+    if total.as_secs_f64() > 0.0 {
+        println!(
+            "  Codex share:      {:>6.1}%",
+            100.0 * codex / total.as_secs_f64()
+        );
+        println!(
+            "  Verify share:     {:>6.1}%",
+            100.0 * verify / total.as_secs_f64()
+        );
     }
 }
 
@@ -947,6 +980,7 @@ fn run_llm_opt(
     let result = searcher.search(&target, &live_out, &config);
 
     print_search_statistics(&result.statistics);
+    print_llm_timings(searcher.timings(), result.statistics.elapsed_time);
     print_unsupported_mnemonic_ledger(searcher.ledger());
 
     println!();
