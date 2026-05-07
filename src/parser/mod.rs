@@ -30,6 +30,7 @@ impl ParseError {
         }
     }
 
+    #[allow(dead_code)]
     pub fn with_column(mut self, column: usize) -> Self {
         self.column = Some(column);
         self

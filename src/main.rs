@@ -48,6 +48,8 @@ enum CliAlgorithm {
     Symbolic,
     /// Hybrid parallel search (symbolic + multiple stochastic workers)
     Hybrid,
+    /// LLM-assisted search via Codex CLI
+    Llm,
 }
 
 impl From<CliAlgorithm> for Algorithm {
@@ -57,6 +59,7 @@ impl From<CliAlgorithm> for Algorithm {
             CliAlgorithm::Stochastic => Algorithm::Stochastic,
             CliAlgorithm::Symbolic => Algorithm::Symbolic,
             CliAlgorithm::Hybrid => Algorithm::Hybrid,
+            CliAlgorithm::Llm => Algorithm::Llm,
         }
     }
 }
@@ -180,6 +183,35 @@ enum Commands {
         /// Disable symbolic worker in hybrid mode (all workers run stochastic)
         #[arg(long)]
         no_symbolic: bool,
+
+        // --- LLM-assisted search options ---
+        /// Maximum number of `codex exec` invocations per target (LLM algorithm)
+        #[arg(long, default_value = "20")]
+        llm_max_calls: u32,
+        /// Codex model identifier (LLM algorithm)
+        #[arg(long, default_value = "gpt-5.3-codex-spark")]
+        llm_model: String,
+    },
+    /// Run LLM-assisted optimization on a single assembly file (demo entry point)
+    LlmOpt {
+        /// Path to an .s file containing the target sequence (GAS syntax)
+        #[arg(long)]
+        asm: PathBuf,
+        /// Live-out registers (comma-separated, e.g. "x0,x1")
+        #[arg(long)]
+        live_out: String,
+        /// Maximum number of `codex exec` invocations
+        #[arg(long, default_value = "20")]
+        max_calls: u32,
+        /// Codex model identifier
+        #[arg(long, default_value = "gpt-5.3-codex-spark")]
+        model: String,
+        /// Overall timeout in seconds (across all calls)
+        #[arg(long, default_value = "120")]
+        timeout: u64,
+        /// Enable verbose output
+        #[arg(short, long)]
+        verbose: bool,
     },
     /// Check semantic equivalence of two assembly files
     Equiv {
@@ -329,6 +361,9 @@ struct OptimizationOptions {
     // Parallel/Hybrid options
     cores: Option<usize>,
     no_symbolic: bool,
+    // LLM options
+    llm_max_calls: u32,
+    llm_model: String,
 }
 
 // --- Optimization Function ---
@@ -527,6 +562,32 @@ fn run_optimization(
                 Ok(None)
             }
         }
+        Algorithm::Llm => {
+            println!("\nRunning LLM-assisted (Codex) search...");
+            println!("  Model: {}", options.llm_model);
+            println!("  Max codex calls: {}", options.llm_max_calls);
+
+            let mut config = SearchConfig::default()
+                .with_cost_metric(options.cost_metric)
+                .with_timeout_option(options.timeout)
+                .with_verbose(options.verbose)
+                .with_registers(available_registers)
+                .with_immediates(available_immediates);
+            config.llm.max_codex_calls = options.llm_max_calls;
+            config.llm.model = options.llm_model.clone();
+
+            let mut search = search::llm::LlmSearch::new();
+            let result = search.search(target, &live_out, &config);
+
+            print_search_statistics(&result.statistics);
+            print_unsupported_mnemonic_ledger(search.ledger());
+
+            if result.found_optimization {
+                Ok(result.optimized_sequence)
+            } else {
+                Ok(None)
+            }
+        }
         Algorithm::Hybrid => {
             let num_cores = options.cores.unwrap_or_else(num_cpus::get);
             println!("\nRunning hybrid parallel search...");
@@ -568,6 +629,18 @@ fn run_optimization(
                 Ok(None)
             }
         }
+    }
+}
+
+/// Print the unsupported-mnemonic ledger from an LLM-assisted run.
+fn print_unsupported_mnemonic_ledger(ledger: &search::llm::ledger::UnsupportedMnemonicLedger) {
+    let entries = ledger.clone().into_sorted();
+    if entries.is_empty() {
+        return;
+    }
+    println!("\nUnsupported mnemonics emitted by the LLM (frequency-ranked):");
+    for (mnem, count) in entries {
+        println!("  {:>5}  {}", count, mnem);
     }
 }
 
@@ -843,6 +916,45 @@ fn find_shorter_equivalent(original_seq: &[Instruction]) -> Option<Vec<Instructi
 
 // --- Equivalence Checking Command ---
 
+fn run_llm_opt(
+    asm: &Path,
+    live_out_str: &str,
+    max_calls: u32,
+    model: &str,
+    timeout_secs: u64,
+    verbose: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let target = parser::parse_assembly_file(asm)?;
+    if verbose {
+        println!("Target ({} instructions):", target.len());
+        for instr in &target {
+            println!("  {}", instr);
+        }
+    }
+
+    let live_out: LiveOutMask = live_out_str
+        .parse()
+        .map_err(|e: validation::live_out::ParseLiveOutError| e.to_string())?;
+
+    let mut config = SearchConfig::default()
+        .with_timeout(Duration::from_secs(timeout_secs))
+        .with_verbose(verbose);
+    config.algorithm = Algorithm::Llm;
+    config.llm.max_codex_calls = max_calls;
+    config.llm.model = model.to_string();
+
+    let mut searcher = search::llm::LlmSearch::new();
+    let result = searcher.search(&target, &live_out, &config);
+
+    print_search_statistics(&result.statistics);
+    print_unsupported_mnemonic_ledger(searcher.ledger());
+
+    println!();
+    println!("{}", result);
+
+    Ok(())
+}
+
 fn run_equiv(
     file1: &Path,
     file2: &Path,
@@ -1005,6 +1117,8 @@ fn main() {
             solver_timeout,
             cores,
             no_symbolic,
+            llm_max_calls,
+            llm_model,
         } => {
             // Architecture selection
             if let Some(a) = arch {
@@ -1048,6 +1162,8 @@ fn main() {
                 solver_timeout: Duration::from_secs(solver_timeout),
                 cores,
                 no_symbolic,
+                llm_max_calls,
+                llm_model,
             };
 
             match optimize_elf_binary(&binary, start_addr, end_addr, &options) {
@@ -1058,6 +1174,20 @@ fn main() {
                 }
             }
         }
+        Commands::LlmOpt {
+            asm,
+            live_out,
+            max_calls,
+            model,
+            timeout,
+            verbose,
+        } => match run_llm_opt(&asm, &live_out, max_calls, &model, timeout, verbose) {
+            Ok(()) => {}
+            Err(e) => {
+                eprintln!("llm-opt: {}", e);
+                std::process::exit(1);
+            }
+        },
         Commands::Equiv {
             file1,
             file2,

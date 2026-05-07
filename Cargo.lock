@@ -1294,6 +1294,8 @@ dependencies = [
  "rand",
  "rand_chacha",
  "rayon",
+ "serde",
+ "serde_json",
  "z3",
 ]
 
