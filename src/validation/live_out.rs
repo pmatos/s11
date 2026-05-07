@@ -81,10 +81,56 @@ pub fn compute_written_registers(instructions: &[Instruction]) -> LiveOutMask {
     mask
 }
 
+/// Returns true if NZCV may be observable after the sequence executes.
+///
+/// Conservative static check: any flag-writing instruction in the sequence makes
+/// NZCV live-out, since the latest flag-write is by definition not overwritten
+/// later in this sequence and downstream code may observe it.
+pub fn flags_live_out(instructions: &[Instruction]) -> bool {
+    instructions.iter().any(|i| i.modifies_flags())
+}
+
+/// Returns true if any instruction reads NZCV flags before any instruction writes them.
+///
+/// In live-in terms: NZCV is part of the live-in set iff this returns true.
+pub fn reads_flags_before_writing(instructions: &[Instruction]) -> bool {
+    for instr in instructions {
+        if instr.reads_flags() {
+            return true;
+        }
+        if instr.modifies_flags() {
+            return false;
+        }
+    }
+    false
+}
+
+/// Compute the set of registers read before written by a sequence of instructions.
+///
+/// This is the intra-sequence live-in set: any register the sequence reads
+/// before defining (writing) is in the result. XZR is never included.
+pub fn compute_live_in_registers(instructions: &[Instruction]) -> LiveOutMask {
+    let mut live_in = LiveOutMask::empty();
+    let mut written = LiveOutMask::empty();
+
+    for instr in instructions {
+        for src in instr.source_registers() {
+            if !written.contains(src) {
+                live_in.add(src);
+            }
+        }
+        if let Some(dest) = instr.destination() {
+            written.add(dest);
+        }
+    }
+
+    live_in
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ir::Operand;
+    use crate::ir::{Condition, Operand};
 
     #[test]
     fn test_parse_register_x0() {
@@ -218,6 +264,175 @@ mod tests {
         let mask = compute_written_registers(&instructions);
         assert!(mask.contains(Register::X0));
         assert_eq!(mask.len(), 1);
+    }
+
+    #[test]
+    fn test_compute_live_in_registers_empty() {
+        let mask = compute_live_in_registers(&[]);
+        assert!(mask.is_empty());
+    }
+
+    #[test]
+    fn test_compute_live_in_registers_mov_imm_no_sources() {
+        let instructions = vec![Instruction::MovImm {
+            rd: Register::X0,
+            imm: 42,
+        }];
+        let mask = compute_live_in_registers(&instructions);
+        assert!(mask.is_empty());
+    }
+
+    #[test]
+    fn test_flags_live_out_empty() {
+        assert!(!flags_live_out(&[]));
+    }
+
+    #[test]
+    fn test_flags_live_out_cmp() {
+        let instructions = vec![Instruction::Cmp {
+            rn: Register::X0,
+            rm: Operand::Register(Register::X1),
+        }];
+        assert!(flags_live_out(&instructions));
+    }
+
+    #[test]
+    fn test_flags_live_out_add_only() {
+        let instructions = vec![Instruction::Add {
+            rd: Register::X0,
+            rn: Register::X1,
+            rm: Operand::Register(Register::X2),
+        }];
+        assert!(!flags_live_out(&instructions));
+    }
+
+    #[test]
+    fn test_flags_live_out_cmp_then_add() {
+        // CMP's flags are still live at end (ADD doesn't overwrite them).
+        let instructions = vec![
+            Instruction::Cmp {
+                rn: Register::X0,
+                rm: Operand::Register(Register::X1),
+            },
+            Instruction::Add {
+                rd: Register::X2,
+                rn: Register::X0,
+                rm: Operand::Register(Register::X1),
+            },
+        ];
+        assert!(flags_live_out(&instructions));
+    }
+
+    #[test]
+    fn test_reads_flags_before_writing_empty() {
+        assert!(!reads_flags_before_writing(&[]));
+    }
+
+    #[test]
+    fn test_reads_flags_before_writing_csel_alone() {
+        let instructions = vec![Instruction::Csel {
+            rd: Register::X0,
+            rn: Register::X1,
+            rm: Register::X2,
+            cond: Condition::EQ,
+        }];
+        assert!(reads_flags_before_writing(&instructions));
+    }
+
+    #[test]
+    fn test_reads_flags_before_writing_cmp_then_csel() {
+        let instructions = vec![
+            Instruction::Cmp {
+                rn: Register::X0,
+                rm: Operand::Register(Register::X1),
+            },
+            Instruction::Csel {
+                rd: Register::X0,
+                rn: Register::X1,
+                rm: Register::X2,
+                cond: Condition::EQ,
+            },
+        ];
+        assert!(!reads_flags_before_writing(&instructions));
+    }
+
+    #[test]
+    fn test_reads_flags_before_writing_csel_then_cmp() {
+        let instructions = vec![
+            Instruction::Csel {
+                rd: Register::X0,
+                rn: Register::X1,
+                rm: Register::X2,
+                cond: Condition::EQ,
+            },
+            Instruction::Cmp {
+                rn: Register::X0,
+                rm: Operand::Register(Register::X1),
+            },
+        ];
+        assert!(reads_flags_before_writing(&instructions));
+    }
+
+    #[test]
+    fn test_compute_live_in_registers_xzr_excluded() {
+        // MOV x0, xzr — xzr is read but must not appear in live-in (mirrors
+        // compute_written_registers' exclusion of xzr writes).
+        let instructions = vec![Instruction::MovReg {
+            rd: Register::X0,
+            rn: Register::XZR,
+        }];
+        let mask = compute_live_in_registers(&instructions);
+        assert!(!mask.contains(Register::XZR));
+        assert!(mask.is_empty());
+    }
+
+    #[test]
+    fn test_compute_live_in_registers_cmp_reads_both() {
+        // CMP has no destination but reads both operands — both are live-in.
+        let instructions = vec![Instruction::Cmp {
+            rn: Register::X0,
+            rm: Operand::Register(Register::X1),
+        }];
+        let mask = compute_live_in_registers(&instructions);
+        assert!(mask.contains(Register::X0));
+        assert!(mask.contains(Register::X1));
+        assert_eq!(mask.len(), 2);
+    }
+
+    #[test]
+    fn test_compute_live_in_registers_def_kills_use() {
+        // ADD x0, x1, #5 ; ADD x2, x0, #1 — x0 is written before second use
+        let instructions = vec![
+            Instruction::Add {
+                rd: Register::X0,
+                rn: Register::X1,
+                rm: Operand::Immediate(5),
+            },
+            Instruction::Add {
+                rd: Register::X2,
+                rn: Register::X0,
+                rm: Operand::Immediate(1),
+            },
+        ];
+        let mask = compute_live_in_registers(&instructions);
+        assert!(mask.contains(Register::X1));
+        assert!(!mask.contains(Register::X0));
+        assert!(!mask.contains(Register::X2));
+        assert_eq!(mask.len(), 1);
+    }
+
+    #[test]
+    fn test_compute_live_in_registers_add_two_sources() {
+        let instructions = vec![Instruction::Add {
+            rd: Register::X0,
+            rn: Register::X1,
+            rm: Operand::Register(Register::X2),
+        }];
+        let mask = compute_live_in_registers(&instructions);
+        assert!(mask.contains(Register::X1));
+        assert!(mask.contains(Register::X2));
+        assert!(!mask.contains(Register::X0));
+        assert_eq!(mask.len(), 2);
     }
 
     #[test]

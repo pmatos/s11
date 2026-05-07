@@ -18,6 +18,8 @@ pub enum Algorithm {
     Symbolic,
     /// Hybrid: parallel execution with symbolic + multiple stochastic workers
     Hybrid,
+    /// LLM-assisted search via Codex CLI
+    Llm,
 }
 
 impl std::fmt::Display for Algorithm {
@@ -27,6 +29,7 @@ impl std::fmt::Display for Algorithm {
             Algorithm::Stochastic => write!(f, "stochastic"),
             Algorithm::Symbolic => write!(f, "symbolic"),
             Algorithm::Hybrid => write!(f, "hybrid"),
+            Algorithm::Llm => write!(f, "llm"),
         }
     }
 }
@@ -40,8 +43,9 @@ impl std::str::FromStr for Algorithm {
             "stochastic" | "stoch" | "mcmc" => Ok(Algorithm::Stochastic),
             "symbolic" | "sym" | "smt" => Ok(Algorithm::Symbolic),
             "hybrid" | "parallel" => Ok(Algorithm::Hybrid),
+            "llm" | "codex" => Ok(Algorithm::Llm),
             _ => Err(format!(
-                "Unknown algorithm: '{}'. Valid options: enumerative, stochastic, symbolic, hybrid",
+                "Unknown algorithm: '{}'. Valid options: enumerative, stochastic, symbolic, hybrid, llm",
                 s
             )),
         }
@@ -251,6 +255,27 @@ impl SymbolicConfig {
     }
 }
 
+/// Configuration for the LLM-assisted (Codex) search algorithm.
+#[derive(Debug, Clone)]
+pub struct LlmConfig {
+    /// Maximum number of `codex exec` invocations per search.
+    pub max_codex_calls: u32,
+    /// Codex model identifier (passed to `codex exec -m`).
+    pub model: String,
+    /// Path to the `codex` binary (override for testing or unusual installs).
+    pub codex_bin: String,
+}
+
+impl Default for LlmConfig {
+    fn default() -> Self {
+        Self {
+            max_codex_calls: 20,
+            model: "gpt-5.3-codex-spark".to_string(),
+            codex_bin: "codex".to_string(),
+        }
+    }
+}
+
 /// Main search configuration
 #[derive(Debug, Clone)]
 pub struct SearchConfig {
@@ -268,6 +293,8 @@ pub struct SearchConfig {
     pub stochastic: StochasticConfig,
     /// Symbolic-specific configuration
     pub symbolic: SymbolicConfig,
+    /// LLM-specific configuration
+    pub llm: LlmConfig,
     /// Verbose output during search
     pub verbose: bool,
 }
@@ -291,6 +318,7 @@ impl Default for SearchConfig {
             ],
             stochastic: StochasticConfig::default(),
             symbolic: SymbolicConfig::default(),
+            llm: LlmConfig::default(),
             verbose: false,
         }
     }

@@ -72,6 +72,12 @@ test-all: build-tests build
     @echo "Running complete test suite..."
     ./test_all.sh
 
+# Run the LLM-assisted superoptimizer demo against the local corpus.
+# Requires `codex` CLI installed and authenticated (subscription).
+llm-demo: build
+    @echo "Running LLM-assisted superoptimizer demo..."
+    ./tests/data/llm_demo/run_demo.sh
+
 # Help message (can be more detailed than just listing)
 help:
     @echo "Available commands for AArch64 Super-Optimizer MVP (run with 'just <command>'):"

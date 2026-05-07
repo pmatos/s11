@@ -8,6 +8,7 @@
 
 pub mod candidate;
 pub mod config;
+pub mod llm;
 pub mod parallel;
 pub mod result;
 pub mod stochastic;
