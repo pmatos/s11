@@ -14,3 +14,4 @@ binaries/
 
 # IDE-specific files
 .vscode/
+.claude/settings.local.json
