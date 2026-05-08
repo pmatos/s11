@@ -60,7 +60,7 @@ Mutation testing runs via [cargo-mutants](https://mutants.rs/) and is **informat
 ## Dependencies
 
 The project requires:
-- Rust toolchain with 2021 edition support
+- Rust toolchain with 2024 edition support
 - External crates: `elf`, `capstone`, `clap`, `z3`, `rayon`, `crossbeam-channel`
 - Capstone engine (usually installed via system package manager)
 - Z3 SMT solver and development libraries (for semantic equivalence checking)
