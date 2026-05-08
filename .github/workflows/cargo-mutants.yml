@@ -69,6 +69,7 @@ jobs:
           name: mutants-shard-${{ matrix.shard }}
           path: mutants.out
           if-no-files-found: ignore
+          retention-days: 14
 
   summary:
     name: aggregate summary

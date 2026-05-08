@@ -72,6 +72,7 @@ jobs:
           name: mutants-pr
           path: mutants.out
           if-no-files-found: ignore
+          retention-days: 14
 
       - name: Generate PR comment body
         if: always()
