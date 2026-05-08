@@ -20,10 +20,15 @@ impl UnsupportedMnemonicLedger {
         *self.counts.entry(mnemonic.to_string()).or_insert(0) += 1;
     }
 
+    pub fn is_empty(&self) -> bool {
+        self.counts.is_empty()
+    }
+
     /// Return the ledger as `(mnemonic, count)` pairs sorted by count
-    /// descending, breaking ties alphabetically.
-    pub fn into_sorted(self) -> Vec<(String, u32)> {
-        let mut pairs: Vec<(String, u32)> = self.counts.into_iter().collect();
+    /// descending, breaking ties alphabetically. Borrows; does not consume.
+    pub fn sorted_entries(&self) -> Vec<(String, u32)> {
+        let mut pairs: Vec<(String, u32)> =
+            self.counts.iter().map(|(k, v)| (k.clone(), *v)).collect();
         pairs.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
         pairs
     }
@@ -36,14 +41,15 @@ mod tests {
     #[test]
     fn empty_ledger() {
         let l = UnsupportedMnemonicLedger::new();
-        assert!(l.into_sorted().is_empty());
+        assert!(l.is_empty());
+        assert!(l.sorted_entries().is_empty());
     }
 
     #[test]
     fn single_record() {
         let mut l = UnsupportedMnemonicLedger::new();
         l.record("ldr");
-        assert_eq!(l.into_sorted(), vec![("ldr".to_string(), 1)]);
+        assert_eq!(l.sorted_entries(), vec![("ldr".to_string(), 1)]);
     }
 
     #[test]
@@ -52,7 +58,7 @@ mod tests {
         l.record("ldr");
         l.record("ldr");
         l.record("ldr");
-        assert_eq!(l.into_sorted(), vec![("ldr".to_string(), 3)]);
+        assert_eq!(l.sorted_entries(), vec![("ldr".to_string(), 3)]);
     }
 
     #[test]
@@ -64,7 +70,7 @@ mod tests {
         l.record("b"); // 1
         // Expected: ldr (2), b (1), str (1)  — alpha tie-break for the 1s.
         assert_eq!(
-            l.into_sorted(),
+            l.sorted_entries(),
             vec![
                 ("ldr".to_string(), 2),
                 ("b".to_string(), 1),

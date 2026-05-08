@@ -255,6 +255,14 @@ impl SymbolicConfig {
     }
 }
 
+/// Default Codex model identifier used by the LLM-assisted search flow.
+///
+/// Single source of truth for the model name; CLI defaults reference this
+/// constant rather than embedding the literal in multiple places.
+/// Identifier comes from the OpenAI Codex Spark announcement
+/// (https://openai.com/index/introducing-gpt-5-3-codex-spark/).
+pub const DEFAULT_LLM_MODEL: &str = "gpt-5.3-codex-spark";
+
 /// Configuration for the LLM-assisted (Codex) search algorithm.
 #[derive(Debug, Clone)]
 pub struct LlmConfig {
@@ -270,9 +278,26 @@ impl Default for LlmConfig {
     fn default() -> Self {
         Self {
             max_codex_calls: 20,
-            model: "gpt-5.3-codex-spark".to_string(),
+            model: DEFAULT_LLM_MODEL.to_string(),
             codex_bin: "codex".to_string(),
         }
+    }
+}
+
+impl LlmConfig {
+    pub fn with_max_codex_calls(mut self, n: u32) -> Self {
+        self.max_codex_calls = n;
+        self
+    }
+
+    pub fn with_model(mut self, model: impl Into<String>) -> Self {
+        self.model = model.into();
+        self
+    }
+
+    pub fn with_codex_bin(mut self, bin: impl Into<String>) -> Self {
+        self.codex_bin = bin.into();
+        self
     }
 }
 
@@ -352,6 +377,11 @@ impl SearchConfig {
 
     pub fn with_stochastic(mut self, stochastic: StochasticConfig) -> Self {
         self.stochastic = stochastic;
+        self
+    }
+
+    pub fn with_llm(mut self, llm: LlmConfig) -> Self {
+        self.llm = llm;
         self
     }
 

@@ -17,7 +17,9 @@ mod validation;
 use assembler::AArch64Assembler;
 use elf_patcher::{AddressWindow, ElfPatcher, parse_hex_address};
 use ir::{Instruction, Operand, Register};
-use search::config::{Algorithm, SearchConfig, SearchMode, StochasticConfig, SymbolicConfig};
+use search::config::{
+    Algorithm, LlmConfig, SearchConfig, SearchMode, StochasticConfig, SymbolicConfig,
+};
 use search::parallel::{ParallelConfig, run_parallel_search};
 use search::{SearchAlgorithm, StochasticSearch, SymbolicSearch};
 use semantics::cost::CostMetric;
@@ -189,7 +191,7 @@ enum Commands {
         #[arg(long, default_value = "20")]
         llm_max_calls: u32,
         /// Codex model identifier (LLM algorithm)
-        #[arg(long, default_value = "gpt-5.3-codex-spark")]
+        #[arg(long, default_value_t = search::config::DEFAULT_LLM_MODEL.to_string())]
         llm_model: String,
     },
     /// Run LLM-assisted optimization on a single assembly file (demo entry point)
@@ -204,7 +206,7 @@ enum Commands {
         #[arg(long, default_value = "20")]
         max_calls: u32,
         /// Codex model identifier
-        #[arg(long, default_value = "gpt-5.3-codex-spark")]
+        #[arg(long, default_value_t = search::config::DEFAULT_LLM_MODEL.to_string())]
         model: String,
         /// Overall timeout in seconds (across all calls)
         #[arg(long, default_value = "120")]
@@ -567,14 +569,17 @@ fn run_optimization(
             println!("  Model: {}", options.llm_model);
             println!("  Max codex calls: {}", options.llm_max_calls);
 
-            let mut config = SearchConfig::default()
+            let llm = LlmConfig::default()
+                .with_max_codex_calls(options.llm_max_calls)
+                .with_model(options.llm_model.clone());
+
+            let config = SearchConfig::default()
                 .with_cost_metric(options.cost_metric)
                 .with_timeout_option(options.timeout)
                 .with_verbose(options.verbose)
                 .with_registers(available_registers)
-                .with_immediates(available_immediates);
-            config.llm.max_codex_calls = options.llm_max_calls;
-            config.llm.model = options.llm_model.clone();
+                .with_immediates(available_immediates)
+                .with_llm(llm);
 
             let mut search = search::llm::LlmSearch::new();
             let result = search.search(target, &live_out, &config);
@@ -704,12 +709,11 @@ fn print_llm_timings(timings: &search::llm::LlmTimings, total: Duration) {
 
 /// Print the unsupported-mnemonic ledger from an LLM-assisted run.
 fn print_unsupported_mnemonic_ledger(ledger: &search::llm::ledger::UnsupportedMnemonicLedger) {
-    let entries = ledger.clone().into_sorted();
-    if entries.is_empty() {
+    if ledger.is_empty() {
         return;
     }
     println!("\nUnsupported mnemonics emitted by the LLM (frequency-ranked):");
-    for (mnem, count) in entries {
+    for (mnem, count) in ledger.sorted_entries() {
         println!("  {:>5}  {}", count, mnem);
     }
 }
@@ -1006,12 +1010,15 @@ fn run_llm_opt(
         .parse()
         .map_err(|e: validation::live_out::ParseLiveOutError| e.to_string())?;
 
-    let mut config = SearchConfig::default()
+    let llm = LlmConfig::default()
+        .with_max_codex_calls(max_calls)
+        .with_model(model);
+
+    let config = SearchConfig::default()
+        .with_algorithm(Algorithm::Llm)
         .with_timeout(Duration::from_secs(timeout_secs))
-        .with_verbose(verbose);
-    config.algorithm = Algorithm::Llm;
-    config.llm.max_codex_calls = max_calls;
-    config.llm.model = model.to_string();
+        .with_verbose(verbose)
+        .with_llm(llm);
 
     let mut searcher = search::llm::LlmSearch::new();
     let result = searcher.search(&target, &live_out, &config);
