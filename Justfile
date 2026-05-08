@@ -78,14 +78,11 @@ llm-demo: build
     @echo "Running LLM-assisted superoptimizer demo..."
     ./tests/data/llm_demo/run_demo.sh
 
-# Run cargo-mutants locally (slow). Mirrors the nightly CI invocation.
-# The baseline uses `cargo test --bins` to match the gating policy in
-# `.github/workflows/test.yml`, which runs integration tests with `|| true`.
-mutants: build-tests
-    @echo "Running cargo-mutants (this can take >30 min)..."
-    cargo build
-    cargo test --bins
-    cargo mutants --baseline=skip --timeout 180 --in-place -vV
+# Run cargo-mutants locally (slow; expect >30 min on a full run).
+# Thin wrapper around scripts/run-mutants.sh; pass `--diff` or `--shard`
+# arguments through with `just mutants -- --diff`.
+mutants *ARGS:
+    ./scripts/run-mutants.sh {{ARGS}}
 
 # Help message (can be more detailed than just listing)
 help:
