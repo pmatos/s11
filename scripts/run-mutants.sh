@@ -121,8 +121,12 @@ set -e
 
 if [[ -d mutants.out ]]; then
     echo
-    echo "==> Summary (scripts/mutants_summary.py)"
-    python3 scripts/mutants_summary.py mutants.out
+    if command -v python3 >/dev/null; then
+        echo "==> Summary (scripts/mutants_summary.py)"
+        python3 scripts/mutants_summary.py mutants.out
+    else
+        echo "==> Skipping summary: python3 not found. Raw results in mutants.out/."
+    fi
 fi
 
 exit "$status"
