@@ -83,15 +83,15 @@ pub fn compute_written_registers(instructions: &[Instruction]) -> LiveOutMask {
 
 /// Returns true if NZCV may be observable after the sequence executes.
 ///
-/// Conservative static check: refuse if **any** flag-writing instruction is
-/// present, regardless of whether a later instruction overwrites it.
+/// Static check: returns true iff **any** flag-writing instruction is
+/// present in the sequence.
 ///
-/// Sound for the current 20-opcode subset because no instruction in it kills
-/// NZCV without also setting it — if any flag-writer is present, the last
-/// flag-writer's NZCV is observable downstream. If a flag-clobbering or
-/// flag-clearing instruction (e.g. an explicit `MSR NZCV, ...`) is added to
-/// the subset later, this predicate must be revisited: the "any" form would
-/// then be conservative (over-refuse), not exact.
+/// **Exact (not over-approximate) for the current 20-opcode subset.** No
+/// instruction in the subset clears NZCV without also setting it, so any
+/// sequence containing a flag-writer always has live-out flags at the end.
+/// If a flag-clobbering or flag-clearing instruction (e.g. an explicit
+/// `MSR NZCV, ...`) is added later, this predicate becomes a conservative
+/// over-approximation and may need revisiting.
 pub fn flags_live_out(instructions: &[Instruction]) -> bool {
     instructions.iter().any(|i| i.modifies_flags())
 }

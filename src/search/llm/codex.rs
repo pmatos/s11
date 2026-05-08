@@ -15,6 +15,22 @@ pub enum EnvelopeError {
     EmptyAssembly,
 }
 
+impl std::fmt::Display for EnvelopeError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            EnvelopeError::InvalidJson => f.write_str("envelope is not valid JSON"),
+            EnvelopeError::MissingAssemblyField => {
+                f.write_str("envelope is missing the `assembly` field")
+            }
+            EnvelopeError::EmptyAssembly => {
+                f.write_str("envelope `assembly` field is empty or whitespace-only")
+            }
+        }
+    }
+}
+
+impl std::error::Error for EnvelopeError {}
+
 #[derive(Debug)]
 pub enum CodexError {
     Io(String),
@@ -29,7 +45,16 @@ impl std::fmt::Display for CodexError {
             CodexError::NonZeroExit { status, stderr } => {
                 write!(f, "codex exited with status {}: {}", status, stderr)
             }
-            CodexError::Envelope(e) => write!(f, "codex envelope parse error: {:?}", e),
+            CodexError::Envelope(e) => write!(f, "codex envelope parse error: {}", e),
+        }
+    }
+}
+
+impl std::error::Error for CodexError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            CodexError::Envelope(e) => Some(e),
+            _ => None,
         }
     }
 }
