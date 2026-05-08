@@ -4,7 +4,7 @@
 //! Success, ParseFail, NotShorter, EquivFail, EquivUnknown.
 
 use crate::ir::Instruction;
-use crate::parser::parse_assembly_string;
+use crate::parser::{LineResult, parse_assembly_string, parse_line};
 use crate::semantics::equivalence::{
     EquivalenceConfig, EquivalenceMetrics, EquivalenceResult, check_equivalence_with_config_metrics,
 };
@@ -14,7 +14,11 @@ use crate::semantics::state::LiveOutMask;
 pub enum IterationOutcome {
     Success(Vec<Instruction>),
     ParseFail {
-        unsupported_mnemonic: Option<String>,
+        /// All unsupported mnemonics observed in the raw response, lowercased,
+        /// in order of appearance. May contain duplicates (one entry per
+        /// occurrence). Empty if the parse failure was not due to an unknown
+        /// instruction (e.g., immediate-out-of-range, malformed operands).
+        unsupported_mnemonics: Vec<String>,
     },
     NotShorter {
         candidate_len: usize,
@@ -35,10 +39,10 @@ pub fn classify(
 ) -> (IterationOutcome, Option<EquivalenceMetrics>) {
     let candidate = match parse_assembly_string(raw_asm, "<llm-output>".to_string()) {
         Ok(v) => v,
-        Err(err) => {
+        Err(_) => {
             return (
                 IterationOutcome::ParseFail {
-                    unsupported_mnemonic: extract_mnemonic(&err.line_content),
+                    unsupported_mnemonics: extract_unsupported_mnemonics(raw_asm),
                 },
                 None,
             );
@@ -66,11 +70,27 @@ pub fn classify(
     (outcome, Some(metrics))
 }
 
-/// Extract the offending mnemonic from a parser error's line_content.
-/// Returns the first whitespace-separated token, lowercased, or None if the
-/// line is empty/whitespace.
-fn extract_mnemonic(line: &str) -> Option<String> {
-    line.split_whitespace().next().map(|s| s.to_lowercase())
+/// Walk every line of the raw response and collect mnemonics the parser
+/// rejected as unknown. Independent of the single-error-stop behavior of
+/// `parse_assembly_string` so a response with several unsupported lines
+/// contributes every mnemonic to the ledger (per ADR-0003 — full multiset).
+fn extract_unsupported_mnemonics(raw: &str) -> Vec<String> {
+    const PREFIX: &str = "unknown instruction: ";
+    let mut found = Vec::new();
+    for line in raw.lines() {
+        match parse_line(line) {
+            Ok(LineResult::Instruction(_)) | Ok(LineResult::Skip) => {}
+            Err(msg) => {
+                if let Some(rest) = msg.strip_prefix(PREFIX) {
+                    let mnem = rest.trim().to_lowercase();
+                    if !mnem.is_empty() {
+                        found.push(mnem);
+                    }
+                }
+            }
+        }
+    }
+    found
 }
 
 #[cfg(test)]
@@ -94,10 +114,44 @@ mod tests {
         assert_eq!(
             outcome,
             IterationOutcome::ParseFail {
-                unsupported_mnemonic: Some("ldr".to_string())
+                unsupported_mnemonics: vec!["ldr".to_string()]
             }
         );
         assert!(metrics.is_none(), "parse-fail must not invoke verifier");
+    }
+
+    #[test]
+    fn parse_fail_collects_all_unsupported_mnemonics_in_response() {
+        // Response with three different unsupported instructions interleaved
+        // with one supported `mov`. All three unsupported should be captured.
+        let target = vec![Instruction::MovImm {
+            rd: Register::X0,
+            imm: 1,
+        }];
+        let raw = "ldr x0, [x1]\nmov x0, x1\nstr x2, [x3]\nb .Lend\n";
+        let (outcome, metrics) = classify(&target, raw, &live_out_x0());
+        let mnemonics = match outcome {
+            IterationOutcome::ParseFail {
+                unsupported_mnemonics,
+            } => unsupported_mnemonics,
+            other => panic!("expected ParseFail, got {:?}", other),
+        };
+        assert!(
+            mnemonics.contains(&"ldr".to_string()),
+            "ldr missing from {:?}",
+            mnemonics
+        );
+        assert!(
+            mnemonics.contains(&"str".to_string()),
+            "str missing from {:?}",
+            mnemonics
+        );
+        assert!(
+            mnemonics.contains(&"b".to_string()),
+            "b missing from {:?}",
+            mnemonics
+        );
+        assert!(metrics.is_none());
     }
 
     #[test]

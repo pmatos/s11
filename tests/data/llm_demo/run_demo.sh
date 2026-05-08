@@ -3,7 +3,9 @@
 # against each. Requires the codex CLI to be installed and authenticated
 # (subscription).
 
-set -u
+# Per-target failures are expected and handled via `if "$S11" ...`; we only
+# want to abort on infrastructure errors (missing binary, build failure).
+set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"

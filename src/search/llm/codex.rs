@@ -2,8 +2,9 @@
 
 use serde::Deserialize;
 use std::io::Write;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::search::config::LlmConfig;
 
@@ -11,6 +12,7 @@ use crate::search::config::LlmConfig;
 pub enum EnvelopeError {
     InvalidJson,
     MissingAssemblyField,
+    EmptyAssembly,
 }
 
 #[derive(Debug)]
@@ -38,23 +40,53 @@ struct Envelope {
 }
 
 /// Parse the Codex `--output-schema` envelope into the assembly string.
+///
+/// Returns `EmptyAssembly` for an envelope whose `assembly` field is the empty
+/// string — the LLM essentially saying "no candidate" — so the caller can
+/// treat it as a non-candidate iteration without burning a verifier slot.
 pub fn parse_codex_envelope(json: &str) -> Result<String, EnvelopeError> {
     let env: Envelope = serde_json::from_str(json).map_err(|_| EnvelopeError::InvalidJson)?;
-    env.assembly.ok_or(EnvelopeError::MissingAssemblyField)
+    let asm = env.assembly.ok_or(EnvelopeError::MissingAssemblyField)?;
+    if asm.trim().is_empty() {
+        return Err(EnvelopeError::EmptyAssembly);
+    }
+    Ok(asm)
+}
+
+/// Per-process monotonic counter ensuring temp-file paths are unique across
+/// concurrent and sequential `invoke_codex` calls within a single process.
+/// Combined with the PID, this avoids cross-process collisions too.
+static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+/// RAII guard that removes a path on drop. Survives early returns / panics.
+struct TempPath(PathBuf);
+
+impl Drop for TempPath {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.0);
+    }
+}
+
+impl TempPath {
+    fn as_path(&self) -> &Path {
+        &self.0
+    }
 }
 
 /// Invoke `codex exec` with the given prompt and schema, return the asm string.
 ///
 /// Uses an ephemeral, read-only Codex run with subscription auth (no API key needed).
-/// Schema and answer files are written under the system temp dir.
+/// Schema and answer files are written under the system temp dir with PID +
+/// monotonic-counter naming and removed via RAII guards before this function
+/// returns (success, error, or panic).
 pub fn invoke_codex(config: &LlmConfig, prompt: &str, schema: &str) -> Result<String, CodexError> {
+    let id = TEMP_COUNTER.fetch_add(1, Ordering::Relaxed);
+    let pid = std::process::id();
     let tmp = std::env::temp_dir();
-    let schema_path = tmp.join(format!("s11-codex-schema-{}.json", std::process::id()));
-    let answer_path = tmp.join(format!("s11-codex-answer-{}.json", std::process::id()));
+    let schema_path = TempPath(tmp.join(format!("s11-codex-schema-{}-{}.json", pid, id)));
+    let answer_path = TempPath(tmp.join(format!("s11-codex-answer-{}-{}.json", pid, id)));
 
-    write_file(&schema_path, schema).map_err(CodexError::Io)?;
-    // Pre-clear any stale answer file.
-    let _ = std::fs::remove_file(&answer_path);
+    write_file(schema_path.as_path(), schema).map_err(CodexError::Io)?;
 
     let output = Command::new(&config.codex_bin)
         .arg("exec")
@@ -65,9 +97,9 @@ pub fn invoke_codex(config: &LlmConfig, prompt: &str, schema: &str) -> Result<St
         .arg("--ephemeral")
         .arg("--skip-git-repo-check")
         .arg("--output-schema")
-        .arg(&schema_path)
+        .arg(schema_path.as_path())
         .arg("-o")
-        .arg(&answer_path)
+        .arg(answer_path.as_path())
         .arg(prompt)
         .output()
         .map_err(|e| CodexError::Io(e.to_string()))?;
@@ -79,7 +111,7 @@ pub fn invoke_codex(config: &LlmConfig, prompt: &str, schema: &str) -> Result<St
         });
     }
 
-    let json = std::fs::read_to_string(&answer_path)
+    let json = std::fs::read_to_string(answer_path.as_path())
         .map_err(|e| CodexError::Io(format!("reading answer file: {}", e)))?;
 
     parse_codex_envelope(&json).map_err(CodexError::Envelope)
@@ -101,9 +133,21 @@ mod tests {
     }
 
     #[test]
-    fn parses_empty_assembly() {
+    fn rejects_empty_assembly() {
         let json = r#"{"assembly":""}"#;
-        assert_eq!(parse_codex_envelope(json), Ok(String::new()));
+        assert_eq!(
+            parse_codex_envelope(json),
+            Err(EnvelopeError::EmptyAssembly)
+        );
+    }
+
+    #[test]
+    fn rejects_whitespace_only_assembly() {
+        let json = r#"{"assembly":"   \n\t  "}"#;
+        assert_eq!(
+            parse_codex_envelope(json),
+            Err(EnvelopeError::EmptyAssembly)
+        );
     }
 
     #[test]

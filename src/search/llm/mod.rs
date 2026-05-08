@@ -2,8 +2,6 @@
 //!
 //! See CONTEXT.md and docs/adr/0001-0003 for the design.
 
-#![allow(dead_code)]
-
 pub mod codex;
 pub mod ledger;
 pub mod outcome;
@@ -115,7 +113,6 @@ impl SearchAlgorithm for LlmSearch {
                 }
                 break;
             }
-            stats.candidates_evaluated += 1;
 
             if config.verbose {
                 eprintln!(
@@ -140,6 +137,9 @@ impl SearchAlgorithm for LlmSearch {
                             codex_elapsed.as_secs_f64()
                         );
                     }
+                    // Codex produced a candidate; this is the moment we count
+                    // it as "evaluated" — Codex IO errors above don't.
+                    stats.candidates_evaluated += 1;
                     s
                 }
                 Err(e) => {
@@ -158,16 +158,19 @@ impl SearchAlgorithm for LlmSearch {
 
             let verify_start = Instant::now();
             let (outcome, metrics) = classify(target, &raw, live_out);
-            timings.verifications += 1;
-            timings.verify_time += verify_start.elapsed();
-            if let Some(m) = metrics
-                && m.smt_called
-            {
-                timings.smt_calls += 1;
-                if let Some(bytes) = m.smt_formula_bytes {
-                    timings.smt_formula_bytes_total += bytes;
-                    if bytes > timings.smt_formula_bytes_max {
-                        timings.smt_formula_bytes_max = bytes;
+            let verify_elapsed = verify_start.elapsed();
+            // Only count as a "verification" when the verifier actually ran.
+            // Parse-fail and not-shorter short-circuit before the verifier.
+            if let Some(m) = metrics {
+                timings.verifications += 1;
+                timings.verify_time += verify_elapsed;
+                if m.smt_called {
+                    timings.smt_calls += 1;
+                    if let Some(bytes) = m.smt_formula_bytes {
+                        timings.smt_formula_bytes_total += bytes;
+                        if bytes > timings.smt_formula_bytes_max {
+                            timings.smt_formula_bytes_max = bytes;
+                        }
                     }
                 }
             }
@@ -190,13 +193,22 @@ impl SearchAlgorithm for LlmSearch {
                     break;
                 }
                 IterationOutcome::ParseFail {
-                    unsupported_mnemonic,
+                    unsupported_mnemonics,
                 } => {
-                    if let Some(m) = unsupported_mnemonic {
-                        ledger.record(&m);
+                    for m in &unsupported_mnemonics {
+                        ledger.record(m);
                     }
                     if config.verbose {
-                        eprintln!("llm-search: parse-fail on call {}", call_idx);
+                        eprintln!(
+                            "llm-search: parse-fail on call {} ({} unsupported mnemonic{})",
+                            call_idx,
+                            unsupported_mnemonics.len(),
+                            if unsupported_mnemonics.len() == 1 {
+                                ""
+                            } else {
+                                "s"
+                            }
+                        );
                     }
                 }
                 IterationOutcome::NotShorter { candidate_len } => {
@@ -241,5 +253,95 @@ impl SearchAlgorithm for LlmSearch {
         self.last_stats = SearchStatistics::default();
         self.last_ledger = UnsupportedMnemonicLedger::new();
         self.last_timings = LlmTimings::default();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    //! No-Codex unit tests of `LlmSearch::search` flow gates.
+    //!
+    //! These tests do NOT invoke Codex — they exercise paths that short-circuit
+    //! before any candidate generation (the ADR-0002 flags-live-out refusal,
+    //! and the `max_codex_calls = 0` budget exhaustion). For end-to-end LLM
+    //! coverage see `tests/data/llm_demo/` and `just llm-demo`.
+    use super::*;
+    use crate::ir::{Operand, Register};
+    use crate::search::config::LlmConfig;
+
+    fn live_out_x0() -> LiveOutMask {
+        let mut m = LiveOutMask::empty();
+        m.add(Register::X0);
+        m
+    }
+
+    fn cfg_no_calls() -> SearchConfig {
+        SearchConfig::default().with_llm(LlmConfig::default().with_max_codex_calls(0))
+    }
+
+    #[test]
+    fn flags_live_out_target_is_refused_without_calling_codex() {
+        // Target ends in a flag-writer; per ADR-0002 the LLM flow refuses.
+        let target = vec![
+            Instruction::Add {
+                rd: Register::X0,
+                rn: Register::X1,
+                rm: Operand::Register(Register::X2),
+            },
+            Instruction::Cmp {
+                rn: Register::X0,
+                rm: Operand::Immediate(0),
+            },
+        ];
+
+        let mut search = LlmSearch::new();
+        let result = search.search(&target, &live_out_x0(), &cfg_no_calls());
+
+        assert!(
+            !result.found_optimization,
+            "flags-live-out target must be refused, not optimized"
+        );
+        assert!(
+            result.optimized_sequence.is_none(),
+            "no optimized sequence expected on refusal"
+        );
+
+        let timings = search.timings();
+        assert_eq!(
+            timings.codex_calls, 0,
+            "refusal must short-circuit before any codex invocation"
+        );
+        assert_eq!(timings.smt_calls, 0);
+        assert_eq!(timings.verifications, 0);
+        assert!(search.ledger().is_empty());
+    }
+
+    #[test]
+    fn non_flags_live_out_target_proceeds_until_budget_exhausted() {
+        // Same shape but ending on a register-writing instruction (no flag
+        // writer at all). Should NOT be refused. With max_codex_calls=0 the
+        // loop budget exhausts before any call, but the function still
+        // returns a no-optimization result rather than the refusal path.
+        let target = vec![
+            Instruction::Add {
+                rd: Register::X0,
+                rn: Register::X1,
+                rm: Operand::Register(Register::X2),
+            },
+            Instruction::Sub {
+                rd: Register::X0,
+                rn: Register::X0,
+                rm: Operand::Immediate(1),
+            },
+        ];
+
+        let mut search = LlmSearch::new();
+        let result = search.search(&target, &live_out_x0(), &cfg_no_calls());
+
+        assert!(!result.found_optimization);
+        let timings = search.timings();
+        assert_eq!(
+            timings.codex_calls, 0,
+            "max_codex_calls = 0 means zero codex invocations"
+        );
     }
 }

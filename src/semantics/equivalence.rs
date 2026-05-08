@@ -137,13 +137,14 @@ pub struct EquivalenceMetrics {
     pub smt_formula_bytes: Option<usize>,
 }
 
-/// Like `check_equivalence_with_config`, but also reports per-call metrics.
-pub fn check_equivalence_with_config_metrics(
+/// Run the fast-path random + edge-case checks. Returns either a
+/// `NotEquivalentFast` refutation, `None` if the fast path passed, or
+/// `Some(Equivalent)` if `fast_only` short-circuits.
+fn run_fast_path(
     seq1: &[Instruction],
     seq2: &[Instruction],
     config: &EquivalenceConfig,
-) -> (EquivalenceResult, EquivalenceMetrics) {
-    let mut metrics = EquivalenceMetrics::default();
+) -> Option<EquivalenceResult> {
     let input_regs: Vec<_> = config.live_out.iter().cloned().collect();
 
     let random_config = RandomInputConfig {
@@ -157,7 +158,7 @@ pub fn check_equivalence_with_config_metrics(
         let state2 = apply_sequence_concrete(input.clone(), seq2);
 
         if !states_equal_for_live_out(&state1, &state2, &config.live_out) {
-            return (EquivalenceResult::NotEquivalentFast(input.clone()), metrics);
+            return Some(EquivalenceResult::NotEquivalentFast(input.clone()));
         }
     }
 
@@ -167,87 +168,71 @@ pub fn check_equivalence_with_config_metrics(
         let state2 = apply_sequence_concrete(input.clone(), seq2);
 
         if !states_equal_for_live_out(&state1, &state2, &config.live_out) {
-            return (EquivalenceResult::NotEquivalentFast(input.clone()), metrics);
+            return Some(EquivalenceResult::NotEquivalentFast(input.clone()));
         }
     }
 
     if config.fast_only {
-        return (EquivalenceResult::Equivalent, metrics);
+        return Some(EquivalenceResult::Equivalent);
     }
 
-    let solver_config = SolverConfig {
-        timeout: config.smt_timeout,
-    };
-    let solver = create_solver_with_config(&solver_config);
-
-    let initial_state = MachineState::new_symbolic("init");
-
-    let final_state1 = apply_sequence(initial_state.clone(), seq1);
-    let final_state2 = apply_sequence(initial_state, seq2);
-
-    solver.assert(states_not_equal_for_live_out(
-        &final_state1,
-        &final_state2,
-        &config.live_out,
-    ));
-
-    metrics.smt_called = true;
-    metrics.smt_formula_bytes = Some(solver.to_string().len());
-
-    let result = match solver.check() {
-        SatResult::Unsat => EquivalenceResult::Equivalent,
-        SatResult::Sat => EquivalenceResult::NotEquivalent,
-        SatResult::Unknown => {
-            EquivalenceResult::Unknown("SMT solver returned unknown (possibly timeout)".to_string())
-        }
-    };
-    (result, metrics)
+    None
 }
 
-/// Check equivalence with configuration (fast path + optional SMT)
+/// Check equivalence with configuration (fast path + optional SMT). No metrics.
 pub fn check_equivalence_with_config(
     seq1: &[Instruction],
     seq2: &[Instruction],
     config: &EquivalenceConfig,
 ) -> EquivalenceResult {
-    let input_regs: Vec<_> = config.live_out.iter().cloned().collect();
-
-    let random_config = RandomInputConfig {
-        count: config.random_test_count,
-        registers: input_regs.clone(),
-    };
-    let random_inputs = generate_random_inputs(&random_config);
-
-    for input in &random_inputs {
-        let state1 = apply_sequence_concrete(input.clone(), seq1);
-        let state2 = apply_sequence_concrete(input.clone(), seq2);
-
-        if !states_equal_for_live_out(&state1, &state2, &config.live_out) {
-            return EquivalenceResult::NotEquivalentFast(input.clone());
-        }
+    if let Some(fast) = run_fast_path(seq1, seq2, config) {
+        return fast;
     }
 
-    let edge_inputs = generate_edge_case_inputs(&input_regs);
-    for input in &edge_inputs {
-        let state1 = apply_sequence_concrete(input.clone(), seq1);
-        let state2 = apply_sequence_concrete(input.clone(), seq2);
+    let solver = build_smt_solver(seq1, seq2, config);
+    interpret_smt_result(solver.check())
+}
 
-        if !states_equal_for_live_out(&state1, &state2, &config.live_out) {
-            return EquivalenceResult::NotEquivalentFast(input.clone());
-        }
+/// Like `check_equivalence_with_config`, but also reports per-call metrics
+/// including the SMT formula size in bytes. Use this only when the metrics
+/// are actually consumed — `solver.to_string()` is non-trivial work compared
+/// to `solver.check()` on small problems.
+pub fn check_equivalence_with_config_metrics(
+    seq1: &[Instruction],
+    seq2: &[Instruction],
+    config: &EquivalenceConfig,
+) -> (EquivalenceResult, EquivalenceMetrics) {
+    let metrics = EquivalenceMetrics::default();
+
+    if let Some(fast) = run_fast_path(seq1, seq2, config) {
+        return (fast, metrics);
     }
 
-    if config.fast_only {
-        return EquivalenceResult::Equivalent;
-    }
+    let solver = build_smt_solver(seq1, seq2, config);
+    let smt_formula_bytes = solver.to_string().len();
+    let result = interpret_smt_result(solver.check());
+    (
+        result,
+        EquivalenceMetrics {
+            smt_called: true,
+            smt_formula_bytes: Some(smt_formula_bytes),
+        },
+    )
+}
 
+/// Build a Z3 solver populated with the assertion that the two sequences
+/// disagree on the live-out state. Caller invokes `check()` next.
+fn build_smt_solver(
+    seq1: &[Instruction],
+    seq2: &[Instruction],
+    config: &EquivalenceConfig,
+) -> z3::Solver {
     let solver_config = SolverConfig {
         timeout: config.smt_timeout,
     };
     let solver = create_solver_with_config(&solver_config);
 
     let initial_state = MachineState::new_symbolic("init");
-
     let final_state1 = apply_sequence(initial_state.clone(), seq1);
     let final_state2 = apply_sequence(initial_state, seq2);
 
@@ -256,8 +241,11 @@ pub fn check_equivalence_with_config(
         &final_state2,
         &config.live_out,
     ));
+    solver
+}
 
-    match solver.check() {
+fn interpret_smt_result(result: SatResult) -> EquivalenceResult {
+    match result {
         SatResult::Unsat => EquivalenceResult::Equivalent,
         SatResult::Sat => EquivalenceResult::NotEquivalent,
         SatResult::Unknown => {
