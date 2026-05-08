@@ -21,6 +21,7 @@ Usage:
   scripts/run-mutants.sh --diff main     # diff vs an explicit base ref
   scripts/run-mutants.sh --shard 0/8     # one shard of an 8-way split
   scripts/run-mutants.sh -- --foo --bar  # forward extra flags to cargo-mutants
+  scripts/run-mutants.sh -h | --help     # print this message
 EOF
 }
 
@@ -36,7 +37,7 @@ while [[ $# -gt 0 ]]; do
         --diff)
             mode="diff"
             shift
-            if [[ $# -gt 0 && "$1" != --* ]]; then
+            if [[ $# -gt 0 && "$1" != -* ]]; then
                 diff_base="$1"
                 shift
             fi
