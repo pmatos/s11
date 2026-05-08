@@ -46,6 +46,10 @@ while [[ $# -gt 0 ]]; do
                 echo "error: --shard requires an argument (e.g. --shard 0/8)" >&2
                 exit 2
             fi
+            if [[ ! "$2" =~ ^[0-9]+/[0-9]+$ ]]; then
+                echo "error: --shard argument must be N/M (e.g. --shard 0/8)" >&2
+                exit 2
+            fi
             shard="$2"
             shift 2
             ;;
