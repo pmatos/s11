@@ -633,6 +633,17 @@ fn run_optimization(
     }
 }
 
+/// Format a byte count with a unit chosen to keep ~3 significant digits visible.
+fn fmt_bytes(n: usize) -> String {
+    if n >= 1_048_576 {
+        format!("{:>7.2} MB", n as f64 / 1_048_576.0)
+    } else if n >= 1_024 {
+        format!("{:>7.2} kB", n as f64 / 1_024.0)
+    } else {
+        format!("{:>7} B ", n)
+    }
+}
+
 /// Format a Duration with a unit chosen to keep ~3 significant digits visible.
 fn fmt_dur(d: Duration) -> String {
     let secs = d.as_secs_f64();
@@ -663,6 +674,20 @@ fn print_llm_timings(timings: &search::llm::LlmTimings, total: Duration) {
         timings.verifications,
         if timings.verifications == 1 { "" } else { "s" }
     );
+    if timings.smt_calls > 0 {
+        let avg_bytes = timings.smt_formula_bytes_total / timings.smt_calls as usize;
+        println!(
+            "    SMT invoked:    {} time{}",
+            timings.smt_calls,
+            if timings.smt_calls == 1 { "" } else { "s" }
+        );
+        println!(
+            "    SMT formula:    {}  total   ({}  avg, {}  max)",
+            fmt_bytes(timings.smt_formula_bytes_total),
+            fmt_bytes(avg_bytes),
+            fmt_bytes(timings.smt_formula_bytes_max),
+        );
+    }
     println!("  Other:            {}", fmt_dur(other));
     println!("  Total:            {}", fmt_dur(total));
     if total.as_secs_f64() > 0.0 {

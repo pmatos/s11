@@ -41,6 +41,14 @@ pub struct LlmTimings {
     /// Wall-clock time spent in the verification pipeline (parse + fast-path
     /// random testing + Z3 SMT). Dominated by SMT for non-parse-fail outcomes.
     pub verify_time: Duration,
+    /// Number of times the SMT solver was actually invoked (subset of
+    /// verifications: parse-fail and fast-path-refutations don't reach SMT).
+    pub smt_calls: u32,
+    /// Sum of SMT formula sizes (bytes of SMT-LIB rendering) across all
+    /// solver invocations in this search.
+    pub smt_formula_bytes_total: usize,
+    /// Largest SMT formula size (bytes) seen in any single invocation.
+    pub smt_formula_bytes_max: usize,
 }
 
 #[derive(Default)]
@@ -149,9 +157,20 @@ impl SearchAlgorithm for LlmSearch {
             };
 
             let verify_start = Instant::now();
-            let outcome = classify(target, &raw, live_out);
+            let (outcome, metrics) = classify(target, &raw, live_out);
             timings.verifications += 1;
             timings.verify_time += verify_start.elapsed();
+            if let Some(m) = metrics
+                && m.smt_called
+            {
+                timings.smt_calls += 1;
+                if let Some(bytes) = m.smt_formula_bytes {
+                    timings.smt_formula_bytes_total += bytes;
+                    if bytes > timings.smt_formula_bytes_max {
+                        timings.smt_formula_bytes_max = bytes;
+                    }
+                }
+            }
             match outcome {
                 IterationOutcome::Success(seq) => {
                     if config.verbose {

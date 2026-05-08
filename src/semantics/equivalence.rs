@@ -124,6 +124,86 @@ pub fn check_equivalence(seq1: &[Instruction], seq2: &[Instruction]) -> Equivale
     }
 }
 
+/// Optional per-call metrics from the equivalence pipeline.
+#[derive(Debug, Default, Clone)]
+pub struct EquivalenceMetrics {
+    /// Whether the SMT solver was actually invoked. False when fast-path
+    /// refuted the candidate, when fast_only is set, or when the candidate
+    /// was rejected before reaching SMT for any other reason.
+    pub smt_called: bool,
+    /// Size of the SMT-LIB rendering of the loaded solver (assertions +
+    /// declarations) at the moment `check()` was called. None if SMT was
+    /// not called.
+    pub smt_formula_bytes: Option<usize>,
+}
+
+/// Like `check_equivalence_with_config`, but also reports per-call metrics.
+pub fn check_equivalence_with_config_metrics(
+    seq1: &[Instruction],
+    seq2: &[Instruction],
+    config: &EquivalenceConfig,
+) -> (EquivalenceResult, EquivalenceMetrics) {
+    let mut metrics = EquivalenceMetrics::default();
+    let input_regs: Vec<_> = config.live_out.iter().cloned().collect();
+
+    let random_config = RandomInputConfig {
+        count: config.random_test_count,
+        registers: input_regs.clone(),
+    };
+    let random_inputs = generate_random_inputs(&random_config);
+
+    for input in &random_inputs {
+        let state1 = apply_sequence_concrete(input.clone(), seq1);
+        let state2 = apply_sequence_concrete(input.clone(), seq2);
+
+        if !states_equal_for_live_out(&state1, &state2, &config.live_out) {
+            return (EquivalenceResult::NotEquivalentFast(input.clone()), metrics);
+        }
+    }
+
+    let edge_inputs = generate_edge_case_inputs(&input_regs);
+    for input in &edge_inputs {
+        let state1 = apply_sequence_concrete(input.clone(), seq1);
+        let state2 = apply_sequence_concrete(input.clone(), seq2);
+
+        if !states_equal_for_live_out(&state1, &state2, &config.live_out) {
+            return (EquivalenceResult::NotEquivalentFast(input.clone()), metrics);
+        }
+    }
+
+    if config.fast_only {
+        return (EquivalenceResult::Equivalent, metrics);
+    }
+
+    let solver_config = SolverConfig {
+        timeout: config.smt_timeout,
+    };
+    let solver = create_solver_with_config(&solver_config);
+
+    let initial_state = MachineState::new_symbolic("init");
+
+    let final_state1 = apply_sequence(initial_state.clone(), seq1);
+    let final_state2 = apply_sequence(initial_state, seq2);
+
+    solver.assert(states_not_equal_for_live_out(
+        &final_state1,
+        &final_state2,
+        &config.live_out,
+    ));
+
+    metrics.smt_called = true;
+    metrics.smt_formula_bytes = Some(solver.to_string().len());
+
+    let result = match solver.check() {
+        SatResult::Unsat => EquivalenceResult::Equivalent,
+        SatResult::Sat => EquivalenceResult::NotEquivalent,
+        SatResult::Unknown => {
+            EquivalenceResult::Unknown("SMT solver returned unknown (possibly timeout)".to_string())
+        }
+    };
+    (result, metrics)
+}
+
 /// Check equivalence with configuration (fast path + optional SMT)
 pub fn check_equivalence_with_config(
     seq1: &[Instruction],

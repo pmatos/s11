@@ -12,4 +12,6 @@ pub use equivalence::{
     EquivalenceConfig, EquivalenceResult, check_equivalence, check_equivalence_with_config,
 };
 #[allow(unused_imports)]
+pub use equivalence::{EquivalenceMetrics, check_equivalence_with_config_metrics};
+#[allow(unused_imports)]
 pub use state::{ConcreteMachineState, ConcreteValue, ConditionFlags, LiveOutMask};
