@@ -35,19 +35,21 @@ cargo build --verbose
 print_status "Build"
 echo
 
-# 3. Run unit tests
-echo "3. Running unit tests..."
-cargo test --verbose
-print_status "Unit tests"
-echo
-
-# 4. Build test binaries (if build_tests.sh exists)
+# 3. Build test binaries (if build_tests.sh exists)
+# Must run before `cargo test` because integration tests under tests/integration/
+# load the cross-compiled AArch64 binaries from binaries/.
 if [ -f "./build_tests.sh" ]; then
-    echo "4. Building test binaries..."
+    echo "3. Building test binaries..."
     ./build_tests.sh
     print_status "Test binary build"
     echo
 fi
+
+# 4. Run unit + integration tests
+echo "4. Running tests..."
+cargo test --verbose
+print_status "Tests"
+echo
 
 # 5. Run all tests (if test_all.sh exists)
 if [ -f "./test_all.sh" ]; then
