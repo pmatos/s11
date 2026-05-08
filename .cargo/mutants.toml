@@ -13,3 +13,10 @@
 # this multiplier in CI. The multiplier still governs `just mutants` and any
 # other invocation that doesn't pass `--timeout`.
 timeout_multiplier = 5.0
+
+# Match the baseline (`cargo test --bins`) used in CI and `just mutants`. The
+# integration tests under tests/integration/ are flaky in our CI environment
+# (test.yml runs them with `|| true`), so including them in per-mutant runs
+# would mark every mutant as caught by the pre-existing flake instead of by
+# the mutation itself.
+additional_cargo_test_args = ["--bins"]
