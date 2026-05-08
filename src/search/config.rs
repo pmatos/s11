@@ -269,7 +269,15 @@ pub struct LlmConfig {
     pub max_codex_calls: u32,
     /// Codex model identifier (passed to `codex exec -m`).
     pub model: String,
-    /// Path to the `codex` binary (override for testing or unusual installs).
+    /// Path to the `codex` binary. Override for tests or unusual installs.
+    ///
+    /// **Security note:** treat this field as a Rust-only override. It is
+    /// **not** wired up to any CLI flag, environment variable, or config file
+    /// — only Rust callers within this crate can change it. If a future
+    /// change exposes this to user input, it becomes an arbitrary-command-
+    /// execution surface (we `Command::new(codex_bin)` the value), and that
+    /// route should be locked down (e.g., resolve through `which` and reject
+    /// non-canonical paths) before being shipped.
     pub codex_bin: String,
 }
 

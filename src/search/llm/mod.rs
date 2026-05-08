@@ -43,9 +43,13 @@ pub struct LlmTimings {
     /// verifications: parse-fail and fast-path-refutations don't reach SMT).
     pub smt_calls: u32,
     /// Sum of SMT formula sizes (bytes of SMT-LIB rendering) across all
-    /// solver invocations in this search.
+    /// solver invocations in this search **whose result was Equivalent**.
+    /// Sat / Unknown SMT outcomes do not contribute (we don't pay
+    /// `solver.to_string()` on those paths). A run that hit SMT many times
+    /// but never proved equivalence will read 0 here even though `smt_calls`
+    /// is positive.
     pub smt_formula_bytes_total: usize,
-    /// Largest SMT formula size (bytes) seen in any single invocation.
+    /// Largest SMT formula size (bytes) seen on an Equivalent SMT outcome.
     pub smt_formula_bytes_max: usize,
 }
 
@@ -79,6 +83,13 @@ impl SearchAlgorithm for LlmSearch {
         live_out: &LiveOutMask,
         config: &SearchConfig,
     ) -> SearchResult {
+        // Reset accumulators at the start of every search so a caller that
+        // checks `ledger()` / `timings()` between two searches without a
+        // manual `reset()` never sees stale data from the previous run.
+        self.last_stats = SearchStatistics::default();
+        self.last_ledger = UnsupportedMnemonicLedger::new();
+        self.last_timings = LlmTimings::default();
+
         let mut stats = SearchStatistics::new(crate::search::config::Algorithm::Llm);
         stats.original_cost = target.len() as u64;
         stats.best_cost_found = target.len() as u64;
@@ -199,16 +210,24 @@ impl SearchAlgorithm for LlmSearch {
                         ledger.record(m);
                     }
                     if config.verbose {
-                        eprintln!(
-                            "llm-search: parse-fail on call {} ({} unsupported mnemonic{})",
-                            call_idx,
-                            unsupported_mnemonics.len(),
-                            if unsupported_mnemonics.len() == 1 {
-                                ""
-                            } else {
-                                "s"
-                            }
-                        );
+                        if unsupported_mnemonics.is_empty() {
+                            eprintln!(
+                                "llm-search: parse-fail on call {} (operand or encoding error; \
+                                 no unknown mnemonics)",
+                                call_idx
+                            );
+                        } else {
+                            eprintln!(
+                                "llm-search: parse-fail on call {} ({} unsupported mnemonic{})",
+                                call_idx,
+                                unsupported_mnemonics.len(),
+                                if unsupported_mnemonics.len() == 1 {
+                                    ""
+                                } else {
+                                    "s"
+                                }
+                            );
+                        }
                     }
                 }
                 IterationOutcome::NotShorter { candidate_len } => {

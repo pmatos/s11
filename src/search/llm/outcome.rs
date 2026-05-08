@@ -78,6 +78,12 @@ pub fn classify(
 /// Type-driven (matches `ParseLineError::UnknownInstruction`) rather than
 /// string-matched: a parser-error wording change can't silently empty the
 /// ledger.
+///
+/// Note: the loop above (`parse_assembly_string`) and this function each
+/// re-parse the response. The two-pass shape is intentional — we only walk
+/// every line a second time on the cold path (parse failure), and only when
+/// we want every offending mnemonic rather than just the first error site.
+/// Per-call cost is negligible at the MVP target sizes (3–20 instructions).
 fn extract_unsupported_mnemonics(raw: &str) -> Vec<String> {
     let mut found = Vec::new();
     for line in raw.lines() {

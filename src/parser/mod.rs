@@ -92,6 +92,8 @@ impl fmt::Display for ParseLineError {
     }
 }
 
+impl std::error::Error for ParseLineError {}
+
 /// Parse a register name (case-insensitive)
 pub fn parse_register(s: &str) -> Result<Register, String> {
     match s.to_lowercase().as_str() {
