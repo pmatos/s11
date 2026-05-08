@@ -43,9 +43,14 @@ jobs:
         # Without this, an unrelated test failure in the PR causes every mutated
         # build to fail identically and the sticky comment misreports them as
         # "caught" instead of surfacing the underlying breakage.
+        #
+        # Unit tests (--bins) only, matching the gating in `.github/workflows/test.yml`
+        # which runs integration tests with `|| true`. The flaky integration tests
+        # there should be hardened separately; gating cargo-mutants on them would be
+        # stricter than the project-wide CI policy.
         run: |
           cargo build
-          cargo test
+          cargo test --bins
 
       - name: Compute diff vs base
         run: git diff "origin/${{ github.base_ref }}..." > pr.diff
