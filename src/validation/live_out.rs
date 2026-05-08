@@ -84,11 +84,14 @@ pub fn compute_written_registers(instructions: &[Instruction]) -> LiveOutMask {
 /// Returns true if NZCV may be observable after the sequence executes.
 ///
 /// Conservative static check: refuse if **any** flag-writing instruction is
-/// present, regardless of whether a later instruction overwrites it. This is
-/// correct (not just conservative) for the s11 20-opcode subset, which has no
-/// instruction that "kills" NZCV without also setting it: if any flag-writer
-/// exists, the *last* one's NZCV is by definition not overwritten later in
-/// the sequence and downstream code may observe it.
+/// present, regardless of whether a later instruction overwrites it.
+///
+/// Sound for the current 20-opcode subset because no instruction in it kills
+/// NZCV without also setting it — if any flag-writer is present, the last
+/// flag-writer's NZCV is observable downstream. If a flag-clobbering or
+/// flag-clearing instruction (e.g. an explicit `MSR NZCV, ...`) is added to
+/// the subset later, this predicate must be revisited: the "any" form would
+/// then be conservative (over-refuse), not exact.
 pub fn flags_live_out(instructions: &[Instruction]) -> bool {
     instructions.iter().any(|i| i.modifies_flags())
 }
@@ -96,8 +99,9 @@ pub fn flags_live_out(instructions: &[Instruction]) -> bool {
 /// Returns true if any instruction reads NZCV flags before any instruction writes them.
 ///
 /// In live-in terms: NZCV is part of the live-in set iff this returns true.
-/// Intended consumer is the LLM prompt builder (per ADR-0001); not currently
-/// wired up because ADR-0003 omits flags from the prompt for the MVP.
+/// Used by the prompt builder when flags-live-in support is added (ADR-0001
+/// defines the helper; ADR-0003 omits flags from the prompt for the MVP, so
+/// the function has no consumer yet).
 #[allow(dead_code)]
 pub fn reads_flags_before_writing(instructions: &[Instruction]) -> bool {
     for instr in instructions {

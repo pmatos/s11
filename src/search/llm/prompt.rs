@@ -28,7 +28,7 @@ pub fn build_prompt(
 SHORTER (fewer instructions) sequence that produces the same values for the listed \
 live-out registers, given the listed live-in registers as inputs. Registers not in \
 the live-out set may be clobbered freely. If you cannot find a strictly shorter \
-equivalent, return the input sequence verbatim.\n\n",
+equivalent, return an empty `assembly` field — do NOT return the input verbatim.\n\n",
     );
     s.push_str(&format!(
         "Live-in registers: {}\n",

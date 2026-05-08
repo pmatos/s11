@@ -4,7 +4,7 @@
 //! Success, ParseFail, NotShorter, EquivFail, EquivUnknown.
 
 use crate::ir::Instruction;
-use crate::parser::{LineResult, parse_assembly_string, parse_line};
+use crate::parser::{ParseLineError, parse_assembly_string, parse_line};
 use crate::semantics::equivalence::{
     EquivalenceConfig, EquivalenceMetrics, EquivalenceResult, check_equivalence_with_config_metrics,
 };
@@ -74,19 +74,17 @@ pub fn classify(
 /// rejected as unknown. Independent of the single-error-stop behavior of
 /// `parse_assembly_string` so a response with several unsupported lines
 /// contributes every mnemonic to the ledger (per ADR-0003 — full multiset).
+///
+/// Type-driven (matches `ParseLineError::UnknownInstruction`) rather than
+/// string-matched: a parser-error wording change can't silently empty the
+/// ledger.
 fn extract_unsupported_mnemonics(raw: &str) -> Vec<String> {
-    const PREFIX: &str = "unknown instruction: ";
     let mut found = Vec::new();
     for line in raw.lines() {
-        match parse_line(line) {
-            Ok(LineResult::Instruction(_)) | Ok(LineResult::Skip) => {}
-            Err(msg) => {
-                if let Some(rest) = msg.strip_prefix(PREFIX) {
-                    let mnem = rest.trim().to_lowercase();
-                    if !mnem.is_empty() {
-                        found.push(mnem);
-                    }
-                }
+        if let Err(ParseLineError::UnknownInstruction(mnem)) = parse_line(line) {
+            // `parse_line` already lowercases the opcode before this branch.
+            if !mnem.is_empty() {
+                found.push(mnem);
             }
         }
     }

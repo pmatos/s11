@@ -117,8 +117,25 @@ pub fn invoke_codex(config: &LlmConfig, prompt: &str, schema: &str) -> Result<St
     parse_codex_envelope(&json).map_err(CodexError::Envelope)
 }
 
+/// Create a new file with owner-only (`0o600`) permissions on Unix; falls
+/// back to default permissions on non-Unix platforms (the LLM flow is only
+/// tested on Linux). The schema file is dull but the answer file briefly
+/// contains the model's response — we don't want to leak it to other users
+/// on a multi-user host during the (small) window before the RAII guard
+/// removes the file.
 fn write_file(path: &Path, content: &str) -> Result<(), String> {
-    let mut f = std::fs::File::create(path).map_err(|e| e.to_string())?;
+    use std::fs::OpenOptions;
+
+    let mut opts = OpenOptions::new();
+    opts.write(true).create(true).truncate(true);
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        opts.mode(0o600);
+    }
+
+    let mut f = opts.open(path).map_err(|e| e.to_string())?;
     f.write_all(content.as_bytes()).map_err(|e| e.to_string())
 }
 

@@ -258,9 +258,8 @@ impl SymbolicConfig {
 /// Default Codex model identifier used by the LLM-assisted search flow.
 ///
 /// Single source of truth for the model name; CLI defaults reference this
-/// constant rather than embedding the literal in multiple places.
-/// Identifier comes from the OpenAI Codex Spark announcement
-/// (https://openai.com/index/introducing-gpt-5-3-codex-spark/).
+/// constant rather than embedding the literal in multiple places. Identifier
+/// is the OpenAI Codex Spark model exposed via the `codex` CLI.
 pub const DEFAULT_LLM_MODEL: &str = "gpt-5.3-codex-spark";
 
 /// Configuration for the LLM-assisted (Codex) search algorithm.
