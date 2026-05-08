@@ -633,34 +633,46 @@ fn run_optimization(
     }
 }
 
+/// Format a Duration with a unit chosen to keep ~3 significant digits visible.
+fn fmt_dur(d: Duration) -> String {
+    let secs = d.as_secs_f64();
+    if secs >= 1.0 {
+        format!("{:>8.2} s ", secs)
+    } else if secs >= 0.001 {
+        format!("{:>8.2} ms", secs * 1_000.0)
+    } else {
+        format!("{:>8.1} µs", secs * 1_000_000.0)
+    }
+}
+
 /// Print the per-phase timing breakdown from an LLM-assisted run.
 fn print_llm_timings(timings: &search::llm::LlmTimings, total: Duration) {
-    let codex = timings.codex_time.as_secs_f64();
-    let verify = timings.verify_time.as_secs_f64();
-    let other = (total.as_secs_f64() - codex - verify).max(0.0);
+    let codex = timings.codex_time;
+    let verify = timings.verify_time;
+    let other = total.saturating_sub(codex).saturating_sub(verify);
     println!("\nLLM phase timing:");
     println!(
-        "  Codex calls:      {:>7.2}s   ({} call{})",
-        codex,
+        "  Codex calls:      {}   ({} call{})",
+        fmt_dur(codex),
         timings.codex_calls,
         if timings.codex_calls == 1 { "" } else { "s" }
     );
     println!(
-        "  Verification:     {:>7.2}s   ({} verification{}, parse + fast + SMT)",
-        verify,
+        "  Verification:     {}   ({} verification{}, parse + fast + SMT)",
+        fmt_dur(verify),
         timings.verifications,
         if timings.verifications == 1 { "" } else { "s" }
     );
-    println!("  Other:            {:>7.2}s", other);
-    println!("  Total:            {:>7.2}s", total.as_secs_f64());
+    println!("  Other:            {}", fmt_dur(other));
+    println!("  Total:            {}", fmt_dur(total));
     if total.as_secs_f64() > 0.0 {
         println!(
-            "  Codex share:      {:>6.1}%",
-            100.0 * codex / total.as_secs_f64()
+            "  Codex share:      {:>6.2}%",
+            100.0 * codex.as_secs_f64() / total.as_secs_f64()
         );
         println!(
-            "  Verify share:     {:>6.1}%",
-            100.0 * verify / total.as_secs_f64()
+            "  Verify share:     {:>6.2}%",
+            100.0 * verify.as_secs_f64() / total.as_secs_f64()
         );
     }
 }
