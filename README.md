@@ -146,4 +146,4 @@ caught/missed/timeout/unviable summary at the end via
 
 ## License
 
-Dual-licensed under MIT or Apache-2.0, at your option.
+Licensed under [MIT](LICENSE).
