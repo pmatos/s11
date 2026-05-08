@@ -78,6 +78,14 @@ llm-demo: build
     @echo "Running LLM-assisted superoptimizer demo..."
     ./tests/data/llm_demo/run_demo.sh
 
+# Run cargo-mutants locally (slow). Mirrors the nightly CI invocation.
+mutants: build-tests
+    @echo "Running cargo-mutants (this can take >30 min)..."
+    cargo build
+    cargo test
+    cargo mutants --baseline=skip --timeout 180 --in-place -vV
+
+
 # Help message (can be more detailed than just listing)
 help:
     @echo "Available commands for AArch64 Super-Optimizer MVP (run with 'just <command>'):"
@@ -89,6 +97,7 @@ help:
     @echo "  test          - Run tests"
     @echo "  build-tests   - Build AArch64 test binaries"
     @echo "  test-all      - Run complete test suite"
+    @echo "  mutants       - Run cargo-mutants locally (slow; informational)"
     @echo "  clean         - Remove build artifacts from the target directory"
     @echo "  check         - Check the code for errors without compiling"
     @echo "  fmt           - Format the Rust code"

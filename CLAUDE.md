@@ -47,6 +47,15 @@ This prevents pushing code that will fail CI checks.
 
 Note: Clippy linting is run separately in the `rust-clippy.yml` workflow which performs security analysis and uploads results to GitHub's security tab.
 
+### Mutation Testing (informational)
+
+Mutation testing runs via [cargo-mutants](https://mutants.rs/) and is **informational only** — it does not gate merges.
+
+- `cargo-mutants.yml` — sharded × 8, runs nightly at 02:17 UTC and on `workflow_dispatch`. Per-shard `mutants.out` is uploaded as an artifact, and an aggregation job posts a caught/missed/timeout/unviable summary to the run's step summary.
+- `cargo-mutants-pr.yml` — runs on each PR using `cargo mutants --in-diff` against the PR base, and posts a sticky comment summarizing the diff's mutation outcomes.
+- Locally: `just mutants` runs the same flow (slow; expect >30 min).
+- Configuration lives in `mutants.toml` at the repo root.
+
 ## Dependencies
 
 The project requires:

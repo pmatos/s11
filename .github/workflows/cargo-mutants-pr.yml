@@ -1,0 +1,77 @@
+name: cargo-mutants (PR diff)
+
+on:
+  pull_request:
+    branches: [ main ]
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  diff:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Install system deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libcapstone-dev gcc-aarch64-linux-gnu z3 libz3-dev
+          curl --proto '=https' --tlsv1.2 -sSf https://just.systems/install.sh \
+            | sudo bash -s -- --to /usr/local/bin
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: cargo-mutants
+
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-mutants
+
+      - name: Build AArch64 test binaries
+        run: ./build_tests.sh
+
+      - name: Compute diff vs base
+        run: git diff "origin/${{ github.base_ref }}..." > pr.diff
+
+      - name: Run cargo-mutants on diff
+        continue-on-error: true
+        run: |
+          cargo mutants \
+            --in-diff pr.diff \
+            --baseline=skip \
+            --timeout 180 \
+            --in-place \
+            -vV
+
+      - name: Upload mutants.out
+        uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: mutants-pr
+          path: mutants.out
+          if-no-files-found: ignore
+
+      - name: Generate PR comment body
+        if: always()
+        run: |
+          mkdir -p mutants.out
+          python3 scripts/mutants_summary.py mutants.out \
+            --pr-comment mutants.out/comment.md \
+            >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Comment on PR
+        if: always()
+        uses: marocchino/sticky-pull-request-comment@v2
+        with:
+          header: cargo-mutants
+          path: mutants.out/comment.md
