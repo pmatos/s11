@@ -1014,6 +1014,12 @@ fn run_llm_opt(
         .with_max_codex_calls(max_calls)
         .with_model(model);
 
+    // Note: `available_registers` and `available_immediates` are intentionally
+    // omitted here. `LlmSearch` does not enumerate over a register/immediate
+    // pool — Codex generates candidates directly. The other algorithms
+    // (enumerative, stochastic, symbolic) need those fields and set them in
+    // `optimize_elf_binary`. If `LlmSearch` ever falls back to one of those
+    // generators, this entry point must populate the pools too.
     let config = SearchConfig::default()
         .with_algorithm(Algorithm::Llm)
         .with_timeout(Duration::from_secs(timeout_secs))

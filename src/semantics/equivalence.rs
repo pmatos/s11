@@ -197,6 +197,11 @@ pub fn check_equivalence_with_config(
 /// including the SMT formula size in bytes. Use this only when the metrics
 /// are actually consumed — `solver.to_string()` is non-trivial work compared
 /// to `solver.check()` on small problems.
+///
+/// Formula-size is captured **only when the solver returns `unsat`**
+/// (i.e., the candidate was proven equivalent). For `sat` (counter-example)
+/// or `unknown` (timeout) we skip the serialization — the size is
+/// uninteresting in those cases and the cost would be paid on the slow paths.
 pub fn check_equivalence_with_config_metrics(
     seq1: &[Instruction],
     seq2: &[Instruction],
@@ -209,13 +214,18 @@ pub fn check_equivalence_with_config_metrics(
     }
 
     let solver = build_smt_solver(seq1, seq2, config);
-    let smt_formula_bytes = solver.to_string().len();
-    let result = interpret_smt_result(solver.check());
+    let sat_result = solver.check();
+    let smt_formula_bytes = if sat_result == SatResult::Unsat {
+        Some(solver.to_string().len())
+    } else {
+        None
+    };
+    let result = interpret_smt_result(sat_result);
     (
         result,
         EquivalenceMetrics {
             smt_called: true,
-            smt_formula_bytes: Some(smt_formula_bytes),
+            smt_formula_bytes,
         },
     )
 }

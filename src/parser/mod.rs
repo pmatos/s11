@@ -70,6 +70,28 @@ pub enum LineResult {
     Skip,
 }
 
+/// Structured failure mode for `parse_line`. Distinguishes "the parser doesn't
+/// recognise this opcode" from any other parse failure (operand parsing,
+/// encoding-range violations, etc.) so consumers can act on the unknown
+/// mnemonic without string-matching the human-readable message.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ParseLineError {
+    /// The leading token is not one of the parser's supported mnemonics.
+    /// The string is the offending mnemonic, lowercased.
+    UnknownInstruction(String),
+    /// Any other parse failure (operand error, encoding error, etc.).
+    Other(String),
+}
+
+impl fmt::Display for ParseLineError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            ParseLineError::UnknownInstruction(m) => write!(f, "unknown instruction: {}", m),
+            ParseLineError::Other(s) => f.write_str(s),
+        }
+    }
+}
+
 /// Parse a register name (case-insensitive)
 pub fn parse_register(s: &str) -> Result<Register, String> {
     match s.to_lowercase().as_str() {
@@ -464,7 +486,7 @@ fn parse_csneg(operands: &[&str]) -> Result<Instruction, String> {
 }
 
 /// Parse a single line of assembly
-pub fn parse_line(line: &str) -> Result<LineResult, String> {
+pub fn parse_line(line: &str) -> Result<LineResult, ParseLineError> {
     // Strip comments first
     let line = strip_comments(line);
     let trimmed = line.trim();
@@ -500,34 +522,34 @@ pub fn parse_line(line: &str) -> Result<LineResult, String> {
     };
 
     let instruction = match opcode.as_str() {
-        "mov" => parse_mov(&operands)?,
-        "add" => parse_add(&operands)?,
-        "sub" => parse_sub(&operands)?,
-        "and" => parse_and(&operands)?,
-        "orr" => parse_orr(&operands)?,
-        "eor" => parse_eor(&operands)?,
-        "lsl" => parse_lsl(&operands)?,
-        "lsr" => parse_lsr(&operands)?,
-        "asr" => parse_asr(&operands)?,
-        "mul" => parse_mul(&operands)?,
-        "sdiv" => parse_sdiv(&operands)?,
-        "udiv" => parse_udiv(&operands)?,
-        "cmp" => parse_cmp(&operands)?,
-        "cmn" => parse_cmn(&operands)?,
-        "tst" => parse_tst(&operands)?,
-        "csel" => parse_csel(&operands)?,
-        "csinc" => parse_csinc(&operands)?,
-        "csinv" => parse_csinv(&operands)?,
-        "csneg" => parse_csneg(&operands)?,
-        _ => return Err(format!("unknown instruction: {}", opcode)),
+        "mov" => parse_mov(&operands).map_err(ParseLineError::Other)?,
+        "add" => parse_add(&operands).map_err(ParseLineError::Other)?,
+        "sub" => parse_sub(&operands).map_err(ParseLineError::Other)?,
+        "and" => parse_and(&operands).map_err(ParseLineError::Other)?,
+        "orr" => parse_orr(&operands).map_err(ParseLineError::Other)?,
+        "eor" => parse_eor(&operands).map_err(ParseLineError::Other)?,
+        "lsl" => parse_lsl(&operands).map_err(ParseLineError::Other)?,
+        "lsr" => parse_lsr(&operands).map_err(ParseLineError::Other)?,
+        "asr" => parse_asr(&operands).map_err(ParseLineError::Other)?,
+        "mul" => parse_mul(&operands).map_err(ParseLineError::Other)?,
+        "sdiv" => parse_sdiv(&operands).map_err(ParseLineError::Other)?,
+        "udiv" => parse_udiv(&operands).map_err(ParseLineError::Other)?,
+        "cmp" => parse_cmp(&operands).map_err(ParseLineError::Other)?,
+        "cmn" => parse_cmn(&operands).map_err(ParseLineError::Other)?,
+        "tst" => parse_tst(&operands).map_err(ParseLineError::Other)?,
+        "csel" => parse_csel(&operands).map_err(ParseLineError::Other)?,
+        "csinc" => parse_csinc(&operands).map_err(ParseLineError::Other)?,
+        "csinv" => parse_csinv(&operands).map_err(ParseLineError::Other)?,
+        "csneg" => parse_csneg(&operands).map_err(ParseLineError::Other)?,
+        _ => return Err(ParseLineError::UnknownInstruction(opcode)),
     };
 
     // Validate encoding
     if !instruction.is_encodable_aarch64() {
-        return Err(format!(
+        return Err(ParseLineError::Other(format!(
             "instruction cannot be encoded in AArch64: {}",
             instruction
-        ));
+        )));
     }
 
     Ok(LineResult::Instruction(instruction))
@@ -563,8 +585,8 @@ pub fn parse_assembly_string(
             Ok(LineResult::Skip) => {
                 // Nothing to do
             }
-            Err(msg) => {
-                return Err(ParseError::new(line_number, msg, line));
+            Err(err) => {
+                return Err(ParseError::new(line_number, err.to_string(), line));
             }
         }
     }
