@@ -10,7 +10,7 @@ env:
 jobs:
   diff:
     runs-on: ubuntu-24.04
-    timeout-minutes: 30
+    timeout-minutes: 60
     permissions:
       contents: read
       pull-requests: write
@@ -24,8 +24,6 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y \
             libcapstone-dev gcc-aarch64-linux-gnu z3 libz3-dev
-          curl --proto '=https' --tlsv1.2 -sSf https://just.systems/install.sh \
-            | sudo bash -s -- --to /usr/local/bin
 
       - uses: dtolnay/rust-toolchain@stable
 
@@ -35,10 +33,19 @@ jobs:
 
       - uses: taiki-e/install-action@v2
         with:
-          tool: cargo-mutants
+          tool: just,cargo-mutants
 
       - name: Build AArch64 test binaries
         run: ./build_tests.sh
+
+      - name: Baseline build and tests
+        # Run a passing baseline before invoking `cargo mutants --baseline=skip`.
+        # Without this, an unrelated test failure in the PR causes every mutated
+        # build to fail identically and the sticky comment misreports them as
+        # "caught" instead of surfacing the underlying breakage.
+        run: |
+          cargo build
+          cargo test
 
       - name: Compute diff vs base
         run: git diff "origin/${{ github.base_ref }}..." > pr.diff
@@ -67,10 +74,20 @@ jobs:
           mkdir -p mutants.out
           python3 scripts/mutants_summary.py mutants.out \
             --pr-comment mutants.out/comment.md \
+            --run-url "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}" \
             >> "$GITHUB_STEP_SUMMARY"
 
       - name: Comment on PR
-        if: always()
+        # Skip on fork PRs and Dependabot, where GITHUB_TOKEN is read-only despite
+        # the `pull-requests: write` declaration above and the sticky-comment
+        # action would fail. Also skip when no comment body was produced (e.g.
+        # docs-only PRs where mutants_summary.py suppresses an all-zero comment).
+        if: >-
+          always()
+          && github.event.pull_request.head.repo.full_name == github.repository
+          && github.actor != 'dependabot[bot]'
+          && hashFiles('mutants.out/comment.md') != ''
+        continue-on-error: true
         uses: marocchino/sticky-pull-request-comment@v2
         with:
           header: cargo-mutants
