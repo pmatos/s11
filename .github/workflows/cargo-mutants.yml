@@ -13,6 +13,8 @@ jobs:
     name: shard ${{ matrix.shard }}/8
     runs-on: ubuntu-24.04
     timeout-minutes: 180
+    permissions:
+      contents: read
     strategy:
       fail-fast: false
       matrix:
@@ -25,8 +27,6 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y \
             libcapstone-dev gcc-aarch64-linux-gnu z3 libz3-dev
-          curl --proto '=https' --tlsv1.2 -sSf https://just.systems/install.sh \
-            | sudo bash -s -- --to /usr/local/bin
 
       - uses: dtolnay/rust-toolchain@stable
 
@@ -36,7 +36,7 @@ jobs:
 
       - uses: taiki-e/install-action@v2
         with:
-          tool: cargo-mutants
+          tool: just,cargo-mutants
 
       - name: Build AArch64 test binaries
         run: ./build_tests.sh

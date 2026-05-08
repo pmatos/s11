@@ -12,6 +12,20 @@ import unittest
 import mutants_summary as ms
 
 
+def make_shard(root: pathlib.Path, **buckets) -> None:
+    """Materialize a shard directory with the requested bucket contents.
+
+    Each keyword maps a bucket name to either an int (number of placeholder lines)
+    or a string (literal contents to write).
+    """
+    root.mkdir(parents=True, exist_ok=True)
+    for name, content in buckets.items():
+        if isinstance(content, int):
+            n = content
+            content = ("\n".join(f"m{i}" for i in range(n))) + ("\n" if n else "")
+        (root / f"{name}.txt").write_text(content)
+
+
 class TestCountLines(unittest.TestCase):
     def test_missing_file_returns_zero(self):
         self.assertEqual(ms.count_lines(pathlib.Path("/no/such/file.txt")), 0)
@@ -36,15 +50,10 @@ class TestCountLines(unittest.TestCase):
 
 
 class TestReadShard(unittest.TestCase):
-    def _make_shard(self, root: pathlib.Path, **buckets: int) -> None:
-        root.mkdir(parents=True, exist_ok=True)
-        for name, n in buckets.items():
-            (root / f"{name}.txt").write_text("\n".join(f"m{i}" for i in range(n)) + ("\n" if n else ""))
-
     def test_reads_all_five_buckets(self):
         with tempfile.TemporaryDirectory() as d:
             shard = pathlib.Path(d) / "mutants-shard-0"
-            self._make_shard(shard, caught=10, missed=2, timeout=1, unviable=3, unrun=0)
+            make_shard(shard, caught=10, missed=2, timeout=1, unviable=3, unrun=0)
             counts = ms.read_shard(shard)
             self.assertEqual(
                 counts,
@@ -63,16 +72,11 @@ class TestReadShard(unittest.TestCase):
 
 
 class TestAggregate(unittest.TestCase):
-    def _make_shard(self, root: pathlib.Path, **buckets: int) -> None:
-        root.mkdir(parents=True, exist_ok=True)
-        for name, n in buckets.items():
-            (root / f"{name}.txt").write_text("\n".join(f"m{i}" for i in range(n)) + ("\n" if n else ""))
-
     def test_aggregates_multiple_shards(self):
         with tempfile.TemporaryDirectory() as d:
             root = pathlib.Path(d)
-            self._make_shard(root / "mutants-shard-0", caught=5, missed=1, timeout=0, unviable=0, unrun=0)
-            self._make_shard(root / "mutants-shard-1", caught=3, missed=2, timeout=1, unviable=0, unrun=0)
+            make_shard(root / "mutants-shard-0", caught=5, missed=1, timeout=0, unviable=0, unrun=0)
+            make_shard(root / "mutants-shard-1", caught=3, missed=2, timeout=1, unviable=0, unrun=0)
             result = ms.aggregate(root)
             self.assertEqual([s[0] for s in result["shards"]], ["mutants-shard-0", "mutants-shard-1"])
             self.assertEqual(result["totals"]["caught"], 8)
@@ -82,7 +86,7 @@ class TestAggregate(unittest.TestCase):
     def test_treats_root_with_bucket_files_as_single_shard(self):
         with tempfile.TemporaryDirectory() as d:
             root = pathlib.Path(d) / "mutants.out"
-            self._make_shard(root, caught=4, missed=2, timeout=0, unviable=0, unrun=0)
+            make_shard(root, caught=4, missed=2, timeout=0, unviable=0, unrun=0)
             result = ms.aggregate(root)
             self.assertEqual(len(result["shards"]), 1)
             self.assertEqual(result["shards"][0][0], "mutants.out")
@@ -160,20 +164,117 @@ class TestFormatPrComment(unittest.TestCase):
         )
         self.assertNotIn("Missed mutants", out)
 
+    def test_includes_run_url_when_provided(self):
+        out = ms.format_pr_comment(
+            totals={"caught": 1, "missed": 0, "timeout": 0, "unviable": 0, "unrun": 0},
+            missed_lines=[],
+            run_url="https://github.com/o/r/actions/runs/123",
+        )
+        self.assertIn("https://github.com/o/r/actions/runs/123", out)
+        self.assertIn("workflow run", out)
+
+    def test_no_run_url_section_when_omitted(self):
+        out = ms.format_pr_comment(
+            totals={"caught": 1, "missed": 0, "timeout": 0, "unviable": 0, "unrun": 0},
+            missed_lines=[],
+        )
+        self.assertNotIn("workflow run", out)
+
+
+class TestIsEmptyResult(unittest.TestCase):
+    def test_all_zero_is_empty(self):
+        self.assertTrue(ms.is_empty_result(dict.fromkeys(ms.BUCKETS, 0)))
+
+    def test_any_nonzero_is_not_empty(self):
+        for b in ms.BUCKETS:
+            counts = dict.fromkeys(ms.BUCKETS, 0)
+            counts[b] = 1
+            self.assertFalse(ms.is_empty_result(counts), f"{b} bumped should be non-empty")
+
+
+class TestReadMissedLines(unittest.TestCase):
+    def test_single_root_returns_lines_in_order(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = pathlib.Path(d) / "mutants.out"
+            make_shard(
+                root,
+                missed="src/a.rs:1: m1\nsrc/b.rs:2: m2\n",
+                caught=0, timeout=0, unviable=0, unrun=0,
+            )
+            self.assertEqual(
+                ms._read_missed_lines(root),
+                ["src/a.rs:1: m1", "src/b.rs:2: m2"],
+            )
+
+    def test_multi_shard_uses_sorted_directory_order(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = pathlib.Path(d)
+            # Create out-of-order so the test would fail if iterdir() order leaked.
+            make_shard(
+                root / "mutants-shard-2",
+                missed="src/c.rs:1: from-shard-2\n",
+                caught=0, timeout=0, unviable=0, unrun=0,
+            )
+            make_shard(
+                root / "mutants-shard-0",
+                missed="src/a.rs:1: from-shard-0\n",
+                caught=0, timeout=0, unviable=0, unrun=0,
+            )
+            make_shard(
+                root / "mutants-shard-1",
+                missed="src/b.rs:1: from-shard-1\n",
+                caught=0, timeout=0, unviable=0, unrun=0,
+            )
+            self.assertEqual(
+                ms._read_missed_lines(root),
+                [
+                    "src/a.rs:1: from-shard-0",
+                    "src/b.rs:1: from-shard-1",
+                    "src/c.rs:1: from-shard-2",
+                ],
+            )
+
+    def test_dedupes_across_shards(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = pathlib.Path(d)
+            make_shard(
+                root / "mutants-shard-0",
+                missed="src/a.rs:1: dup\nsrc/a.rs:2: only-in-0\n",
+                caught=0, timeout=0, unviable=0, unrun=0,
+            )
+            make_shard(
+                root / "mutants-shard-1",
+                missed="src/a.rs:1: dup\nsrc/a.rs:3: only-in-1\n",
+                caught=0, timeout=0, unviable=0, unrun=0,
+            )
+            self.assertEqual(
+                ms._read_missed_lines(root),
+                [
+                    "src/a.rs:1: dup",
+                    "src/a.rs:2: only-in-0",
+                    "src/a.rs:3: only-in-1",
+                ],
+            )
+
+    def test_skips_blank_lines(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = pathlib.Path(d) / "mutants.out"
+            make_shard(
+                root,
+                missed="src/a.rs:1: m1\n\n   \nsrc/b.rs:2: m2\n",
+                caught=0, timeout=0, unviable=0, unrun=0,
+            )
+            self.assertEqual(
+                ms._read_missed_lines(root),
+                ["src/a.rs:1: m1", "src/b.rs:2: m2"],
+            )
+
 
 class TestMainCli(unittest.TestCase):
-    def _make_shard(self, root: pathlib.Path, **buckets):
-        root.mkdir(parents=True, exist_ok=True)
-        for name, content in buckets.items():
-            if isinstance(content, int):
-                lines = "\n".join(f"m{i}" for i in range(content))
-                content = lines + ("\n" if content else "")
-            (root / f"{name}.txt").write_text(content)
-
     def test_main_writes_summary_to_stdout(self):
         with tempfile.TemporaryDirectory() as d:
             root = pathlib.Path(d)
-            self._make_shard(root / "mutants-shard-0", caught=5, missed=1, timeout=0, unviable=0, unrun=0)
+            make_shard(root / "mutants-shard-0", caught=5, missed=1, timeout=0, unviable=0, unrun=0)
             buf = io.StringIO()
             with contextlib.redirect_stdout(buf):
                 rc = ms.main([str(root)])
@@ -185,13 +286,11 @@ class TestMainCli(unittest.TestCase):
     def test_main_writes_pr_comment_when_flag_set(self):
         with tempfile.TemporaryDirectory() as d:
             root = pathlib.Path(d) / "mutants.out"
-            self._make_shard(
+            make_shard(
                 root,
                 caught=2,
                 missed="src/a.rs:10: replace + with -\nsrc/b.rs:20: delete return\n",
-                timeout=0,
-                unviable=0,
-                unrun=0,
+                timeout=0, unviable=0, unrun=0,
             )
             comment_path = pathlib.Path(d) / "comment.md"
             buf = io.StringIO()
@@ -202,6 +301,38 @@ class TestMainCli(unittest.TestCase):
             body = comment_path.read_text()
             self.assertIn("missed: 2", body)
             self.assertIn("src/a.rs:10: replace + with -", body)
+
+    def test_main_skips_pr_comment_when_all_buckets_empty(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = pathlib.Path(d) / "mutants.out"
+            make_shard(root, caught=0, missed=0, timeout=0, unviable=0, unrun=0)
+            comment_path = pathlib.Path(d) / "comment.md"
+            buf = io.StringIO()
+            with contextlib.redirect_stdout(buf):
+                rc = ms.main([str(root), "--pr-comment", str(comment_path)])
+            self.assertEqual(rc, 0)
+            self.assertFalse(
+                comment_path.exists(),
+                "comment.md must not be written when all buckets are zero",
+            )
+
+    def test_main_passes_run_url_into_pr_comment(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = pathlib.Path(d) / "mutants.out"
+            make_shard(root, caught=1, missed=0, timeout=0, unviable=0, unrun=0)
+            comment_path = pathlib.Path(d) / "comment.md"
+            buf = io.StringIO()
+            with contextlib.redirect_stdout(buf):
+                rc = ms.main(
+                    [
+                        str(root),
+                        "--pr-comment", str(comment_path),
+                        "--run-url", "https://github.com/o/r/actions/runs/42",
+                    ]
+                )
+            self.assertEqual(rc, 0)
+            body = comment_path.read_text()
+            self.assertIn("https://github.com/o/r/actions/runs/42", body)
 
 
 if __name__ == "__main__":
