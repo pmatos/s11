@@ -1,0 +1,87 @@
+name: cargo-mutants
+
+on:
+  schedule:
+    - cron: "17 2 * * *"
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  cargo-mutants:
+    name: shard ${{ matrix.shard }}/8
+    runs-on: ubuntu-24.04
+    timeout-minutes: 180
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [0, 1, 2, 3, 4, 5, 6, 7]
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install system deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libcapstone-dev gcc-aarch64-linux-gnu z3 libz3-dev
+          curl --proto '=https' --tlsv1.2 -sSf https://just.systems/install.sh \
+            | sudo bash -s -- --to /usr/local/bin
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: cargo-mutants
+
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-mutants
+
+      - name: Build AArch64 test binaries
+        run: ./build_tests.sh
+
+      - name: Baseline build and tests
+        run: |
+          cargo build
+          cargo test
+
+      - name: Run cargo-mutants shard
+        continue-on-error: true
+        run: |
+          cargo mutants \
+            --no-shuffle \
+            -vV \
+            --shard "${{ matrix.shard }}/8" \
+            --sharding round-robin \
+            --baseline=skip \
+            --timeout 180 \
+            --in-place
+
+      - name: Upload mutants.out
+        uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: mutants-shard-${{ matrix.shard }}
+          path: mutants.out
+          if-no-files-found: ignore
+
+  summary:
+    name: aggregate summary
+    runs-on: ubuntu-24.04
+    needs: cargo-mutants
+    if: always()
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/download-artifact@v5
+        with:
+          path: shards
+          pattern: mutants-shard-*
+
+      - name: Write summary
+        run: |
+          python3 scripts/mutants_summary.py shards \
+            >> "$GITHUB_STEP_SUMMARY"

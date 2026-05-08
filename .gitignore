@@ -16,3 +16,10 @@ binaries/
 .vscode/
 .claude/settings.local.json
 .claude/worktrees/
+
+# Python bytecode (scripts/)
+__pycache__/
+
+# cargo-mutants output
+mutants.out/
+mutants.out.old/

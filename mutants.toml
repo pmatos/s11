@@ -1,0 +1,10 @@
+# cargo-mutants configuration. See https://mutants.rs/.
+#
+# Intentionally minimal for the initial rollout. Tighten exclude_globs and
+# exclude_re_in_file once the first nightly identifies modules dominated by
+# I/O / CLI plumbing or known infinite-loop-prone code.
+
+# Allow each mutant 5x the baseline test runtime before declaring timeout.
+# Integration tests take ~1-2 min and some mutants intentionally cause
+# unbounded loops (e.g. mutating loop bounds in src/search/).
+timeout_multiplier = 5.0
