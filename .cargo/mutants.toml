@@ -1,4 +1,5 @@
-# cargo-mutants configuration. See https://mutants.rs/.
+# cargo-mutants configuration. cargo-mutants reads this file from
+# `.cargo/mutants.toml` automatically (see `cargo mutants --help`).
 #
 # Intentionally minimal for the initial rollout. Tighten exclude_globs and
 # exclude_re_in_file once the first nightly identifies modules dominated by
@@ -7,4 +8,8 @@
 # Allow each mutant 5x the baseline test runtime before declaring timeout.
 # Integration tests take ~1-2 min and some mutants intentionally cause
 # unbounded loops (e.g. mutating loop bounds in src/search/).
+#
+# Note: the CI workflows pass `--timeout 180` explicitly, which overrides
+# this multiplier in CI. The multiplier still governs `just mutants` and any
+# other invocation that doesn't pass `--timeout`.
 timeout_multiplier = 5.0
