@@ -190,7 +190,7 @@ pub fn apply_instruction_concrete(
         }
         // MOVN: rd = !((imm as u64) << shift)
         Instruction::MovN { rd, imm, shift } => {
-            let value = !(((*imm as u64) << (*shift as u32)) as u64);
+            let value = !((*imm as u64) << (*shift as u32));
             state.set_register(*rd, ConcreteValue::new(value));
         }
         // BIC: rd = rn & !rm

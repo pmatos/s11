@@ -225,12 +225,31 @@ impl fmt::Display for Condition {
     }
 }
 
+/// The 14 condition codes that are sensible operands for CSET / CSETM /
+/// stochastic mutation. AL (always true) and NV (reserved) are excluded —
+/// see `Condition::invert()` for the underlying AArch64 pairing rule.
+pub const NORMAL_CONDITIONS: [Condition; 14] = [
+    Condition::EQ,
+    Condition::NE,
+    Condition::CS,
+    Condition::CC,
+    Condition::MI,
+    Condition::PL,
+    Condition::VS,
+    Condition::VC,
+    Condition::HI,
+    Condition::LS,
+    Condition::GE,
+    Condition::LT,
+    Condition::GT,
+    Condition::LE,
+];
+
 impl Condition {
     /// Returns the logical inverse of a condition code. AArch64 encodes the
     /// invert by toggling the low bit of the 4-bit condition field, so pairs
     /// are: EQ↔NE, CS↔CC, MI↔PL, VS↔VC, HI↔LS, GE↔LT, GT↔LE, AL↔NV.
     #[must_use]
-    #[allow(dead_code)] // used by Phase 4 CSET/CSETM encoder
     pub fn invert(self) -> Condition {
         match self {
             Condition::EQ => Condition::NE,
@@ -250,6 +269,14 @@ impl Condition {
             Condition::AL => Condition::NV,
             Condition::NV => Condition::AL,
         }
+    }
+
+    /// Pick a random condition code from [`NORMAL_CONDITIONS`] (excludes
+    /// AL / NV — those are encoder-rejected by `is_encodable_aarch64` for
+    /// CSET / CSETM and have no real meaning for stochastic mutation).
+    #[must_use]
+    pub fn random_normal<R: rand::RngExt>(rng: &mut R) -> Condition {
+        NORMAL_CONDITIONS[rng.random_range(0..NORMAL_CONDITIONS.len())]
     }
 }
 

@@ -182,13 +182,6 @@ impl InstructionType for Instruction {
     }
 }
 
-/// Pick a random condition code excluding AL/NV (the two reserved-for-CSET-rejection cases).
-fn random_normal_condition<R: rand::RngExt>(rng: &mut R) -> Condition {
-    use crate::ir::types::Condition::*;
-    const NORMAL: [Condition; 14] = [EQ, NE, CS, CC, MI, PL, VS, VC, HI, LS, GE, LT, GT, LE];
-    NORMAL[rng.random_range(0..NORMAL.len())]
-}
-
 /// AArch64 instruction generator
 #[derive(Clone, Debug, Default)]
 pub struct AArch64InstructionGenerator;
@@ -587,7 +580,16 @@ impl InstructionGenerator<Instruction> for AArch64InstructionGenerator {
                         Instruction::Negs { rd, rm: new_rm }
                     }
                     Instruction::MovN { rd, shift, .. } => {
-                        // Mutate just the immediate; keep shift legal.
+                        // "Change source operand" strategy: for MOVN the only
+                        // source operand is `imm`. The `shift` field is part
+                        // of the encoding form, not the source-operand set,
+                        // so we leave it alone here.
+                        //
+                        // The more granular per-field mutator in
+                        // `search/stochastic/mutation.rs` (mutate_operand)
+                        // also covers `shift` because it picks among rd,
+                        // imm, and shift uniformly. Both paths are
+                        // intentionally distinct.
                         let new_imm = (rng.random::<u32>() & 0xFFFF) as u16;
                         Instruction::MovN {
                             rd,
@@ -632,11 +634,11 @@ impl InstructionGenerator<Instruction> for AArch64InstructionGenerator {
                     // Pick from the 14 sensible conditions (skip AL/NV).
                     Instruction::Cset { rd, .. } => Instruction::Cset {
                         rd,
-                        cond: random_normal_condition(rng),
+                        cond: Condition::random_normal(rng),
                     },
                     Instruction::Csetm { rd, .. } => Instruction::Csetm {
                         rd,
-                        cond: random_normal_condition(rng),
+                        cond: Condition::random_normal(rng),
                     },
                     Instruction::Ror { rd, rn, shift } => {
                         let new_shift = mutate_shift_operand(rng, shift, registers);

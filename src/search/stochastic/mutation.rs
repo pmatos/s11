@@ -14,13 +14,6 @@ use crate::search::candidate::generate_random_instruction;
 use crate::search::config::MutationWeights;
 use rand::RngExt;
 
-/// Pick a random condition code excluding AL/NV.
-fn random_normal_cond_local<R: RngExt>(rng: &mut R) -> Condition {
-    use Condition::*;
-    const NORMAL: [Condition; 14] = [EQ, NE, CS, CC, MI, PL, VS, VC, HI, LS, GE, LT, GT, LE];
-    NORMAL[rng.random_range(0..NORMAL.len())]
-}
-
 /// Mutation operator types
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MutationType {
@@ -222,7 +215,7 @@ impl Mutator {
                 if rng.random_bool(0.5) {
                     *rd = self.random_register(rng);
                 } else {
-                    *cond = random_normal_cond_local(rng);
+                    *cond = Condition::random_normal(rng);
                 }
             }
             // ROR: same operand shape as LSL/LSR/ASR
