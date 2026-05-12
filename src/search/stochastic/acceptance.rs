@@ -10,7 +10,7 @@
 
 #![allow(dead_code)]
 
-use rand::Rng;
+use rand::RngExt;
 
 /// Acceptance criterion for Metropolis-Hastings MCMC
 pub struct AcceptanceCriterion {
@@ -34,7 +34,7 @@ impl AcceptanceCriterion {
     ///
     /// Returns the maximum cost that would be accepted.
     /// threshold = current_cost - ln(random) / beta
-    pub fn compute_threshold<R: Rng>(&self, rng: &mut R, current_cost: u64) -> f64 {
+    pub fn compute_threshold<R: RngExt>(&self, rng: &mut R, current_cost: u64) -> f64 {
         let u: f64 = rng.random();
         // Avoid log(0) which is -infinity
         let u = u.max(1e-300);
@@ -50,7 +50,7 @@ impl AcceptanceCriterion {
     ///
     /// # Returns
     /// true if the proposal should be accepted
-    pub fn accept<R: Rng>(&self, rng: &mut R, current_cost: u64, proposal_cost: u64) -> bool {
+    pub fn accept<R: RngExt>(&self, rng: &mut R, current_cost: u64, proposal_cost: u64) -> bool {
         // Always accept if proposal is better
         if proposal_cost < current_cost {
             return true;
@@ -69,7 +69,7 @@ impl AcceptanceCriterion {
     ///
     /// # Returns
     /// true if the proposal should be accepted
-    pub fn accept_delta<R: Rng>(&self, rng: &mut R, cost_delta: i64) -> bool {
+    pub fn accept_delta<R: RngExt>(&self, rng: &mut R, cost_delta: i64) -> bool {
         // Always accept improvements
         if cost_delta < 0 {
             return true;

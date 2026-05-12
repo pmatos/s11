@@ -7,7 +7,7 @@
 use crate::ir::{Instruction, Operand, Register};
 use crate::isa::traits::{ISA, InstructionGenerator, InstructionType, OperandType, RegisterType};
 
-use rand::Rng;
+use rand::RngExt;
 
 /// AArch64 ISA marker type
 #[derive(Clone, Debug)]
@@ -259,7 +259,7 @@ impl InstructionGenerator<Instruction> for AArch64InstructionGenerator {
         instructions
     }
 
-    fn generate_random<R: Rng>(
+    fn generate_random<R: RngExt>(
         &self,
         rng: &mut R,
         registers: &[Register],
@@ -319,7 +319,7 @@ impl InstructionGenerator<Instruction> for AArch64InstructionGenerator {
         }
     }
 
-    fn mutate<R: Rng>(
+    fn mutate<R: RngExt>(
         &self,
         rng: &mut R,
         instruction: &Instruction,
@@ -527,7 +527,7 @@ impl InstructionGenerator<Instruction> for AArch64InstructionGenerator {
     }
 }
 
-fn mutate_operand<R: Rng>(
+fn mutate_operand<R: RngExt>(
     rng: &mut R,
     operand: Operand,
     registers: &[Register],
@@ -551,7 +551,11 @@ fn mutate_operand<R: Rng>(
     }
 }
 
-fn mutate_shift_operand<R: Rng>(rng: &mut R, operand: Operand, registers: &[Register]) -> Operand {
+fn mutate_shift_operand<R: RngExt>(
+    rng: &mut R,
+    operand: Operand,
+    registers: &[Register],
+) -> Operand {
     let shift_amounts: [i64; 7] = [0, 1, 2, 4, 8, 16, 32];
     match operand {
         Operand::Register(_) => {

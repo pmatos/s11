@@ -27,7 +27,7 @@ use crate::semantics::{EquivalenceConfig, EquivalenceResult, check_equivalence_w
 use crate::validation::random::{
     RandomInputConfig, generate_edge_case_inputs, generate_random_inputs,
 };
-use rand::{Rng, SeedableRng};
+use rand::{RngExt, SeedableRng};
 use rand_chacha::ChaCha8Rng;
 use std::time::Instant;
 
@@ -72,7 +72,9 @@ impl SearchAlgorithm for StochasticSearch {
         // Set up RNG
         let mut rng: ChaCha8Rng = match config.stochastic.seed {
             Some(seed) => ChaCha8Rng::seed_from_u64(seed),
-            None => ChaCha8Rng::from_os_rng(),
+            None => {
+                ChaCha8Rng::try_from_rng(&mut rand::rngs::SysRng).expect("OS entropy unavailable")
+            }
         };
 
         // Generate test cases

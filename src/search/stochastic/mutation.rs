@@ -11,7 +11,7 @@
 use crate::ir::{Instruction, Operand, Register};
 use crate::search::candidate::generate_random_instruction;
 use crate::search::config::MutationWeights;
-use rand::Rng;
+use rand::RngExt;
 
 /// Mutation operator types
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -43,7 +43,7 @@ impl Mutator {
     }
 
     /// Select a mutation type based on weights
-    pub fn select_mutation_type<R: Rng>(&self, rng: &mut R) -> MutationType {
+    pub fn select_mutation_type<R: RngExt>(&self, rng: &mut R) -> MutationType {
         let thresholds = self.weights.cumulative_thresholds();
         let r: f64 = rng.random();
 
@@ -59,7 +59,7 @@ impl Mutator {
     }
 
     /// Apply a random mutation to a sequence
-    pub fn mutate<R: Rng>(&self, rng: &mut R, sequence: &[Instruction]) -> Vec<Instruction> {
+    pub fn mutate<R: RngExt>(&self, rng: &mut R, sequence: &[Instruction]) -> Vec<Instruction> {
         if sequence.is_empty() {
             return sequence.to_vec();
         }
@@ -78,7 +78,7 @@ impl Mutator {
     }
 
     /// Operand mutation: change a register or immediate in a random instruction
-    fn mutate_operand<R: Rng>(&self, rng: &mut R, sequence: &mut [Instruction]) {
+    fn mutate_operand<R: RngExt>(&self, rng: &mut R, sequence: &mut [Instruction]) {
         if sequence.is_empty() || self.registers.is_empty() {
             return;
         }
@@ -164,7 +164,7 @@ impl Mutator {
     }
 
     /// Opcode mutation: change the opcode while keeping operand structure
-    fn mutate_opcode<R: Rng>(&self, rng: &mut R, sequence: &mut [Instruction]) {
+    fn mutate_opcode<R: RngExt>(&self, rng: &mut R, sequence: &mut [Instruction]) {
         if sequence.is_empty() {
             return;
         }
@@ -306,7 +306,7 @@ impl Mutator {
     }
 
     /// Swap mutation: swap two instructions in the sequence
-    fn mutate_swap<R: Rng>(&self, rng: &mut R, sequence: &mut [Instruction]) {
+    fn mutate_swap<R: RngExt>(&self, rng: &mut R, sequence: &mut [Instruction]) {
         if sequence.len() < 2 {
             return;
         }
@@ -317,7 +317,7 @@ impl Mutator {
     }
 
     /// Instruction mutation: replace an entire instruction with a random one
-    fn mutate_instruction<R: Rng>(&self, rng: &mut R, sequence: &mut [Instruction]) {
+    fn mutate_instruction<R: RngExt>(&self, rng: &mut R, sequence: &mut [Instruction]) {
         if sequence.is_empty() {
             return;
         }
@@ -326,7 +326,7 @@ impl Mutator {
         sequence[idx] = generate_random_instruction(rng, &self.registers, &self.immediates);
     }
 
-    fn random_register<R: Rng>(&self, rng: &mut R) -> Register {
+    fn random_register<R: RngExt>(&self, rng: &mut R) -> Register {
         if self.registers.is_empty() {
             Register::X0
         } else {
@@ -334,7 +334,7 @@ impl Mutator {
         }
     }
 
-    fn random_immediate<R: Rng>(&self, rng: &mut R) -> i64 {
+    fn random_immediate<R: RngExt>(&self, rng: &mut R) -> i64 {
         if self.immediates.is_empty() {
             0
         } else {
@@ -342,7 +342,7 @@ impl Mutator {
         }
     }
 
-    fn random_operand<R: Rng>(&self, rng: &mut R) -> Operand {
+    fn random_operand<R: RngExt>(&self, rng: &mut R) -> Operand {
         if rng.random_bool(0.5) && !self.registers.is_empty() {
             Operand::Register(self.random_register(rng))
         } else {
@@ -350,7 +350,7 @@ impl Mutator {
         }
     }
 
-    fn random_shift_operand<R: Rng>(&self, rng: &mut R) -> Operand {
+    fn random_shift_operand<R: RngExt>(&self, rng: &mut R) -> Operand {
         if rng.random_bool(0.7) {
             let shifts = [0, 1, 2, 4, 8, 16, 32];
             Operand::Immediate(shifts[rng.random_range(0..shifts.len())])
@@ -363,7 +363,7 @@ impl Mutator {
 }
 
 /// Perform operand mutation on a specific instruction (for testing)
-pub fn mutate_operand_in_place<R: Rng>(
+pub fn mutate_operand_in_place<R: RngExt>(
     rng: &mut R,
     instr: &mut Instruction,
     registers: &[Register],
@@ -380,7 +380,7 @@ pub fn mutate_operand_in_place<R: Rng>(
 }
 
 /// Change opcode while preserving operand structure (for testing)
-pub fn mutate_opcode_in_place<R: Rng>(rng: &mut R, instr: &mut Instruction) {
+pub fn mutate_opcode_in_place<R: RngExt>(rng: &mut R, instr: &mut Instruction) {
     let mutator = Mutator::new(
         vec![Register::X0, Register::X1, Register::X2],
         vec![0, 1],
