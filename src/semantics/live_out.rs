@@ -4,8 +4,6 @@
 //! only populated slice is `LiveOutRegisters`; condition state, memory, and PC
 //! can be added beside it without renaming the search/equivalence boundary.
 
-#![allow(dead_code)]
-
 use crate::ir::Register;
 use std::collections::HashSet;
 use std::fmt;
@@ -100,6 +98,7 @@ impl LiveOutRegisters {
     }
 
     /// Remove a register from the register set
+    #[allow(dead_code)]
     pub fn remove(&mut self, reg: Register) {
         self.registers.remove(&reg);
     }
@@ -115,11 +114,13 @@ impl LiveOutRegisters {
     }
 
     /// Get the number of registers in the register set
+    #[allow(dead_code)]
     pub fn len(&self) -> usize {
         self.registers.len()
     }
 
     /// Check if the register set is empty
+    #[allow(dead_code)]
     pub fn is_empty(&self) -> bool {
         self.registers.is_empty()
     }

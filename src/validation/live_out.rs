@@ -119,6 +119,8 @@ pub fn reads_flags_before_writing(instructions: &[Instruction]) -> bool {
 ///
 /// This is the intra-sequence live-in set: any register the sequence reads
 /// before defining (writing) is in the result. XZR is never included.
+/// It reuses `LiveOutRegisters` because live-in and live-out registers are both
+/// architecture-register sets; see ADR-0001 for the design rationale.
 pub fn compute_live_in_registers(instructions: &[Instruction]) -> LiveOutRegisters {
     let mut live_in = LiveOutRegisters::empty();
     let mut written = LiveOutRegisters::empty();
