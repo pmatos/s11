@@ -846,4 +846,197 @@ mod tests {
         assert_eq!(v1.as_u64(), 5);
         assert_eq!(v2.as_u64(), 10);
     }
+
+    // --- Tier 1 algebraic identities --------------------------------------
+
+    #[test]
+    fn test_eor_self_equivalent_to_bic_self() {
+        // EOR x0, x0, x0 ≡ BIC x0, x0, x0 (both produce 0)
+        let seq1 = vec![Instruction::Eor {
+            rd: Register::X0,
+            rn: Register::X0,
+            rm: Operand::Register(Register::X0),
+        }];
+        let seq2 = vec![Instruction::Bic {
+            rd: Register::X0,
+            rn: Register::X0,
+            rm: Operand::Register(Register::X0),
+        }];
+        assert_eq!(
+            check_equivalence(&seq1, &seq2),
+            EquivalenceResult::Equivalent
+        );
+    }
+
+    #[test]
+    fn test_orn_self_is_all_ones() {
+        // ORN x0, x1, x1 = x1 | !x1 = all ones, matches MOVN x0, #0
+        let seq1 = vec![Instruction::Orn {
+            rd: Register::X0,
+            rn: Register::X1,
+            rm: Operand::Register(Register::X1),
+        }];
+        let seq2 = vec![Instruction::MovN {
+            rd: Register::X0,
+            imm: 0,
+            shift: 0,
+        }];
+        assert_eq!(
+            check_equivalence(&seq1, &seq2),
+            EquivalenceResult::Equivalent
+        );
+    }
+
+    #[test]
+    fn test_movn_zero_equivalent_to_csetm_al() {
+        // MOVN x0, #0 = all ones.
+        // We can't test CSETM with AL (it's rejected by is_encodable), but
+        // we can prove MOVN x0,#0 ≡ EON x0,x1,x1.
+        let seq1 = vec![Instruction::MovN {
+            rd: Register::X0,
+            imm: 0,
+            shift: 0,
+        }];
+        let seq2 = vec![Instruction::Eon {
+            rd: Register::X0,
+            rn: Register::X1,
+            rm: Operand::Register(Register::X1),
+        }];
+        assert_eq!(
+            check_equivalence(&seq1, &seq2),
+            EquivalenceResult::Equivalent
+        );
+    }
+
+    #[test]
+    fn test_mvn_twice_is_identity() {
+        // MVN x0, x1; MVN x0, x0 ≡ MOV x0, x1
+        let seq1 = vec![
+            Instruction::Mvn {
+                rd: Register::X0,
+                rm: Register::X1,
+            },
+            Instruction::Mvn {
+                rd: Register::X0,
+                rm: Register::X0,
+            },
+        ];
+        let seq2 = vec![Instruction::MovReg {
+            rd: Register::X0,
+            rn: Register::X1,
+        }];
+        assert_eq!(
+            check_equivalence(&seq1, &seq2),
+            EquivalenceResult::Equivalent
+        );
+    }
+
+    /// BIC x0, x1, x2 ≡ MVN x3, x2; AND x0, x1, x3 (live-out X0)
+    #[test]
+    fn test_bic_lowered_to_mvn_and() {
+        let seq1 = vec![Instruction::Bic {
+            rd: Register::X0,
+            rn: Register::X1,
+            rm: Operand::Register(Register::X2),
+        }];
+        let seq2 = vec![
+            Instruction::Mvn {
+                rd: Register::X3,
+                rm: Register::X2,
+            },
+            Instruction::And {
+                rd: Register::X0,
+                rn: Register::X1,
+                rm: Operand::Register(Register::X3),
+            },
+        ];
+        let config =
+            EquivalenceConfig::with_live_out(LiveOutMask::from_registers(vec![Register::X0]));
+        assert_eq!(
+            check_equivalence_with_config(&seq1, &seq2, &config),
+            EquivalenceResult::Equivalent
+        );
+    }
+
+    /// ORN x0, x1, x2 ≡ MVN x3, x2; ORR x0, x1, x3 (live-out X0)
+    #[test]
+    fn test_orn_lowered_to_mvn_orr() {
+        let seq1 = vec![Instruction::Orn {
+            rd: Register::X0,
+            rn: Register::X1,
+            rm: Operand::Register(Register::X2),
+        }];
+        let seq2 = vec![
+            Instruction::Mvn {
+                rd: Register::X3,
+                rm: Register::X2,
+            },
+            Instruction::Orr {
+                rd: Register::X0,
+                rn: Register::X1,
+                rm: Operand::Register(Register::X3),
+            },
+        ];
+        let config =
+            EquivalenceConfig::with_live_out(LiveOutMask::from_registers(vec![Register::X0]));
+        assert_eq!(
+            check_equivalence_with_config(&seq1, &seq2, &config),
+            EquivalenceResult::Equivalent
+        );
+    }
+
+    /// EON x0, x1, x2 ≡ MVN x3, x2; EOR x0, x1, x3 (live-out X0)
+    #[test]
+    fn test_eon_lowered_to_mvn_eor() {
+        let seq1 = vec![Instruction::Eon {
+            rd: Register::X0,
+            rn: Register::X1,
+            rm: Operand::Register(Register::X2),
+        }];
+        let seq2 = vec![
+            Instruction::Mvn {
+                rd: Register::X3,
+                rm: Register::X2,
+            },
+            Instruction::Eor {
+                rd: Register::X0,
+                rn: Register::X1,
+                rm: Operand::Register(Register::X3),
+            },
+        ];
+        let config =
+            EquivalenceConfig::with_live_out(LiveOutMask::from_registers(vec![Register::X0]));
+        assert_eq!(
+            check_equivalence_with_config(&seq1, &seq2, &config),
+            EquivalenceResult::Equivalent
+        );
+    }
+
+    #[test]
+    fn test_neg_equivalent_to_sub_from_zero() {
+        // NEG x0, x1 ≡ MOV x2, #0; SUB x0, x2, x1
+        let seq1 = vec![Instruction::Neg {
+            rd: Register::X0,
+            rm: Register::X1,
+        }];
+        let seq2 = vec![
+            Instruction::MovImm {
+                rd: Register::X2,
+                imm: 0,
+            },
+            Instruction::Sub {
+                rd: Register::X0,
+                rn: Register::X2,
+                rm: Operand::Register(Register::X1),
+            },
+        ];
+        // X2 differs between the two sequences (NEG doesn't touch X2 but the
+        // 2-op form sets X2 to 0). Restrict equivalence to live-out X0.
+        let config =
+            EquivalenceConfig::with_live_out(LiveOutMask::from_registers(vec![Register::X0]));
+        assert_eq!(
+            check_equivalence_with_config(&seq1, &seq2, &config),
+            EquivalenceResult::Equivalent
+        );
+    }
 }

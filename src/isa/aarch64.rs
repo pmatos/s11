@@ -4,6 +4,7 @@
 
 #![allow(dead_code)]
 
+use crate::ir::types::Condition;
 use crate::ir::{Instruction, Operand, Register};
 use crate::isa::traits::{ISA, InstructionGenerator, InstructionType, OperandType, RegisterType};
 
@@ -121,6 +122,20 @@ impl InstructionType for Instruction {
             Instruction::Csinc { .. } => 17,
             Instruction::Csinv { .. } => 18,
             Instruction::Csneg { .. } => 19,
+            Instruction::Mvn { .. } => 20,
+            Instruction::Neg { .. } => 21,
+            Instruction::Negs { .. } => 22,
+            Instruction::MovN { .. } => 23,
+            Instruction::Bic { .. } => 24,
+            Instruction::Bics { .. } => 25,
+            Instruction::Orn { .. } => 26,
+            Instruction::Eon { .. } => 27,
+            Instruction::Adds { .. } => 28,
+            Instruction::Subs { .. } => 29,
+            Instruction::Ands { .. } => 30,
+            Instruction::Cset { .. } => 31,
+            Instruction::Csetm { .. } => 32,
+            Instruction::Ror { .. } => 33,
         }
     }
 
@@ -145,12 +160,33 @@ impl InstructionType for Instruction {
             Instruction::Csinc { .. } => "csinc",
             Instruction::Csinv { .. } => "csinv",
             Instruction::Csneg { .. } => "csneg",
+            Instruction::Mvn { .. } => "mvn",
+            Instruction::Neg { .. } => "neg",
+            Instruction::Negs { .. } => "negs",
+            Instruction::MovN { .. } => "movn",
+            Instruction::Bic { .. } => "bic",
+            Instruction::Bics { .. } => "bics",
+            Instruction::Orn { .. } => "orn",
+            Instruction::Eon { .. } => "eon",
+            Instruction::Adds { .. } => "adds",
+            Instruction::Subs { .. } => "subs",
+            Instruction::Ands { .. } => "ands",
+            Instruction::Cset { .. } => "cset",
+            Instruction::Csetm { .. } => "csetm",
+            Instruction::Ror { .. } => "ror",
         }
     }
 
     fn has_side_effects(&self) -> bool {
         false // Current instructions have no side effects
     }
+}
+
+/// Pick a random condition code excluding AL/NV (the two reserved-for-CSET-rejection cases).
+fn random_normal_condition<R: rand::RngExt>(rng: &mut R) -> Condition {
+    use crate::ir::types::Condition::*;
+    const NORMAL: [Condition; 14] = [EQ, NE, CS, CC, MI, PL, VS, VC, HI, LS, GE, LT, GT, LE];
+    NORMAL[rng.random_range(0..NORMAL.len())]
 }
 
 /// AArch64 instruction generator
@@ -392,6 +428,28 @@ impl InstructionGenerator<Instruction> for AArch64InstructionGenerator {
                         rm,
                         cond,
                     },
+                    Instruction::Mvn { rm, .. } => Instruction::Mvn { rd: new_rd, rm },
+                    Instruction::Neg { rm, .. } => Instruction::Neg { rd: new_rd, rm },
+                    Instruction::Negs { rm, .. } => Instruction::Negs { rd: new_rd, rm },
+                    Instruction::MovN { imm, shift, .. } => Instruction::MovN {
+                        rd: new_rd,
+                        imm,
+                        shift,
+                    },
+                    Instruction::Bic { rn, rm, .. } => Instruction::Bic { rd: new_rd, rn, rm },
+                    Instruction::Bics { rn, rm, .. } => Instruction::Bics { rd: new_rd, rn, rm },
+                    Instruction::Orn { rn, rm, .. } => Instruction::Orn { rd: new_rd, rn, rm },
+                    Instruction::Eon { rn, rm, .. } => Instruction::Eon { rd: new_rd, rn, rm },
+                    Instruction::Adds { rn, rm, .. } => Instruction::Adds { rd: new_rd, rn, rm },
+                    Instruction::Subs { rn, rm, .. } => Instruction::Subs { rd: new_rd, rn, rm },
+                    Instruction::Ands { rn, rm, .. } => Instruction::Ands { rd: new_rd, rn, rm },
+                    Instruction::Cset { cond, .. } => Instruction::Cset { rd: new_rd, cond },
+                    Instruction::Csetm { cond, .. } => Instruction::Csetm { rd: new_rd, cond },
+                    Instruction::Ror { rn, shift, .. } => Instruction::Ror {
+                        rd: new_rd,
+                        rn,
+                        shift,
+                    },
                 }
             }
             2 => {
@@ -516,6 +574,78 @@ impl InstructionGenerator<Instruction> for AArch64InstructionGenerator {
                             cond,
                         }
                     }
+                    Instruction::Mvn { rd, .. } => {
+                        let new_rm = registers[rng.random_range(0..registers.len())];
+                        Instruction::Mvn { rd, rm: new_rm }
+                    }
+                    Instruction::Neg { rd, .. } => {
+                        let new_rm = registers[rng.random_range(0..registers.len())];
+                        Instruction::Neg { rd, rm: new_rm }
+                    }
+                    Instruction::Negs { rd, .. } => {
+                        let new_rm = registers[rng.random_range(0..registers.len())];
+                        Instruction::Negs { rd, rm: new_rm }
+                    }
+                    Instruction::MovN { rd, shift, .. } => {
+                        // Mutate just the immediate; keep shift legal.
+                        let new_imm = (rng.random::<u32>() & 0xFFFF) as u16;
+                        Instruction::MovN {
+                            rd,
+                            imm: new_imm,
+                            shift,
+                        }
+                    }
+                    Instruction::Bic { rd, rn, rm: _ } => {
+                        let new_rm =
+                            Operand::Register(registers[rng.random_range(0..registers.len())]);
+                        Instruction::Bic { rd, rn, rm: new_rm }
+                    }
+                    Instruction::Bics { rd, rn, rm: _ } => {
+                        let new_rm =
+                            Operand::Register(registers[rng.random_range(0..registers.len())]);
+                        Instruction::Bics { rd, rn, rm: new_rm }
+                    }
+                    Instruction::Orn { rd, rn, rm: _ } => {
+                        let new_rm =
+                            Operand::Register(registers[rng.random_range(0..registers.len())]);
+                        Instruction::Orn { rd, rn, rm: new_rm }
+                    }
+                    Instruction::Eon { rd, rn, rm: _ } => {
+                        let new_rm =
+                            Operand::Register(registers[rng.random_range(0..registers.len())]);
+                        Instruction::Eon { rd, rn, rm: new_rm }
+                    }
+                    Instruction::Adds { rd, rn, rm } => {
+                        let new_rm = mutate_operand(rng, rm, registers, immediates);
+                        Instruction::Adds { rd, rn, rm: new_rm }
+                    }
+                    Instruction::Subs { rd, rn, rm } => {
+                        let new_rm = mutate_operand(rng, rm, registers, immediates);
+                        Instruction::Subs { rd, rn, rm: new_rm }
+                    }
+                    Instruction::Ands { rd, rn, rm: _ } => {
+                        let new_rm =
+                            Operand::Register(registers[rng.random_range(0..registers.len())]);
+                        Instruction::Ands { rd, rn, rm: new_rm }
+                    }
+                    // CSET / CSETM: only thing to "change as operand" is the cond.
+                    // Pick from the 14 sensible conditions (skip AL/NV).
+                    Instruction::Cset { rd, .. } => Instruction::Cset {
+                        rd,
+                        cond: random_normal_condition(rng),
+                    },
+                    Instruction::Csetm { rd, .. } => Instruction::Csetm {
+                        rd,
+                        cond: random_normal_condition(rng),
+                    },
+                    Instruction::Ror { rd, rn, shift } => {
+                        let new_shift = mutate_shift_operand(rng, shift, registers);
+                        Instruction::Ror {
+                            rd,
+                            rn,
+                            shift: new_shift,
+                        }
+                    }
                 }
             }
             _ => unreachable!(),
@@ -523,7 +653,8 @@ impl InstructionGenerator<Instruction> for AArch64InstructionGenerator {
     }
 
     fn opcode_count(&self) -> u8 {
-        20 // MovReg, MovImm, Add, Sub, And, Orr, Eor, Lsl, Lsr, Asr, Mul, Sdiv, Udiv, Cmp, Cmn, Tst, Csel, Csinc, Csinv, Csneg
+        34 // 20 original + 14 Tier 1: MVN, NEG, NEGS, MovN, BIC, BICS, ORN, EON,
+        //                          ADDS, SUBS, ANDS, CSET, CSETM, ROR.
     }
 }
 
@@ -678,7 +809,7 @@ mod tests {
         for _ in 0..100 {
             let instr = generator.generate_random(&mut rng, &regs, &imms);
             // Just verify it doesn't panic and produces valid instructions
-            assert!(instr.opcode_id() < 13);
+            assert!(instr.opcode_id() < 34);
         }
     }
 

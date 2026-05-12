@@ -5,9 +5,20 @@
 use crate::ir::{Instruction, Operand, Register};
 use crate::semantics::live_out::LiveOutRegisters;
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 use z3::ast::BV;
 use z3::{Params, Solver};
+
+/// Monotonic counter used to generate unique names for fresh symbolic values
+/// produced when modelling instructions whose result depends on state we do
+/// not symbolically track (currently: the CSEL family, which reads NZCV).
+static FRESH_BV_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+fn fresh_bv(prefix: &str) -> BV {
+    let id = FRESH_BV_COUNTER.fetch_add(1, Ordering::Relaxed);
+    BV::new_const(format!("{}_{}", prefix, id), 64)
+}
 
 /// Configuration for the SMT solver
 #[derive(Debug, Clone)]
@@ -202,18 +213,90 @@ pub fn apply_instruction(mut state: MachineState, instruction: &Instruction) -> 
             // These only affect flags, which we don't model symbolically yet
             // No register state changes
         }
-        // Conditional select instructions depend on flags, which we don't model yet
-        // For now, we model them as selecting rn (conservative approximation)
-        // TODO: Add full flags support for proper SMT modeling
-        Instruction::Csel { rd, rn, .. }
-        | Instruction::Csinc { rd, rn, .. }
-        | Instruction::Csinv { rd, rn, .. }
-        | Instruction::Csneg { rd, rn, .. } => {
-            // Without flags, we can't determine the condition result
-            // For equivalence checking purposes, we use a fresh symbolic value
-            // This is sound but incomplete - it may miss some optimizations
-            let rn_val = state.get_register(*rn).clone();
-            state.set_register(*rd, rn_val);
+        // CSEL family depends on NZCV, which we don't model symbolically.
+        // Emit a fresh, unconstrained BV per use site so the solver can never
+        // prove equivalence across the conditional select. Sound (cannot
+        // wrongly accept) but uninformative (cannot prove valid rewrites that
+        // span CSEL chains). Flag-aware modelling is deferred.
+        Instruction::Csel { rd, .. }
+        | Instruction::Csinc { rd, .. }
+        | Instruction::Csinv { rd, .. }
+        | Instruction::Csneg { rd, .. } => {
+            state.set_register(*rd, fresh_bv("csel_result"));
+        }
+        Instruction::Mvn { rd, rm } => {
+            let value = state.get_register(*rm).bvnot();
+            state.set_register(*rd, value);
+        }
+        Instruction::Neg { rd, rm } => {
+            let value = state.get_register(*rm).bvneg();
+            state.set_register(*rd, value);
+        }
+        // NEGS writes rd just like NEG; flag side-effects are not modelled
+        // symbolically (matches CMP/CMN/TST). Soundness barrier: callers must
+        // refuse to drop flag-writers when flags are live-out.
+        Instruction::Negs { rd, rm } => {
+            let value = state.get_register(*rm).bvneg();
+            state.set_register(*rd, value);
+        }
+        Instruction::MovN { rd, imm, shift } => {
+            let value = !(((*imm as u64) << (*shift as u32)) as u64);
+            state.set_register(*rd, BV::from_u64(value, 64));
+        }
+        Instruction::Bic { rd, rn, rm } | Instruction::Bics { rd, rn, rm } => {
+            let lhs = state.get_register(*rn).clone();
+            let rhs = state.eval_operand(rm);
+            let result = lhs.bvand(&rhs.bvnot());
+            state.set_register(*rd, result);
+        }
+        Instruction::Orn { rd, rn, rm } => {
+            let lhs = state.get_register(*rn).clone();
+            let rhs = state.eval_operand(rm);
+            let result = lhs.bvor(&rhs.bvnot());
+            state.set_register(*rd, result);
+        }
+        Instruction::Eon { rd, rn, rm } => {
+            let lhs = state.get_register(*rn).clone();
+            let rhs = state.eval_operand(rm);
+            let result = lhs.bvxor(&rhs.bvnot());
+            state.set_register(*rd, result);
+        }
+        // Flag-setting arith/logical: rd is modelled symbolically (same as
+        // ADD/SUB/AND); flag side-effects are NOT modelled (matches CMP/CMN/TST).
+        // Soundness barrier: callers must refuse to drop flag-writers when
+        // flags are live-out (see `flags_live_out` and `modifies_flags`).
+        Instruction::Adds { rd, rn, rm } => {
+            let lhs = state.get_register(*rn).clone();
+            let rhs = state.eval_operand(rm);
+            state.set_register(*rd, lhs.bvadd(&rhs));
+        }
+        Instruction::Subs { rd, rn, rm } => {
+            let lhs = state.get_register(*rn).clone();
+            let rhs = state.eval_operand(rm);
+            state.set_register(*rd, lhs.bvsub(&rhs));
+        }
+        Instruction::Ands { rd, rn, rm } => {
+            let lhs = state.get_register(*rn).clone();
+            let rhs = state.eval_operand(rm);
+            state.set_register(*rd, lhs.bvand(&rhs));
+        }
+        // CSET / CSETM: depend on NZCV, which we don't model symbolically.
+        // Emit a fresh symbolic value per use (matches CSEL family policy).
+        Instruction::Cset { rd, .. } | Instruction::Csetm { rd, .. } => {
+            state.set_register(*rd, fresh_bv("cset_result"));
+        }
+        // ROR: no native bvror in z3-rust; compose
+        // `(x lshr n) | (x shl (64 - n))`. For reg form, mask shift to 6 bits.
+        Instruction::Ror { rd, rn, shift } => {
+            let value = state.get_register(*rn).clone();
+            let n = state.eval_operand(shift);
+            let mask = BV::from_u64(63, 64);
+            let n_masked = n.bvand(&mask);
+            let sixty_four = BV::from_u64(64, 64);
+            let complement = sixty_four.bvsub(&n_masked);
+            let lo = value.bvlshr(&n_masked);
+            let hi = value.bvshl(&complement);
+            state.set_register(*rd, lo.bvor(&hi));
         }
     }
     state
@@ -325,5 +408,75 @@ mod tests {
         let solver = Solver::new();
         solver.assert(&x0_val.eq(&expected).not());
         assert_eq!(solver.check(), SatResult::Unsat);
+    }
+
+    #[test]
+    fn test_mvn_smt_inverts_bits() {
+        // Prove MVN x0, x1 ≡ EOR x0, x1, #(all-ones) — but the IR has no EOR
+        // with a 64-bit immediate, so instead prove the simpler identity that
+        // applying MVN twice gives back the original value:
+        // MVN x0, x1; MVN x0, x0  ⇒  x0 == original x1.
+        let initial = MachineState::new_symbolic("pre");
+        let initial_x1 = initial.get_register(Register::X1).clone();
+
+        let seq = vec![
+            Instruction::Mvn {
+                rd: Register::X0,
+                rm: Register::X1,
+            },
+            Instruction::Mvn {
+                rd: Register::X0,
+                rm: Register::X0,
+            },
+        ];
+        let final_state = apply_sequence(initial, &seq);
+        let final_x0 = final_state.get_register(Register::X0);
+
+        let solver = Solver::new();
+        solver.assert(&final_x0.eq(&initial_x1).not());
+        assert_eq!(
+            solver.check(),
+            SatResult::Unsat,
+            "MVN is an involution: MVN(MVN(x)) must equal x"
+        );
+    }
+
+    /// Soundness regression: CSEL must NOT be proved equivalent to MOV.
+    /// The condition's value depends on NZCV which we don't model; the SMT
+    /// result must be unconstrained so the solver can find inputs where they
+    /// differ.
+    #[test]
+    fn test_csel_not_equivalent_to_mov() {
+        use crate::ir::types::Condition;
+
+        let initial_state = MachineState::new_symbolic("pre");
+
+        // CSEL X0, X1, X2, EQ — should NOT be the same as MOV X0, X1
+        // (it depends on flags; without flag modeling, we must remain
+        // conservative — i.e. uninformative, never wrongly equivalent).
+        let csel = vec![Instruction::Csel {
+            rd: Register::X0,
+            rn: Register::X1,
+            rm: Register::X2,
+            cond: Condition::EQ,
+        }];
+        let state_csel = apply_sequence(initial_state.clone(), &csel);
+
+        let mov = vec![Instruction::MovReg {
+            rd: Register::X0,
+            rn: Register::X1,
+        }];
+        let state_mov = apply_sequence(initial_state, &mov);
+
+        // states_not_equal SAT ⇒ solver found inputs where they differ
+        //                       ⇒ the two sequences are NOT proved equivalent
+        // states_not_equal UNSAT ⇒ they are always equal ⇒ unsound for CSEL
+        let solver = Solver::new();
+        solver.assert(&states_not_equal(&state_csel, &state_mov));
+        assert_eq!(
+            solver.check(),
+            SatResult::Sat,
+            "CSEL must not be proved equivalent to MOV — SMT model is unsound"
+        );
     }
 }

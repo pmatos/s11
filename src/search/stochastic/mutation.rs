@@ -8,10 +8,18 @@
 
 #![allow(dead_code)]
 
+use crate::ir::types::Condition;
 use crate::ir::{Instruction, Operand, Register};
 use crate::search::candidate::generate_random_instruction;
 use crate::search::config::MutationWeights;
 use rand::RngExt;
+
+/// Pick a random condition code excluding AL/NV.
+fn random_normal_cond_local<R: RngExt>(rng: &mut R) -> Condition {
+    use Condition::*;
+    const NORMAL: [Condition; 14] = [EQ, NE, CS, CC, MI, PL, VS, VC, HI, LS, GE, LT, GT, LE];
+    NORMAL[rng.random_range(0..NORMAL.len())]
+}
 
 /// Mutation operator types
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -160,6 +168,72 @@ impl Mutator {
                     _ => *rm = self.random_register(rng),
                 }
             }
+            // Unary: MVN, NEG, NEGS
+            Instruction::Mvn { rd, rm }
+            | Instruction::Neg { rd, rm }
+            | Instruction::Negs { rd, rm } => {
+                if rng.random_bool(0.5) {
+                    *rd = self.random_register(rng);
+                } else {
+                    *rm = self.random_register(rng);
+                }
+            }
+            // MOVN: mutate rd, imm, or shift
+            Instruction::MovN { rd, imm, shift } => match rng.random_range(0..3) {
+                0 => *rd = self.random_register(rng),
+                1 => *imm = (rng.random::<u32>() & 0xFFFF) as u16,
+                _ => {
+                    let shifts = [0u8, 16, 32, 48];
+                    *shift = shifts[rng.random_range(0..shifts.len())];
+                }
+            },
+            // Inverted-logical: BIC / BICS / ORN / EON — register-only rm
+            Instruction::Bic { rd, rn, rm }
+            | Instruction::Bics { rd, rn, rm }
+            | Instruction::Orn { rd, rn, rm }
+            | Instruction::Eon { rd, rn, rm } => {
+                let choice = rng.random_range(0..3);
+                match choice {
+                    0 => *rd = self.random_register(rng),
+                    1 => *rn = self.random_register(rng),
+                    _ => *rm = Operand::Register(self.random_register(rng)),
+                }
+            }
+            // Flag-setting arith/logical: ADDS/SUBS allow imm; ANDS register-only
+            Instruction::Adds { rd, rn, rm } | Instruction::Subs { rd, rn, rm } => {
+                let choice = rng.random_range(0..3);
+                match choice {
+                    0 => *rd = self.random_register(rng),
+                    1 => *rn = self.random_register(rng),
+                    _ => *rm = self.random_operand(rng),
+                }
+            }
+            Instruction::Ands { rd, rn, rm } => {
+                let choice = rng.random_range(0..3);
+                match choice {
+                    0 => *rd = self.random_register(rng),
+                    1 => *rn = self.random_register(rng),
+                    _ => *rm = Operand::Register(self.random_register(rng)),
+                }
+            }
+            // CSET / CSETM: only rd and cond can change; cond from the 14
+            // non-AL/NV options.
+            Instruction::Cset { rd, cond } | Instruction::Csetm { rd, cond } => {
+                if rng.random_bool(0.5) {
+                    *rd = self.random_register(rng);
+                } else {
+                    *cond = random_normal_cond_local(rng);
+                }
+            }
+            // ROR: same operand shape as LSL/LSR/ASR
+            Instruction::Ror { rd, rn, shift } => {
+                let choice = rng.random_range(0..3);
+                match choice {
+                    0 => *rd = self.random_register(rng),
+                    1 => *rn = self.random_register(rng),
+                    _ => *shift = self.random_shift_operand(rng),
+                }
+            }
         }
     }
 
@@ -301,6 +375,93 @@ impl Mutator {
                 1 => Instruction::Csinc { rd, rn, rm, cond },
                 2 => Instruction::Csinv { rd, rn, rm, cond },
                 _ => Instruction::Csneg { rd, rn, rm, cond },
+            },
+            // Unary peer-mutation cluster: MVN ↔ NEG ↔ NEGS
+            Instruction::Mvn { rd, rm } => match rng.random_range(0..3) {
+                0 => Instruction::Neg { rd, rm },
+                1 => Instruction::Negs { rd, rm },
+                _ => Instruction::Mvn { rd, rm },
+            },
+            Instruction::Neg { rd, rm } => match rng.random_range(0..3) {
+                0 => Instruction::Mvn { rd, rm },
+                1 => Instruction::Negs { rd, rm },
+                _ => Instruction::Neg { rd, rm },
+            },
+            Instruction::Negs { rd, rm } => match rng.random_range(0..3) {
+                0 => Instruction::Mvn { rd, rm },
+                1 => Instruction::Neg { rd, rm },
+                _ => Instruction::Negs { rd, rm },
+            },
+            // MOVN sits alongside MovImm as the only other immediate-move op.
+            Instruction::MovN { rd, imm, shift } => match rng.random_range(0..2) {
+                0 => Instruction::MovImm {
+                    rd,
+                    imm: imm as i64,
+                },
+                _ => Instruction::MovN { rd, imm, shift },
+            },
+            // Inverted-logical join the AND/ORR/EOR cluster.
+            Instruction::Bic { rd, rn, rm } => match rng.random_range(0..7) {
+                0 => Instruction::And { rd, rn, rm },
+                1 => Instruction::Orr { rd, rn, rm },
+                2 => Instruction::Eor { rd, rn, rm },
+                3 => Instruction::Bics { rd, rn, rm },
+                4 => Instruction::Orn { rd, rn, rm },
+                5 => Instruction::Eon { rd, rn, rm },
+                _ => Instruction::Bic { rd, rn, rm },
+            },
+            Instruction::Bics { rd, rn, rm } => match rng.random_range(0..2) {
+                0 => Instruction::Bic { rd, rn, rm },
+                _ => Instruction::Bics { rd, rn, rm },
+            },
+            Instruction::Orn { rd, rn, rm } => match rng.random_range(0..5) {
+                0 => Instruction::And { rd, rn, rm },
+                1 => Instruction::Orr { rd, rn, rm },
+                2 => Instruction::Bic { rd, rn, rm },
+                3 => Instruction::Eon { rd, rn, rm },
+                _ => Instruction::Orn { rd, rn, rm },
+            },
+            Instruction::Eon { rd, rn, rm } => match rng.random_range(0..5) {
+                0 => Instruction::And { rd, rn, rm },
+                1 => Instruction::Eor { rd, rn, rm },
+                2 => Instruction::Bic { rd, rn, rm },
+                3 => Instruction::Orn { rd, rn, rm },
+                _ => Instruction::Eon { rd, rn, rm },
+            },
+            // Flag-setting cluster: ADDS↔SUBS↔ANDS, and into/out of ADD/SUB/AND.
+            Instruction::Adds { rd, rn, rm } => match rng.random_range(0..4) {
+                0 => Instruction::Add { rd, rn, rm },
+                1 => Instruction::Subs { rd, rn, rm },
+                2 => Instruction::Ands { rd, rn, rm },
+                _ => Instruction::Adds { rd, rn, rm },
+            },
+            Instruction::Subs { rd, rn, rm } => match rng.random_range(0..4) {
+                0 => Instruction::Sub { rd, rn, rm },
+                1 => Instruction::Adds { rd, rn, rm },
+                2 => Instruction::Ands { rd, rn, rm },
+                _ => Instruction::Subs { rd, rn, rm },
+            },
+            Instruction::Ands { rd, rn, rm } => match rng.random_range(0..4) {
+                0 => Instruction::And { rd, rn, rm },
+                1 => Instruction::Adds { rd, rn, rm },
+                2 => Instruction::Subs { rd, rn, rm },
+                _ => Instruction::Ands { rd, rn, rm },
+            },
+            // CSET ↔ CSETM
+            Instruction::Cset { rd, cond } => match rng.random_range(0..2) {
+                0 => Instruction::Csetm { rd, cond },
+                _ => Instruction::Cset { rd, cond },
+            },
+            Instruction::Csetm { rd, cond } => match rng.random_range(0..2) {
+                0 => Instruction::Cset { rd, cond },
+                _ => Instruction::Csetm { rd, cond },
+            },
+            // ROR joins the shift cluster LSL/LSR/ASR.
+            Instruction::Ror { rd, rn, shift } => match rng.random_range(0..4) {
+                0 => Instruction::Lsl { rd, rn, shift },
+                1 => Instruction::Lsr { rd, rn, shift },
+                2 => Instruction::Asr { rd, rn, shift },
+                _ => Instruction::Ror { rd, rn, shift },
             },
         };
     }

@@ -119,6 +119,85 @@ pub enum Instruction {
         rm: Register,
         cond: Condition,
     },
+
+    // Bitwise NOT (alias of ORN with XZR)
+    Mvn {
+        rd: Register,
+        rm: Register,
+    },
+    // Two's-complement negation (alias of SUB from XZR)
+    Neg {
+        rd: Register,
+        rm: Register,
+    },
+    // Flag-setting negation (alias of SUBS from XZR)
+    Negs {
+        rd: Register,
+        rm: Register,
+    },
+    // Move-negated immediate: rd = !((imm as u64) << shift), shift ∈ {0,16,32,48}
+    MovN {
+        rd: Register,
+        imm: u16,
+        shift: u8,
+    },
+
+    // Inverted-logical (second operand bitwise-NOTed before the op)
+    Bic {
+        rd: Register,
+        rn: Register,
+        rm: Operand,
+    },
+    Bics {
+        rd: Register,
+        rn: Register,
+        rm: Operand,
+    },
+    Orn {
+        rd: Register,
+        rn: Register,
+        rm: Operand,
+    },
+    Eon {
+        rd: Register,
+        rn: Register,
+        rm: Operand,
+    },
+
+    // Flag-setting arithmetic / logical
+    Adds {
+        rd: Register,
+        rn: Register,
+        rm: Operand,
+    },
+    Subs {
+        rd: Register,
+        rn: Register,
+        rm: Operand,
+    },
+    Ands {
+        rd: Register,
+        rn: Register,
+        rm: Operand,
+    },
+
+    // Conditional set: rd = (cond holds) ? 1 : 0
+    Cset {
+        rd: Register,
+        cond: Condition,
+    },
+    // Conditional set mask: rd = (cond holds) ? -1 : 0
+    Csetm {
+        rd: Register,
+        cond: Condition,
+    },
+
+    // Rotate right (immediate or register form)
+    Ror {
+        rd: Register,
+        rn: Register,
+        shift: Operand,
+    },
 }
 
 impl Instruction {
@@ -142,18 +221,44 @@ impl Instruction {
             | Instruction::Csel { rd, .. }
             | Instruction::Csinc { rd, .. }
             | Instruction::Csinv { rd, .. }
-            | Instruction::Csneg { rd, .. } => Some(*rd),
+            | Instruction::Csneg { rd, .. }
+            | Instruction::Mvn { rd, .. }
+            | Instruction::Neg { rd, .. }
+            | Instruction::Negs { rd, .. }
+            | Instruction::MovN { rd, .. }
+            | Instruction::Bic { rd, .. }
+            | Instruction::Bics { rd, .. }
+            | Instruction::Orn { rd, .. }
+            | Instruction::Eon { rd, .. }
+            | Instruction::Adds { rd, .. }
+            | Instruction::Subs { rd, .. }
+            | Instruction::Ands { rd, .. }
+            | Instruction::Cset { rd, .. }
+            | Instruction::Csetm { rd, .. }
+            | Instruction::Ror { rd, .. } => Some(*rd),
             // Comparison instructions only set flags, no destination register
             Instruction::Cmp { .. } | Instruction::Cmn { .. } | Instruction::Tst { .. } => None,
         }
     }
 
-    /// Returns true if this instruction modifies NZCV flags
+    /// Returns true if this instruction modifies NZCV flags.
+    ///
+    /// Note: for flag-setting variants (NEGS, ADDS, SUBS, ANDS, BICS), this
+    /// can co-occur with `destination().is_some()` — those write both a
+    /// register and the NZCV flags. Earlier callers that assumed
+    /// "flag-setter ⇒ no destination" must be re-verified.
     #[allow(dead_code)]
     pub fn modifies_flags(&self) -> bool {
         matches!(
             self,
-            Instruction::Cmp { .. } | Instruction::Cmn { .. } | Instruction::Tst { .. }
+            Instruction::Cmp { .. }
+                | Instruction::Cmn { .. }
+                | Instruction::Tst { .. }
+                | Instruction::Negs { .. }
+                | Instruction::Bics { .. }
+                | Instruction::Adds { .. }
+                | Instruction::Subs { .. }
+                | Instruction::Ands { .. }
         )
     }
 
@@ -166,6 +271,8 @@ impl Instruction {
                 | Instruction::Csinc { .. }
                 | Instruction::Csinv { .. }
                 | Instruction::Csneg { .. }
+                | Instruction::Cset { .. }
+                | Instruction::Csetm { .. }
         )
     }
 
@@ -222,6 +329,38 @@ impl Instruction {
             | Instruction::Csinc { .. }
             | Instruction::Csinv { .. }
             | Instruction::Csneg { .. } => true,
+
+            // MVN / NEG / NEGS: always encodable (register-only)
+            Instruction::Mvn { .. } | Instruction::Neg { .. } | Instruction::Negs { .. } => true,
+
+            // MOVN: shift must be one of {0, 16, 32, 48}; u16 imm is always in range.
+            Instruction::MovN { shift, .. } => matches!(shift, 0 | 16 | 32 | 48),
+
+            // BIC / BICS / ORN / EON: register-only (matching AND precedent).
+            Instruction::Bic { rm, .. }
+            | Instruction::Bics { rm, .. }
+            | Instruction::Orn { rm, .. }
+            | Instruction::Eon { rm, .. } => matches!(rm, Operand::Register(_)),
+
+            // ADDS/SUBS: imm 0..=0xFFF (same as ADD/SUB).
+            Instruction::Adds { rm, .. } | Instruction::Subs { rm, .. } => match rm {
+                Operand::Register(_) => true,
+                Operand::Immediate(imm) => *imm >= 0 && *imm <= 0xFFF,
+            },
+            // ANDS: register-only (same as AND).
+            Instruction::Ands { rm, .. } => matches!(rm, Operand::Register(_)),
+
+            // CSET / CSETM: reject AL (always true ⇒ unconditional 1/-1) and
+            // NV (reserved). All other 14 conditions are encodable.
+            Instruction::Cset { cond, .. } | Instruction::Csetm { cond, .. } => {
+                !matches!(cond, Condition::AL | Condition::NV)
+            }
+
+            // ROR: shift amount 0..=63 (same as LSL/LSR/ASR).
+            Instruction::Ror { shift, .. } => match shift {
+                Operand::Register(_) => true,
+                Operand::Immediate(amt) => *amt >= 0 && *amt <= 63,
+            },
         }
     }
 
@@ -269,6 +408,36 @@ impl Instruction {
             | Instruction::Csinc { rn, rm, .. }
             | Instruction::Csinv { rn, rm, .. }
             | Instruction::Csneg { rn, rm, .. } => vec![*rn, *rm],
+            // Unary
+            Instruction::Mvn { rm, .. }
+            | Instruction::Neg { rm, .. }
+            | Instruction::Negs { rm, .. } => vec![*rm],
+            // MOVN takes no register source
+            Instruction::MovN { .. } => vec![],
+            // Inverted-logical (BIC / BICS / ORN / EON) and flag-setting arith/logical
+            Instruction::Bic { rn, rm, .. }
+            | Instruction::Bics { rn, rm, .. }
+            | Instruction::Orn { rn, rm, .. }
+            | Instruction::Eon { rn, rm, .. }
+            | Instruction::Adds { rn, rm, .. }
+            | Instruction::Subs { rn, rm, .. }
+            | Instruction::Ands { rn, rm, .. } => {
+                let mut regs = vec![*rn];
+                if let Operand::Register(r) = rm {
+                    regs.push(*r);
+                }
+                regs
+            }
+            // CSET / CSETM have no source registers (read flags, not regs).
+            Instruction::Cset { .. } | Instruction::Csetm { .. } => vec![],
+            // ROR reads rn and shift (if register)
+            Instruction::Ror { rn, shift, .. } => {
+                let mut regs = vec![*rn];
+                if let Operand::Register(r) = shift {
+                    regs.push(*r);
+                }
+                regs
+            }
         }
     }
 }
@@ -306,6 +475,26 @@ impl fmt::Display for Instruction {
             Instruction::Csneg { rd, rn, rm, cond } => {
                 write!(f, "csneg {}, {}, {}, {}", rd, rn, rm, cond)
             }
+            Instruction::Mvn { rd, rm } => write!(f, "mvn {}, {}", rd, rm),
+            Instruction::Neg { rd, rm } => write!(f, "neg {}, {}", rd, rm),
+            Instruction::Negs { rd, rm } => write!(f, "negs {}, {}", rd, rm),
+            Instruction::MovN { rd, imm, shift } => {
+                if *shift == 0 {
+                    write!(f, "movn {}, #{}", rd, imm)
+                } else {
+                    write!(f, "movn {}, #{}, lsl #{}", rd, imm, shift)
+                }
+            }
+            Instruction::Bic { rd, rn, rm } => write!(f, "bic {}, {}, {}", rd, rn, rm),
+            Instruction::Bics { rd, rn, rm } => write!(f, "bics {}, {}, {}", rd, rn, rm),
+            Instruction::Orn { rd, rn, rm } => write!(f, "orn {}, {}, {}", rd, rn, rm),
+            Instruction::Eon { rd, rn, rm } => write!(f, "eon {}, {}, {}", rd, rn, rm),
+            Instruction::Adds { rd, rn, rm } => write!(f, "adds {}, {}, {}", rd, rn, rm),
+            Instruction::Subs { rd, rn, rm } => write!(f, "subs {}, {}, {}", rd, rn, rm),
+            Instruction::Ands { rd, rn, rm } => write!(f, "ands {}, {}, {}", rd, rn, rm),
+            Instruction::Cset { rd, cond } => write!(f, "cset {}, {}", rd, cond),
+            Instruction::Csetm { rd, cond } => write!(f, "csetm {}, {}", rd, cond),
+            Instruction::Ror { rd, rn, shift } => write!(f, "ror {}, {}, {}", rd, rn, shift),
         }
     }
 }
@@ -566,6 +755,20 @@ mod tests {
             }
             .is_encodable_aarch64()
         );
+    }
+
+    #[test]
+    fn test_mvn_display_and_helpers() {
+        let mvn = Instruction::Mvn {
+            rd: Register::X0,
+            rm: Register::X1,
+        };
+        assert_eq!(format!("{}", mvn), "mvn x0, x1");
+        assert_eq!(mvn.destination(), Some(Register::X0));
+        assert_eq!(mvn.source_registers(), vec![Register::X1]);
+        assert!(!mvn.modifies_flags());
+        assert!(!mvn.reads_flags());
+        assert!(mvn.is_encodable_aarch64());
     }
 
     #[test]

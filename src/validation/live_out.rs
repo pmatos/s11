@@ -83,15 +83,16 @@ pub fn compute_written_registers(instructions: &[Instruction]) -> LiveOutRegiste
 
 /// Returns true if NZCV may be observable after the sequence executes.
 ///
-/// Static check: returns true iff **any** flag-writing instruction is
-/// present in the sequence.
+/// Static check: returns true iff **any** flag-writing instruction appears
+/// in the sequence.
 ///
-/// **Exact (not over-approximate) for the current 20-opcode subset.** No
-/// instruction in the subset clears NZCV without also setting it, so any
-/// sequence containing a flag-writer always has live-out flags at the end.
-/// If a flag-clobbering or flag-clearing instruction (e.g. an explicit
-/// `MSR NZCV, ...`) is added later, this predicate becomes a conservative
-/// over-approximation and may need revisiting.
+/// **Over-approximate.** This predicate fires whenever a flag-writer is
+/// present, regardless of whether a later instruction actually reads NZCV.
+/// That conservative posture is the only soundness barrier preventing the
+/// equivalence checker from accepting a rewrite that silently drops a
+/// flag-side-effect — SMT semantics for ADDS/SUBS/ANDS/NEGS/BICS/CMP/CMN/TST
+/// model the register write but not the flag effect. A tighter "flag-writer
+/// AND later read" form is tracked as a separate follow-up.
 pub fn flags_live_out(instructions: &[Instruction]) -> bool {
     instructions.iter().any(|i| i.modifies_flags())
 }

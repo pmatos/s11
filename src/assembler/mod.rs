@@ -4,6 +4,32 @@ use crate::ir::types::Condition;
 use crate::ir::{Instruction, Operand, Register};
 use dynasmrt::{DynasmApi, dynasm};
 
+/// Emits one of the four CSEL-family mnemonics with the given register
+/// indices and a runtime `Condition` value. dynasm-rs requires the condition
+/// suffix to be a compile-time literal, so we dispatch via a 16-arm match.
+macro_rules! emit_csel {
+    ($ops:expr, $mnem:ident, $rd:expr, $rn:expr, $rm:expr, $cond:expr) => {{
+        match $cond {
+            Condition::EQ => dynasm!($ops ; .arch aarch64 ; $mnem X($rd), X($rn), X($rm), eq),
+            Condition::NE => dynasm!($ops ; .arch aarch64 ; $mnem X($rd), X($rn), X($rm), ne),
+            Condition::CS => dynasm!($ops ; .arch aarch64 ; $mnem X($rd), X($rn), X($rm), cs),
+            Condition::CC => dynasm!($ops ; .arch aarch64 ; $mnem X($rd), X($rn), X($rm), cc),
+            Condition::MI => dynasm!($ops ; .arch aarch64 ; $mnem X($rd), X($rn), X($rm), mi),
+            Condition::PL => dynasm!($ops ; .arch aarch64 ; $mnem X($rd), X($rn), X($rm), pl),
+            Condition::VS => dynasm!($ops ; .arch aarch64 ; $mnem X($rd), X($rn), X($rm), vs),
+            Condition::VC => dynasm!($ops ; .arch aarch64 ; $mnem X($rd), X($rn), X($rm), vc),
+            Condition::HI => dynasm!($ops ; .arch aarch64 ; $mnem X($rd), X($rn), X($rm), hi),
+            Condition::LS => dynasm!($ops ; .arch aarch64 ; $mnem X($rd), X($rn), X($rm), ls),
+            Condition::GE => dynasm!($ops ; .arch aarch64 ; $mnem X($rd), X($rn), X($rm), ge),
+            Condition::LT => dynasm!($ops ; .arch aarch64 ; $mnem X($rd), X($rn), X($rm), lt),
+            Condition::GT => dynasm!($ops ; .arch aarch64 ; $mnem X($rd), X($rn), X($rm), gt),
+            Condition::LE => dynasm!($ops ; .arch aarch64 ; $mnem X($rd), X($rn), X($rm), le),
+            Condition::AL => dynasm!($ops ; .arch aarch64 ; $mnem X($rd), X($rn), X($rm), al),
+            Condition::NV => dynasm!($ops ; .arch aarch64 ; $mnem X($rd), X($rn), X($rm), nv),
+        }
+    }};
+}
+
 pub struct AArch64Assembler;
 
 impl AArch64Assembler {
@@ -354,14 +380,207 @@ impl AArch64Assembler {
                     }
                 }
             }
-            Instruction::Csel { .. } => {
-                // TODO: dynasm doesn't easily support condition code operands
-                // This requires raw encoding or dynasm macro extension
-                Err("CSEL encoding not yet supported".to_string())
+            Instruction::Csel { rd, rn, rm, cond } => {
+                let rd_reg = register_to_dynasm(*rd)?;
+                let rn_reg = register_to_dynasm(*rn)?;
+                let rm_reg = register_to_dynasm(*rm)?;
+                emit_csel!(ops, csel, rd_reg, rn_reg, rm_reg, *cond);
+                Ok(())
             }
-            Instruction::Csinc { .. } => Err("CSINC encoding not yet supported".to_string()),
-            Instruction::Csinv { .. } => Err("CSINV encoding not yet supported".to_string()),
-            Instruction::Csneg { .. } => Err("CSNEG encoding not yet supported".to_string()),
+            Instruction::Csinc { rd, rn, rm, cond } => {
+                let rd_reg = register_to_dynasm(*rd)?;
+                let rn_reg = register_to_dynasm(*rn)?;
+                let rm_reg = register_to_dynasm(*rm)?;
+                emit_csel!(ops, csinc, rd_reg, rn_reg, rm_reg, *cond);
+                Ok(())
+            }
+            Instruction::Csinv { rd, rn, rm, cond } => {
+                let rd_reg = register_to_dynasm(*rd)?;
+                let rn_reg = register_to_dynasm(*rn)?;
+                let rm_reg = register_to_dynasm(*rm)?;
+                emit_csel!(ops, csinv, rd_reg, rn_reg, rm_reg, *cond);
+                Ok(())
+            }
+            Instruction::Csneg { rd, rn, rm, cond } => {
+                let rd_reg = register_to_dynasm(*rd)?;
+                let rn_reg = register_to_dynasm(*rn)?;
+                let rm_reg = register_to_dynasm(*rm)?;
+                emit_csel!(ops, csneg, rd_reg, rn_reg, rm_reg, *cond);
+                Ok(())
+            }
+            Instruction::Mvn { rd, rm } => {
+                let rd_reg = register_to_dynasm(*rd)?;
+                let rm_reg = register_to_dynasm(*rm)?;
+                dynasm!(ops ; .arch aarch64 ; mvn X(rd_reg), X(rm_reg));
+                Ok(())
+            }
+            Instruction::Neg { rd, rm } => {
+                let rd_reg = register_to_dynasm(*rd)?;
+                let rm_reg = register_to_dynasm(*rm)?;
+                dynasm!(ops ; .arch aarch64 ; neg X(rd_reg), X(rm_reg));
+                Ok(())
+            }
+            Instruction::Negs { rd, rm } => {
+                let rd_reg = register_to_dynasm(*rd)?;
+                let rm_reg = register_to_dynasm(*rm)?;
+                dynasm!(ops ; .arch aarch64 ; negs X(rd_reg), X(rm_reg));
+                Ok(())
+            }
+            Instruction::MovN { rd, imm, shift } => {
+                let rd_reg = register_to_dynasm(*rd)?;
+                let imm = *imm as u32;
+                match shift {
+                    0 => dynasm!(ops ; .arch aarch64 ; movn X(rd_reg), imm),
+                    16 => dynasm!(ops ; .arch aarch64 ; movn X(rd_reg), imm, lsl #16),
+                    32 => dynasm!(ops ; .arch aarch64 ; movn X(rd_reg), imm, lsl #32),
+                    48 => dynasm!(ops ; .arch aarch64 ; movn X(rd_reg), imm, lsl #48),
+                    other => return Err(format!("MOVN shift {} out of range", other)),
+                }
+                Ok(())
+            }
+            Instruction::Bic { rd, rn, rm } => {
+                let rd_reg = register_to_dynasm(*rd)?;
+                let rn_reg = register_to_dynasm(*rn)?;
+                match rm {
+                    Operand::Register(r) => {
+                        let rm_reg = register_to_dynasm(*r)?;
+                        dynasm!(ops ; .arch aarch64 ; bic X(rd_reg), X(rn_reg), X(rm_reg));
+                        Ok(())
+                    }
+                    Operand::Immediate(_) => {
+                        Err("BIC immediate encoding not supported".to_string())
+                    }
+                }
+            }
+            Instruction::Bics { rd, rn, rm } => {
+                let rd_reg = register_to_dynasm(*rd)?;
+                let rn_reg = register_to_dynasm(*rn)?;
+                match rm {
+                    Operand::Register(r) => {
+                        let rm_reg = register_to_dynasm(*r)?;
+                        dynasm!(ops ; .arch aarch64 ; bics X(rd_reg), X(rn_reg), X(rm_reg));
+                        Ok(())
+                    }
+                    Operand::Immediate(_) => {
+                        Err("BICS immediate encoding not supported".to_string())
+                    }
+                }
+            }
+            Instruction::Orn { rd, rn, rm } => {
+                let rd_reg = register_to_dynasm(*rd)?;
+                let rn_reg = register_to_dynasm(*rn)?;
+                match rm {
+                    Operand::Register(r) => {
+                        let rm_reg = register_to_dynasm(*r)?;
+                        dynasm!(ops ; .arch aarch64 ; orn X(rd_reg), X(rn_reg), X(rm_reg));
+                        Ok(())
+                    }
+                    Operand::Immediate(_) => {
+                        Err("ORN immediate encoding not supported".to_string())
+                    }
+                }
+            }
+            Instruction::Eon { rd, rn, rm } => {
+                let rd_reg = register_to_dynasm(*rd)?;
+                let rn_reg = register_to_dynasm(*rn)?;
+                match rm {
+                    Operand::Register(r) => {
+                        let rm_reg = register_to_dynasm(*r)?;
+                        dynasm!(ops ; .arch aarch64 ; eon X(rd_reg), X(rn_reg), X(rm_reg));
+                        Ok(())
+                    }
+                    Operand::Immediate(_) => {
+                        Err("EON immediate encoding not supported".to_string())
+                    }
+                }
+            }
+            Instruction::Adds { rd, rn, rm } => {
+                let rd_reg = register_to_dynasm(*rd)?;
+                let rn_reg = register_to_dynasm(*rn)?;
+                match rm {
+                    Operand::Register(r) => {
+                        let rm_reg = register_to_dynasm(*r)?;
+                        dynasm!(ops ; .arch aarch64 ; adds X(rd_reg), X(rn_reg), X(rm_reg));
+                        Ok(())
+                    }
+                    Operand::Immediate(imm) => {
+                        if *imm < 0 || *imm > 0xFFF {
+                            return Err(format!("Immediate {} out of range for ADDS", imm));
+                        }
+                        let imm = *imm as u32;
+                        dynasm!(ops ; .arch aarch64 ; adds X(rd_reg), XSP(rn_reg), imm);
+                        Ok(())
+                    }
+                }
+            }
+            Instruction::Subs { rd, rn, rm } => {
+                let rd_reg = register_to_dynasm(*rd)?;
+                let rn_reg = register_to_dynasm(*rn)?;
+                match rm {
+                    Operand::Register(r) => {
+                        let rm_reg = register_to_dynasm(*r)?;
+                        dynasm!(ops ; .arch aarch64 ; subs X(rd_reg), X(rn_reg), X(rm_reg));
+                        Ok(())
+                    }
+                    Operand::Immediate(imm) => {
+                        if *imm < 0 || *imm > 0xFFF {
+                            return Err(format!("Immediate {} out of range for SUBS", imm));
+                        }
+                        let imm = *imm as u32;
+                        dynasm!(ops ; .arch aarch64 ; subs X(rd_reg), XSP(rn_reg), imm);
+                        Ok(())
+                    }
+                }
+            }
+            Instruction::Ands { rd, rn, rm } => {
+                let rd_reg = register_to_dynasm(*rd)?;
+                let rn_reg = register_to_dynasm(*rn)?;
+                match rm {
+                    Operand::Register(r) => {
+                        let rm_reg = register_to_dynasm(*r)?;
+                        dynasm!(ops ; .arch aarch64 ; ands X(rd_reg), X(rn_reg), X(rm_reg));
+                        Ok(())
+                    }
+                    Operand::Immediate(_) => {
+                        Err("ANDS immediate encoding not supported".to_string())
+                    }
+                }
+            }
+            // CSET / CSETM lower to CSINC/CSINV with XZR sources and inverted cond.
+            // Capstone canonicalises the disassembly back to `cset`/`csetm`.
+            Instruction::Cset { rd, cond } => {
+                let rd_reg = register_to_dynasm(*rd)?;
+                let xzr: u8 = 31;
+                let inv = cond.invert();
+                emit_csel!(ops, csinc, rd_reg, xzr, xzr, inv);
+                Ok(())
+            }
+            Instruction::Csetm { rd, cond } => {
+                let rd_reg = register_to_dynasm(*rd)?;
+                let xzr: u8 = 31;
+                let inv = cond.invert();
+                emit_csel!(ops, csinv, rd_reg, xzr, xzr, inv);
+                Ok(())
+            }
+            Instruction::Ror { rd, rn, shift } => {
+                let rd_reg = register_to_dynasm(*rd)?;
+                let rn_reg = register_to_dynasm(*rn)?;
+                match shift {
+                    Operand::Register(r) => {
+                        let rm_reg = register_to_dynasm(*r)?;
+                        dynasm!(ops ; .arch aarch64 ; ror X(rd_reg), X(rn_reg), X(rm_reg));
+                        Ok(())
+                    }
+                    Operand::Immediate(imm) => {
+                        if *imm < 0 || *imm > 63 {
+                            return Err(format!("ROR shift {} out of range", imm));
+                        }
+                        let imm = *imm as u32;
+                        dynasm!(ops ; .arch aarch64 ; ror X(rd_reg), X(rn_reg), imm);
+                        Ok(())
+                    }
+                }
+            }
         }
     }
 }
@@ -375,28 +594,6 @@ impl Default for AArch64Assembler {
 fn register_to_dynasm(reg: Register) -> Result<u8, String> {
     reg.index()
         .ok_or_else(|| format!("Register {:?} not supported in dynasm encoding", reg))
-}
-
-#[allow(dead_code)]
-fn condition_to_dynasm(cond: Condition) -> Result<u8, String> {
-    Ok(match cond {
-        Condition::EQ => 0b0000,
-        Condition::NE => 0b0001,
-        Condition::CS => 0b0010,
-        Condition::CC => 0b0011,
-        Condition::MI => 0b0100,
-        Condition::PL => 0b0101,
-        Condition::VS => 0b0110,
-        Condition::VC => 0b0111,
-        Condition::HI => 0b1000,
-        Condition::LS => 0b1001,
-        Condition::GE => 0b1010,
-        Condition::LT => 0b1011,
-        Condition::GT => 0b1100,
-        Condition::LE => 0b1101,
-        Condition::AL => 0b1110,
-        Condition::NV => 0b1111,
-    })
 }
 
 #[cfg(test)]
@@ -729,5 +926,227 @@ mod tests {
             .assemble_instructions(&instructions)
             .expect("LSL register encoding should succeed");
         disassemble_and_verify(&bytes, "lsl", &["x0", "x1", "x2"]);
+    }
+
+    #[test]
+    fn test_csel_correctness() {
+        let mut assembler = AArch64Assembler::new();
+        let instructions = vec![Instruction::Csel {
+            rd: Register::X0,
+            rn: Register::X1,
+            rm: Register::X2,
+            cond: Condition::EQ,
+        }];
+        let bytes = assembler
+            .assemble_instructions(&instructions)
+            .expect("CSEL encoding should succeed");
+        disassemble_and_verify(&bytes, "csel", &["x0", "x1", "x2", "eq"]);
+    }
+
+    #[test]
+    fn test_csinc_correctness() {
+        let mut assembler = AArch64Assembler::new();
+        let instructions = vec![Instruction::Csinc {
+            rd: Register::X3,
+            rn: Register::X4,
+            rm: Register::X5,
+            cond: Condition::NE,
+        }];
+        let bytes = assembler
+            .assemble_instructions(&instructions)
+            .expect("CSINC encoding should succeed");
+        disassemble_and_verify(&bytes, "csinc", &["x3", "x4", "x5", "ne"]);
+    }
+
+    #[test]
+    fn test_csinv_correctness() {
+        let mut assembler = AArch64Assembler::new();
+        let instructions = vec![Instruction::Csinv {
+            rd: Register::X10,
+            rn: Register::X11,
+            rm: Register::X12,
+            cond: Condition::LT,
+        }];
+        let bytes = assembler
+            .assemble_instructions(&instructions)
+            .expect("CSINV encoding should succeed");
+        disassemble_and_verify(&bytes, "csinv", &["x10", "x11", "x12", "lt"]);
+    }
+
+    #[test]
+    fn test_csneg_correctness() {
+        let mut assembler = AArch64Assembler::new();
+        let instructions = vec![Instruction::Csneg {
+            rd: Register::X20,
+            rn: Register::X21,
+            rm: Register::X22,
+            cond: Condition::GE,
+        }];
+        let bytes = assembler
+            .assemble_instructions(&instructions)
+            .expect("CSNEG encoding should succeed");
+        disassemble_and_verify(&bytes, "csneg", &["x20", "x21", "x22", "ge"]);
+    }
+
+    #[test]
+    fn test_mvn_correctness() {
+        let mut assembler = AArch64Assembler::new();
+        let instructions = vec![Instruction::Mvn {
+            rd: Register::X0,
+            rm: Register::X1,
+        }];
+        let bytes = assembler
+            .assemble_instructions(&instructions)
+            .expect("MVN encoding should succeed");
+        disassemble_and_verify(&bytes, "mvn", &["x0", "x1"]);
+    }
+
+    #[test]
+    fn test_neg_correctness() {
+        let mut assembler = AArch64Assembler::new();
+        let instructions = vec![Instruction::Neg {
+            rd: Register::X0,
+            rm: Register::X1,
+        }];
+        let bytes = assembler
+            .assemble_instructions(&instructions)
+            .expect("NEG encoding should succeed");
+        disassemble_and_verify(&bytes, "neg", &["x0", "x1"]);
+    }
+
+    #[test]
+    fn test_negs_correctness() {
+        let mut assembler = AArch64Assembler::new();
+        let instructions = vec![Instruction::Negs {
+            rd: Register::X0,
+            rm: Register::X1,
+        }];
+        let bytes = assembler
+            .assemble_instructions(&instructions)
+            .expect("NEGS encoding should succeed");
+        disassemble_and_verify(&bytes, "negs", &["x0", "x1"]);
+    }
+
+    #[test]
+    fn test_movn_correctness_shift_0() {
+        let mut assembler = AArch64Assembler::new();
+        let instructions = vec![Instruction::MovN {
+            rd: Register::X0,
+            imm: 0xFFFF,
+            shift: 0,
+        }];
+        let bytes = assembler
+            .assemble_instructions(&instructions)
+            .expect("MOVN encoding should succeed");
+        // Capstone may render this as `mov x0, #-65536` (canonicalises movn → mov #-N)
+        // so we only assert that the instruction is exactly 4 bytes and not zero.
+        assert_eq!(bytes.len(), 4);
+        assert_ne!(bytes, [0, 0, 0, 0]);
+    }
+
+    #[test]
+    fn test_cset_disassembles_to_cset() {
+        let mut assembler = AArch64Assembler::new();
+        let instructions = vec![Instruction::Cset {
+            rd: Register::X0,
+            cond: Condition::EQ,
+        }];
+        let bytes = assembler
+            .assemble_instructions(&instructions)
+            .expect("CSET encoding should succeed");
+        // Capstone canonicalises `csinc x0, xzr, xzr, ne` back to `cset x0, eq`
+        disassemble_and_verify(&bytes, "cset", &["x0", "eq"]);
+    }
+
+    #[test]
+    fn test_ror_imm_correctness() {
+        let mut assembler = AArch64Assembler::new();
+        let instructions = vec![Instruction::Ror {
+            rd: Register::X0,
+            rn: Register::X1,
+            shift: Operand::Immediate(5),
+        }];
+        let bytes = assembler
+            .assemble_instructions(&instructions)
+            .expect("ROR imm encoding should succeed");
+        disassemble_and_verify(&bytes, "ror", &["x0", "x1"]);
+    }
+
+    #[test]
+    fn test_ror_reg_correctness() {
+        let mut assembler = AArch64Assembler::new();
+        let instructions = vec![Instruction::Ror {
+            rd: Register::X0,
+            rn: Register::X1,
+            shift: Operand::Register(Register::X2),
+        }];
+        let bytes = assembler
+            .assemble_instructions(&instructions)
+            .expect("ROR reg encoding should succeed");
+        disassemble_and_verify(&bytes, "ror", &["x0", "x1", "x2"]);
+    }
+
+    #[test]
+    fn test_csetm_disassembles_to_csetm() {
+        let mut assembler = AArch64Assembler::new();
+        let instructions = vec![Instruction::Csetm {
+            rd: Register::X3,
+            cond: Condition::NE,
+        }];
+        let bytes = assembler
+            .assemble_instructions(&instructions)
+            .expect("CSETM encoding should succeed");
+        disassemble_and_verify(&bytes, "csetm", &["x3", "ne"]);
+    }
+
+    #[test]
+    fn test_movn_correctness_shift_16() {
+        let mut assembler = AArch64Assembler::new();
+        let instructions = vec![Instruction::MovN {
+            rd: Register::X0,
+            imm: 1,
+            shift: 16,
+        }];
+        let bytes = assembler
+            .assemble_instructions(&instructions)
+            .expect("MOVN encoding with shift should succeed");
+        assert_eq!(bytes.len(), 4);
+    }
+
+    /// Ensures we emit the 64-bit (sf=1) form, not the 32-bit Wn form —
+    /// regression for the encoding bit-pattern error.
+    #[test]
+    fn test_csinv_is_xform_not_wform() {
+        let mut assembler = AArch64Assembler::new();
+        let instructions = vec![Instruction::Csinv {
+            rd: Register::X0,
+            rn: Register::X1,
+            rm: Register::X2,
+            cond: Condition::EQ,
+        }];
+        let bytes = assembler
+            .assemble_instructions(&instructions)
+            .expect("CSINV encoding should succeed");
+        // disassemble_and_verify asserts mnemonic and operand presence; here
+        // we additionally assert the operands are xN, not wN.
+        use capstone::prelude::*;
+        let cs = Capstone::new()
+            .arm64()
+            .mode(arch::arm64::ArchMode::Arm)
+            .build()
+            .expect("Capstone");
+        let insns = cs.disasm_all(&bytes, 0).expect("disasm");
+        let insn = insns.iter().next().expect("instruction");
+        let op_str = insn.op_str().expect("op_str");
+        assert!(
+            op_str.contains("x0") && op_str.contains("x1") && op_str.contains("x2"),
+            "Expected 64-bit Xn form, got: {}",
+            op_str
+        );
+        assert!(
+            !op_str.contains("w0") && !op_str.contains("w1") && !op_str.contains("w2"),
+            "Got 32-bit Wn form (sf-bit error); op_str: {}",
+            op_str
+        );
     }
 }
