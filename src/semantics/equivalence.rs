@@ -6,11 +6,12 @@ use crate::ir::Instruction;
 use crate::semantics::concrete::{
     apply_sequence_concrete, find_first_difference, states_equal_for_live_out,
 };
+use crate::semantics::live_out::LiveOut;
 use crate::semantics::smt::{
     MachineState, SolverConfig, apply_sequence, create_solver_with_config, states_not_equal,
     states_not_equal_for_live_out,
 };
-use crate::semantics::state::{ConcreteMachineState, LiveOutMask};
+use crate::semantics::state::ConcreteMachineState;
 use crate::validation::random::{
     RandomInputConfig, generate_edge_case_inputs, generate_random_inputs,
 };
@@ -33,8 +34,8 @@ pub enum EquivalenceResult {
 /// Configuration for equivalence checking
 #[derive(Debug, Clone)]
 pub struct EquivalenceConfig {
-    /// Registers that need to match after execution
-    pub live_out: LiveOutMask,
+    /// Observable architectural state that must match after execution.
+    pub live_out: LiveOut,
     /// Number of random tests to run before SMT
     pub random_test_count: usize,
     /// Timeout for SMT solver
@@ -46,7 +47,7 @@ pub struct EquivalenceConfig {
 impl Default for EquivalenceConfig {
     fn default() -> Self {
         Self {
-            live_out: LiveOutMask::all_registers(),
+            live_out: LiveOut::all_registers(),
             random_test_count: 10,
             smt_timeout: Some(Duration::from_secs(30)),
             fast_only: false,
@@ -63,16 +64,16 @@ impl EquivalenceConfig {
         }
     }
 
-    /// Create a config with a specific live-out mask
-    pub fn with_live_out(live_out: LiveOutMask) -> Self {
+    /// Create a config with a specific live-out contract.
+    pub fn with_live_out(live_out: LiveOut) -> Self {
         Self {
             live_out,
             ..Default::default()
         }
     }
 
-    /// Builder method to set live-out mask
-    pub fn live_out(mut self, live_out: LiveOutMask) -> Self {
+    /// Builder method to set live-out contract.
+    pub fn live_out(mut self, live_out: LiveOut) -> Self {
         self.live_out = live_out;
         self
     }
@@ -145,7 +146,8 @@ fn run_fast_path(
     seq2: &[Instruction],
     config: &EquivalenceConfig,
 ) -> Option<EquivalenceResult> {
-    let input_regs: Vec<_> = config.live_out.iter().cloned().collect();
+    let live_out_registers = config.live_out.registers();
+    let input_regs: Vec<_> = live_out_registers.iter().cloned().collect();
 
     let random_config = RandomInputConfig {
         count: config.random_test_count,
@@ -157,7 +159,7 @@ fn run_fast_path(
         let state1 = apply_sequence_concrete(input.clone(), seq1);
         let state2 = apply_sequence_concrete(input.clone(), seq2);
 
-        if !states_equal_for_live_out(&state1, &state2, &config.live_out) {
+        if !states_equal_for_live_out(&state1, &state2, live_out_registers) {
             return Some(EquivalenceResult::NotEquivalentFast(input.clone()));
         }
     }
@@ -167,7 +169,7 @@ fn run_fast_path(
         let state1 = apply_sequence_concrete(input.clone(), seq1);
         let state2 = apply_sequence_concrete(input.clone(), seq2);
 
-        if !states_equal_for_live_out(&state1, &state2, &config.live_out) {
+        if !states_equal_for_live_out(&state1, &state2, live_out_registers) {
             return Some(EquivalenceResult::NotEquivalentFast(input.clone()));
         }
     }
@@ -249,7 +251,7 @@ fn build_smt_solver(
     solver.assert(states_not_equal_for_live_out(
         &final_state1,
         &final_state2,
-        &config.live_out,
+        config.live_out.registers(),
     ));
     solver
 }
@@ -318,7 +320,8 @@ pub fn find_counterexample_concrete(
     crate::semantics::state::ConcreteValue,
     crate::semantics::state::ConcreteValue,
 )> {
-    let input_regs: Vec<_> = config.live_out.iter().cloned().collect();
+    let live_out_registers = config.live_out.registers();
+    let input_regs: Vec<_> = live_out_registers.iter().cloned().collect();
 
     let random_config = RandomInputConfig {
         count: config.random_test_count,
@@ -330,7 +333,7 @@ pub fn find_counterexample_concrete(
         let state1 = apply_sequence_concrete(input.clone(), seq1);
         let state2 = apply_sequence_concrete(input.clone(), seq2);
 
-        if let Some(diff) = find_first_difference(&state1, &state2, &config.live_out) {
+        if let Some(diff) = find_first_difference(&state1, &state2, live_out_registers) {
             return Some(diff);
         }
     }
@@ -340,7 +343,7 @@ pub fn find_counterexample_concrete(
         let state1 = apply_sequence_concrete(input.clone(), seq1);
         let state2 = apply_sequence_concrete(input.clone(), seq2);
 
-        if let Some(diff) = find_first_difference(&state1, &state2, &config.live_out) {
+        if let Some(diff) = find_first_difference(&state1, &state2, live_out_registers) {
             return Some(diff);
         }
     }
@@ -565,8 +568,7 @@ mod tests {
             imm: 2,
         }];
 
-        let config =
-            EquivalenceConfig::with_live_out(LiveOutMask::from_registers(vec![Register::X1]));
+        let config = EquivalenceConfig::with_live_out(LiveOut::from_registers(vec![Register::X1]));
         let result = check_equivalence_with_config(&seq1, &seq2, &config);
         assert_eq!(result, EquivalenceResult::Equivalent);
     }

@@ -13,7 +13,7 @@ use crate::ir::Instruction;
 use crate::search::SearchAlgorithm;
 use crate::search::config::SearchConfig;
 use crate::search::result::{SearchResult, SearchStatistics};
-use crate::semantics::state::LiveOutMask;
+use crate::semantics::live_out::LiveOut;
 use crate::validation::live_out::{compute_live_in_registers, flags_live_out};
 
 use self::codex::invoke_codex;
@@ -80,7 +80,7 @@ impl SearchAlgorithm for LlmSearch {
     fn search(
         &mut self,
         target: &[Instruction],
-        live_out: &LiveOutMask,
+        live_out: &LiveOut,
         config: &SearchConfig,
     ) -> SearchResult {
         // Reset accumulators at the start of every search so a caller that
@@ -111,7 +111,7 @@ impl SearchAlgorithm for LlmSearch {
         }
 
         let live_in = compute_live_in_registers(target);
-        let prompt = build_prompt(target, &live_in, live_out);
+        let prompt = build_prompt(target, &live_in, live_out.registers());
         let timeout = config.timeout.unwrap_or(Duration::from_secs(60));
         let max_calls = config.llm.max_codex_calls;
 
@@ -287,10 +287,8 @@ mod tests {
     use crate::ir::{Operand, Register};
     use crate::search::config::LlmConfig;
 
-    fn live_out_x0() -> LiveOutMask {
-        let mut m = LiveOutMask::empty();
-        m.add(Register::X0);
-        m
+    fn live_out_x0() -> LiveOut {
+        LiveOut::from_registers(vec![Register::X0])
     }
 
     fn cfg_no_calls() -> SearchConfig {

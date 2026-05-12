@@ -12,7 +12,7 @@ use crate::search::parallel::config::ParallelConfig;
 use crate::search::result::{SearchResult, SearchStatistics};
 use crate::search::stochastic::StochasticSearch;
 use crate::search::symbolic::SymbolicSearch;
-use crate::semantics::state::LiveOutMask;
+use crate::semantics::live_out::LiveOut;
 use crossbeam_channel::RecvTimeoutError;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -31,7 +31,7 @@ pub struct ParallelResult {
 /// Run parallel search with the given configuration.
 pub fn run_parallel_search(
     target: &[Instruction],
-    live_out: &LiveOutMask,
+    live_out: &LiveOut,
     search_config: &SearchConfig,
     parallel_config: &ParallelConfig,
 ) -> ParallelResult {
@@ -90,7 +90,7 @@ pub fn run_parallel_search(
 /// Coordinator loop that receives messages from workers and aggregates results.
 fn run_coordinator(
     target: &[Instruction],
-    _live_out: &LiveOutMask,
+    _live_out: &LiveOut,
     channels: CoordinatorChannels,
     config: &ParallelConfig,
     start_time: Instant,
@@ -211,7 +211,7 @@ fn run_coordinator(
 fn run_worker(
     worker_id: usize,
     target: &[Instruction],
-    live_out: &LiveOutMask,
+    live_out: &LiveOut,
     search_config: &SearchConfig,
     parallel_config: &ParallelConfig,
     channels: WorkerChannels,
@@ -244,7 +244,7 @@ fn run_worker(
 fn run_symbolic_worker(
     worker_id: usize,
     target: &[Instruction],
-    live_out: &LiveOutMask,
+    live_out: &LiveOut,
     config: &SearchConfig,
     channels: WorkerChannels,
 ) {
@@ -276,7 +276,7 @@ fn run_symbolic_worker(
 fn run_stochastic_worker(
     worker_id: usize,
     target: &[Instruction],
-    live_out: &LiveOutMask,
+    live_out: &LiveOut,
     config: &SearchConfig,
     channels: WorkerChannels,
 ) {
@@ -331,7 +331,7 @@ mod tests {
     #[test]
     fn test_parallel_search_single_worker() {
         let target = mov_add_sequence();
-        let live_out = LiveOutMask::from_registers(vec![Register::X0]);
+        let live_out = LiveOut::from_registers(vec![Register::X0]);
 
         let search_config = SearchConfig::default()
             .with_registers(vec![Register::X0, Register::X1])
@@ -352,7 +352,7 @@ mod tests {
     #[test]
     fn test_parallel_search_multiple_workers() {
         let target = mov_add_sequence();
-        let live_out = LiveOutMask::from_registers(vec![Register::X0]);
+        let live_out = LiveOut::from_registers(vec![Register::X0]);
 
         let search_config = SearchConfig::default()
             .with_registers(vec![Register::X0, Register::X1])

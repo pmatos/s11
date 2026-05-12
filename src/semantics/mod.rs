@@ -3,6 +3,7 @@
 pub mod concrete;
 pub mod cost;
 pub mod equivalence;
+pub mod live_out;
 pub mod smt;
 pub mod state;
 
@@ -17,4 +18,6 @@ pub use equivalence::{
 #[allow(unused_imports)]
 pub use equivalence::{EquivalenceMetrics, check_equivalence_with_config_metrics};
 #[allow(unused_imports)]
-pub use state::{ConcreteMachineState, ConcreteValue, ConditionFlags, LiveOutMask};
+pub use live_out::{LiveOut, LiveOutRegisters};
+#[allow(unused_imports)]
+pub use state::{ConcreteMachineState, ConcreteValue, ConditionFlags};

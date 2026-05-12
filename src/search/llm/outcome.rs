@@ -8,7 +8,7 @@ use crate::parser::{ParseLineError, parse_assembly_string, parse_line};
 use crate::semantics::equivalence::{
     EquivalenceConfig, EquivalenceMetrics, EquivalenceResult, check_equivalence_with_config_metrics,
 };
-use crate::semantics::state::LiveOutMask;
+use crate::semantics::live_out::LiveOut;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum IterationOutcome {
@@ -35,7 +35,7 @@ pub enum IterationOutcome {
 pub fn classify(
     target: &[Instruction],
     raw_asm: &str,
-    live_out: &LiveOutMask,
+    live_out: &LiveOut,
 ) -> (IterationOutcome, Option<EquivalenceMetrics>) {
     let candidate = match parse_assembly_string(raw_asm, "<llm-output>".to_string()) {
         Ok(v) => v,
@@ -102,10 +102,8 @@ mod tests {
     use super::*;
     use crate::ir::{Operand, Register};
 
-    fn live_out_x0() -> LiveOutMask {
-        let mut m = LiveOutMask::empty();
-        m.add(Register::X0);
-        m
+    fn live_out_x0() -> LiveOut {
+        LiveOut::from_registers(vec![Register::X0])
     }
 
     #[test]

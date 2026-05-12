@@ -4,7 +4,7 @@
 
 use crate::ir::Register;
 use crate::ir::types::Condition;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::fmt;
 
 /// NZCV condition flags (Negative, Zero, Carry, oVerflow)
@@ -215,81 +215,6 @@ impl fmt::Display for ConcreteMachineState {
     }
 }
 
-/// Mask specifying which registers are live-out (need to be preserved)
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct LiveOutMask {
-    registers: HashSet<Register>,
-}
-
-impl LiveOutMask {
-    /// Create a mask with all general-purpose registers (X0-X30, SP)
-    pub fn all_registers() -> Self {
-        let mut registers = HashSet::new();
-        for i in 0..=30 {
-            if let Some(reg) = Register::from_index(i) {
-                registers.insert(reg);
-            }
-        }
-        registers.insert(Register::SP);
-        LiveOutMask { registers }
-    }
-
-    /// Create a mask from a list of registers
-    pub fn from_registers(regs: Vec<Register>) -> Self {
-        LiveOutMask {
-            registers: regs.into_iter().collect(),
-        }
-    }
-
-    /// Create an empty mask
-    pub fn empty() -> Self {
-        LiveOutMask {
-            registers: HashSet::new(),
-        }
-    }
-
-    /// Add a register to the mask
-    pub fn add(&mut self, reg: Register) {
-        if reg != Register::XZR {
-            self.registers.insert(reg);
-        }
-    }
-
-    /// Remove a register from the mask
-    pub fn remove(&mut self, reg: Register) {
-        self.registers.remove(&reg);
-    }
-
-    /// Check if a register is in the mask
-    pub fn contains(&self, reg: Register) -> bool {
-        self.registers.contains(&reg)
-    }
-
-    /// Iterate over registers in the mask
-    pub fn iter(&self) -> impl Iterator<Item = &Register> {
-        self.registers.iter()
-    }
-
-    /// Get the number of registers in the mask
-    pub fn len(&self) -> usize {
-        self.registers.len()
-    }
-
-    /// Check if the mask is empty
-    pub fn is_empty(&self) -> bool {
-        self.registers.is_empty()
-    }
-}
-
-impl fmt::Display for LiveOutMask {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let mut regs: Vec<_> = self.registers.iter().collect();
-        regs.sort_by_key(|r| r.index().unwrap_or(255));
-        let names: Vec<_> = regs.iter().map(|r| format!("{}", r)).collect();
-        write!(f, "{{{}}}", names.join(", "))
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -337,49 +262,5 @@ mod tests {
         let mut state = ConcreteMachineState::new_zeroed();
         state.set_register(Register::XZR, ConcreteValue::new(123));
         assert_eq!(state.get_register(Register::XZR).as_u64(), 0);
-    }
-
-    #[test]
-    fn test_live_out_mask_all_registers() {
-        let mask = LiveOutMask::all_registers();
-        assert!(mask.contains(Register::X0));
-        assert!(mask.contains(Register::X30));
-        assert!(mask.contains(Register::SP));
-        assert!(!mask.contains(Register::XZR));
-    }
-
-    #[test]
-    fn test_live_out_mask_from_registers() {
-        let mask = LiveOutMask::from_registers(vec![Register::X0, Register::X1, Register::X2]);
-        assert!(mask.contains(Register::X0));
-        assert!(mask.contains(Register::X1));
-        assert!(mask.contains(Register::X2));
-        assert!(!mask.contains(Register::X3));
-        assert_eq!(mask.len(), 3);
-    }
-
-    #[test]
-    fn test_live_out_mask_empty() {
-        let mask = LiveOutMask::empty();
-        assert!(mask.is_empty());
-        assert!(!mask.contains(Register::X0));
-    }
-
-    #[test]
-    fn test_live_out_mask_add_remove() {
-        let mut mask = LiveOutMask::empty();
-        mask.add(Register::X0);
-        assert!(mask.contains(Register::X0));
-
-        mask.remove(Register::X0);
-        assert!(!mask.contains(Register::X0));
-    }
-
-    #[test]
-    fn test_live_out_mask_xzr_ignored() {
-        let mut mask = LiveOutMask::empty();
-        mask.add(Register::XZR);
-        assert!(!mask.contains(Register::XZR));
-        assert!(mask.is_empty());
     }
 }

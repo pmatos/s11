@@ -1,27 +1,27 @@
-//! Live-out register computation and parsing
+//! Live-out register set computation and parsing
 
 #![allow(dead_code)]
 
 use crate::ir::{Instruction, Register};
-use crate::semantics::state::LiveOutMask;
+use crate::semantics::live_out::LiveOutRegisters;
 use std::str::FromStr;
 
-/// Error type for parsing LiveOutMask
+/// Error type for parsing live-out register sets.
 #[derive(Debug, Clone, PartialEq)]
-pub struct ParseLiveOutError {
+pub struct ParseLiveOutRegistersError {
     pub message: String,
 }
 
-impl std::fmt::Display for ParseLiveOutError {
+impl std::fmt::Display for ParseLiveOutRegistersError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "ParseLiveOutError: {}", self.message)
+        write!(f, "ParseLiveOutRegistersError: {}", self.message)
     }
 }
 
-impl std::error::Error for ParseLiveOutError {}
+impl std::error::Error for ParseLiveOutRegistersError {}
 
 /// Parse a register name like "x0", "X1", "sp", "SP"
-fn parse_register(s: &str) -> Result<Register, ParseLiveOutError> {
+fn parse_register(s: &str) -> Result<Register, ParseLiveOutRegistersError> {
     let s = s.trim().to_lowercase();
 
     if s == "sp" {
@@ -38,25 +38,25 @@ fn parse_register(s: &str) -> Result<Register, ParseLiveOutError> {
         return Ok(reg);
     }
 
-    Err(ParseLiveOutError {
+    Err(ParseLiveOutRegistersError {
         message: format!("invalid register name: '{}'", s),
     })
 }
 
-impl FromStr for LiveOutMask {
-    type Err = ParseLiveOutError;
+impl FromStr for LiveOutRegisters {
+    type Err = ParseLiveOutRegistersError;
 
     /// Parse a comma or space-separated list of register names
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         let s = s.trim();
 
         if s.is_empty() {
-            return Ok(LiveOutMask::empty());
+            return Ok(LiveOutRegisters::empty());
         }
 
         let separator = if s.contains(',') { ',' } else { ' ' };
 
-        let mut mask = LiveOutMask::empty();
+        let mut mask = LiveOutRegisters::empty();
         for part in s.split(separator) {
             let part = part.trim();
             if part.is_empty() {
@@ -71,8 +71,8 @@ impl FromStr for LiveOutMask {
 }
 
 /// Compute the set of registers written by a sequence of instructions
-pub fn compute_written_registers(instructions: &[Instruction]) -> LiveOutMask {
-    let mut mask = LiveOutMask::empty();
+pub fn compute_written_registers(instructions: &[Instruction]) -> LiveOutRegisters {
+    let mut mask = LiveOutRegisters::empty();
     for instr in instructions {
         if let Some(dest) = instr.destination() {
             mask.add(dest);
@@ -119,9 +119,9 @@ pub fn reads_flags_before_writing(instructions: &[Instruction]) -> bool {
 ///
 /// This is the intra-sequence live-in set: any register the sequence reads
 /// before defining (writing) is in the result. XZR is never included.
-pub fn compute_live_in_registers(instructions: &[Instruction]) -> LiveOutMask {
-    let mut live_in = LiveOutMask::empty();
-    let mut written = LiveOutMask::empty();
+pub fn compute_live_in_registers(instructions: &[Instruction]) -> LiveOutRegisters {
+    let mut live_in = LiveOutRegisters::empty();
+    let mut written = LiveOutRegisters::empty();
 
     for instr in instructions {
         for src in instr.source_registers() {
@@ -174,8 +174,8 @@ mod tests {
     }
 
     #[test]
-    fn test_live_out_mask_from_str_comma_separated() {
-        let mask: LiveOutMask = "x0, x1, x2".parse().unwrap();
+    fn test_live_out_registers_from_str_comma_separated() {
+        let mask: LiveOutRegisters = "x0, x1, x2".parse().unwrap();
         assert!(mask.contains(Register::X0));
         assert!(mask.contains(Register::X1));
         assert!(mask.contains(Register::X2));
@@ -183,37 +183,37 @@ mod tests {
     }
 
     #[test]
-    fn test_live_out_mask_from_str_space_separated() {
-        let mask: LiveOutMask = "x0 x1 x2".parse().unwrap();
+    fn test_live_out_registers_from_str_space_separated() {
+        let mask: LiveOutRegisters = "x0 x1 x2".parse().unwrap();
         assert!(mask.contains(Register::X0));
         assert!(mask.contains(Register::X1));
         assert!(mask.contains(Register::X2));
     }
 
     #[test]
-    fn test_live_out_mask_from_str_mixed_case() {
-        let mask: LiveOutMask = "X0, x1, SP".parse().unwrap();
+    fn test_live_out_registers_from_str_mixed_case() {
+        let mask: LiveOutRegisters = "X0, x1, SP".parse().unwrap();
         assert!(mask.contains(Register::X0));
         assert!(mask.contains(Register::X1));
         assert!(mask.contains(Register::SP));
     }
 
     #[test]
-    fn test_live_out_mask_from_str_empty() {
-        let mask: LiveOutMask = "".parse().unwrap();
+    fn test_live_out_registers_from_str_empty() {
+        let mask: LiveOutRegisters = "".parse().unwrap();
         assert!(mask.is_empty());
     }
 
     #[test]
-    fn test_live_out_mask_from_str_whitespace() {
-        let mask: LiveOutMask = "  x0  ,  x1  ".parse().unwrap();
+    fn test_live_out_registers_from_str_whitespace() {
+        let mask: LiveOutRegisters = "  x0  ,  x1  ".parse().unwrap();
         assert!(mask.contains(Register::X0));
         assert!(mask.contains(Register::X1));
     }
 
     #[test]
-    fn test_live_out_mask_from_str_invalid() {
-        let result: Result<LiveOutMask, _> = "x0, invalid, x1".parse();
+    fn test_live_out_registers_from_str_invalid() {
+        let result: Result<LiveOutRegisters, _> = "x0, invalid, x1".parse();
         assert!(result.is_err());
     }
 
