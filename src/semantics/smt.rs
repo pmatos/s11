@@ -245,7 +245,7 @@ pub fn apply_instruction(mut state: MachineState, instruction: &Instruction) -> 
         }
         // BIC: rd = rn & !rm. BICS shares the SMT body — the flag effect is
         // not modelled (matches CMP/CMN/TST and ADDS/SUBS/ANDS). The
-        // soundness barrier lives in `equivalence::drops_target_flag_writer`,
+        // soundness barrier lives in `equivalence::flag_writers_diverge`,
         // which refuses any rewrite that drops a flag-writer the target had.
         Instruction::Bic { rd, rn, rm } | Instruction::Bics { rd, rn, rm } => {
             let lhs = state.get_register(*rn).clone();
