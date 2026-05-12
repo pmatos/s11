@@ -12,11 +12,25 @@ use crate::semantics::smt::{
     states_not_equal_for_live_out,
 };
 use crate::semantics::state::ConcreteMachineState;
+use crate::validation::live_out::flags_live_out;
 use crate::validation::random::{
     RandomInputConfig, generate_edge_case_inputs, generate_random_inputs,
 };
 use std::time::Duration;
 use z3::SatResult;
+
+/// Soundness guard: SMT does not model NZCV, so a rewrite that drops a
+/// flag-writing instruction present in the target sequence cannot be proved
+/// equivalent — a downstream conditional branch (or CSEL chain) would
+/// observe different flags. Equivalent in registers ≠ equivalent in flags.
+///
+/// Conservative: returns `true` whenever the target contains any
+/// flag-writer that the candidate lacks. Reject (return NotEquivalent) when
+/// this is the case before invoking SMT. Over-approximation matches the
+/// posture documented on `flags_live_out`.
+fn drops_target_flag_writer(target: &[Instruction], candidate: &[Instruction]) -> bool {
+    flags_live_out(target) && !flags_live_out(candidate)
+}
 
 /// Result of equivalence checking
 #[derive(Debug, Clone, PartialEq)]
@@ -108,6 +122,11 @@ impl EquivalenceConfig {
 /// Returns true if for all possible initial states, both sequences
 /// produce the same final state.
 pub fn check_equivalence(seq1: &[Instruction], seq2: &[Instruction]) -> EquivalenceResult {
+    // Soundness guard before SMT: see `drops_target_flag_writer`.
+    if drops_target_flag_writer(seq1, seq2) {
+        return EquivalenceResult::NotEquivalent;
+    }
+
     let solver_config = SolverConfig::default();
     let solver = create_solver_with_config(&solver_config);
 
@@ -187,6 +206,11 @@ pub fn check_equivalence_with_config(
     seq2: &[Instruction],
     config: &EquivalenceConfig,
 ) -> EquivalenceResult {
+    // Soundness guard before SMT: see `drops_target_flag_writer`.
+    if drops_target_flag_writer(seq1, seq2) {
+        return EquivalenceResult::NotEquivalent;
+    }
+
     if let Some(fast) = run_fast_path(seq1, seq2, config) {
         return fast;
     }
@@ -210,6 +234,11 @@ pub fn check_equivalence_with_config_metrics(
     config: &EquivalenceConfig,
 ) -> (EquivalenceResult, EquivalenceMetrics) {
     let metrics = EquivalenceMetrics::default();
+
+    // Soundness guard before SMT: see `drops_target_flag_writer`.
+    if drops_target_flag_writer(seq1, seq2) {
+        return (EquivalenceResult::NotEquivalent, metrics);
+    }
 
     if let Some(fast) = run_fast_path(seq1, seq2, config) {
         return (fast, metrics);
@@ -888,10 +917,10 @@ mod tests {
     }
 
     #[test]
-    fn test_movn_zero_equivalent_to_csetm_al() {
-        // MOVN x0, #0 = all ones.
-        // We can't test CSETM with AL (it's rejected by is_encodable), but
-        // we can prove MOVN x0,#0 ≡ EON x0,x1,x1.
+    fn test_movn_zero_equivalent_to_eon_self() {
+        // MOVN x0, #0 = all ones, which also equals `x1 XOR ~x1` for any x1.
+        // (CSETM with AL would also produce all-ones but is_encodable rejects
+        //  AL, so we use EON-with-self as the comparison sequence.)
         let seq1 = vec![Instruction::MovN {
             rd: Register::X0,
             imm: 0,
@@ -951,7 +980,7 @@ mod tests {
             },
         ];
         let config =
-            EquivalenceConfig::with_live_out(LiveOutMask::from_registers(vec![Register::X0]));
+            EquivalenceConfig::with_live_out(LiveOut::from_registers(vec![Register::X0]));
         assert_eq!(
             check_equivalence_with_config(&seq1, &seq2, &config),
             EquivalenceResult::Equivalent
@@ -978,7 +1007,7 @@ mod tests {
             },
         ];
         let config =
-            EquivalenceConfig::with_live_out(LiveOutMask::from_registers(vec![Register::X0]));
+            EquivalenceConfig::with_live_out(LiveOut::from_registers(vec![Register::X0]));
         assert_eq!(
             check_equivalence_with_config(&seq1, &seq2, &config),
             EquivalenceResult::Equivalent
@@ -1005,7 +1034,7 @@ mod tests {
             },
         ];
         let config =
-            EquivalenceConfig::with_live_out(LiveOutMask::from_registers(vec![Register::X0]));
+            EquivalenceConfig::with_live_out(LiveOut::from_registers(vec![Register::X0]));
         assert_eq!(
             check_equivalence_with_config(&seq1, &seq2, &config),
             EquivalenceResult::Equivalent
@@ -1033,10 +1062,54 @@ mod tests {
         // X2 differs between the two sequences (NEG doesn't touch X2 but the
         // 2-op form sets X2 to 0). Restrict equivalence to live-out X0.
         let config =
-            EquivalenceConfig::with_live_out(LiveOutMask::from_registers(vec![Register::X0]));
+            EquivalenceConfig::with_live_out(LiveOut::from_registers(vec![Register::X0]));
         assert_eq!(
             check_equivalence_with_config(&seq1, &seq2, &config),
             EquivalenceResult::Equivalent
         );
+    }
+
+    /// Soundness regression for the flag-drop guard: ADDS x0, x1, #1 ≡ ADD
+    /// x0, x1, #1 is unsound because the flag side-effect is silently
+    /// dropped. SMT alone cannot rule this out (it models registers only).
+    /// `check_equivalence_with_config` and `check_equivalence` must reject
+    /// such rewrites before reaching the solver.
+    #[test]
+    fn test_adds_to_add_rewrite_rejected_even_with_register_live_out() {
+        let adds = vec![Instruction::Adds {
+            rd: Register::X0,
+            rn: Register::X1,
+            rm: Operand::Immediate(1),
+        }];
+        let add = vec![Instruction::Add {
+            rd: Register::X0,
+            rn: Register::X1,
+            rm: Operand::Immediate(1),
+        }];
+        let config =
+            EquivalenceConfig::with_live_out(LiveOut::from_registers(vec![Register::X0]));
+        assert_eq!(
+            check_equivalence_with_config(&adds, &add, &config),
+            EquivalenceResult::NotEquivalent,
+            "Dropping a flag-writer must not be certified as equivalent"
+        );
+        assert_eq!(
+            check_equivalence(&adds, &add),
+            EquivalenceResult::NotEquivalent,
+            "Same guard must apply to the simple entry point"
+        );
+    }
+
+    /// ADDS ≡ ADDS (same op) must still succeed — the flag guard fires only
+    /// when the candidate drops a writer the target had.
+    #[test]
+    fn test_adds_equivalent_to_adds() {
+        let s1 = vec![Instruction::Adds {
+            rd: Register::X0,
+            rn: Register::X1,
+            rm: Operand::Immediate(1),
+        }];
+        let s2 = s1.clone();
+        assert_eq!(check_equivalence(&s1, &s2), EquivalenceResult::Equivalent);
     }
 }

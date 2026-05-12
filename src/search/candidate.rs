@@ -92,7 +92,67 @@ pub fn generate_all_instructions(registers: &[Register], immediates: &[i64]) -> 
                     rn,
                     shift: shift_op,
                 });
+                // ROR also accepts the same shift-amount table.
+                instrs.push(Instruction::Ror {
+                    rd,
+                    rn,
+                    shift: shift_op,
+                });
             }
+
+            // ROR with register shift amount.
+            for &rm in registers {
+                instrs.push(Instruction::Ror {
+                    rd,
+                    rn,
+                    shift: Operand::Register(rm),
+                });
+            }
+
+            // Tier 1 inverted-logical and flag-setting binary ops (register form).
+            for &rm in registers {
+                let rm_op = Operand::Register(rm);
+                instrs.push(Instruction::Bic { rd, rn, rm: rm_op });
+                instrs.push(Instruction::Bics { rd, rn, rm: rm_op });
+                instrs.push(Instruction::Orn { rd, rn, rm: rm_op });
+                instrs.push(Instruction::Eon { rd, rn, rm: rm_op });
+                instrs.push(Instruction::Adds { rd, rn, rm: rm_op });
+                instrs.push(Instruction::Subs { rd, rn, rm: rm_op });
+                instrs.push(Instruction::Ands { rd, rn, rm: rm_op });
+            }
+            // ADDS / SUBS also accept the same 12-bit-class immediate table
+            // ADD / SUB does — keep them in sync. ANDS is register-only.
+            for &imm in immediates {
+                let imm_op = Operand::Immediate(imm);
+                instrs.push(Instruction::Adds { rd, rn, rm: imm_op });
+                instrs.push(Instruction::Subs { rd, rn, rm: imm_op });
+            }
+        }
+
+        // Tier 1 unary ops: MVN / NEG / NEGS — one source register, no rn.
+        for &rm in registers {
+            instrs.push(Instruction::Mvn { rd, rm });
+            instrs.push(Instruction::Neg { rd, rm });
+            instrs.push(Instruction::Negs { rd, rm });
+        }
+
+        // MOVN: small representative imm set × four legal shift positions.
+        // Keep this small — the full u16 × 4-shift space would balloon the
+        // candidate count. The same parsimony rationale applies as the
+        // immediate-table choice above.
+        for imm in [0u16, 1, 0xFF, 0xFFFF] {
+            for shift in [0u8, 16, 32, 48] {
+                instrs.push(Instruction::MovN { rd, imm, shift });
+            }
+        }
+
+        // CSET / CSETM: the 14 non-AL/NV conditions defined in
+        // `ir::types::NORMAL_CONDITIONS`. `is_encodable_aarch64` rejects
+        // AL/NV at the encoder boundary; the exhaustive set here enumerates
+        // only the encodable subset.
+        for cond in crate::ir::types::NORMAL_CONDITIONS {
+            instrs.push(Instruction::Cset { rd, cond });
+            instrs.push(Instruction::Csetm { rd, cond });
         }
     }
 
@@ -113,7 +173,6 @@ pub fn generate_random_instruction<R: rand::RngExt>(
     }
 
     let rd = registers[rng.random_range(0..registers.len())];
-    let pick_rn = |rng: &mut R| registers[rng.random_range(0..registers.len())];
     let pick_reg = |rng: &mut R| registers[rng.random_range(0..registers.len())];
 
     match rng.random_range(0..24) {
@@ -127,45 +186,45 @@ pub fn generate_random_instruction<R: rand::RngExt>(
         }
         1 => Instruction::MovReg {
             rd,
-            rn: pick_rn(rng),
+            rn: pick_reg(rng),
         },
         2 => {
-            let rn = pick_rn(rng);
+            let rn = pick_reg(rng);
             let rm = random_operand(rng, registers, immediates);
             Instruction::Add { rd, rn, rm }
         }
         3 => {
-            let rn = pick_rn(rng);
+            let rn = pick_reg(rng);
             let rm = random_operand(rng, registers, immediates);
             Instruction::Sub { rd, rn, rm }
         }
         4 => {
-            let rn = pick_rn(rng);
+            let rn = pick_reg(rng);
             let rm = Operand::Register(pick_reg(rng));
             Instruction::And { rd, rn, rm }
         }
         5 => {
-            let rn = pick_rn(rng);
+            let rn = pick_reg(rng);
             let rm = Operand::Register(pick_reg(rng));
             Instruction::Orr { rd, rn, rm }
         }
         6 => {
-            let rn = pick_rn(rng);
+            let rn = pick_reg(rng);
             let rm = Operand::Register(pick_reg(rng));
             Instruction::Eor { rd, rn, rm }
         }
         7 => {
-            let rn = pick_rn(rng);
+            let rn = pick_reg(rng);
             let shift = random_shift_operand(rng, registers);
             Instruction::Lsl { rd, rn, shift }
         }
         8 => {
-            let rn = pick_rn(rng);
+            let rn = pick_reg(rng);
             let shift = random_shift_operand(rng, registers);
             Instruction::Lsr { rd, rn, shift }
         }
         9 => {
-            let rn = pick_rn(rng);
+            let rn = pick_reg(rng);
             let shift = random_shift_operand(rng, registers);
             Instruction::Asr { rd, rn, shift }
         }
@@ -189,62 +248,54 @@ pub fn generate_random_instruction<R: rand::RngExt>(
             Instruction::MovN { rd, imm, shift }
         }
         14 => {
-            let rn = pick_rn(rng);
+            let rn = pick_reg(rng);
             let rm = Operand::Register(pick_reg(rng));
             Instruction::Bic { rd, rn, rm }
         }
         15 => {
-            let rn = pick_rn(rng);
+            let rn = pick_reg(rng);
             let rm = Operand::Register(pick_reg(rng));
             Instruction::Bics { rd, rn, rm }
         }
         16 => {
-            let rn = pick_rn(rng);
+            let rn = pick_reg(rng);
             let rm = Operand::Register(pick_reg(rng));
             Instruction::Orn { rd, rn, rm }
         }
         17 => {
-            let rn = pick_rn(rng);
+            let rn = pick_reg(rng);
             let rm = Operand::Register(pick_reg(rng));
             Instruction::Eon { rd, rn, rm }
         }
         18 => {
-            let rn = pick_rn(rng);
+            let rn = pick_reg(rng);
             let rm = random_operand(rng, registers, immediates);
             Instruction::Adds { rd, rn, rm }
         }
         19 => {
-            let rn = pick_rn(rng);
+            let rn = pick_reg(rng);
             let rm = random_operand(rng, registers, immediates);
             Instruction::Subs { rd, rn, rm }
         }
         20 => {
-            let rn = pick_rn(rng);
+            let rn = pick_reg(rng);
             let rm = Operand::Register(pick_reg(rng));
             Instruction::Ands { rd, rn, rm }
         }
         21 => Instruction::Cset {
             rd,
-            cond: random_normal_cond_cand(rng),
+            cond: crate::ir::types::Condition::random_normal(rng),
         },
         22 => Instruction::Csetm {
             rd,
-            cond: random_normal_cond_cand(rng),
+            cond: crate::ir::types::Condition::random_normal(rng),
         },
         _ => {
-            let rn = pick_rn(rng);
+            let rn = pick_reg(rng);
             let shift = random_shift_operand(rng, registers);
             Instruction::Ror { rd, rn, shift }
         }
     }
-}
-
-/// Pick a random condition code excluding AL/NV (for CSET/CSETM).
-fn random_normal_cond_cand<R: rand::RngExt>(rng: &mut R) -> crate::ir::types::Condition {
-    use crate::ir::types::Condition::*;
-    const NORMAL: [crate::ir::types::Condition; 14] =
-        [EQ, NE, CS, CC, MI, PL, VS, VC, HI, LS, GE, LT, GT, LE];
-    NORMAL[rng.random_range(0..NORMAL.len())]
 }
 
 fn random_operand<R: rand::RngExt>(

@@ -240,25 +240,29 @@ pub fn apply_instruction(mut state: MachineState, instruction: &Instruction) -> 
             state.set_register(*rd, value);
         }
         Instruction::MovN { rd, imm, shift } => {
-            let value = !(((*imm as u64) << (*shift as u32)) as u64);
+            let value = !((*imm as u64) << (*shift as u32));
             state.set_register(*rd, BV::from_u64(value, 64));
         }
+        // BIC: rd = rn & !rm. BICS shares the SMT body — the flag effect is
+        // not modelled (matches CMP/CMN/TST and ADDS/SUBS/ANDS). The
+        // soundness barrier lives in `equivalence::drops_target_flag_writer`,
+        // which refuses any rewrite that drops a flag-writer the target had.
         Instruction::Bic { rd, rn, rm } | Instruction::Bics { rd, rn, rm } => {
             let lhs = state.get_register(*rn).clone();
             let rhs = state.eval_operand(rm);
-            let result = lhs.bvand(&rhs.bvnot());
+            let result = lhs.bvand(rhs.bvnot());
             state.set_register(*rd, result);
         }
         Instruction::Orn { rd, rn, rm } => {
             let lhs = state.get_register(*rn).clone();
             let rhs = state.eval_operand(rm);
-            let result = lhs.bvor(&rhs.bvnot());
+            let result = lhs.bvor(rhs.bvnot());
             state.set_register(*rd, result);
         }
         Instruction::Eon { rd, rn, rm } => {
             let lhs = state.get_register(*rn).clone();
             let rhs = state.eval_operand(rm);
-            let result = lhs.bvxor(&rhs.bvnot());
+            let result = lhs.bvxor(rhs.bvnot());
             state.set_register(*rd, result);
         }
         // Flag-setting arith/logical: rd is modelled symbolically (same as
@@ -287,6 +291,12 @@ pub fn apply_instruction(mut state: MachineState, instruction: &Instruction) -> 
         }
         // ROR: no native bvror in z3-rust; compose
         // `(x lshr n) | (x shl (64 - n))`. For reg form, mask shift to 6 bits.
+        //
+        // Edge case at n == 0: `complement` evaluates to 64, and SMTLIB2
+        // bit-vector semantics define `bvshl(x, 64) = 0` (any shift ≥ the
+        // bit-width zeroes the value). So `hi = 0` and the result is just
+        // `value lshr 0 = value`. Do **not** add a guard for n == 0 — it
+        // would mis-handle the symbolic case where n is unknown.
         Instruction::Ror { rd, rn, shift } => {
             let value = state.get_register(*rn).clone();
             let n = state.eval_operand(shift);
