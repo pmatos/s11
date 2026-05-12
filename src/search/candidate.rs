@@ -113,10 +113,11 @@ pub fn generate_random_instruction<R: rand::RngExt>(
     }
 
     let rd = registers[rng.random_range(0..registers.len())];
+    let pick_rn = |rng: &mut R| registers[rng.random_range(0..registers.len())];
+    let pick_reg = |rng: &mut R| registers[rng.random_range(0..registers.len())];
 
-    match rng.random_range(0..10) {
+    match rng.random_range(0..24) {
         0 => {
-            // MovImm
             let imm = if immediates.is_empty() {
                 0
             } else {
@@ -124,60 +125,126 @@ pub fn generate_random_instruction<R: rand::RngExt>(
             };
             Instruction::MovImm { rd, imm }
         }
-        1 => {
-            // MovReg
-            let rn = registers[rng.random_range(0..registers.len())];
-            Instruction::MovReg { rd, rn }
-        }
+        1 => Instruction::MovReg {
+            rd,
+            rn: pick_rn(rng),
+        },
         2 => {
-            // Add
-            let rn = registers[rng.random_range(0..registers.len())];
+            let rn = pick_rn(rng);
             let rm = random_operand(rng, registers, immediates);
             Instruction::Add { rd, rn, rm }
         }
         3 => {
-            // Sub
-            let rn = registers[rng.random_range(0..registers.len())];
+            let rn = pick_rn(rng);
             let rm = random_operand(rng, registers, immediates);
             Instruction::Sub { rd, rn, rm }
         }
         4 => {
-            // And
-            let rn = registers[rng.random_range(0..registers.len())];
-            let rm = random_operand(rng, registers, immediates);
+            let rn = pick_rn(rng);
+            let rm = Operand::Register(pick_reg(rng));
             Instruction::And { rd, rn, rm }
         }
         5 => {
-            // Orr
-            let rn = registers[rng.random_range(0..registers.len())];
-            let rm = random_operand(rng, registers, immediates);
+            let rn = pick_rn(rng);
+            let rm = Operand::Register(pick_reg(rng));
             Instruction::Orr { rd, rn, rm }
         }
         6 => {
-            // Eor
-            let rn = registers[rng.random_range(0..registers.len())];
-            let rm = random_operand(rng, registers, immediates);
+            let rn = pick_rn(rng);
+            let rm = Operand::Register(pick_reg(rng));
             Instruction::Eor { rd, rn, rm }
         }
         7 => {
-            // Lsl
-            let rn = registers[rng.random_range(0..registers.len())];
+            let rn = pick_rn(rng);
             let shift = random_shift_operand(rng, registers);
             Instruction::Lsl { rd, rn, shift }
         }
         8 => {
-            // Lsr
-            let rn = registers[rng.random_range(0..registers.len())];
+            let rn = pick_rn(rng);
             let shift = random_shift_operand(rng, registers);
             Instruction::Lsr { rd, rn, shift }
         }
-        _ => {
-            // Asr
-            let rn = registers[rng.random_range(0..registers.len())];
+        9 => {
+            let rn = pick_rn(rng);
             let shift = random_shift_operand(rng, registers);
             Instruction::Asr { rd, rn, shift }
         }
+        // New: unary / inverted-logical / flag-setting / cond-set / ror
+        10 => Instruction::Mvn {
+            rd,
+            rm: pick_reg(rng),
+        },
+        11 => Instruction::Neg {
+            rd,
+            rm: pick_reg(rng),
+        },
+        12 => Instruction::Negs {
+            rd,
+            rm: pick_reg(rng),
+        },
+        13 => {
+            let imm = (rng.random::<u32>() & 0xFFFF) as u16;
+            let shifts = [0u8, 16, 32, 48];
+            let shift = shifts[rng.random_range(0..shifts.len())];
+            Instruction::MovN { rd, imm, shift }
+        }
+        14 => {
+            let rn = pick_rn(rng);
+            let rm = Operand::Register(pick_reg(rng));
+            Instruction::Bic { rd, rn, rm }
+        }
+        15 => {
+            let rn = pick_rn(rng);
+            let rm = Operand::Register(pick_reg(rng));
+            Instruction::Bics { rd, rn, rm }
+        }
+        16 => {
+            let rn = pick_rn(rng);
+            let rm = Operand::Register(pick_reg(rng));
+            Instruction::Orn { rd, rn, rm }
+        }
+        17 => {
+            let rn = pick_rn(rng);
+            let rm = Operand::Register(pick_reg(rng));
+            Instruction::Eon { rd, rn, rm }
+        }
+        18 => {
+            let rn = pick_rn(rng);
+            let rm = random_operand(rng, registers, immediates);
+            Instruction::Adds { rd, rn, rm }
+        }
+        19 => {
+            let rn = pick_rn(rng);
+            let rm = random_operand(rng, registers, immediates);
+            Instruction::Subs { rd, rn, rm }
+        }
+        20 => {
+            let rn = pick_rn(rng);
+            let rm = Operand::Register(pick_reg(rng));
+            Instruction::Ands { rd, rn, rm }
+        }
+        21 => Instruction::Cset {
+            rd,
+            cond: random_normal_cond_cand(rng),
+        },
+        22 => Instruction::Csetm {
+            rd,
+            cond: random_normal_cond_cand(rng),
+        },
+        _ => {
+            let rn = pick_rn(rng);
+            let shift = random_shift_operand(rng, registers);
+            Instruction::Ror { rd, rn, shift }
+        }
     }
+}
+
+/// Pick a random condition code excluding AL/NV (for CSET/CSETM).
+fn random_normal_cond_cand<R: rand::RngExt>(rng: &mut R) -> crate::ir::types::Condition {
+    use crate::ir::types::Condition::*;
+    const NORMAL: [crate::ir::types::Condition; 14] =
+        [EQ, NE, CS, CC, MI, PL, VS, VC, HI, LS, GE, LT, GT, LE];
+    NORMAL[rng.random_range(0..NORMAL.len())]
 }
 
 fn random_operand<R: rand::RngExt>(
@@ -244,6 +311,20 @@ pub fn opcode_id(instr: &Instruction) -> u8 {
         Instruction::Csinc { .. } => 17,
         Instruction::Csinv { .. } => 18,
         Instruction::Csneg { .. } => 19,
+        Instruction::Mvn { .. } => 20,
+        Instruction::Neg { .. } => 21,
+        Instruction::Negs { .. } => 22,
+        Instruction::MovN { .. } => 23,
+        Instruction::Bic { .. } => 24,
+        Instruction::Bics { .. } => 25,
+        Instruction::Orn { .. } => 26,
+        Instruction::Eon { .. } => 27,
+        Instruction::Adds { .. } => 28,
+        Instruction::Subs { .. } => 29,
+        Instruction::Ands { .. } => 30,
+        Instruction::Cset { .. } => 31,
+        Instruction::Csetm { .. } => 32,
+        Instruction::Ror { .. } => 33,
     }
 }
 
@@ -261,6 +342,10 @@ pub fn supports_immediate(instr: &Instruction) -> bool {
             | Instruction::Lsl { .. }
             | Instruction::Lsr { .. }
             | Instruction::Asr { .. }
+            | Instruction::MovN { .. }
+            | Instruction::Adds { .. }
+            | Instruction::Subs { .. }
+            | Instruction::Ror { .. }
     )
 }
 
@@ -274,6 +359,13 @@ pub fn is_binary_op(instr: &Instruction) -> bool {
             | Instruction::And { .. }
             | Instruction::Orr { .. }
             | Instruction::Eor { .. }
+            | Instruction::Bic { .. }
+            | Instruction::Bics { .. }
+            | Instruction::Orn { .. }
+            | Instruction::Eon { .. }
+            | Instruction::Adds { .. }
+            | Instruction::Subs { .. }
+            | Instruction::Ands { .. }
     )
 }
 
@@ -282,7 +374,10 @@ pub fn is_binary_op(instr: &Instruction) -> bool {
 pub fn is_shift_op(instr: &Instruction) -> bool {
     matches!(
         instr,
-        Instruction::Lsl { .. } | Instruction::Lsr { .. } | Instruction::Asr { .. }
+        Instruction::Lsl { .. }
+            | Instruction::Lsr { .. }
+            | Instruction::Asr { .. }
+            | Instruction::Ror { .. }
     )
 }
 
@@ -291,7 +386,7 @@ pub fn is_shift_op(instr: &Instruction) -> bool {
 pub fn is_move_op(instr: &Instruction) -> bool {
     matches!(
         instr,
-        Instruction::MovReg { .. } | Instruction::MovImm { .. }
+        Instruction::MovReg { .. } | Instruction::MovImm { .. } | Instruction::MovN { .. }
     )
 }
 

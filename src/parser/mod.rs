@@ -252,6 +252,189 @@ fn parse_mov(operands: &[&str]) -> Result<Instruction, String> {
     }
 }
 
+/// Parse MVN instruction
+fn parse_mvn(operands: &[&str]) -> Result<Instruction, String> {
+    if operands.len() != 2 {
+        return Err(format!("mvn requires 2 operands, got {}", operands.len()));
+    }
+    let rd = parse_register(operands[0])?;
+    let rm = parse_register(operands[1])?;
+    Ok(Instruction::Mvn { rd, rm })
+}
+
+/// Parse NEG instruction
+fn parse_neg(operands: &[&str]) -> Result<Instruction, String> {
+    if operands.len() != 2 {
+        return Err(format!("neg requires 2 operands, got {}", operands.len()));
+    }
+    let rd = parse_register(operands[0])?;
+    let rm = parse_register(operands[1])?;
+    Ok(Instruction::Neg { rd, rm })
+}
+
+/// Parse NEGS instruction
+fn parse_negs(operands: &[&str]) -> Result<Instruction, String> {
+    if operands.len() != 2 {
+        return Err(format!("negs requires 2 operands, got {}", operands.len()));
+    }
+    let rd = parse_register(operands[0])?;
+    let rm = parse_register(operands[1])?;
+    Ok(Instruction::Negs { rd, rm })
+}
+
+/// Parse BIC instruction (register-only rm)
+fn parse_bic(operands: &[&str]) -> Result<Instruction, String> {
+    if operands.len() != 3 {
+        return Err(format!("bic requires 3 operands, got {}", operands.len()));
+    }
+    let rd = parse_register(operands[0])?;
+    let rn = parse_register(operands[1])?;
+    let rm = parse_operand(operands[2])?;
+    Ok(Instruction::Bic { rd, rn, rm })
+}
+
+/// Parse BICS instruction (register-only rm)
+fn parse_bics(operands: &[&str]) -> Result<Instruction, String> {
+    if operands.len() != 3 {
+        return Err(format!("bics requires 3 operands, got {}", operands.len()));
+    }
+    let rd = parse_register(operands[0])?;
+    let rn = parse_register(operands[1])?;
+    let rm = parse_operand(operands[2])?;
+    Ok(Instruction::Bics { rd, rn, rm })
+}
+
+/// Parse ORN instruction (register-only rm)
+fn parse_orn(operands: &[&str]) -> Result<Instruction, String> {
+    if operands.len() != 3 {
+        return Err(format!("orn requires 3 operands, got {}", operands.len()));
+    }
+    let rd = parse_register(operands[0])?;
+    let rn = parse_register(operands[1])?;
+    let rm = parse_operand(operands[2])?;
+    Ok(Instruction::Orn { rd, rn, rm })
+}
+
+/// Parse EON instruction (register-only rm)
+fn parse_eon(operands: &[&str]) -> Result<Instruction, String> {
+    if operands.len() != 3 {
+        return Err(format!("eon requires 3 operands, got {}", operands.len()));
+    }
+    let rd = parse_register(operands[0])?;
+    let rn = parse_register(operands[1])?;
+    let rm = parse_operand(operands[2])?;
+    Ok(Instruction::Eon { rd, rn, rm })
+}
+
+/// Parse ADDS instruction
+fn parse_adds(operands: &[&str]) -> Result<Instruction, String> {
+    if operands.len() != 3 {
+        return Err(format!("adds requires 3 operands, got {}", operands.len()));
+    }
+    let rd = parse_register(operands[0])?;
+    let rn = parse_register(operands[1])?;
+    let rm = parse_operand(operands[2])?;
+    Ok(Instruction::Adds { rd, rn, rm })
+}
+
+/// Parse SUBS instruction
+fn parse_subs(operands: &[&str]) -> Result<Instruction, String> {
+    if operands.len() != 3 {
+        return Err(format!("subs requires 3 operands, got {}", operands.len()));
+    }
+    let rd = parse_register(operands[0])?;
+    let rn = parse_register(operands[1])?;
+    let rm = parse_operand(operands[2])?;
+    Ok(Instruction::Subs { rd, rn, rm })
+}
+
+/// Parse ANDS instruction (register-only rm)
+fn parse_ands(operands: &[&str]) -> Result<Instruction, String> {
+    if operands.len() != 3 {
+        return Err(format!("ands requires 3 operands, got {}", operands.len()));
+    }
+    let rd = parse_register(operands[0])?;
+    let rn = parse_register(operands[1])?;
+    let rm = parse_operand(operands[2])?;
+    Ok(Instruction::Ands { rd, rn, rm })
+}
+
+/// Parse CSET instruction: `cset rd, cond`
+fn parse_cset(operands: &[&str]) -> Result<Instruction, String> {
+    if operands.len() != 2 {
+        return Err(format!("cset requires 2 operands, got {}", operands.len()));
+    }
+    let rd = parse_register(operands[0])?;
+    let cond = parse_condition(operands[1])?;
+    Ok(Instruction::Cset { rd, cond })
+}
+
+/// Parse CSETM instruction: `csetm rd, cond`
+fn parse_csetm(operands: &[&str]) -> Result<Instruction, String> {
+    if operands.len() != 2 {
+        return Err(format!("csetm requires 2 operands, got {}", operands.len()));
+    }
+    let rd = parse_register(operands[0])?;
+    let cond = parse_condition(operands[1])?;
+    Ok(Instruction::Csetm { rd, cond })
+}
+
+/// Parse ROR instruction: `ror rd, rn, #imm` or `ror rd, rn, rm`
+fn parse_ror(operands: &[&str]) -> Result<Instruction, String> {
+    if operands.len() != 3 {
+        return Err(format!("ror requires 3 operands, got {}", operands.len()));
+    }
+    let rd = parse_register(operands[0])?;
+    let rn = parse_register(operands[1])?;
+    let shift = parse_operand(operands[2])?;
+    Ok(Instruction::Ror { rd, rn, shift })
+}
+
+/// Parse MOVN instruction: `movn rd, #imm` or `movn rd, #imm, lsl #shift`.
+/// Operands are comma-split, so the LSL-with-shift form arrives as
+/// `["rd", "#imm", "lsl #shift"]` (3 entries, the third internally has the
+/// `lsl` keyword and the shift expression).
+fn parse_movn(operands: &[&str]) -> Result<Instruction, String> {
+    if operands.len() != 2 && operands.len() != 3 {
+        return Err(format!(
+            "movn requires 2 or 3 operands (rd, #imm[, lsl #shift]), got {}",
+            operands.len()
+        ));
+    }
+    let rd = parse_register(operands[0])?;
+    let imm_val = match parse_operand(operands[1])? {
+        Operand::Immediate(v) => v,
+        Operand::Register(_) => return Err("movn second operand must be an immediate".to_string()),
+    };
+    if !(0..=0xFFFF).contains(&imm_val) {
+        return Err(format!("movn immediate {} out of u16 range", imm_val));
+    }
+    let imm = imm_val as u16;
+
+    let shift = if operands.len() == 2 {
+        0u8
+    } else {
+        // Expect form "lsl #N" (whitespace-separated within the 3rd operand).
+        let tail = operands[2].trim();
+        let mut parts = tail.splitn(2, char::is_whitespace);
+        let kw = parts.next().unwrap_or("").trim();
+        let rest = parts.next().unwrap_or("").trim();
+        if !kw.eq_ignore_ascii_case("lsl") {
+            return Err(format!("movn shift form must be `lsl #N`, got `{}`", tail));
+        }
+        let s = match parse_operand(rest)? {
+            Operand::Immediate(v) => v,
+            Operand::Register(_) => return Err("movn shift must be an immediate".to_string()),
+        };
+        if !matches!(s, 0 | 16 | 32 | 48) {
+            return Err(format!("movn shift {} must be one of 0/16/32/48", s));
+        }
+        s as u8
+    };
+
+    Ok(Instruction::MovN { rd, imm, shift })
+}
+
 /// Parse ADD instruction
 fn parse_add(operands: &[&str]) -> Result<Instruction, String> {
     if operands.len() != 3 {
@@ -543,6 +726,20 @@ pub fn parse_line(line: &str) -> Result<LineResult, ParseLineError> {
         "csinc" => parse_csinc(&operands).map_err(ParseLineError::Other)?,
         "csinv" => parse_csinv(&operands).map_err(ParseLineError::Other)?,
         "csneg" => parse_csneg(&operands).map_err(ParseLineError::Other)?,
+        "mvn" => parse_mvn(&operands).map_err(ParseLineError::Other)?,
+        "neg" => parse_neg(&operands).map_err(ParseLineError::Other)?,
+        "negs" => parse_negs(&operands).map_err(ParseLineError::Other)?,
+        "movn" => parse_movn(&operands).map_err(ParseLineError::Other)?,
+        "bic" => parse_bic(&operands).map_err(ParseLineError::Other)?,
+        "bics" => parse_bics(&operands).map_err(ParseLineError::Other)?,
+        "orn" => parse_orn(&operands).map_err(ParseLineError::Other)?,
+        "eon" => parse_eon(&operands).map_err(ParseLineError::Other)?,
+        "adds" => parse_adds(&operands).map_err(ParseLineError::Other)?,
+        "subs" => parse_subs(&operands).map_err(ParseLineError::Other)?,
+        "ands" => parse_ands(&operands).map_err(ParseLineError::Other)?,
+        "cset" => parse_cset(&operands).map_err(ParseLineError::Other)?,
+        "csetm" => parse_csetm(&operands).map_err(ParseLineError::Other)?,
+        "ror" => parse_ror(&operands).map_err(ParseLineError::Other)?,
         _ => return Err(ParseLineError::UnknownInstruction(opcode)),
     };
 
@@ -790,5 +987,99 @@ mod tests {
         let asm = "// just a comment\n.text\n";
         let result = parse_assembly_string(asm, "test".to_string());
         assert!(result.is_err());
+    }
+
+    /// Round-trip Display → parser for every Tier 1 mnemonic.
+    #[test]
+    fn test_tier1_display_parser_roundtrip() {
+        use crate::ir::types::Condition;
+        let cases: Vec<Instruction> = vec![
+            Instruction::Mvn {
+                rd: Register::X0,
+                rm: Register::X1,
+            },
+            Instruction::Neg {
+                rd: Register::X0,
+                rm: Register::X1,
+            },
+            Instruction::Negs {
+                rd: Register::X0,
+                rm: Register::X1,
+            },
+            Instruction::MovN {
+                rd: Register::X0,
+                imm: 0xFFFF,
+                shift: 0,
+            },
+            Instruction::MovN {
+                rd: Register::X0,
+                imm: 1,
+                shift: 16,
+            },
+            Instruction::Bic {
+                rd: Register::X0,
+                rn: Register::X1,
+                rm: Operand::Register(Register::X2),
+            },
+            Instruction::Bics {
+                rd: Register::X0,
+                rn: Register::X1,
+                rm: Operand::Register(Register::X2),
+            },
+            Instruction::Orn {
+                rd: Register::X0,
+                rn: Register::X1,
+                rm: Operand::Register(Register::X2),
+            },
+            Instruction::Eon {
+                rd: Register::X0,
+                rn: Register::X1,
+                rm: Operand::Register(Register::X2),
+            },
+            Instruction::Adds {
+                rd: Register::X0,
+                rn: Register::X1,
+                rm: Operand::Immediate(5),
+            },
+            Instruction::Subs {
+                rd: Register::X0,
+                rn: Register::X1,
+                rm: Operand::Register(Register::X2),
+            },
+            Instruction::Ands {
+                rd: Register::X0,
+                rn: Register::X1,
+                rm: Operand::Register(Register::X2),
+            },
+            Instruction::Cset {
+                rd: Register::X0,
+                cond: Condition::EQ,
+            },
+            Instruction::Csetm {
+                rd: Register::X3,
+                cond: Condition::NE,
+            },
+            Instruction::Ror {
+                rd: Register::X0,
+                rn: Register::X1,
+                shift: Operand::Immediate(5),
+            },
+            Instruction::Ror {
+                rd: Register::X0,
+                rn: Register::X1,
+                shift: Operand::Register(Register::X2),
+            },
+        ];
+        for instr in cases {
+            let printed = format!("{}", instr);
+            match parse_line(&printed) {
+                Ok(LineResult::Instruction(parsed)) => assert_eq!(
+                    parsed, instr,
+                    "Round-trip mismatch: printed `{}` parsed back as `{}`",
+                    printed, parsed
+                ),
+                other => panic!("Failed to parse `{}` round-trip: {:?}", printed, other),
+            }
+        }
     }
 }

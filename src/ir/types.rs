@@ -225,6 +225,34 @@ impl fmt::Display for Condition {
     }
 }
 
+impl Condition {
+    /// Returns the logical inverse of a condition code. AArch64 encodes the
+    /// invert by toggling the low bit of the 4-bit condition field, so pairs
+    /// are: EQ↔NE, CS↔CC, MI↔PL, VS↔VC, HI↔LS, GE↔LT, GT↔LE, AL↔NV.
+    #[must_use]
+    #[allow(dead_code)] // used by Phase 4 CSET/CSETM encoder
+    pub fn invert(self) -> Condition {
+        match self {
+            Condition::EQ => Condition::NE,
+            Condition::NE => Condition::EQ,
+            Condition::CS => Condition::CC,
+            Condition::CC => Condition::CS,
+            Condition::MI => Condition::PL,
+            Condition::PL => Condition::MI,
+            Condition::VS => Condition::VC,
+            Condition::VC => Condition::VS,
+            Condition::HI => Condition::LS,
+            Condition::LS => Condition::HI,
+            Condition::GE => Condition::LT,
+            Condition::LT => Condition::GE,
+            Condition::GT => Condition::LE,
+            Condition::LE => Condition::GT,
+            Condition::AL => Condition::NV,
+            Condition::NV => Condition::AL,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -257,5 +285,53 @@ mod tests {
         assert_eq!(format!("{}", Operand::Register(Register::X5)), "x5");
         assert_eq!(format!("{}", Operand::Immediate(42)), "#42");
         assert_eq!(format!("{}", Operand::Immediate(-1)), "#-1");
+    }
+
+    #[test]
+    fn test_condition_invert_pairs() {
+        let pairs = [
+            (Condition::EQ, Condition::NE),
+            (Condition::CS, Condition::CC),
+            (Condition::MI, Condition::PL),
+            (Condition::VS, Condition::VC),
+            (Condition::HI, Condition::LS),
+            (Condition::GE, Condition::LT),
+            (Condition::GT, Condition::LE),
+            (Condition::AL, Condition::NV),
+        ];
+        for (a, b) in pairs {
+            assert_eq!(a.invert(), b, "{:?}.invert() should be {:?}", a, b);
+            assert_eq!(b.invert(), a, "{:?}.invert() should be {:?}", b, a);
+        }
+    }
+
+    #[test]
+    fn test_condition_invert_is_involution() {
+        for c in [
+            Condition::EQ,
+            Condition::NE,
+            Condition::CS,
+            Condition::CC,
+            Condition::MI,
+            Condition::PL,
+            Condition::VS,
+            Condition::VC,
+            Condition::HI,
+            Condition::LS,
+            Condition::GE,
+            Condition::LT,
+            Condition::GT,
+            Condition::LE,
+            Condition::AL,
+            Condition::NV,
+        ] {
+            assert_eq!(
+                c.invert().invert(),
+                c,
+                "{:?}.invert().invert() != {:?}",
+                c,
+                c
+            );
+        }
     }
 }

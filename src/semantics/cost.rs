@@ -43,6 +43,22 @@ fn instruction_latency(instr: &Instruction) -> u64 {
         | Instruction::Csinc { .. }
         | Instruction::Csinv { .. }
         | Instruction::Csneg { .. } => 1,
+        // Unary bitwise / negation / move-negated immediate
+        Instruction::Mvn { .. }
+        | Instruction::Neg { .. }
+        | Instruction::Negs { .. }
+        | Instruction::MovN { .. } => 1,
+        // Inverted-logical
+        Instruction::Bic { .. }
+        | Instruction::Bics { .. }
+        | Instruction::Orn { .. }
+        | Instruction::Eon { .. } => 1,
+        // Flag-setting arith / logical
+        Instruction::Adds { .. } | Instruction::Subs { .. } | Instruction::Ands { .. } => 1,
+        // Conditional set aliases
+        Instruction::Cset { .. } | Instruction::Csetm { .. } => 1,
+        // Rotate right
+        Instruction::Ror { .. } => 1,
     }
 }
 
