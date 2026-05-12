@@ -23,8 +23,7 @@ use search::config::{
 use search::parallel::{ParallelConfig, run_parallel_search};
 use search::{SearchAlgorithm, StochasticSearch, SymbolicSearch};
 use semantics::cost::CostMetric;
-use semantics::state::LiveOutMask;
-use semantics::{EquivalenceResult, check_equivalence};
+use semantics::{EquivalenceResult, LiveOut, LiveOutRegisters, check_equivalence};
 
 // --- Command Line Arguments ---
 
@@ -490,8 +489,8 @@ fn run_optimization(
         0, 1, 2, 3, 4, 5, 7, 8, 10, 15, 16, 31, 32, 63, 64, 100, 255, 256, 1000, 4095,
     ];
 
-    // Create live-out mask (assume all modified registers are live-out for now)
-    let live_out = LiveOutMask::from_registers(
+    // Create live-out contract (assume all modified registers are live-out for now).
+    let live_out = LiveOut::from_registers(
         target
             .iter()
             .filter_map(|instr| instr.destination())
@@ -1006,9 +1005,10 @@ fn run_llm_opt(
         }
     }
 
-    let live_out: LiveOutMask = live_out_str
+    let live_out_registers: LiveOutRegisters = live_out_str
         .parse()
-        .map_err(|e: validation::live_out::ParseLiveOutError| e.to_string())?;
+        .map_err(|e: validation::live_out::ParseLiveOutRegistersError| e.to_string())?;
+    let live_out = LiveOut::from_register_set(live_out_registers);
 
     let llm = LlmConfig::default()
         .with_max_codex_calls(max_calls)
@@ -1092,7 +1092,7 @@ fn run_equiv(
         );
     }
 
-    let live_out = LiveOutMask::from_registers(live_out_regs);
+    let live_out = LiveOut::from_registers(live_out_regs);
 
     // Build config
     let config = EquivalenceConfig::default()
@@ -1134,19 +1134,19 @@ fn run_equiv(
 
             println!("  Input state:");
             for (reg, val) in input_state.registers() {
-                if config.live_out.contains(*reg) {
+                if config.live_out.contains_register(*reg) {
                     println!("    {} = 0x{:016x}", reg, val.as_u64());
                 }
             }
             println!("  Output from sequence 1:");
             for (reg, val) in output1.registers() {
-                if config.live_out.contains(*reg) {
+                if config.live_out.contains_register(*reg) {
                     println!("    {} = 0x{:016x}", reg, val.as_u64());
                 }
             }
             println!("  Output from sequence 2:");
             for (reg, val) in output2.registers() {
-                if config.live_out.contains(*reg) {
+                if config.live_out.contains_register(*reg) {
                     println!("    {} = 0x{:016x}", reg, val.as_u64());
                 }
             }

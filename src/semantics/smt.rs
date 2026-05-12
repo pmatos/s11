@@ -3,7 +3,7 @@
 #![allow(dead_code)]
 
 use crate::ir::{Instruction, Operand, Register};
-use crate::semantics::state::LiveOutMask;
+use crate::semantics::live_out::LiveOutRegisters;
 use std::collections::HashMap;
 use std::time::Duration;
 use z3::ast::BV;
@@ -254,7 +254,7 @@ pub fn states_not_equal(state1: &MachineState, state2: &MachineState) -> z3::ast
 pub fn states_not_equal_for_live_out(
     state1: &MachineState,
     state2: &MachineState,
-    live_out: &LiveOutMask,
+    live_out: &LiveOutRegisters,
 ) -> z3::ast::Bool {
     let mut not_equal = z3::ast::Bool::from_bool(false);
 

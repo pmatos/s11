@@ -1,10 +1,10 @@
 //! Prompt construction for the Codex-assisted search loop.
 
 use crate::ir::{Instruction, Register};
-use crate::semantics::state::LiveOutMask;
+use crate::semantics::live_out::LiveOutRegisters;
 
 /// Render a register set as a comma-separated list (e.g. "x0, x1, x2").
-fn render_register_set(mask: &LiveOutMask) -> String {
+fn render_register_set(mask: &LiveOutRegisters) -> String {
     let mut names: Vec<String> = (0..=30u8)
         .filter_map(Register::from_index)
         .filter(|r| mask.contains(*r))
@@ -19,8 +19,8 @@ fn render_register_set(mask: &LiveOutMask) -> String {
 /// Build the full prompt sent to `codex exec`.
 pub fn build_prompt(
     target: &[Instruction],
-    live_in: &LiveOutMask,
-    live_out: &LiveOutMask,
+    live_in: &LiveOutRegisters,
+    live_out: &LiveOutRegisters,
 ) -> String {
     let mut s = String::new();
     s.push_str(
@@ -64,8 +64,8 @@ mod tests {
     use super::*;
     use crate::ir::{Operand, Register};
 
-    fn mask(regs: &[Register]) -> LiveOutMask {
-        let mut m = LiveOutMask::empty();
+    fn mask(regs: &[Register]) -> LiveOutRegisters {
+        let mut m = LiveOutRegisters::empty();
         for r in regs {
             m.add(*r);
         }

@@ -22,7 +22,8 @@ use crate::search::stochastic::mutation::Mutator;
 use crate::search::{Algorithm, SearchAlgorithm};
 use crate::semantics::concrete::{apply_sequence_concrete, states_equal_for_live_out};
 use crate::semantics::cost::sequence_cost;
-use crate::semantics::state::{ConcreteMachineState, LiveOutMask};
+use crate::semantics::live_out::{LiveOut, LiveOutRegisters};
+use crate::semantics::state::ConcreteMachineState;
 use crate::semantics::{EquivalenceConfig, EquivalenceResult, check_equivalence_with_config};
 use crate::validation::random::{
     RandomInputConfig, generate_edge_case_inputs, generate_random_inputs,
@@ -54,7 +55,7 @@ impl SearchAlgorithm for StochasticSearch {
     fn search(
         &mut self,
         target: &[Instruction],
-        live_out: &LiveOutMask,
+        live_out: &LiveOut,
         config: &SearchConfig,
     ) -> SearchResult {
         self.reset();
@@ -76,7 +77,8 @@ impl SearchAlgorithm for StochasticSearch {
         };
 
         // Generate test cases
-        let input_regs: Vec<_> = live_out.iter().cloned().collect();
+        let live_out_registers = live_out.registers();
+        let input_regs: Vec<_> = live_out_registers.iter().cloned().collect();
         let random_config = RandomInputConfig {
             count: config.stochastic.test_count,
             registers: input_regs.clone(),
@@ -175,7 +177,7 @@ impl SearchAlgorithm for StochasticSearch {
             let mut passes_tests = true;
             for (input, target_output) in all_inputs.iter().zip(target_outputs.iter()) {
                 let proposal_output = apply_sequence_concrete(input.clone(), &proposal);
-                if !states_equal_for_live_out(&proposal_output, target_output, live_out) {
+                if !states_equal_for_live_out(&proposal_output, target_output, live_out_registers) {
                     passes_tests = false;
                     break;
                 }
@@ -265,7 +267,7 @@ pub fn evaluate_with_tests(
     _target: &[Instruction],
     test_inputs: &[ConcreteMachineState],
     target_outputs: &[ConcreteMachineState],
-    live_out: &LiveOutMask,
+    live_out: &LiveOutRegisters,
 ) -> (u64, bool) {
     let mut passes_all = true;
 
@@ -325,7 +327,7 @@ mod tests {
     fn test_stochastic_search_empty_sequence() {
         let mut search = StochasticSearch::new();
         let config = SearchConfig::default();
-        let live_out = LiveOutMask::from_registers(vec![Register::X0]);
+        let live_out = LiveOut::from_registers(vec![Register::X0]);
 
         let result = search.search(&[], &live_out, &config);
         assert!(!result.found_optimization);
@@ -339,7 +341,7 @@ mod tests {
                 .with_seed(42)
                 .with_iterations(1000),
         );
-        let live_out = LiveOutMask::from_registers(vec![Register::X0]);
+        let live_out = LiveOut::from_registers(vec![Register::X0]);
 
         let result = search.search(&mov_zero_sequence(), &live_out, &config);
         let stats = result.statistics;
@@ -358,7 +360,7 @@ mod tests {
             .with_registers(vec![Register::X0, Register::X1, Register::X2])
             .with_immediates(vec![-1, 0, 1]);
 
-        let live_out = LiveOutMask::from_registers(vec![Register::X0]);
+        let live_out = LiveOut::from_registers(vec![Register::X0]);
 
         // Target: MOV X0, #0 - can be replaced with EOR X0, X0, X0
         // But since both are 1 instruction, no optimization expected
@@ -378,7 +380,7 @@ mod tests {
             .with_registers(vec![Register::X0, Register::X1, Register::X2])
             .with_immediates(vec![-1, 0, 1, 2]);
 
-        let live_out = LiveOutMask::from_registers(vec![Register::X0]);
+        let live_out = LiveOut::from_registers(vec![Register::X0]);
 
         // Target: MOV X0, X1; ADD X0, X0, #1 (2 instructions)
         // Can be optimized to: ADD X0, X1, #1 (1 instruction)
@@ -408,7 +410,7 @@ mod tests {
         let input = ConcreteMachineState::new_zeroed();
         let target_output = apply_sequence_concrete(input.clone(), &target);
 
-        let live_out = LiveOutMask::from_registers(vec![Register::X0]);
+        let live_out = LiveOutRegisters::from_registers(vec![Register::X0]);
         let (cost, passes) =
             evaluate_with_tests(&proposal, &target, &[input], &[target_output], &live_out);
 
@@ -427,7 +429,7 @@ mod tests {
         let input = ConcreteMachineState::new_zeroed();
         let target_output = apply_sequence_concrete(input.clone(), &target);
 
-        let live_out = LiveOutMask::from_registers(vec![Register::X0]);
+        let live_out = LiveOutRegisters::from_registers(vec![Register::X0]);
         let (cost, passes) =
             evaluate_with_tests(&proposal, &target, &[input], &[target_output], &live_out);
 
@@ -443,7 +445,7 @@ mod tests {
             .with_stochastic(StochasticConfig::default().with_iterations(1000))
             .with_registers(vec![Register::X0, Register::X1]);
 
-        let live_out = LiveOutMask::from_registers(vec![Register::X0]);
+        let live_out = LiveOut::from_registers(vec![Register::X0]);
         let target = mov_zero_sequence();
 
         let result = search.search(&target, &live_out, &config);
@@ -467,7 +469,7 @@ mod tests {
             )
             .with_registers(vec![Register::X0, Register::X1, Register::X2]);
 
-        let live_out = LiveOutMask::from_registers(vec![Register::X0]);
+        let live_out = LiveOut::from_registers(vec![Register::X0]);
         let target = mov_zero_sequence();
 
         let result = search.search(&target, &live_out, &config);

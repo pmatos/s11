@@ -15,7 +15,7 @@ use crate::search::config::{SearchConfig, SearchMode};
 use crate::search::result::{SearchResult, SearchStatistics};
 use crate::search::{Algorithm, SearchAlgorithm};
 use crate::semantics::cost::sequence_cost;
-use crate::semantics::state::LiveOutMask;
+use crate::semantics::live_out::LiveOut;
 use crate::semantics::{EquivalenceConfig, EquivalenceResult, check_equivalence_with_config};
 use std::time::{Duration, Instant};
 
@@ -35,7 +35,7 @@ impl SymbolicSearch {
     fn linear_search(
         &mut self,
         target: &[Instruction],
-        live_out: &LiveOutMask,
+        live_out: &LiveOut,
         config: &SearchConfig,
         start_time: Instant,
     ) -> Option<Vec<Instruction>> {
@@ -88,7 +88,7 @@ impl SymbolicSearch {
     fn search_at_length(
         &mut self,
         target: &[Instruction],
-        live_out: &LiveOutMask,
+        live_out: &LiveOut,
         config: &SearchConfig,
         all_instructions: &[Instruction],
         length: usize,
@@ -227,7 +227,7 @@ impl SymbolicSearch {
         &mut self,
         target: &[Instruction],
         candidate: &[Instruction],
-        live_out: &LiveOutMask,
+        live_out: &LiveOut,
         config: &SearchConfig,
     ) -> bool {
         let timeout = config
@@ -261,7 +261,7 @@ impl SymbolicSearch {
     fn binary_search(
         &mut self,
         _target: &[Instruction],
-        _live_out: &LiveOutMask,
+        _live_out: &LiveOut,
         _config: &SearchConfig,
         _start_time: Instant,
     ) -> Option<Vec<Instruction>> {
@@ -281,7 +281,7 @@ impl SearchAlgorithm for SymbolicSearch {
     fn search(
         &mut self,
         target: &[Instruction],
-        live_out: &LiveOutMask,
+        live_out: &LiveOut,
         config: &SearchConfig,
     ) -> SearchResult {
         self.reset();
@@ -361,7 +361,7 @@ mod tests {
     fn test_symbolic_search_empty_sequence() {
         let mut search = SymbolicSearch::new();
         let config = SearchConfig::default();
-        let live_out = LiveOutMask::from_registers(vec![Register::X0]);
+        let live_out = LiveOut::from_registers(vec![Register::X0]);
 
         let result = search.search(&[], &live_out, &config);
         assert!(!result.found_optimization);
@@ -371,7 +371,7 @@ mod tests {
     fn test_symbolic_search_single_instruction() {
         let mut search = SymbolicSearch::new();
         let config = SearchConfig::default();
-        let live_out = LiveOutMask::from_registers(vec![Register::X0]);
+        let live_out = LiveOut::from_registers(vec![Register::X0]);
 
         // Single instruction can't be optimized to shorter
         let result = search.search(&mov_zero_sequence(), &live_out, &config);
@@ -387,7 +387,7 @@ mod tests {
             .with_registers(vec![Register::X0, Register::X1, Register::X2])
             .with_immediates(vec![-1, 0, 1, 2]);
 
-        let live_out = LiveOutMask::from_registers(vec![Register::X0]);
+        let live_out = LiveOut::from_registers(vec![Register::X0]);
 
         // Target: MOV X0, X1; ADD X0, X0, #1 (2 instructions)
         // Should find an equivalent 1-instruction sequence (e.g., ADD X0, X1, #1)
@@ -413,7 +413,7 @@ mod tests {
             .with_symbolic(SymbolicConfig::default())
             .with_registers(vec![Register::X0, Register::X1]);
 
-        let live_out = LiveOutMask::from_registers(vec![Register::X0]);
+        let live_out = LiveOut::from_registers(vec![Register::X0]);
         let target = mov_add_sequence();
 
         let result = search.search(&target, &live_out, &config);
@@ -433,7 +433,7 @@ mod tests {
             .with_immediates(vec![0, 1]);
 
         // Only X0 is live-out, X1 can differ
-        let live_out = LiveOutMask::from_registers(vec![Register::X0]);
+        let live_out = LiveOut::from_registers(vec![Register::X0]);
 
         // Target modifies both X0 and X1
         let target = vec![
@@ -459,7 +459,7 @@ mod tests {
     fn test_verify_equivalence() {
         let mut search = SymbolicSearch::new();
         let config = SearchConfig::default();
-        let live_out = LiveOutMask::from_registers(vec![Register::X0]);
+        let live_out = LiveOut::from_registers(vec![Register::X0]);
 
         // These should be equivalent
         let target = vec![Instruction::MovImm {
@@ -479,7 +479,7 @@ mod tests {
     fn test_verify_non_equivalence() {
         let mut search = SymbolicSearch::new();
         let config = SearchConfig::default();
-        let live_out = LiveOutMask::from_registers(vec![Register::X0]);
+        let live_out = LiveOut::from_registers(vec![Register::X0]);
 
         // These should NOT be equivalent
         let target = vec![Instruction::MovImm {

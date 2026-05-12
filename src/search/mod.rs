@@ -23,7 +23,7 @@ pub use stochastic::StochasticSearch;
 pub use symbolic::SymbolicSearch;
 
 use crate::ir::Instruction;
-use crate::semantics::state::LiveOutMask;
+use crate::semantics::live_out::LiveOut;
 
 /// Trait for search algorithms that find equivalent instruction sequences
 #[allow(dead_code)]
@@ -32,7 +32,7 @@ pub trait SearchAlgorithm {
     ///
     /// # Arguments
     /// * `target` - The instruction sequence to optimize
-    /// * `live_out` - Registers that must match after execution
+    /// * `live_out` - Observable state that must match after execution
     /// * `config` - Search configuration parameters
     ///
     /// # Returns
@@ -40,7 +40,7 @@ pub trait SearchAlgorithm {
     fn search(
         &mut self,
         target: &[Instruction],
-        live_out: &LiveOutMask,
+        live_out: &LiveOut,
         config: &SearchConfig,
     ) -> SearchResult;
 

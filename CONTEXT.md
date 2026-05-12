@@ -14,7 +14,16 @@ A `Vec<Instruction>` produced by a search algorithm as a potential replacement f
 A candidate that is both **strictly cheaper** than the target and **proven equivalent** on the live-out contract. The metric of "cheaper" is search-config dependent (cost model in `src/semantics/cost.rs`, or byte count for the LLM-assisted flow).
 
 ### Live-out
-The set of architectural registers (and, implicitly, flags read by the target's downstream context) whose values must agree between target and candidate after execution. Carried as `LiveOutMask` in `src/semantics/state.rs`. Fed into `EquivalenceConfig` and `SearchAlgorithm::search`.
+The observable architectural state whose values must agree between target and candidate after execution. Today this is represented by `LiveOut` in `src/semantics/live_out.rs`; its only populated slice is `LiveOutRegisters`. The intended concept is broader than registers: condition state, memory, and PC can also be live-out when downstream code observes them.
+
+### Live-out registers
+The register slice of the live-out contract. Represented by `LiveOutRegisters`, a set of architectural registers whose values must agree between target and candidate after execution. This is not the whole live-out concept.
+
+### Observable state
+Any architectural state a downstream context can observe after the target executes. Registers are the only fully modeled observable state today. Condition state is the next known slice. Memory and PC are intentionally reserved in the term so the live-out contract can grow without being renamed.
+
+### Condition state
+Architecture-specific predicate or flag state that later instructions can read. On AArch64 this is NZCV. On a RISC-V integer subset there may be no condition state. Future architectures can map this term to their own flag or predicate state without changing the shared live-out vocabulary.
 
 ### Live-in
 The set of architectural registers whose initial values the target reads. Currently *not* surfaced in `SearchAlgorithm::search`. The LLM-assisted flow needs this in the prompt; computed by def-use analysis on the target rather than added to the trait (see ADR-0001).
@@ -34,12 +43,12 @@ A `SearchAlgorithm` impl that delegates candidate generation to the OpenAI Codex
 - Calls are **sequential** within one search.
 - Loop terminates when **either** an optimization is found, **or** `max_codex_calls` is reached, **or** `SearchConfig.timeout` elapses.
 - Per-iteration outcomes: parse-fail → log unsupported mnemonics, continue. Equivalence-fail → log, continue. Not-shorter → log, continue. Equivalent and shorter → **success**, return.
-- Verification reuses `EquivalenceConfig::default().with_live_out(live_out)`: 10 random tests (fast path), then Z3 with 30s timeout.
+- Verification reuses `EquivalenceConfig` with the caller's `LiveOut` contract: 10 random tests (fast path), then Z3 with 30s timeout.
 
 **Deliverable:** local-only. A bash/`just` target that runs the search across a fixed corpus of 5–10 small asm targets known to be optimizable (drawn from existing equivalence tests). No CI, no mocked Codex backend, no `CandidateGenerator` trait abstraction.
 
 ### Flags-live-out (MVP exclusion)
-For the LLM-assisted search MVP only, targets whose final architectural state includes a meaningful NZCV value (i.e., flags are live-out) are **refused** rather than processed. `LiveOutMask` does not currently encode flags, and adding flags to the live-out contract would require co-ordinated changes to `EquivalenceConfig` and all four search algorithms — out of scope for the MVP. The LLM flow detects flags-live-out by static inspection of the target and bails with an explicit message. See ADR-0002.
+For the LLM-assisted search MVP only, targets whose final architectural state includes meaningful AArch64 condition state (NZCV) are **refused** rather than processed. `LiveOut` does not currently populate a condition-state slice, and adding condition state to the live-out contract would require co-ordinated changes to the equivalence internals — out of scope for the MVP. The LLM flow detects flags-live-out by static inspection of the target and bails with an explicit message. See ADR-0002.
 
 ### Subset hint (intentionally absent)
 The LLM prompt does **not** enumerate the 20-opcode subset s11's parser accepts. The model is invited to use any AArch64 mnemonic it knows. Outputs that use unsupported instructions are recorded as a research signal (which mnemonics the model "wanted" to reach for), not treated as wasted calls. See ADR-0003.

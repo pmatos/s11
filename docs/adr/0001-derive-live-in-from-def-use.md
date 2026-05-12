@@ -5,7 +5,7 @@ Date: 2026-05-07
 
 ## Context
 
-The LLM-assisted search algorithm (`LlmSearch`, see `src/search/llm/`) needs to tell the model which registers (and flags) the target reads before writing — i.e., the target's live-in set. The existing `SearchAlgorithm::search` trait at `src/search/mod.rs:39` exposes only `live_out` and the target itself. No live-in is plumbed through.
+The LLM-assisted search algorithm (`LlmSearch`, see `src/search/llm/`) needs to tell the model which registers (and flags) the target reads before writing — i.e., the target's live-in set. The existing `SearchAlgorithm::search` trait exposes only `live_out` and the target itself. No live-in is plumbed through.
 
 Three options were considered:
 
@@ -17,7 +17,7 @@ Three options were considered:
 
 Option 2: derive live-in from the target via intra-sequence def-use analysis.
 
-A new helper `compute_live_in_registers(&[Instruction]) -> LiveOutMask` is added in `src/validation/live_out.rs` (the type is reused — it's structurally a set-of-registers, despite the name). Flag-livein is tracked by a separate boolean predicate `reads_flags_before_writing(&[Instruction]) -> bool` because flags don't fit `LiveOutMask`'s bitset.
+A new helper `compute_live_in_registers(&[Instruction]) -> LiveOutRegisters` is added in `src/validation/live_out.rs`. The type is reused because live-in registers and live-out registers are both register sets. Flag-live-in is tracked by a separate boolean predicate `reads_flags_before_writing(&[Instruction]) -> bool` because AArch64 condition state is not part of `LiveOutRegisters`.
 
 ## Consequences
 
