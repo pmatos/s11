@@ -19,17 +19,38 @@ use crate::validation::random::{
 use std::time::Duration;
 use z3::SatResult;
 
-/// Soundness guard: SMT does not model NZCV, so a rewrite that drops a
-/// flag-writing instruction present in the target sequence cannot be proved
-/// equivalent — a downstream conditional branch (or CSEL chain) would
-/// observe different flags. Equivalent in registers ≠ equivalent in flags.
+/// Soundness guard: SMT does not model NZCV, so any rewrite that disturbs
+/// the flag-writing trace cannot be proved equivalent — a downstream
+/// conditional branch (or CSEL chain) would observe different flags.
+/// Equivalent in registers ≠ equivalent in flags.
 ///
-/// Conservative: returns `true` whenever the target contains any
-/// flag-writer that the candidate lacks. Reject (return NotEquivalent) when
-/// this is the case before invoking SMT. Over-approximation matches the
-/// posture documented on `flags_live_out`.
-fn drops_target_flag_writer(target: &[Instruction], candidate: &[Instruction]) -> bool {
-    flags_live_out(target) && !flags_live_out(candidate)
+/// This guard fires when the sub-sequence of flag-writing instructions in
+/// `target` differs in any way from the sub-sequence in `candidate` — drop,
+/// swap, reorder, or replace-with-different-flag-writer all count. The
+/// comparison is `Instruction`-level structural equality, so a `CMP x2, #0`
+/// in target vs `ADDS x0, x1, #1` in candidate (both modify NZCV but with
+/// different operands and different flag-setting rules) is correctly
+/// rejected — see the regression tests below.
+///
+/// Conservative on purpose: some valid rewrites that happen to produce
+/// identical final NZCV from different flag-writers will be wrongly
+/// rejected here. Closing that gap requires full NZCV modelling in SMT,
+/// which is tracked as a separate follow-up.
+fn flag_writers_diverge(target: &[Instruction], candidate: &[Instruction]) -> bool {
+    // Fast paths: most rewrites involve no flag writers at all.
+    let tw = flags_live_out(target);
+    let cw = flags_live_out(candidate);
+    if !tw && !cw {
+        return false;
+    }
+    if tw != cw {
+        return true; // target writes flags, candidate doesn't (or vice versa)
+    }
+    let target_flag_writers: Vec<&Instruction> =
+        target.iter().filter(|i| i.modifies_flags()).collect();
+    let candidate_flag_writers: Vec<&Instruction> =
+        candidate.iter().filter(|i| i.modifies_flags()).collect();
+    target_flag_writers != candidate_flag_writers
 }
 
 /// Result of equivalence checking
@@ -122,8 +143,8 @@ impl EquivalenceConfig {
 /// Returns true if for all possible initial states, both sequences
 /// produce the same final state.
 pub fn check_equivalence(seq1: &[Instruction], seq2: &[Instruction]) -> EquivalenceResult {
-    // Soundness guard before SMT: see `drops_target_flag_writer`.
-    if drops_target_flag_writer(seq1, seq2) {
+    // Soundness guard before SMT: see `flag_writers_diverge`.
+    if flag_writers_diverge(seq1, seq2) {
         return EquivalenceResult::NotEquivalent;
     }
 
@@ -206,8 +227,8 @@ pub fn check_equivalence_with_config(
     seq2: &[Instruction],
     config: &EquivalenceConfig,
 ) -> EquivalenceResult {
-    // Soundness guard before SMT: see `drops_target_flag_writer`.
-    if drops_target_flag_writer(seq1, seq2) {
+    // Soundness guard before SMT: see `flag_writers_diverge`.
+    if flag_writers_diverge(seq1, seq2) {
         return EquivalenceResult::NotEquivalent;
     }
 
@@ -235,8 +256,8 @@ pub fn check_equivalence_with_config_metrics(
 ) -> (EquivalenceResult, EquivalenceMetrics) {
     let metrics = EquivalenceMetrics::default();
 
-    // Soundness guard before SMT: see `drops_target_flag_writer`.
-    if drops_target_flag_writer(seq1, seq2) {
+    // Soundness guard before SMT: see `flag_writers_diverge`.
+    if flag_writers_diverge(seq1, seq2) {
         return (EquivalenceResult::NotEquivalent, metrics);
     }
 
@@ -1100,8 +1121,47 @@ mod tests {
         );
     }
 
+    /// Soundness regression for the strengthened flag-writer guard:
+    /// `ADD x0, x1, #1; CMP x2, #0` (writes flags from `CMP x2, #0`) vs
+    /// `ADDS x0, x1, #1` (writes flags from `ADDS x0, x1, #1`). Both
+    /// sequences write X0 to x1+1 and both have a flag-writer, so the SMT
+    /// register check would pass and the old "any writer present" guard
+    /// would also pass — but the post-sequence NZCV differs. The
+    /// strengthened guard rejects on structural flag-writer-sequence
+    /// inequality.
+    #[test]
+    fn test_swapped_flag_writer_rewrite_rejected() {
+        let target = vec![
+            Instruction::Add {
+                rd: Register::X0,
+                rn: Register::X1,
+                rm: Operand::Immediate(1),
+            },
+            Instruction::Cmp {
+                rn: Register::X2,
+                rm: Operand::Immediate(0),
+            },
+        ];
+        let candidate = vec![Instruction::Adds {
+            rd: Register::X0,
+            rn: Register::X1,
+            rm: Operand::Immediate(1),
+        }];
+        let config =
+            EquivalenceConfig::with_live_out(LiveOutMask::from_registers(vec![Register::X0]));
+        assert_eq!(
+            check_equivalence_with_config(&target, &candidate, &config),
+            EquivalenceResult::NotEquivalent,
+            "Replacing one flag-writer with a different flag-writer changes NZCV"
+        );
+        assert_eq!(
+            check_equivalence(&target, &candidate),
+            EquivalenceResult::NotEquivalent
+        );
+    }
+
     /// ADDS ≡ ADDS (same op) must still succeed — the flag guard fires only
-    /// when the candidate drops a writer the target had.
+    /// when the flag-writer sequence diverges.
     #[test]
     fn test_adds_equivalent_to_adds() {
         let s1 = vec![Instruction::Adds {
