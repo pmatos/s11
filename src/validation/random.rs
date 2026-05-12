@@ -2,7 +2,7 @@
 
 use crate::ir::Register;
 use crate::semantics::state::ConcreteMachineState;
-use rand::Rng;
+use rand::RngExt;
 use std::collections::HashMap;
 
 /// Configuration for random input generation

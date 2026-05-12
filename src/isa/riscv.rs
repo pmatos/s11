@@ -8,7 +8,7 @@ use crate::isa::traits::{ISA, InstructionGenerator, InstructionType, OperandType
 use std::fmt;
 use std::hash::Hash;
 
-use rand::Rng;
+use rand::RngExt;
 
 /// RISC-V register enumeration (x0-x31)
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
@@ -581,7 +581,7 @@ impl InstructionGenerator<RiscVInstruction> for RiscVInstructionGenerator {
         instructions
     }
 
-    fn generate_random<R: Rng>(
+    fn generate_random<R: RngExt>(
         &self,
         rng: &mut R,
         registers: &[RiscVRegister],
@@ -616,7 +616,7 @@ impl InstructionGenerator<RiscVInstruction> for RiscVInstructionGenerator {
         }
     }
 
-    fn mutate<R: Rng>(
+    fn mutate<R: RngExt>(
         &self,
         rng: &mut R,
         instruction: &RiscVInstruction,

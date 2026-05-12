@@ -100,7 +100,7 @@ pub fn generate_all_instructions(registers: &[Register], immediates: &[i64]) -> 
 }
 
 /// Generate a random instruction using the given registers and immediates
-pub fn generate_random_instruction<R: rand::Rng>(
+pub fn generate_random_instruction<R: rand::RngExt>(
     rng: &mut R,
     registers: &[Register],
     immediates: &[i64],
@@ -180,7 +180,7 @@ pub fn generate_random_instruction<R: rand::Rng>(
     }
 }
 
-fn random_operand<R: rand::Rng>(
+fn random_operand<R: rand::RngExt>(
     rng: &mut R,
     registers: &[Register],
     immediates: &[i64],
@@ -196,7 +196,7 @@ fn random_operand<R: rand::Rng>(
     }
 }
 
-fn random_shift_operand<R: rand::Rng>(rng: &mut R, registers: &[Register]) -> Operand {
+fn random_shift_operand<R: rand::RngExt>(rng: &mut R, registers: &[Register]) -> Operand {
     if rng.random_bool(0.7) {
         // Prefer immediate shifts
         let shifts = [0, 1, 2, 4, 8, 16, 32];
@@ -209,7 +209,7 @@ fn random_shift_operand<R: rand::Rng>(rng: &mut R, registers: &[Register]) -> Op
 }
 
 /// Generate a random sequence of instructions
-pub fn generate_random_sequence<R: rand::Rng>(
+pub fn generate_random_sequence<R: rand::RngExt>(
     rng: &mut R,
     length: usize,
     registers: &[Register],

@@ -8,7 +8,7 @@ use std::collections::HashMap;
 use std::fmt::{Debug, Display};
 use std::hash::Hash;
 
-use rand::Rng;
+use rand::RngExt;
 /// Trait for register types
 pub trait RegisterType:
     Clone + Copy + PartialEq + Eq + Hash + Debug + Display + Send + Sync
@@ -193,7 +193,7 @@ pub trait InstructionGenerator<I: InstructionType>: Send + Sync {
     fn generate_all(&self, registers: &[I::Register], immediates: &[i64]) -> Vec<I>;
 
     /// Generate a random instruction
-    fn generate_random<R: Rng>(
+    fn generate_random<R: RngExt>(
         &self,
         rng: &mut R,
         registers: &[I::Register],
@@ -201,7 +201,7 @@ pub trait InstructionGenerator<I: InstructionType>: Send + Sync {
     ) -> I;
 
     /// Mutate an existing instruction
-    fn mutate<R: Rng>(
+    fn mutate<R: RngExt>(
         &self,
         rng: &mut R,
         instruction: &I,
