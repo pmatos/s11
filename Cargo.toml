@@ -18,7 +18,7 @@ z3 = { version = "0.20", optional = true }
 dynasmrt = "5.0.0"
 dynasm = "5.0.0"
 rand = "0.9"
-rand_chacha = "0.9"
+rand_chacha = "0.10"
 rayon = "1.12"
 crossbeam-channel = "0.5"
 num_cpus = "1.16"
