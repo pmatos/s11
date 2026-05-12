@@ -19,7 +19,7 @@ dynasmrt = "4.0.1"
 dynasm = "4.0.1"
 rand = "0.9"
 rand_chacha = "0.9"
-rayon = "1.10"
+rayon = "1.12"
 crossbeam-channel = "0.5"
 num_cpus = "1.16"
 serde = { version = "1", features = ["derive"] }
