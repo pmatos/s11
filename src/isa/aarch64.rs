@@ -285,6 +285,64 @@ impl InstructionGenerator<Instruction> for AArch64InstructionGenerator {
             }
         }
 
+        // Tier 1 inverted-logical / flag-setting binary ops (register form).
+        for &rd in registers {
+            for &rn in registers {
+                for &rm in registers {
+                    let rm_op = Operand::Register(rm);
+                    instructions.push(Instruction::Bic { rd, rn, rm: rm_op });
+                    instructions.push(Instruction::Bics { rd, rn, rm: rm_op });
+                    instructions.push(Instruction::Orn { rd, rn, rm: rm_op });
+                    instructions.push(Instruction::Eon { rd, rn, rm: rm_op });
+                    instructions.push(Instruction::Adds { rd, rn, rm: rm_op });
+                    instructions.push(Instruction::Subs { rd, rn, rm: rm_op });
+                    instructions.push(Instruction::Ands { rd, rn, rm: rm_op });
+                }
+                // ADDS / SUBS immediate forms (ANDS is register-only).
+                for &imm in immediates {
+                    let imm_op = Operand::Immediate(imm);
+                    instructions.push(Instruction::Adds { rd, rn, rm: imm_op });
+                    instructions.push(Instruction::Subs { rd, rn, rm: imm_op });
+                }
+                // ROR with register and immediate shift.
+                for &rm in registers {
+                    instructions.push(Instruction::Ror {
+                        rd,
+                        rn,
+                        shift: Operand::Register(rm),
+                    });
+                }
+                for &shift in &shift_amounts {
+                    instructions.push(Instruction::Ror {
+                        rd,
+                        rn,
+                        shift: Operand::Immediate(shift),
+                    });
+                }
+            }
+
+            // Tier 1 unary: MVN / NEG / NEGS.
+            for &rm in registers {
+                instructions.push(Instruction::Mvn { rd, rm });
+                instructions.push(Instruction::Neg { rd, rm });
+                instructions.push(Instruction::Negs { rd, rm });
+            }
+
+            // MOVN: small representative imm × {0,16,32,48} shift table —
+            // mirrors `search::candidate::generate_all_instructions`.
+            for imm in [0u16, 1, 0xFF, 0xFFFF] {
+                for shift in [0u8, 16, 32, 48] {
+                    instructions.push(Instruction::MovN { rd, imm, shift });
+                }
+            }
+
+            // CSET / CSETM: 14 non-AL/NV conditions from ir::types.
+            for cond in crate::ir::types::NORMAL_CONDITIONS {
+                instructions.push(Instruction::Cset { rd, cond });
+                instructions.push(Instruction::Csetm { rd, cond });
+            }
+        }
+
         instructions
     }
 
@@ -294,22 +352,25 @@ impl InstructionGenerator<Instruction> for AArch64InstructionGenerator {
         registers: &[Register],
         immediates: &[i64],
     ) -> Instruction {
-        let opcode = rng.random_range(0..13);
+        // 24 opcode slots: 0..13 original, 13..23 Tier 1, 23 = ROR.
+        let opcode = rng.random_range(0..24);
         let rd = registers[rng.random_range(0..registers.len())];
         let rn = registers[rng.random_range(0..registers.len())];
+        let pick_reg = |rng: &mut R| registers[rng.random_range(0..registers.len())];
+        let pick_imm = |rng: &mut R| immediates[rng.random_range(0..immediates.len())];
 
         match opcode {
             0 => Instruction::MovReg { rd, rn },
-            1 => {
-                let imm = immediates[rng.random_range(0..immediates.len())];
-                Instruction::MovImm { rd, imm }
-            }
+            1 => Instruction::MovImm {
+                rd,
+                imm: pick_imm(rng),
+            },
             2..=6 => {
                 let use_imm = rng.random_bool(0.5);
                 let rm = if use_imm && (opcode == 2 || opcode == 3) {
-                    Operand::Immediate(immediates[rng.random_range(0..immediates.len())])
+                    Operand::Immediate(pick_imm(rng))
                 } else {
-                    Operand::Register(registers[rng.random_range(0..registers.len())])
+                    Operand::Register(pick_reg(rng))
                 };
                 match opcode {
                     2 => Instruction::Add { rd, rn, rm },
@@ -323,10 +384,10 @@ impl InstructionGenerator<Instruction> for AArch64InstructionGenerator {
             7..=9 => {
                 let use_imm = rng.random_bool(0.5);
                 let shift = if use_imm {
-                    let amounts = [0, 1, 2, 4, 8, 16, 32];
+                    let amounts = [0i64, 1, 2, 4, 8, 16, 32];
                     Operand::Immediate(amounts[rng.random_range(0..amounts.len())])
                 } else {
-                    Operand::Register(registers[rng.random_range(0..registers.len())])
+                    Operand::Register(pick_reg(rng))
                 };
                 match opcode {
                     7 => Instruction::Lsl { rd, rn, shift },
@@ -336,12 +397,102 @@ impl InstructionGenerator<Instruction> for AArch64InstructionGenerator {
                 }
             }
             10..=12 => {
-                let rm = registers[rng.random_range(0..registers.len())];
+                let rm = pick_reg(rng);
                 match opcode {
                     10 => Instruction::Mul { rd, rn, rm },
                     11 => Instruction::Sdiv { rd, rn, rm },
                     12 => Instruction::Udiv { rd, rn, rm },
                     _ => unreachable!(),
+                }
+            }
+            // Tier 1: unary
+            13 => Instruction::Mvn {
+                rd,
+                rm: pick_reg(rng),
+            },
+            14 => Instruction::Neg {
+                rd,
+                rm: pick_reg(rng),
+            },
+            15 => Instruction::Negs {
+                rd,
+                rm: pick_reg(rng),
+            },
+            16 => {
+                let imm = (rng.random::<u32>() & 0xFFFF) as u16;
+                let shifts = [0u8, 16, 32, 48];
+                Instruction::MovN {
+                    rd,
+                    imm,
+                    shift: shifts[rng.random_range(0..shifts.len())],
+                }
+            }
+            // Tier 1: inverted-logical (register-only)
+            17 => Instruction::Bic {
+                rd,
+                rn,
+                rm: Operand::Register(pick_reg(rng)),
+            },
+            18 => Instruction::Bics {
+                rd,
+                rn,
+                rm: Operand::Register(pick_reg(rng)),
+            },
+            19 => Instruction::Orn {
+                rd,
+                rn,
+                rm: Operand::Register(pick_reg(rng)),
+            },
+            20 => Instruction::Eon {
+                rd,
+                rn,
+                rm: Operand::Register(pick_reg(rng)),
+            },
+            // Tier 1: flag-setting arith (ADDS/SUBS imm, ANDS reg-only)
+            21 => {
+                let rm = if rng.random_bool(0.5) {
+                    Operand::Immediate(pick_imm(rng))
+                } else {
+                    Operand::Register(pick_reg(rng))
+                };
+                Instruction::Adds { rd, rn, rm }
+            }
+            22 => {
+                let rm = if rng.random_bool(0.5) {
+                    Operand::Immediate(pick_imm(rng))
+                } else {
+                    Operand::Register(pick_reg(rng))
+                };
+                Instruction::Subs { rd, rn, rm }
+            }
+            // ANDS: choose register-only.
+            // CSET / CSETM share the next slot pair.
+            23 => {
+                // Branch between ANDS, CSET, CSETM, ROR — three "small" Tier 1
+                // families fit here. Even split.
+                match rng.random_range(0..4) {
+                    0 => Instruction::Ands {
+                        rd,
+                        rn,
+                        rm: Operand::Register(pick_reg(rng)),
+                    },
+                    1 => Instruction::Cset {
+                        rd,
+                        cond: Condition::random_normal(rng),
+                    },
+                    2 => Instruction::Csetm {
+                        rd,
+                        cond: Condition::random_normal(rng),
+                    },
+                    _ => {
+                        let shift = if rng.random_bool(0.5) {
+                            let amounts = [0i64, 1, 2, 4, 8, 16, 32];
+                            Operand::Immediate(amounts[rng.random_range(0..amounts.len())])
+                        } else {
+                            Operand::Register(pick_reg(rng))
+                        };
+                        Instruction::Ror { rd, rn, shift }
+                    }
                 }
             }
             _ => unreachable!(),
@@ -832,7 +983,7 @@ mod tests {
         // Mutate several times and verify we get valid instructions
         for _ in 0..100 {
             let mutated = generator.mutate(&mut rng, &original, &regs, &imms);
-            assert!(mutated.opcode_id() < 13);
+            assert!(mutated.opcode_id() < generator.opcode_count());
         }
     }
 }
