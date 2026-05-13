@@ -361,4 +361,45 @@ mod tests {
             );
         }
     }
+
+    #[test]
+    fn all_registers_display_and_index_round_trip() {
+        for idx in 0..=30 {
+            let reg = Register::from_index(idx).unwrap();
+            assert_eq!(reg.index(), Some(idx));
+            assert_eq!(format!("{}", reg), format!("x{}", idx));
+        }
+        assert_eq!(Register::XZR.index(), Some(31));
+        assert_eq!(format!("{}", Register::XZR), "xzr");
+        assert_eq!(Register::SP.index(), None);
+        assert_eq!(format!("{}", Register::SP), "sp");
+    }
+
+    #[test]
+    fn all_conditions_display_and_normal_set_are_covered() {
+        let cases = [
+            (Condition::EQ, "eq"),
+            (Condition::NE, "ne"),
+            (Condition::CS, "cs"),
+            (Condition::CC, "cc"),
+            (Condition::MI, "mi"),
+            (Condition::PL, "pl"),
+            (Condition::VS, "vs"),
+            (Condition::VC, "vc"),
+            (Condition::HI, "hi"),
+            (Condition::LS, "ls"),
+            (Condition::GE, "ge"),
+            (Condition::LT, "lt"),
+            (Condition::GT, "gt"),
+            (Condition::LE, "le"),
+            (Condition::AL, "al"),
+            (Condition::NV, "nv"),
+        ];
+        for (cond, display) in cases {
+            assert_eq!(format!("{}", cond), display);
+        }
+        assert_eq!(NORMAL_CONDITIONS.len(), 14);
+        assert!(!NORMAL_CONDITIONS.contains(&Condition::AL));
+        assert!(!NORMAL_CONDITIONS.contains(&Condition::NV));
+    }
 }

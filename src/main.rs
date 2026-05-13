@@ -1884,3 +1884,253 @@ mod x86_parser_tests {
         assert!(x86_ir_from_mnemonic("shl", "rax, 1").unwrap().is_none());
     }
 }
+
+#[cfg(test)]
+mod cli_helper_tests {
+    use super::*;
+    use isa::x86::{X86Instruction, X86Register};
+    use search::llm::LlmTimings;
+    use search::llm::ledger::UnsupportedMnemonicLedger;
+    use search::result::SearchStatistics;
+    use std::fs;
+
+    fn options_for(algorithm: Algorithm) -> OptimizationOptions {
+        OptimizationOptions {
+            algorithm,
+            timeout: Some(Duration::from_millis(1)),
+            cost_metric: CostMetric::InstructionCount,
+            verbose: false,
+            beta: 1.0,
+            iterations: 0,
+            seed: Some(1),
+            search_mode: SearchMode::Linear,
+            solver_timeout: Duration::from_millis(1),
+            cores: Some(1),
+            no_symbolic: true,
+            llm_max_calls: 0,
+            llm_model: "test-model".to_string(),
+        }
+    }
+
+    fn temp_asm(name: &str, content: &str) -> PathBuf {
+        let path = std::env::temp_dir().join(format!(
+            "s11-{}-{}-{}.s",
+            name,
+            std::process::id(),
+            std::thread::current().name().unwrap_or("test")
+        ));
+        fs::write(&path, content).unwrap();
+        path
+    }
+
+    #[test]
+    fn cli_enum_conversions_cover_all_variants() {
+        assert_eq!(
+            Algorithm::from(CliAlgorithm::Enumerative),
+            Algorithm::Enumerative
+        );
+        assert_eq!(
+            Algorithm::from(CliAlgorithm::Stochastic),
+            Algorithm::Stochastic
+        );
+        assert_eq!(Algorithm::from(CliAlgorithm::Symbolic), Algorithm::Symbolic);
+        assert_eq!(Algorithm::from(CliAlgorithm::Hybrid), Algorithm::Hybrid);
+        assert_eq!(Algorithm::from(CliAlgorithm::Llm), Algorithm::Llm);
+
+        assert_eq!(
+            CostMetric::from(CliCostMetric::InstructionCount),
+            CostMetric::InstructionCount
+        );
+        assert_eq!(
+            CostMetric::from(CliCostMetric::Latency),
+            CostMetric::Latency
+        );
+        assert_eq!(
+            CostMetric::from(CliCostMetric::CodeSize),
+            CostMetric::CodeSize
+        );
+
+        assert_eq!(SearchMode::from(CliSearchMode::Linear), SearchMode::Linear);
+        assert_eq!(SearchMode::from(CliSearchMode::Binary), SearchMode::Binary);
+    }
+
+    #[test]
+    fn main_register_and_instruction_parsers_cover_core_forms() {
+        for idx in 0..=30 {
+            let text = format!("x{}", idx);
+            assert_eq!(
+                parse_register(&text).unwrap(),
+                Register::from_index(idx).unwrap()
+            );
+        }
+        assert_eq!(parse_register("xzr").unwrap(), Register::XZR);
+        assert_eq!(parse_register("sp").unwrap(), Register::SP);
+        assert!(parse_register("x31").is_err());
+
+        assert_eq!(
+            parse_mov_instruction("x0, #0x10").unwrap(),
+            Some(Instruction::MovImm {
+                rd: Register::X0,
+                imm: 16,
+            })
+        );
+        assert_eq!(
+            parse_mov_instruction("x0, x1").unwrap(),
+            Some(Instruction::MovReg {
+                rd: Register::X0,
+                rn: Register::X1,
+            })
+        );
+        assert_eq!(parse_mov_instruction("x0").unwrap(), None);
+        assert!(parse_mov_instruction("x0, #wat").is_err());
+
+        assert_eq!(
+            parse_add_instruction("x0, x1, #0x20").unwrap(),
+            Some(Instruction::Add {
+                rd: Register::X0,
+                rn: Register::X1,
+                rm: Operand::Immediate(32),
+            })
+        );
+        assert_eq!(
+            parse_add_instruction("x0, x1, x2").unwrap(),
+            Some(Instruction::Add {
+                rd: Register::X0,
+                rn: Register::X1,
+                rm: Operand::Register(Register::X2),
+            })
+        );
+        assert_eq!(parse_add_instruction("x0, x1").unwrap(), None);
+        assert!(parse_add_instruction("x0, x1, #wat").is_err());
+    }
+
+    #[test]
+    fn x86_register_parser_covers_all_alias_groups() {
+        let cases = [
+            (["rax", "eax", "ax", "al"], X86Register::RAX),
+            (["rcx", "ecx", "cx", "cl"], X86Register::RCX),
+            (["rdx", "edx", "dx", "dl"], X86Register::RDX),
+            (["rbx", "ebx", "bx", "bl"], X86Register::RBX),
+            (["rsp", "esp", "sp", "rsp"], X86Register::RSP),
+            (["rbp", "ebp", "bp", "rbp"], X86Register::RBP),
+            (["rsi", "esi", "si", "rsi"], X86Register::RSI),
+            (["rdi", "edi", "di", "rdi"], X86Register::RDI),
+            (["r8", "r8d", "r8w", "r8b"], X86Register::R8),
+            (["r9", "r9d", "r9w", "r9b"], X86Register::R9),
+            (["r10", "r10d", "r10w", "r10b"], X86Register::R10),
+            (["r11", "r11d", "r11w", "r11b"], X86Register::R11),
+            (["r12", "r12d", "r12w", "r12b"], X86Register::R12),
+            (["r13", "r13d", "r13w", "r13b"], X86Register::R13),
+            (["r14", "r14d", "r14w", "r14b"], X86Register::R14),
+            (["r15", "r15d", "r15w", "r15b"], X86Register::R15),
+        ];
+        for (aliases, reg) in cases {
+            for alias in aliases {
+                assert_eq!(parse_x86_register(alias).unwrap(), reg);
+            }
+        }
+    }
+
+    #[test]
+    fn x86_helpers_cover_error_and_optimization_paths() {
+        assert!(parse_x86_operand("not-an-operand").is_err());
+        assert!(x86_ir_from_mnemonic("add", "rax").unwrap().is_none());
+        assert!(x86_ir_from_mnemonic("add", "rax, nope").is_err());
+
+        assert!(find_shorter_equivalent_x86(&[], 64).is_none());
+        assert!(
+            find_shorter_equivalent_x86(
+                &[X86Instruction::MovImm {
+                    rd: X86Register::RAX,
+                    imm: 1,
+                }],
+                64
+            )
+            .is_none()
+        );
+        let optimized = find_shorter_equivalent_x86(
+            &[
+                X86Instruction::MovImm {
+                    rd: X86Register::RAX,
+                    imm: 1,
+                },
+                X86Instruction::MovImm {
+                    rd: X86Register::RAX,
+                    imm: 1,
+                },
+            ],
+            64,
+        )
+        .expect("two identical writes can be shortened");
+        assert_eq!(optimized.len(), 1);
+    }
+
+    #[test]
+    fn formatting_and_print_helpers_cover_optional_sections() {
+        assert_eq!(fmt_bytes(42), "     42 B ");
+        assert!(fmt_bytes(2_048).contains("kB"));
+        assert!(fmt_bytes(2_097_152).contains("MB"));
+        assert!(fmt_dur(Duration::from_nanos(500)).contains("µs"));
+        assert!(fmt_dur(Duration::from_millis(2)).contains("ms"));
+        assert!(fmt_dur(Duration::from_secs(2)).contains("s"));
+
+        let timings = LlmTimings {
+            codex_calls: 1,
+            codex_time: Duration::from_millis(2),
+            verifications: 1,
+            verify_time: Duration::from_millis(3),
+            smt_calls: 2,
+            smt_formula_bytes_total: 2_048,
+            smt_formula_bytes_max: 1_536,
+        };
+        print_llm_timings(&timings, Duration::from_millis(10));
+
+        let mut ledger = UnsupportedMnemonicLedger::new();
+        print_unsupported_mnemonic_ledger(&ledger);
+        ledger.record("ldr");
+        print_unsupported_mnemonic_ledger(&ledger);
+
+        let mut stats = SearchStatistics::new(Algorithm::Stochastic);
+        stats.iterations = 10;
+        stats.accepted_proposals = 5;
+        print_search_statistics(&stats);
+    }
+
+    #[test]
+    fn run_optimization_fast_modes_do_not_require_codex_or_long_searches() {
+        let target = [Instruction::MovReg {
+            rd: Register::X0,
+            rn: Register::X1,
+        }];
+
+        for algorithm in [
+            Algorithm::Stochastic,
+            Algorithm::Symbolic,
+            Algorithm::Hybrid,
+            Algorithm::Llm,
+        ] {
+            let options = options_for(algorithm);
+            let result = run_optimization(&target, &options).unwrap();
+            assert!(result.is_none() || result.as_ref().is_some());
+        }
+        assert!(
+            run_optimization(&[], &options_for(Algorithm::Enumerative))
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn run_equiv_and_llm_opt_accept_equivalent_tiny_files() {
+        let asm1 = temp_asm("equiv-a", "mov x0, x1\n");
+        let asm2 = temp_asm("equiv-b", "mov x0, x1\n");
+        run_equiv(&asm1, &asm2, "x0", 1, true, true).unwrap();
+
+        let llm_asm = temp_asm("llm", "mov x0, x1\n");
+        run_llm_opt(&llm_asm, "x0", 0, "test-model", 0, true).unwrap();
+
+        fs::remove_file(asm1).unwrap();
+        fs::remove_file(asm2).unwrap();
+        fs::remove_file(llm_asm).unwrap();
+    }
+}

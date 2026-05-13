@@ -1371,4 +1371,293 @@ mod tests {
             op_str
         );
     }
+
+    #[test]
+    fn assemble_remaining_success_forms() {
+        let cases = [
+            Instruction::Sub {
+                rd: Register::X0,
+                rn: Register::X1,
+                rm: Operand::Register(Register::X2),
+            },
+            Instruction::Sub {
+                rd: Register::X0,
+                rn: Register::X1,
+                rm: Operand::Immediate(5),
+            },
+            Instruction::And {
+                rd: Register::X0,
+                rn: Register::X1,
+                rm: Operand::Register(Register::X2),
+            },
+            Instruction::Orr {
+                rd: Register::X0,
+                rn: Register::X1,
+                rm: Operand::Register(Register::X2),
+            },
+            Instruction::Eor {
+                rd: Register::X0,
+                rn: Register::X1,
+                rm: Operand::Register(Register::X2),
+            },
+            Instruction::Lsl {
+                rd: Register::X0,
+                rn: Register::X1,
+                shift: Operand::Register(Register::X2),
+            },
+            Instruction::Lsr {
+                rd: Register::X0,
+                rn: Register::X1,
+                shift: Operand::Immediate(3),
+            },
+            Instruction::Asr {
+                rd: Register::X0,
+                rn: Register::X1,
+                shift: Operand::Register(Register::X2),
+            },
+            Instruction::Mul {
+                rd: Register::X0,
+                rn: Register::X1,
+                rm: Register::X2,
+            },
+            Instruction::Sdiv {
+                rd: Register::X0,
+                rn: Register::X1,
+                rm: Register::X2,
+            },
+            Instruction::Udiv {
+                rd: Register::X0,
+                rn: Register::X1,
+                rm: Register::X2,
+            },
+            Instruction::Cmp {
+                rn: Register::X1,
+                rm: Operand::Register(Register::X2),
+            },
+            Instruction::Cmp {
+                rn: Register::X1,
+                rm: Operand::Immediate(5),
+            },
+            Instruction::Cmn {
+                rn: Register::X1,
+                rm: Operand::Register(Register::X2),
+            },
+            Instruction::Cmn {
+                rn: Register::X1,
+                rm: Operand::Immediate(5),
+            },
+            Instruction::Tst {
+                rn: Register::X1,
+                rm: Operand::Register(Register::X2),
+            },
+            Instruction::Mvn {
+                rd: Register::X0,
+                rm: Register::X1,
+            },
+            Instruction::Neg {
+                rd: Register::X0,
+                rm: Register::X1,
+            },
+            Instruction::Negs {
+                rd: Register::X0,
+                rm: Register::X1,
+            },
+            Instruction::MovN {
+                rd: Register::X0,
+                imm: 2,
+                shift: 32,
+            },
+            Instruction::MovN {
+                rd: Register::X0,
+                imm: 3,
+                shift: 48,
+            },
+            Instruction::Bic {
+                rd: Register::X0,
+                rn: Register::X1,
+                rm: Operand::Register(Register::X2),
+            },
+            Instruction::Bics {
+                rd: Register::X0,
+                rn: Register::X1,
+                rm: Operand::Register(Register::X2),
+            },
+            Instruction::Orn {
+                rd: Register::X0,
+                rn: Register::X1,
+                rm: Operand::Register(Register::X2),
+            },
+            Instruction::Eon {
+                rd: Register::X0,
+                rn: Register::X1,
+                rm: Operand::Register(Register::X2),
+            },
+            Instruction::Adds {
+                rd: Register::X0,
+                rn: Register::X1,
+                rm: Operand::Register(Register::X2),
+            },
+            Instruction::Adds {
+                rd: Register::X0,
+                rn: Register::SP,
+                rm: Operand::Immediate(4),
+            },
+            Instruction::Subs {
+                rd: Register::X0,
+                rn: Register::X1,
+                rm: Operand::Register(Register::X2),
+            },
+            Instruction::Subs {
+                rd: Register::X0,
+                rn: Register::SP,
+                rm: Operand::Immediate(4),
+            },
+            Instruction::Ands {
+                rd: Register::X0,
+                rn: Register::X1,
+                rm: Operand::Register(Register::X2),
+            },
+            Instruction::Ror {
+                rd: Register::X0,
+                rn: Register::X1,
+                shift: Operand::Register(Register::X2),
+            },
+            Instruction::Ror {
+                rd: Register::X0,
+                rn: Register::X1,
+                shift: Operand::Immediate(4),
+            },
+        ];
+
+        for instr in cases {
+            let mut assembler = AArch64Assembler::default();
+            assembler
+                .assemble_instructions(&[instr])
+                .unwrap_or_else(|e| panic!("{} should assemble: {}", instr, e));
+        }
+    }
+
+    #[test]
+    fn reject_remaining_invalid_forms() {
+        let cases = [
+            Instruction::Add {
+                rd: Register::X0,
+                rn: Register::X1,
+                rm: Operand::Immediate(4096),
+            },
+            Instruction::Sub {
+                rd: Register::X0,
+                rn: Register::X1,
+                rm: Operand::Immediate(-1),
+            },
+            Instruction::And {
+                rd: Register::X0,
+                rn: Register::X1,
+                rm: Operand::Immediate(1),
+            },
+            Instruction::Orr {
+                rd: Register::X0,
+                rn: Register::X1,
+                rm: Operand::Immediate(1),
+            },
+            Instruction::Eor {
+                rd: Register::X0,
+                rn: Register::X1,
+                rm: Operand::Immediate(1),
+            },
+            Instruction::Lsl {
+                rd: Register::X0,
+                rn: Register::X1,
+                shift: Operand::Immediate(64),
+            },
+            Instruction::Lsr {
+                rd: Register::X0,
+                rn: Register::X1,
+                shift: Operand::Immediate(-1),
+            },
+            Instruction::Asr {
+                rd: Register::X0,
+                rn: Register::X1,
+                shift: Operand::Immediate(64),
+            },
+            Instruction::Cmp {
+                rn: Register::X1,
+                rm: Operand::Immediate(4096),
+            },
+            Instruction::Cmn {
+                rn: Register::X1,
+                rm: Operand::Immediate(-1),
+            },
+            Instruction::Tst {
+                rn: Register::X1,
+                rm: Operand::Immediate(1),
+            },
+            Instruction::MovN {
+                rd: Register::X0,
+                imm: 1,
+                shift: 8,
+            },
+            Instruction::Bic {
+                rd: Register::X0,
+                rn: Register::X1,
+                rm: Operand::Immediate(1),
+            },
+            Instruction::Bics {
+                rd: Register::X0,
+                rn: Register::X1,
+                rm: Operand::Immediate(1),
+            },
+            Instruction::Orn {
+                rd: Register::X0,
+                rn: Register::X1,
+                rm: Operand::Immediate(1),
+            },
+            Instruction::Eon {
+                rd: Register::X0,
+                rn: Register::X1,
+                rm: Operand::Immediate(1),
+            },
+            Instruction::Adds {
+                rd: Register::X0,
+                rn: Register::X1,
+                rm: Operand::Immediate(4096),
+            },
+            Instruction::Adds {
+                rd: Register::X0,
+                rn: Register::XZR,
+                rm: Operand::Immediate(1),
+            },
+            Instruction::Subs {
+                rd: Register::X0,
+                rn: Register::X1,
+                rm: Operand::Immediate(-1),
+            },
+            Instruction::Subs {
+                rd: Register::X0,
+                rn: Register::XZR,
+                rm: Operand::Immediate(1),
+            },
+            Instruction::Ands {
+                rd: Register::X0,
+                rn: Register::X1,
+                rm: Operand::Immediate(1),
+            },
+            Instruction::Ror {
+                rd: Register::X0,
+                rn: Register::X1,
+                shift: Operand::Immediate(64),
+            },
+        ];
+
+        for instr in cases {
+            let mut assembler = AArch64Assembler::new();
+            assert!(
+                assembler.assemble_instructions(&[instr]).is_err(),
+                "{} should be rejected",
+                instr
+            );
+        }
+        assert!(register_to_dynasm(Register::SP).is_err());
+        assert_eq!(register_to_dynasm_xsp(Register::SP).unwrap(), 31);
+    }
 }

@@ -813,6 +813,98 @@ mod tests {
     use super::*;
     use rand::SeedableRng;
     use rand_chacha::ChaCha8Rng;
+    use std::collections::BTreeSet;
+
+    fn all_registers() -> Vec<RiscVRegister> {
+        (0..32)
+            .map(|idx| RiscVRegister::from_index(idx).unwrap())
+            .collect()
+    }
+
+    fn all_instruction_families() -> Vec<RiscVInstruction> {
+        use RiscVInstruction::*;
+        vec![
+            Add {
+                rd: RiscVRegister::X1,
+                rs1: RiscVRegister::X2,
+                rs2: RiscVRegister::X3,
+            },
+            Sub {
+                rd: RiscVRegister::X1,
+                rs1: RiscVRegister::X2,
+                rs2: RiscVRegister::X3,
+            },
+            And {
+                rd: RiscVRegister::X1,
+                rs1: RiscVRegister::X2,
+                rs2: RiscVRegister::X3,
+            },
+            Or {
+                rd: RiscVRegister::X1,
+                rs1: RiscVRegister::X2,
+                rs2: RiscVRegister::X3,
+            },
+            Xor {
+                rd: RiscVRegister::X1,
+                rs1: RiscVRegister::X2,
+                rs2: RiscVRegister::X3,
+            },
+            Sll {
+                rd: RiscVRegister::X1,
+                rs1: RiscVRegister::X2,
+                rs2: RiscVRegister::X3,
+            },
+            Srl {
+                rd: RiscVRegister::X1,
+                rs1: RiscVRegister::X2,
+                rs2: RiscVRegister::X3,
+            },
+            Sra {
+                rd: RiscVRegister::X1,
+                rs1: RiscVRegister::X2,
+                rs2: RiscVRegister::X3,
+            },
+            Addi {
+                rd: RiscVRegister::X1,
+                rs1: RiscVRegister::X2,
+                imm: 7,
+            },
+            Andi {
+                rd: RiscVRegister::X1,
+                rs1: RiscVRegister::X2,
+                imm: 7,
+            },
+            Ori {
+                rd: RiscVRegister::X1,
+                rs1: RiscVRegister::X2,
+                imm: 7,
+            },
+            Xori {
+                rd: RiscVRegister::X1,
+                rs1: RiscVRegister::X2,
+                imm: 7,
+            },
+            Slli {
+                rd: RiscVRegister::X1,
+                rs1: RiscVRegister::X2,
+                shamt: 4,
+            },
+            Srli {
+                rd: RiscVRegister::X1,
+                rs1: RiscVRegister::X2,
+                shamt: 4,
+            },
+            Srai {
+                rd: RiscVRegister::X1,
+                rs1: RiscVRegister::X2,
+                shamt: 4,
+            },
+            Lui {
+                rd: RiscVRegister::X1,
+                imm: 0x12345,
+            },
+        ]
+    }
 
     #[test]
     fn test_riscv32_isa_metadata() {
@@ -821,6 +913,8 @@ mod tests {
         assert_eq!(isa.register_count(), 32);
         assert_eq!(isa.register_width(), 32);
         assert_eq!(isa.instruction_size(), Some(4));
+        assert_eq!(isa.zero_register(), Some(RiscVRegister::X0));
+        assert_eq!(isa.general_registers(), all_registers());
     }
 
     #[test]
@@ -830,6 +924,8 @@ mod tests {
         assert_eq!(isa.register_count(), 32);
         assert_eq!(isa.register_width(), 64);
         assert_eq!(isa.instruction_size(), Some(4));
+        assert_eq!(isa.zero_register(), Some(RiscVRegister::X0));
+        assert_eq!(isa.general_registers(), all_registers());
     }
 
     #[test]
@@ -859,6 +955,21 @@ mod tests {
         assert_eq!(RiscVRegister::X2.abi_name(), "sp");
         assert_eq!(RiscVRegister::X10.abi_name(), "a0");
         assert_eq!(RiscVRegister::X31.abi_name(), "t6");
+    }
+
+    #[test]
+    fn all_register_indices_display_and_abi_names_are_covered() {
+        let abi_names = [
+            "zero", "ra", "sp", "gp", "tp", "t0", "t1", "t2", "s0", "s1", "a0", "a1", "a2", "a3",
+            "a4", "a5", "a6", "a7", "s2", "s3", "s4", "s5", "s6", "s7", "s8", "s9", "s10", "s11",
+            "t3", "t4", "t5", "t6",
+        ];
+        for (idx, reg) in all_registers().into_iter().enumerate() {
+            assert_eq!(reg.index(), Some(idx as u8));
+            assert_eq!(format!("{}", reg), format!("x{}", idx));
+            assert_eq!(reg.abi_name(), abi_names[idx]);
+        }
+        assert_eq!(RiscVRegister::from_index(32), None);
     }
 
     #[test]
@@ -1001,5 +1112,74 @@ mod tests {
             shamt: 4,
         };
         assert_eq!(slli.source_registers(), vec![RiscVRegister::X11]);
+    }
+
+    #[test]
+    fn all_instruction_families_cover_traits_and_display() {
+        let generator = RiscVInstructionGenerator;
+        let ids: BTreeSet<u8> = all_instruction_families()
+            .iter()
+            .map(|instr| {
+                assert_eq!(instr.destination(), RiscVRegister::X1);
+                let _ = instr.source_registers();
+                assert!(!format!("{}", instr).is_empty());
+                assert!(!instr.mnemonic().is_empty());
+                assert!(!instr.has_side_effects());
+                instr.opcode_id()
+            })
+            .collect();
+        assert_eq!(ids.len(), generator.opcode_count() as usize);
+    }
+
+    #[test]
+    fn generate_all_covers_every_riscv_family() {
+        let generator = RiscVInstructionGenerator;
+        let regs = vec![RiscVRegister::X1, RiscVRegister::X2];
+        let imms = vec![0, 1];
+        let ids: BTreeSet<u8> = generator
+            .generate_all(&regs, &imms)
+            .iter()
+            .map(InstructionType::opcode_id)
+            .collect();
+        assert_eq!(ids.len(), generator.opcode_count() as usize);
+    }
+
+    #[test]
+    fn random_generation_reaches_every_riscv_family() {
+        let generator = RiscVInstructionGenerator;
+        let regs = vec![RiscVRegister::X1, RiscVRegister::X2, RiscVRegister::X3];
+        let imms = vec![-1, 0, 1, 2];
+        let mut rng = ChaCha8Rng::seed_from_u64(0x515c);
+        let mut ids = BTreeSet::new();
+
+        for _ in 0..2_000 {
+            ids.insert(
+                generator
+                    .generate_random(&mut rng, &regs, &imms)
+                    .opcode_id(),
+            );
+        }
+
+        assert_eq!(ids.len(), generator.opcode_count() as usize);
+    }
+
+    #[test]
+    fn mutation_exercises_every_riscv_instruction_shape() {
+        let generator = RiscVInstructionGenerator;
+        let regs = vec![
+            RiscVRegister::X1,
+            RiscVRegister::X2,
+            RiscVRegister::X3,
+            RiscVRegister::X4,
+        ];
+        let imms = vec![-1, 0, 1, 7];
+        let mut rng = ChaCha8Rng::seed_from_u64(0x515c_515c);
+
+        for original in all_instruction_families() {
+            for _ in 0..200 {
+                let mutated = generator.mutate(&mut rng, &original, &regs, &imms);
+                assert!(mutated.opcode_id() < generator.opcode_count());
+            }
+        }
     }
 }

@@ -485,6 +485,72 @@ mod tests {
         state.set_register(Register::XZR, ConcreteValue::new(123));
         assert_eq!(state.get_register(Register::XZR).as_u64(), 0);
     }
+
+    #[test]
+    fn condition_flags_evaluate_all_conditions() {
+        let flags = ConditionFlags {
+            n: true,
+            z: false,
+            c: true,
+            v: false,
+        };
+
+        assert!(!flags.evaluate(Condition::EQ));
+        assert!(flags.evaluate(Condition::NE));
+        assert!(flags.evaluate(Condition::CS));
+        assert!(!flags.evaluate(Condition::CC));
+        assert!(flags.evaluate(Condition::MI));
+        assert!(!flags.evaluate(Condition::PL));
+        assert!(!flags.evaluate(Condition::VS));
+        assert!(flags.evaluate(Condition::VC));
+        assert!(flags.evaluate(Condition::HI));
+        assert!(!flags.evaluate(Condition::LS));
+        assert!(!flags.evaluate(Condition::GE));
+        assert!(flags.evaluate(Condition::LT));
+        assert!(!flags.evaluate(Condition::GT));
+        assert!(flags.evaluate(Condition::LE));
+        assert!(flags.evaluate(Condition::AL));
+        assert!(!flags.evaluate(Condition::NV));
+    }
+
+    #[test]
+    fn aarch64_state_display_and_accessors_show_nonzero_parts() {
+        let mut state = ConcreteMachineState::new_zeroed();
+        state.set_register(Register::X0, ConcreteValue::new(0x2a));
+        state.set_register(Register::SP, ConcreteValue::new(0x1000));
+        state.set_flags(ConditionFlags {
+            n: true,
+            z: true,
+            c: false,
+            v: true,
+        });
+
+        assert!(state.registers().contains_key(&Register::X0));
+        assert_eq!(state.get_flags().z, true);
+        assert_eq!(
+            format!("{}", ConcreteValue::new(0x2a)),
+            "0x000000000000002a"
+        );
+
+        let rendered = format!("{}", state);
+        assert!(rendered.contains("ConcreteMachineState"));
+        assert!(rendered.contains("x0: 0x000000000000002a"));
+        assert!(rendered.contains("sp: 0x0000000000001000"));
+        assert!(rendered.contains("NZCV=NZcV"));
+    }
+
+    #[test]
+    fn width_helpers_cover_small_and_fallback_widths() {
+        assert_eq!(mask_to_width(0x12345, 16), 0x2345);
+        assert_eq!(mask_to_width(0x12345, 8), 0x45);
+        assert_eq!(mask_to_width(0x12345, 24), 0x12345);
+
+        assert!(top_bit(0x8000, 16));
+        assert!(top_bit(0x80, 8));
+        assert!(!top_bit(0x7f, 8));
+        assert!(!top_bit(0x7f, 24));
+    }
+
     #[test]
     fn x86_state_new_zeroed_has_all_gprs() {
         use crate::isa::x86::X86Register;
@@ -532,6 +598,22 @@ mod tests {
         };
         state.set_flags(flags);
         assert_eq!(state.get_flags(), flags);
+    }
+
+    #[test]
+    fn x86_state_registers_accessor_exposes_backing_map() {
+        use crate::isa::x86::X86Register;
+        let mut state = X86ConcreteMachineState::new_zeroed(64);
+        state.set_register(X86Register::RBX, ConcreteValue::new(0xbeef));
+
+        assert_eq!(
+            state
+                .registers()
+                .get(&X86Register::RBX)
+                .expect("rbx should be present")
+                .as_u64(),
+            0xbeef
+        );
     }
 
     #[test]

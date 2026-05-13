@@ -440,6 +440,8 @@ mod tests {
         assert_eq!(format!("{}", Algorithm::Enumerative), "enumerative");
         assert_eq!(format!("{}", Algorithm::Stochastic), "stochastic");
         assert_eq!(format!("{}", Algorithm::Symbolic), "symbolic");
+        assert_eq!(format!("{}", Algorithm::Hybrid), "hybrid");
+        assert_eq!(format!("{}", Algorithm::Llm), "llm");
     }
 
     #[test]
@@ -455,6 +457,27 @@ mod tests {
         assert_eq!(
             "code-size".parse::<CostMetricConfig>().unwrap().0,
             CostMetric::CodeSize
+        );
+        assert_eq!(
+            "instructions".parse::<CostMetricConfig>().unwrap().0,
+            CostMetric::InstructionCount
+        );
+        assert_eq!(
+            "bytes".parse::<CostMetricConfig>().unwrap().0,
+            CostMetric::CodeSize
+        );
+        assert!("bogus".parse::<CostMetricConfig>().is_err());
+        assert_eq!(
+            format!("{}", CostMetricConfig(CostMetric::InstructionCount)),
+            "instruction-count"
+        );
+        assert_eq!(
+            format!("{}", CostMetricConfig(CostMetric::Latency)),
+            "latency"
+        );
+        assert_eq!(
+            format!("{}", CostMetricConfig(CostMetric::CodeSize)),
+            "code-size"
         );
     }
 
@@ -474,10 +497,17 @@ mod tests {
         let config = SearchConfig::default()
             .with_algorithm(Algorithm::Stochastic)
             .with_cost_metric(CostMetric::Latency)
+            .with_timeout(Duration::from_secs(9))
+            .with_registers(vec![Register::X0, Register::X1])
+            .with_immediates(vec![0, 42])
+            .with_verbose(false)
             .verbose();
 
         assert_eq!(config.algorithm, Algorithm::Stochastic);
         assert_eq!(config.cost_metric, CostMetric::Latency);
+        assert_eq!(config.timeout, Some(Duration::from_secs(9)));
+        assert_eq!(config.available_registers, vec![Register::X0, Register::X1]);
+        assert_eq!(config.available_immediates, vec![0, 42]);
         assert!(config.verbose);
     }
 
@@ -486,20 +516,66 @@ mod tests {
         let config = StochasticConfig::default()
             .with_beta(2.0)
             .with_iterations(500_000)
-            .with_seed(42);
+            .with_test_count(99)
+            .with_seed(42)
+            .with_seed_option(None);
 
         assert_eq!(config.beta, 2.0);
         assert_eq!(config.iterations, 500_000);
-        assert_eq!(config.seed, Some(42));
+        assert_eq!(config.test_count, 99);
+        assert_eq!(config.seed, None);
     }
 
     #[test]
     fn test_symbolic_config_builder() {
         let config = SymbolicConfig::default()
             .with_window_size(5)
-            .with_search_mode(SearchMode::Binary);
+            .with_cost_bound(2)
+            .with_search_mode(SearchMode::Binary)
+            .with_timeout(Duration::from_millis(250));
 
         assert_eq!(config.window_size, 5);
+        assert_eq!(config.cost_bound, Some(2));
         assert_eq!(config.search_mode, SearchMode::Binary);
+        assert_eq!(config.solver_timeout, Some(Duration::from_millis(250)));
+    }
+
+    #[test]
+    fn search_mode_and_algorithm_aliases_are_covered() {
+        assert_eq!("enum".parse::<Algorithm>().unwrap(), Algorithm::Enumerative);
+        assert_eq!("stoch".parse::<Algorithm>().unwrap(), Algorithm::Stochastic);
+        assert_eq!("sym".parse::<Algorithm>().unwrap(), Algorithm::Symbolic);
+        assert_eq!("parallel".parse::<Algorithm>().unwrap(), Algorithm::Hybrid);
+        assert_eq!("codex".parse::<Algorithm>().unwrap(), Algorithm::Llm);
+        assert!("wat".parse::<Algorithm>().is_err());
+
+        assert_eq!(format!("{}", SearchMode::Linear), "linear");
+        assert_eq!(format!("{}", SearchMode::Binary), "binary");
+        assert_eq!("linear".parse::<SearchMode>().unwrap(), SearchMode::Linear);
+        assert_eq!("binary".parse::<SearchMode>().unwrap(), SearchMode::Binary);
+        assert!("diagonal".parse::<SearchMode>().is_err());
+    }
+
+    #[test]
+    fn llm_and_nested_search_config_builders_are_covered() {
+        let stochastic = StochasticConfig::default().with_iterations(3);
+        let symbolic = SymbolicConfig::default().with_window_size(4);
+        let llm = LlmConfig::default()
+            .with_max_codex_calls(2)
+            .with_model("test-model")
+            .with_codex_bin("/bin/echo");
+
+        let config = SearchConfig::default()
+            .with_stochastic(stochastic.clone())
+            .with_symbolic(symbolic.clone())
+            .with_llm(llm.clone())
+            .with_timeout_option(None);
+
+        assert_eq!(config.stochastic.iterations, stochastic.iterations);
+        assert_eq!(config.symbolic.window_size, symbolic.window_size);
+        assert_eq!(config.llm.max_codex_calls, 2);
+        assert_eq!(config.llm.model, "test-model");
+        assert_eq!(config.llm.codex_bin, "/bin/echo");
+        assert_eq!(config.timeout, None);
     }
 }
