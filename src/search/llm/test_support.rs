@@ -61,7 +61,7 @@ impl Drop for FakeCodex {
 
 #[cfg(unix)]
 fn wait_until_executable_ready(path: &Path) {
-    for _ in 0..100 {
+    for _ in 0..1_000 {
         match std::process::Command::new(path)
             .arg("__s11_ready_probe")
             .status()

@@ -178,7 +178,7 @@ impl InstructionType for Instruction {
     }
 
     fn has_side_effects(&self) -> bool {
-        false // Current instructions have no side effects
+        self.modifies_flags()
     }
 }
 
@@ -1104,6 +1104,12 @@ mod tests {
         assert_eq!(add.opcode_id(), 2);
         assert_eq!(add.mnemonic(), "add");
         assert!(!add.has_side_effects());
+
+        let cmp = Instruction::Cmp {
+            rn: Register::X1,
+            rm: Operand::Register(Register::X2),
+        };
+        assert!(cmp.has_side_effects());
     }
 
     #[test]
@@ -1177,7 +1183,7 @@ mod tests {
                 assert!(!format!("{}", instr).is_empty());
                 let _ = instr.destination();
                 let _ = instr.source_registers();
-                assert!(!instr.has_side_effects());
+                assert_eq!(instr.has_side_effects(), instr.modifies_flags());
                 id
             })
             .collect();
@@ -1242,6 +1248,7 @@ mod tests {
         let generator = AArch64InstructionGenerator;
         let regs = vec![Register::X0, Register::X1, Register::X2];
         let imms = vec![0, 1, 2, 16, 32];
+        // The fixed seed keeps this broad sampling check deterministic in CI.
         let mut rng = ChaCha8Rng::seed_from_u64(0xA64);
         let mut ids = BTreeSet::new();
 
