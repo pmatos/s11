@@ -629,17 +629,8 @@ fn register_to_dynasm(reg: Register) -> Result<u8, String> {
         .ok_or_else(|| format!("Register {:?} not supported in dynasm encoding", reg))
 }
 
-/// Map a register to the index used in the `Xn|SP` encoding slot (`XSP(...)`
-/// in dynasm). Index 31 means SP — XZR is **not** valid in this slot.
-///
-/// Use this wherever the encoding decodes register 31 as SP rather than XZR
-/// (currently the immediate-form ADDS/SUBS arms; the pre-existing ADD/SUB
-/// immediate arms have the same encoding shape and should migrate to this
-/// helper too — tracked as a follow-up).
-///
-/// We can't just call `reg.index().ok_or_else(...)` here: `Register::XZR`
-/// has `index() == Some(31)`, so a delegating implementation would silently
-/// alias XZR to SP in the Xn|SP slot, producing inverted semantics.
+/// Map a register to the `Xn|SP` encoding slot. Returns Err for XZR —
+/// `Register::XZR.index() == Some(31)` would otherwise silently alias to SP.
 fn register_to_dynasm_xsp(reg: Register) -> Result<u8, String> {
     match reg {
         Register::XZR => {
@@ -1206,6 +1197,22 @@ mod tests {
             }])
             .expect("ADDS imm with SP rn should encode");
         disassemble_and_verify(&bytes, "adds", &["x0", "sp", "#8"]);
+    }
+
+    /// SUBS counterpart to `test_adds_imm_sp_rn_roundtrip`. The encoding
+    /// logic is shared via `register_to_dynasm_xsp` but a regression
+    /// specific to SUBS would otherwise go unnoticed.
+    #[test]
+    fn test_subs_imm_sp_rn_roundtrip() {
+        let mut assembler = AArch64Assembler::new();
+        let bytes = assembler
+            .assemble_instructions(&[Instruction::Subs {
+                rd: Register::X0,
+                rn: Register::SP,
+                rm: Operand::Immediate(8),
+            }])
+            .expect("SUBS imm with SP rn should encode");
+        disassemble_and_verify(&bytes, "subs", &["x0", "sp", "#8"]);
     }
 
     /// Defense-in-depth: SP as `rd` for ADDS/SUBS is rejected. Architecturally,
