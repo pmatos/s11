@@ -526,7 +526,7 @@ mod tests {
         });
 
         assert!(state.registers().contains_key(&Register::X0));
-        assert_eq!(state.get_flags().z, true);
+        assert!(state.get_flags().z);
         assert_eq!(
             format!("{}", ConcreteValue::new(0x2a)),
             "0x000000000000002a"
