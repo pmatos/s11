@@ -4,16 +4,16 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-s11 is an AArch64 superoptimizer written in Rust. It finds shorter or faster equivalent instruction sequences using multiple search strategies and SMT-based equivalence checking.
+s11 is a superoptimizer written in Rust. It finds shorter or faster equivalent instruction sequences using multiple search strategies and SMT-based equivalence checking. Primary target is AArch64; x86-64 and x86-32 are supported through a parallel pipeline; RISC-V is scaffold-only.
 
 **Key Features:**
-- ELF binary reading and disassembly using Capstone engine
-- 20 AArch64 instructions: MOV, ADD, SUB, AND, ORR, EOR, LSL, LSR, ASR, MUL, SDIV, UDIV, CMP, CMN, TST, CSEL, CSINC, CSINV, CSNEG
-- Four search algorithms: enumerative, stochastic (MCMC), symbolic (SMT synthesis), and hybrid
-- SMT-based equivalence checking using Z3
+- ELF binary reading and disassembly using Capstone engine (auto-detects e_machine)
+- **AArch64** (20 instructions): MOV, ADD, SUB, AND, ORR, EOR, LSL, LSR, ASR, MUL, SDIV, UDIV, CMP, CMN, TST, CSEL, CSINC, CSINV, CSNEG — full pipeline including stochastic/symbolic/hybrid/LLM search
+- **x86-64 + x86-32** (14 variants, 7 mnemonics): MOV, ADD, SUB, AND, OR, XOR, CMP (each with reg/imm forms) — enumerative search only in v1
+- SMT-based equivalence checking using Z3 (width-parameterised for x86-32 vs x86-64)
 - Multi-threaded parallel search with worker coordination
-- ISA abstraction supporting AArch64 (primary) and RISC-V (secondary)
-- Binary patching for applying optimizations
+- ISA abstraction supporting AArch64 (primary), x86-64/x86-32, RISC-V (scaffolded)
+- Binary patching for applying optimizations (per-arch alignment + NOP padding)
 
 ## Development Commands
 
@@ -61,10 +61,13 @@ Mutation testing runs via [cargo-mutants](https://mutants.rs/) and is **informat
 
 The project requires:
 - Rust toolchain with 2024 edition support
-- External crates: `elf`, `capstone`, `clap`, `z3`, `rayon`, `crossbeam-channel`
-- Capstone engine (usually installed via system package manager)
+- External crates: `elf`, `capstone`, `clap`, `z3`, `rayon`, `crossbeam-channel`, `dynasmrt`/`dynasm` (both ship aarch64 + x64 + x86 backends in default features)
+- Capstone engine (usually installed via system package manager) — auto-detects x86 and arm64 modes
 - Z3 SMT solver and development libraries (for semantic equivalence checking)
 - `just` command runner for running build tasks (required by test_all.sh)
+- For building x86 test binaries via `build_tests.sh`:
+  - Host `gcc` for x86-64 (produced into `binaries/x86_64/`)
+  - `gcc -m32` for x86-32 (requires `gcc-multilib`; gracefully skipped if absent)
 
 ## Architecture
 
@@ -72,29 +75,38 @@ The project requires:
 
 ```
 src/
-├── main.rs              # CLI and ELF binary analysis
-├── ir/                  # Intermediate Representation
-│   ├── types.rs         # Register, Operand, Condition enums
-│   └── instructions.rs  # Instruction enum (20 opcodes)
+├── main.rs              # CLI; AArch64 + x86 optimization pipelines
+├── ir/                  # AArch64 IR (Register, Operand, Condition, Instruction)
+│   ├── types.rs
+│   └── instructions.rs
 ├── isa/                 # ISA Abstraction Layer
-│   ├── traits.rs        # ISA trait definitions
+│   ├── traits.rs        # ISA trait definitions (aspirational; not all backends use)
 │   ├── aarch64.rs       # AArch64 backend
-│   └── riscv.rs         # RISC-V backend
+│   ├── riscv.rs         # RISC-V backend (trait scaffolding only, not wired through)
+│   └── x86.rs           # x86 backend (X86_64 + X86_32; full vertical slice)
 ├── semantics/           # Execution semantics
-│   ├── concrete.rs      # Concrete interpreter
-│   ├── smt.rs           # Symbolic interpreter (Z3)
-│   ├── equivalence.rs   # SMT equivalence checking
-│   ├── cost.rs          # Instruction cost model
-│   └── state.rs         # Machine state (registers, flags)
-├── search/              # Search algorithms
-│   ├── enumerative/     # Exhaustive search
-│   ├── stochastic/      # MCMC with Metropolis-Hastings
-│   ├── symbolic/        # SMT-based synthesis
-│   └── parallel/        # Multi-threaded coordination
+│   ├── concrete.rs      # AArch64 concrete interpreter
+│   ├── concrete_x86.rs  # x86 concrete interpreter (width-aware)
+│   ├── smt.rs           # AArch64 SMT lowering (64-bit BVs)
+│   ├── smt_x86.rs       # x86 SMT lowering (width-parameterised BVs)
+│   ├── cost.rs          # AArch64 cost model
+│   ├── cost_x86.rs      # x86 cost model (variable-length CodeSize)
+│   ├── equivalence.rs   # check_equivalence (AArch64) + check_equivalence_x86 (EFLAGS fast-path)
+│   └── state.rs         # Machine state: ConditionFlags (NZCV), Eflags, *MachineState, LiveOutMask
+├── search/              # Search algorithms (AArch64-typed in v1)
+│   ├── candidate.rs     # AArch64 candidate generation
+│   ├── candidate_x86.rs # x86 candidate generation
+│   ├── stochastic/      # MCMC with Metropolis-Hastings (AArch64)
+│   ├── symbolic/        # SMT-based synthesis (AArch64)
+│   ├── parallel/        # Multi-threaded coordination (AArch64)
+│   └── llm/             # LLM-assisted search via Codex CLI (AArch64)
 ├── validation/          # Input validation
-│   ├── live_out.rs      # Live-out register tracking
-│   └── random.rs        # Random input generation
-└── assembler/           # Machine code generation (dynasm)
+│   ├── live_out.rs      # Live-out register tracking (AArch64)
+│   └── random.rs        # Random input generation (AArch64)
+├── assembler/           # Machine code generation (dynasm)
+│   ├── mod.rs           # AArch64Assembler
+│   └── x86.rs           # X86Assembler (Mode64 / Mode32)
+└── elf_patcher/         # ELF read/patch with DetectedArch (AArch64/X86_64/X86_32)
 ```
 
 ### Search Algorithms
@@ -107,14 +119,20 @@ src/
 ### Key CLI Options
 
 ```bash
-# Disassemble a binary
-s11 disasm --binary <file>
+# Disassemble a binary (auto-detects arch from ELF; --arch is optional)
+s11 disasm <file>
+s11 disasm --arch x86-64 <file>
 
 # Optimize a code region
-s11 opt --binary <file> --start-addr <hex> --end-addr <hex>
+s11 opt <file> --start-addr <hex> --end-addr <hex>
 
-# Algorithm selection
-s11 opt ... --algorithm [enumerative|stochastic|symbolic|hybrid]
+# Architecture selection
+s11 opt ... --arch [aarch64|x86-64|x86-32]    # riscv32/64 still rejected
+
+# Algorithm selection (AArch64 only)
+s11 opt ... --algorithm [enumerative|stochastic|symbolic|hybrid|llm]
+
+# x86 currently supports --algorithm enumerative only.
 
 # Parallel execution
 s11 opt ... --cores <n> --timeout <seconds>

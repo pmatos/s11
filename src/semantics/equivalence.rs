@@ -351,10 +351,244 @@ pub fn find_counterexample_concrete(
     None
 }
 
+// ============================================================================
+// x86 equivalence checking
+// ============================================================================
+
+/// Equivalence-check configuration for the x86 backend. Carries the
+/// bitvector width (64 for x86-64, 32 for x86-32) which threads through
+/// to `MachineStateX86::new_symbolic` and the immediate lowering.
+#[derive(Debug, Clone)]
+pub struct X86EquivalenceConfig {
+    pub live_out: crate::semantics::state::X86LiveOutMask,
+    pub width: u32,
+    pub random_test_count: usize,
+    pub smt_timeout: Option<Duration>,
+    pub fast_only: bool,
+}
+
+impl X86EquivalenceConfig {
+    pub fn new_for_64() -> Self {
+        Self {
+            live_out: crate::semantics::state::X86LiveOutMask::empty(),
+            width: 64,
+            random_test_count: 10,
+            smt_timeout: Some(Duration::from_secs(30)),
+            fast_only: false,
+        }
+    }
+
+    pub fn new_for_32() -> Self {
+        Self {
+            width: 32,
+            ..Self::new_for_64()
+        }
+    }
+
+    pub fn live_out(mut self, mask: crate::semantics::state::X86LiveOutMask) -> Self {
+        self.live_out = mask;
+        self
+    }
+
+    pub fn fast_only(mut self) -> Self {
+        self.fast_only = true;
+        self
+    }
+}
+
+/// Check whether two x86 instruction sequences are equivalent under the
+/// given live-out mask and operand width. Mirrors `check_equivalence_with_config`
+/// for the AArch64 backend: fast path uses the concrete interpreter over
+/// random inputs (and EFLAGS comparison when CMP is present or the mask
+/// declares flags live); slow path lowers to Z3 BVs and checks UNSAT of the
+/// not-equal assertion over live-out registers.
+pub fn check_equivalence_x86(
+    seq1: &[crate::isa::x86::X86Instruction],
+    seq2: &[crate::isa::x86::X86Instruction],
+    config: &X86EquivalenceConfig,
+) -> EquivalenceResult {
+    // Fast path: 10 random inputs.
+    if let Some(refutation) = run_fast_path_x86(seq1, seq2, config) {
+        return refutation;
+    }
+    if config.fast_only {
+        return EquivalenceResult::Equivalent;
+    }
+
+    // SMT path.
+    let solver_config = SolverConfig {
+        timeout: config.smt_timeout,
+    };
+    let solver = create_solver_with_config(&solver_config);
+    let initial = crate::semantics::smt_x86::MachineStateX86::new_symbolic("init", config.width);
+    let final1 = crate::semantics::smt_x86::apply_sequence(initial.clone(), seq1);
+    let final2 = crate::semantics::smt_x86::apply_sequence(initial, seq2);
+
+    let mut disjuncts: Vec<z3::ast::Bool> = Vec::new();
+    for reg in config.live_out.iter() {
+        let v1 = final1.get_register(*reg);
+        let v2 = final2.get_register(*reg);
+        disjuncts.push(v1.eq(v2).not());
+    }
+    let any_diff = if disjuncts.is_empty() {
+        z3::ast::Bool::from_bool(false)
+    } else {
+        z3::ast::Bool::or(&disjuncts.iter().collect::<Vec<_>>())
+    };
+    solver.assert(&any_diff);
+    interpret_smt_result(solver.check())
+}
+
+fn run_fast_path_x86(
+    seq1: &[crate::isa::x86::X86Instruction],
+    seq2: &[crate::isa::x86::X86Instruction],
+    config: &X86EquivalenceConfig,
+) -> Option<EquivalenceResult> {
+    use crate::isa::x86::X86Register;
+    use crate::semantics::concrete_x86::apply_instruction_concrete_x86;
+    use crate::semantics::state::X86ConcreteMachineState;
+
+    // Detect any CMP in either sequence — that's the trigger to also
+    // compare EFLAGS even if the caller didn't declare flags live.
+    let cmp_present = seq1.iter().chain(seq2.iter()).any(|i| {
+        matches!(
+            i,
+            crate::isa::x86::X86Instruction::CmpReg { .. }
+                | crate::isa::x86::X86Instruction::CmpImm { .. }
+        )
+    });
+    let flags_must_match = cmp_present || config.live_out.flags_live();
+
+    // Deterministic seed sequence: the first four are hand-picked
+    // boundary cases (zero, one, an asymmetric bit pattern, all-ones);
+    // beyond that we mix the iteration index with a golden-ratio
+    // multiplier to scatter through the u64 space without pulling in a
+    // PRNG. The total number of seeds is `config.random_test_count`
+    // (matching the AArch64 path's contract that the field actually
+    // drives the fast-path coverage).
+    let base_seeds: &[u64] = &[0, 1, 0xdead_beef, u64::MAX];
+    for n in 0..config.random_test_count {
+        let seed = if n < base_seeds.len() {
+            base_seeds[n]
+        } else {
+            (n as u64).wrapping_mul(0x9e37_79b9_7f4a_7c15)
+        };
+        let mut state = X86ConcreteMachineState::new_zeroed(config.width);
+        for i in 0..16u8 {
+            if let Some(reg) = X86Register::from_index(i) {
+                state.set_register(
+                    reg,
+                    crate::semantics::state::ConcreteValue::new(seed.wrapping_add(i as u64)),
+                );
+            }
+        }
+        let mut s1 = state.clone();
+        for instr in seq1 {
+            s1 = apply_instruction_concrete_x86(s1, instr);
+        }
+        let mut s2 = state.clone();
+        for instr in seq2 {
+            s2 = apply_instruction_concrete_x86(s2, instr);
+        }
+        for reg in config.live_out.iter() {
+            if s1.get_register(*reg) != s2.get_register(*reg) {
+                // We don't have an X86-typed counterexample state in the
+                // EquivalenceResult yet; report a generic NotEquivalent.
+                return Some(EquivalenceResult::NotEquivalent);
+            }
+        }
+        if flags_must_match && s1.get_flags() != s2.get_flags() {
+            return Some(EquivalenceResult::NotEquivalent);
+        }
+    }
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::ir::{Operand, Register};
+    use crate::isa::x86::{X86Instruction, X86Register};
+    use crate::semantics::state::X86LiveOutMask;
+
+    #[test]
+    fn x86_mov_zero_equivalent_to_xor_self_when_flags_dead() {
+        let seq_mov = vec![X86Instruction::MovImm {
+            rd: X86Register::RAX,
+            imm: 0,
+        }];
+        let seq_xor = vec![X86Instruction::XorReg {
+            rd: X86Register::RAX,
+            rs: X86Register::RAX,
+        }];
+        let cfg = X86EquivalenceConfig::new_for_64()
+            .live_out(X86LiveOutMask::from_registers(vec![X86Register::RAX]));
+        assert_eq!(
+            check_equivalence_x86(&seq_mov, &seq_xor, &cfg),
+            EquivalenceResult::Equivalent
+        );
+    }
+
+    #[test]
+    fn x86_mov_zero_not_equivalent_to_xor_self_when_flags_live() {
+        // XOR sets EFLAGS; MOV does not. So with flags_live=true, the two
+        // sequences must NOT be considered equivalent.
+        let seq_mov = vec![X86Instruction::MovImm {
+            rd: X86Register::RAX,
+            imm: 0,
+        }];
+        let seq_xor = vec![X86Instruction::XorReg {
+            rd: X86Register::RAX,
+            rs: X86Register::RAX,
+        }];
+        let cfg = X86EquivalenceConfig::new_for_64()
+            .live_out(X86LiveOutMask::from_registers(vec![X86Register::RAX]).with_flags(true))
+            .fast_only();
+        assert!(matches!(
+            check_equivalence_x86(&seq_mov, &seq_xor, &cfg),
+            EquivalenceResult::NotEquivalent
+        ));
+    }
+
+    #[test]
+    fn x86_cmp_difference_caught_by_fast_path_eflags_auto_compare() {
+        // Two CMPs that differ in operands -> different EFLAGS even when
+        // no register is in live-out.
+        let seq1 = vec![X86Instruction::CmpReg {
+            rn: X86Register::RAX,
+            rs: X86Register::RBX,
+        }];
+        let seq2 = vec![X86Instruction::CmpReg {
+            rn: X86Register::RAX,
+            rs: X86Register::RCX,
+        }];
+        let cfg = X86EquivalenceConfig::new_for_64()
+            .live_out(X86LiveOutMask::empty())
+            .fast_only();
+        // CMP is present, so EFLAGS comparison auto-engages.
+        assert!(matches!(
+            check_equivalence_x86(&seq1, &seq2, &cfg),
+            EquivalenceResult::NotEquivalent
+        ));
+    }
+
+    #[test]
+    fn x86_two_movs_with_same_immediate_are_equivalent() {
+        let seq1 = vec![X86Instruction::MovImm {
+            rd: X86Register::RAX,
+            imm: 42,
+        }];
+        let seq2 = vec![X86Instruction::MovImm {
+            rd: X86Register::RAX,
+            imm: 42,
+        }];
+        let cfg = X86EquivalenceConfig::new_for_64()
+            .live_out(X86LiveOutMask::from_registers(vec![X86Register::RAX]));
+        assert_eq!(
+            check_equivalence_x86(&seq1, &seq2, &cfg),
+            EquivalenceResult::Equivalent
+        );
+    }
 
     #[test]
     fn test_mov_zero_eor_equivalence() {

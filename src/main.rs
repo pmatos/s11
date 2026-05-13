@@ -29,7 +29,7 @@ use semantics::{EquivalenceResult, LiveOut, LiveOutRegisters, check_equivalence}
 
 #[derive(Parser)]
 #[command(name = "s11")]
-#[command(about = "s11 - AArch64 Optimizer")]
+#[command(about = "s11 - Superoptimizer (AArch64, x86)")]
 #[command(version)]
 #[command(subcommand_required = true)]
 #[command(arg_required_else_help = true)]
@@ -105,7 +105,7 @@ impl From<CliSearchMode> for SearchMode {
 }
 
 /// CLI target architecture selection
-#[derive(Clone, Copy, Debug, Default, ValueEnum)]
+#[derive(Clone, Copy, Debug, Default, ValueEnum, PartialEq, Eq)]
 pub enum CliArch {
     /// AArch64 (ARM64) architecture
     #[default]
@@ -114,6 +114,10 @@ pub enum CliArch {
     Riscv32,
     /// RISC-V 64-bit architecture
     Riscv64,
+    /// x86-64 (AMD64) architecture
+    X86_64,
+    /// x86-32 (i386) architecture
+    X86_32,
 }
 
 #[derive(Subcommand)]
@@ -237,6 +241,20 @@ enum Commands {
 
 // --- ELF Binary Analysis ---
 
+/// Read an ELF's `e_machine` and map it to the matching `CliArch` variant.
+/// Returns an error if the binary can't be read or the architecture isn't
+/// one we support.
+fn detect_cli_arch_from_elf(path: &Path) -> Result<CliArch, Box<dyn std::error::Error>> {
+    let data = fs::read(path)?;
+    let elf = ElfBytes::<AnyEndian>::minimal_parse(&data)?;
+    match elf.ehdr.e_machine {
+        elf::abi::EM_AARCH64 => Ok(CliArch::Aarch64),
+        elf::abi::EM_X86_64 => Ok(CliArch::X86_64),
+        elf::abi::EM_386 => Ok(CliArch::X86_32),
+        m => Err(format!("Unsupported architecture (e_machine: {})", m).into()),
+    }
+}
+
 fn analyze_elf_binary(path: &PathBuf, disasm_mode: bool) -> Result<(), Box<dyn std::error::Error>> {
     if !disasm_mode {
         println!("Analyzing ELF binary: {}", path.display());
@@ -248,18 +266,17 @@ fn analyze_elf_binary(path: &PathBuf, disasm_mode: bool) -> Result<(), Box<dyn s
     // Parse ELF
     let elf = ElfBytes::<AnyEndian>::minimal_parse(&file_data)?;
 
-    // Check if it's AArch64
-    if elf.ehdr.e_machine != elf::abi::EM_AARCH64 {
-        return Err(format!(
-            "Not an AArch64 binary (machine type: {})",
-            elf.ehdr.e_machine
-        )
-        .into());
-    }
+    // Detect architecture; reject anything outside the supported set.
+    let arch = match elf.ehdr.e_machine {
+        elf::abi::EM_AARCH64 => "AArch64",
+        elf::abi::EM_X86_64 => "x86-64",
+        elf::abi::EM_386 => "x86-32",
+        m => return Err(format!("Unsupported architecture (e_machine: {})", m).into()),
+    };
 
     if !disasm_mode {
         println!("ELF Header:");
-        println!("  Architecture: AArch64");
+        println!("  Architecture: {}", arch);
         println!("  Entry point: 0x{:x}", elf.ehdr.e_entry);
         println!(
             "  Type: {}",
@@ -272,12 +289,27 @@ fn analyze_elf_binary(path: &PathBuf, disasm_mode: bool) -> Result<(), Box<dyn s
         );
     }
 
-    // Initialize Capstone disassembler for AArch64
-    let cs = Capstone::new()
-        .arm64()
-        .mode(capstone::arch::arm64::ArchMode::Arm)
-        .detail(true)
-        .build()?;
+    // Initialize Capstone disassembler per architecture.
+    let cs = match elf.ehdr.e_machine {
+        elf::abi::EM_AARCH64 => Capstone::new()
+            .arm64()
+            .mode(capstone::arch::arm64::ArchMode::Arm)
+            .detail(true)
+            .build()?,
+        elf::abi::EM_X86_64 => Capstone::new()
+            .x86()
+            .mode(capstone::arch::x86::ArchMode::Mode64)
+            .syntax(capstone::arch::x86::ArchSyntax::Intel)
+            .detail(true)
+            .build()?,
+        elf::abi::EM_386 => Capstone::new()
+            .x86()
+            .mode(capstone::arch::x86::ArchMode::Mode32)
+            .syntax(capstone::arch::x86::ArchSyntax::Intel)
+            .detail(true)
+            .build()?,
+        _ => unreachable!("e_machine already validated above"),
+    };
 
     // Find and disassemble .text sections
     let section_headers = elf
@@ -872,6 +904,368 @@ fn parse_register(reg_str: &str) -> Result<Register, String> {
     }
 }
 
+// ============================================================================
+// x86 parser + enumerative pipeline
+// ============================================================================
+
+fn parse_x86_register(reg_str: &str) -> Result<isa::x86::X86Register, String> {
+    use isa::x86::X86Register;
+    match reg_str.trim().to_lowercase().as_str() {
+        // 64-bit names map to the canonical X86Register variants.
+        "rax" | "eax" | "ax" | "al" => Ok(X86Register::RAX),
+        "rcx" | "ecx" | "cx" | "cl" => Ok(X86Register::RCX),
+        "rdx" | "edx" | "dx" | "dl" => Ok(X86Register::RDX),
+        "rbx" | "ebx" | "bx" | "bl" => Ok(X86Register::RBX),
+        "rsp" | "esp" | "sp" => Ok(X86Register::RSP),
+        "rbp" | "ebp" | "bp" => Ok(X86Register::RBP),
+        "rsi" | "esi" | "si" => Ok(X86Register::RSI),
+        "rdi" | "edi" | "di" => Ok(X86Register::RDI),
+        "r8" | "r8d" | "r8w" | "r8b" => Ok(X86Register::R8),
+        "r9" | "r9d" | "r9w" | "r9b" => Ok(X86Register::R9),
+        "r10" | "r10d" | "r10w" | "r10b" => Ok(X86Register::R10),
+        "r11" | "r11d" | "r11w" | "r11b" => Ok(X86Register::R11),
+        "r12" | "r12d" | "r12w" | "r12b" => Ok(X86Register::R12),
+        "r13" | "r13d" | "r13w" | "r13b" => Ok(X86Register::R13),
+        "r14" | "r14d" | "r14w" | "r14b" => Ok(X86Register::R14),
+        "r15" | "r15d" | "r15w" | "r15b" => Ok(X86Register::R15),
+        _ => Err(format!("Unknown x86 register: {}", reg_str)),
+    }
+}
+
+/// Parse an Intel-syntax operand string ("rax" or "42" or "0x2a").
+fn parse_x86_operand(op_str: &str) -> Result<isa::x86::X86Operand, String> {
+    use isa::x86::X86Operand;
+    let s = op_str.trim();
+    if let Ok(reg) = parse_x86_register(s) {
+        return Ok(X86Operand::Register(reg));
+    }
+    let imm = parse_x86_immediate(s)?;
+    Ok(X86Operand::Immediate(imm))
+}
+
+fn parse_x86_immediate(s: &str) -> Result<i64, String> {
+    let s = s.trim();
+    if let Some(hex) = s.strip_prefix("0x").or_else(|| s.strip_prefix("0X")) {
+        // Positive hex: parse via u64 then reinterpret as i64 with
+        // two's-complement wrapping. Capstone's Intel-syntax
+        // disassembler renders a sign-extended `imm = -1` operand as
+        // the full-width `0xffffffffffffffff` (and `-2` as
+        // `0xfffffffffffffffe`, etc.), so any value with the top bit
+        // set must be re-mapped to the corresponding negative i64.
+        // Treating "high bit set" as out-of-range here would reject
+        // legitimate `cmp/and/add rax, -1` lines coming straight from
+        // Capstone — exactly the false rejection raised on this PR.
+        let u =
+            u64::from_str_radix(hex, 16).map_err(|_| format!("Invalid hex immediate: {}", s))?;
+        Ok(u as i64)
+    } else if let Some(hex) = s.strip_prefix("-0x").or_else(|| s.strip_prefix("-0X")) {
+        // Negative hex: the magnitude can be as large as 1<<63 (giving
+        // i64::MIN). `i64::from_str_radix` rejects 0x8000_0000_0000_0000
+        // because that doesn't fit i64 positively. Parse via u64 and
+        // negate carefully with wrapping_neg so INT64_MIN survives.
+        let abs =
+            u64::from_str_radix(hex, 16).map_err(|_| format!("Invalid hex immediate: {}", s))?;
+        if abs > (1u64 << 63) {
+            return Err(format!("Hex immediate {} out of i64 range", s));
+        }
+        Ok((abs as i64).wrapping_neg())
+    } else {
+        s.parse::<i64>()
+            .map_err(|_| format!("Invalid immediate: {}", s))
+    }
+}
+
+/// Convert a `(mnemonic, op_str)` pair (as produced by Capstone Intel
+/// syntax) into an `X86Instruction`. Returns `Ok(None)` for mnemonics
+/// outside the minimal core set, mirroring the AArch64 path.
+fn x86_ir_from_mnemonic(
+    mnemonic: &str,
+    op_str: &str,
+) -> Result<Option<isa::x86::X86Instruction>, String> {
+    use isa::x86::X86Instruction;
+    let mnemonic = mnemonic.trim().to_lowercase();
+    let parts: Vec<&str> = op_str.split(',').map(|s| s.trim()).collect();
+    if parts.len() != 2 {
+        return Ok(None);
+    }
+    let rd = parse_x86_register(parts[0])?;
+    let src_op = parse_x86_operand(parts[1])?;
+    let make = |reg_form: fn(isa::x86::X86Register, isa::x86::X86Register) -> X86Instruction,
+                imm_form: fn(isa::x86::X86Register, i64) -> X86Instruction|
+     -> Result<Option<X86Instruction>, String> {
+        Ok(Some(match src_op {
+            isa::x86::X86Operand::Register(rs) => reg_form(rd, rs),
+            isa::x86::X86Operand::Immediate(imm) => imm_form(rd, imm),
+        }))
+    };
+    let make_cmp =
+        |reg_form: fn(isa::x86::X86Register, isa::x86::X86Register) -> X86Instruction,
+         imm_form: fn(isa::x86::X86Register, i64) -> X86Instruction|
+         -> Result<Option<X86Instruction>, String> {
+            Ok(Some(match src_op {
+                isa::x86::X86Operand::Register(rs) => reg_form(rd, rs),
+                isa::x86::X86Operand::Immediate(imm) => imm_form(rd, imm),
+            }))
+        };
+    match mnemonic.as_str() {
+        "mov" | "movabs" => make(
+            |rd, rs| X86Instruction::MovReg { rd, rs },
+            |rd, imm| X86Instruction::MovImm { rd, imm },
+        ),
+        "add" => make(
+            |rd, rs| X86Instruction::AddReg { rd, rs },
+            |rd, imm| X86Instruction::AddImm { rd, imm },
+        ),
+        "sub" => make(
+            |rd, rs| X86Instruction::SubReg { rd, rs },
+            |rd, imm| X86Instruction::SubImm { rd, imm },
+        ),
+        "and" => make(
+            |rd, rs| X86Instruction::AndReg { rd, rs },
+            |rd, imm| X86Instruction::AndImm { rd, imm },
+        ),
+        "or" => make(
+            |rd, rs| X86Instruction::OrReg { rd, rs },
+            |rd, imm| X86Instruction::OrImm { rd, imm },
+        ),
+        "xor" => make(
+            |rd, rs| X86Instruction::XorReg { rd, rs },
+            |rd, imm| X86Instruction::XorImm { rd, imm },
+        ),
+        "cmp" => make_cmp(
+            |rn, rs| X86Instruction::CmpReg { rn, rs },
+            |rn, imm| X86Instruction::CmpImm { rn, imm },
+        ),
+        _ => Ok(None),
+    }
+}
+
+fn convert_to_x86_ir(
+    instructions: &capstone::Instructions,
+) -> Result<Vec<isa::x86::X86Instruction>, String> {
+    let mut out = Vec::new();
+    for instruction in instructions.iter() {
+        let mn = instruction.mnemonic().unwrap_or("");
+        let ops = instruction.op_str().unwrap_or("");
+        match x86_ir_from_mnemonic(mn, ops) {
+            Ok(Some(ir)) => out.push(ir),
+            Ok(None) => {
+                // Refusing the window is safer than silently dropping the
+                // unsupported instruction: the patcher overwrites the entire
+                // byte window with the reassembled IR, so a dropped `lea`,
+                // `call`, etc. would lose its side effect from the binary.
+                return Err(format!(
+                    "x86 window contains unsupported mnemonic '{} {}' at 0x{:x}; \
+                     cannot optimize. Narrow the --start-addr/--end-addr range \
+                     to exclude it, or add the mnemonic to the supported set.",
+                    mn,
+                    ops,
+                    instruction.address()
+                ));
+            }
+            Err(e) => {
+                return Err(format!(
+                    "failed to parse x86 instruction '{} {}' at 0x{:x}: {}",
+                    mn,
+                    ops,
+                    instruction.address(),
+                    e
+                ));
+            }
+        }
+    }
+    Ok(out)
+}
+
+/// Length-1 enumerator for x86: try every candidate of length 1 against
+/// the target sequence, return the first equivalent shorter sequence.
+fn find_shorter_equivalent_x86(
+    target: &[isa::x86::X86Instruction],
+    width: u32,
+) -> Option<Vec<isa::x86::X86Instruction>> {
+    use isa::InstructionType;
+    use isa::x86::X86Register;
+    use search::candidate_x86::generate_all_x86_instructions;
+    use semantics::cost_x86;
+    use semantics::equivalence::{X86EquivalenceConfig, check_equivalence_x86};
+    use semantics::state::X86LiveOutMask;
+
+    if target.is_empty() || target.len() < 2 {
+        // Already length 1; nothing strictly shorter exists.
+        return None;
+    }
+    let target_cost =
+        cost_x86::sequence_cost(target, &semantics::cost::CostMetric::CodeSize, width);
+
+    // Live-out registers = everything the target writes.
+    let live_regs: Vec<X86Register> = target.iter().filter_map(|i| i.destination()).collect();
+    // Flags are live whenever the target contains any instruction with
+    // observable side-effects beyond the register write — every variant
+    // except MOV reports `has_side_effects() == true` because it touches
+    // EFLAGS. Without this, a rewrite like `add rax, 0; mov rax, rbx`
+    // → `mov rax, rbx` could be silently accepted, dropping the EFLAGS
+    // write the surrounding code may consume via Jcc.
+    let flags_live = target.iter().any(InstructionType::has_side_effects);
+    let live_out = X86LiveOutMask::from_registers(live_regs.clone()).with_flags(flags_live);
+
+    // Build a register pool from the registers actually used in the
+    // target, plus a couple of scratch regs.
+    let mut pool: Vec<X86Register> = live_regs.clone();
+    for reg in target.iter().flat_map(|i| i.source_registers()) {
+        if !pool.contains(&reg) {
+            pool.push(reg);
+        }
+    }
+    for extra in [X86Register::RAX, X86Register::RDI] {
+        if !pool.contains(&extra) {
+            pool.push(extra);
+        }
+    }
+    let imms = vec![0i64, 1, -1];
+
+    let candidates = generate_all_x86_instructions(&pool, &imms);
+    let cfg = X86EquivalenceConfig::new_for_64()
+        .live_out(live_out.clone())
+        .fast_only();
+    let cfg = X86EquivalenceConfig { width, ..cfg };
+    for cand in candidates {
+        let seq = vec![cand];
+        let cand_cost =
+            cost_x86::sequence_cost(&seq, &semantics::cost::CostMetric::CodeSize, width);
+        if cand_cost >= target_cost {
+            continue;
+        }
+        match check_equivalence_x86(target, &seq, &cfg) {
+            semantics::equivalence::EquivalenceResult::Equivalent => return Some(seq),
+            _ => continue,
+        }
+    }
+    None
+}
+
+fn optimize_elf_binary_x86(
+    path: &Path,
+    start_addr: u64,
+    end_addr: u64,
+) -> Result<(), Box<dyn std::error::Error>> {
+    use elf_patcher::{AddressWindow, DetectedArch};
+
+    println!("Optimizing x86 ELF binary: {}", path.display());
+    println!("Address window: 0x{:x} - 0x{:x}", start_addr, end_addr);
+
+    let window = AddressWindow {
+        start: start_addr,
+        end: end_addr,
+    };
+    let patcher = elf_patcher::ElfPatcher::new(path)?;
+    let arch = patcher.arch();
+    let width = match arch {
+        DetectedArch::X86_64 => 64u32,
+        DetectedArch::X86_32 => 32u32,
+        DetectedArch::Aarch64 => {
+            return Err("expected x86 binary; got AArch64".into());
+        }
+    };
+    println!("Detected: {:?} (width {})", arch, width);
+
+    let section = patcher.validate_address_window(&window)?;
+    println!("Window is within section: {}", section.name);
+
+    let bytes = patcher.get_instructions_in_window(&window)?;
+    println!("Original code: {} bytes", bytes.len());
+
+    let cs = match arch {
+        DetectedArch::X86_64 => Capstone::new()
+            .x86()
+            .mode(capstone::arch::x86::ArchMode::Mode64)
+            .syntax(capstone::arch::x86::ArchSyntax::Intel)
+            .build()?,
+        DetectedArch::X86_32 => Capstone::new()
+            .x86()
+            .mode(capstone::arch::x86::ArchMode::Mode32)
+            .syntax(capstone::arch::x86::ArchSyntax::Intel)
+            .build()?,
+        DetectedArch::Aarch64 => unreachable!(),
+    };
+    let cs_instrs = cs.disasm_all(&bytes, start_addr)?;
+    println!("Disassembled {} instructions:", cs_instrs.len());
+    for i in cs_instrs.iter() {
+        println!(
+            "  0x{:x}: {} {}",
+            i.address(),
+            i.mnemonic().unwrap_or("???"),
+            i.op_str().unwrap_or("")
+        );
+    }
+
+    // Validate that the disassembled instructions cover the entire byte
+    // window. x86 is variable-length, so an `--end-addr` that lands
+    // mid-instruction (or leaves any undecodable tail bytes) makes
+    // disasm_all return only the complete decoded prefix; the patcher
+    // then overwrites the entire requested byte range with the
+    // reassembled IR, which can replace or NOP part of the next
+    // instruction in the binary. Refuse the window in that case.
+    let decoded_bytes: usize = cs_instrs.iter().map(|i| i.bytes().len()).sum();
+    if decoded_bytes != bytes.len() {
+        return Err(format!(
+            "x86 window 0x{:x}-0x{:x} ({} bytes) does not end on an \
+             instruction boundary: Capstone decoded only {} bytes. Adjust \
+             --end-addr to align with the next instruction's start address.",
+            start_addr,
+            end_addr,
+            bytes.len(),
+            decoded_bytes
+        )
+        .into());
+    }
+
+    let ir = convert_to_x86_ir(&cs_instrs)?;
+    println!("Converted {} instructions to x86 IR:", ir.len());
+    for instr in &ir {
+        println!("  {}", instr);
+    }
+
+    let optimized = find_shorter_equivalent_x86(&ir, width);
+    let Some(final_ir) = optimized else {
+        // Without a shorter sequence to substitute there is nothing to
+        // patch. Round-tripping the original IR through dynasm could
+        // emit different bytes than the source compiler (e.g. a
+        // different MOV imm32 form, or different NOP padding) and
+        // silently produce a non-byte-identical "no-op" output binary.
+        // Leave the input untouched and exit.
+        println!("No optimization found; not patching (input binary left untouched).");
+        return Ok(());
+    };
+    println!("Optimized to {} instructions:", final_ir.len());
+    for i in &final_ir {
+        println!("  {}", i);
+    }
+
+    let mut asm = match arch {
+        DetectedArch::X86_64 => assembler::x86::X86Assembler::new_64(),
+        DetectedArch::X86_32 => assembler::x86::X86Assembler::new_32(),
+        DetectedArch::Aarch64 => unreachable!(),
+    };
+    let new_bytes = asm.assemble_instructions(&final_ir)?;
+    println!("Reassembled to {} bytes", new_bytes.len());
+
+    let output_path = {
+        let mut new_path = path.to_path_buf();
+        let stem = new_path.file_stem().unwrap().to_str().unwrap();
+        let extension = new_path.extension().map(|e| e.to_str().unwrap());
+        let new_name = if let Some(ext) = extension {
+            format!("{}_optimized.{}", stem, ext)
+        } else {
+            format!("{}_optimized", stem)
+        };
+        new_path.set_file_name(new_name);
+        new_path
+    };
+    patcher.create_patched_copy(&output_path, &window, &new_bytes)?;
+    println!("Created optimized binary: {}", output_path.display());
+    Ok(())
+}
+
 // For simplicity in MVP, immediate is fixed for generation, but can be varied in input.
 const IMM_VALUE_FOR_GENERATION: i64 = 1;
 
@@ -1166,14 +1560,33 @@ fn main() {
 
     match args.command {
         Commands::Disasm { binary, arch } => {
-            // Disassemble mode
+            // Disassemble mode. `analyze_elf_binary` auto-detects the
+            // architecture from e_machine and picks the right Capstone
+            // backend. The optional `--arch` is used to (a) early-reject
+            // RISC-V (still unsupported) and (b) cross-check against the
+            // ELF so a stale or wrong `--arch` value fails fast instead of
+            // silently producing disassembly for a different architecture.
             if let Some(a) = arch {
-                // For now, only AArch64 is fully supported for disassembly
                 match a {
-                    CliArch::Aarch64 => {}
                     CliArch::Riscv32 | CliArch::Riscv64 => {
                         eprintln!("RISC-V disassembly is not yet supported");
                         std::process::exit(1);
+                    }
+                    CliArch::Aarch64 | CliArch::X86_64 | CliArch::X86_32 => {
+                        match detect_cli_arch_from_elf(&binary) {
+                            Ok(detected) if detected == a => {}
+                            Ok(detected) => {
+                                eprintln!(
+                                    "Architecture mismatch: --arch {:?} but ELF reports {:?}",
+                                    a, detected
+                                );
+                                std::process::exit(1);
+                            }
+                            Err(e) => {
+                                eprintln!("Error reading ELF: {}", e);
+                                std::process::exit(1);
+                            }
+                        }
                     }
                 }
             }
@@ -1204,17 +1617,57 @@ fn main() {
             llm_max_calls,
             llm_model,
         } => {
-            // Architecture selection
-            if let Some(a) = arch {
-                // For now, only AArch64 is fully supported for optimization
-                match a {
-                    CliArch::Aarch64 => {}
-                    CliArch::Riscv32 | CliArch::Riscv64 => {
-                        eprintln!(
-                            "RISC-V optimization is not yet supported (ISA traits available but not integrated)"
-                        );
-                        std::process::exit(1);
-                    }
+            // Architecture selection — when --arch is omitted, auto-detect
+            // from the ELF e_machine so x86 binaries route through the
+            // x86 pipeline instead of falling into the AArch64 default.
+            let cli_arch = match arch {
+                Some(a) => a,
+                None => detect_cli_arch_from_elf(&binary).unwrap_or_else(|e| {
+                    eprintln!("Error auto-detecting architecture: {}", e);
+                    std::process::exit(1);
+                }),
+            };
+            match cli_arch {
+                CliArch::Aarch64 | CliArch::X86_64 | CliArch::X86_32 => {}
+                CliArch::Riscv32 | CliArch::Riscv64 => {
+                    eprintln!(
+                        "RISC-V optimization is not yet supported (ISA traits available but not integrated)"
+                    );
+                    std::process::exit(1);
+                }
+            }
+            let is_x86 = matches!(cli_arch, CliArch::X86_64 | CliArch::X86_32);
+            if is_x86 && !matches!(algorithm, CliAlgorithm::Enumerative) {
+                eprintln!(
+                    "x86 only supports --algorithm enumerative in this release; \
+                     stochastic/symbolic/hybrid/llm are AArch64-only."
+                );
+                std::process::exit(1);
+            }
+            // The x86 path uses a fixed enumerative + fast-path-only
+            // pipeline in v1, so most search-tuning options are
+            // silently dropped. Warn the user so an unexpected --beta
+            // / --iterations / --timeout / --cores / --cost-metric on
+            // an x86 invocation isn't mistaken for being honored.
+            if is_x86 {
+                let mut ignored: Vec<&str> = Vec::new();
+                if timeout.is_some() {
+                    ignored.push("--timeout");
+                }
+                if !matches!(cost_metric, CliCostMetric::CodeSize) {
+                    ignored.push("--cost-metric (x86 v1 always uses CodeSize)");
+                }
+                if cores.is_some() {
+                    ignored.push("--cores (x86 v1 is single-threaded)");
+                }
+                if !ignored.is_empty() {
+                    eprintln!(
+                        "warning: x86 v1 ignores the following option(s): {}. \
+                         Stochastic/symbolic-specific flags (--beta, --iterations, \
+                         --seed, --search-mode, --solver-timeout, --no-symbolic, \
+                         --llm-*) are also ignored even when not listed.",
+                        ignored.join(", ")
+                    );
                 }
             }
             // Optimization mode
@@ -1250,7 +1703,12 @@ fn main() {
                 llm_model,
             };
 
-            match optimize_elf_binary(&binary, start_addr, end_addr, &options) {
+            let opt_result = if is_x86 {
+                optimize_elf_binary_x86(&binary, start_addr, end_addr)
+            } else {
+                optimize_elf_binary(&binary, start_addr, end_addr, &options)
+            };
+            match opt_result {
                 Ok(()) => println!("\nOptimization completed successfully."),
                 Err(e) => {
                     eprintln!("Error during optimization: {}", e);
@@ -1286,5 +1744,143 @@ fn main() {
                 std::process::exit(1);
             }
         },
+    }
+}
+
+#[cfg(test)]
+mod x86_parser_tests {
+    use super::*;
+    use isa::x86::{X86Instruction, X86Operand, X86Register};
+
+    #[test]
+    fn parse_register_handles_aliased_names() {
+        assert_eq!(parse_x86_register("rax").unwrap(), X86Register::RAX);
+        assert_eq!(parse_x86_register("eax").unwrap(), X86Register::RAX);
+        assert_eq!(parse_x86_register("RAX").unwrap(), X86Register::RAX);
+        assert_eq!(parse_x86_register("r10").unwrap(), X86Register::R10);
+        assert_eq!(parse_x86_register("r10d").unwrap(), X86Register::R10);
+        assert!(parse_x86_register("zmm0").is_err());
+    }
+
+    #[test]
+    fn parse_immediate_int64_boundaries() {
+        // Smallest signed value: -0x8000_0000_0000_0000 = i64::MIN.
+        // The naive `i64::from_str_radix(abs_hex).map(-)` rejects this
+        // because the absolute magnitude doesn't fit i64 positively.
+        assert_eq!(
+            parse_x86_immediate("-0x8000000000000000").unwrap(),
+            i64::MIN
+        );
+        assert_eq!(parse_x86_immediate("0x7FFFFFFFFFFFFFFF").unwrap(), i64::MAX);
+        // Capstone Intel-syntax renders a sign-extended -1 as the
+        // full-width 0xffffffffffffffff. We must accept it as the
+        // wrapping signed value (i64 -1), not reject it as
+        // out-of-range.
+        assert_eq!(parse_x86_immediate("0xffffffffffffffff").unwrap(), -1i64);
+        assert_eq!(parse_x86_immediate("0xfffffffffffffffe").unwrap(), -2i64);
+        assert_eq!(parse_x86_immediate("0x8000000000000000").unwrap(), i64::MIN);
+        // Magnitudes that exceed even u64 width must still fail.
+        assert!(parse_x86_immediate("0x10000000000000000").is_err());
+        assert!(parse_x86_immediate("-0x8000000000000001").is_err());
+    }
+
+    #[test]
+    fn parse_immediate_supports_hex_decimal_signed() {
+        assert_eq!(parse_x86_immediate("42").unwrap(), 42);
+        assert_eq!(parse_x86_immediate("-1").unwrap(), -1);
+        assert_eq!(parse_x86_immediate("0x2a").unwrap(), 42);
+        assert_eq!(parse_x86_immediate("0XFF").unwrap(), 255);
+        assert_eq!(parse_x86_immediate("-0x10").unwrap(), -16);
+    }
+
+    #[test]
+    fn parse_operand_routes_to_register_or_immediate() {
+        assert_eq!(
+            parse_x86_operand("rdi").unwrap(),
+            X86Operand::Register(X86Register::RDI)
+        );
+        assert_eq!(parse_x86_operand("7").unwrap(), X86Operand::Immediate(7));
+    }
+
+    #[test]
+    fn x86_ir_recognises_seven_mnemonics() {
+        let cases = [
+            (
+                "mov",
+                "rax, rbx",
+                X86Instruction::MovReg {
+                    rd: X86Register::RAX,
+                    rs: X86Register::RBX,
+                },
+            ),
+            (
+                "mov",
+                "rax, 42",
+                X86Instruction::MovImm {
+                    rd: X86Register::RAX,
+                    imm: 42,
+                },
+            ),
+            (
+                "add",
+                "rax, rbx",
+                X86Instruction::AddReg {
+                    rd: X86Register::RAX,
+                    rs: X86Register::RBX,
+                },
+            ),
+            (
+                "sub",
+                "rax, 1",
+                X86Instruction::SubImm {
+                    rd: X86Register::RAX,
+                    imm: 1,
+                },
+            ),
+            (
+                "and",
+                "rax, rbx",
+                X86Instruction::AndReg {
+                    rd: X86Register::RAX,
+                    rs: X86Register::RBX,
+                },
+            ),
+            (
+                "or",
+                "rax, 0",
+                X86Instruction::OrImm {
+                    rd: X86Register::RAX,
+                    imm: 0,
+                },
+            ),
+            (
+                "xor",
+                "rax, rax",
+                X86Instruction::XorReg {
+                    rd: X86Register::RAX,
+                    rs: X86Register::RAX,
+                },
+            ),
+            (
+                "cmp",
+                "rax, 5",
+                X86Instruction::CmpImm {
+                    rn: X86Register::RAX,
+                    imm: 5,
+                },
+            ),
+        ];
+        for (mn, ops, expected) in cases {
+            let got = x86_ir_from_mnemonic(mn, ops).unwrap().unwrap();
+            assert_eq!(got, expected, "{} {}", mn, ops);
+        }
+    }
+
+    #[test]
+    fn x86_ir_unsupported_mnemonic_returns_none() {
+        assert!(x86_ir_from_mnemonic("ret", "").unwrap().is_none());
+        assert!(x86_ir_from_mnemonic("jmp", "0x1234").unwrap().is_none());
+        // Two-operand "shl" not in the minimal set.
+        assert!(x86_ir_from_mnemonic("shl", "rax, 1").unwrap().is_none());
     }
 }

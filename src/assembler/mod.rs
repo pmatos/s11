@@ -1,3 +1,5 @@
+pub mod x86;
+
 use crate::ir::types::Condition;
 use crate::ir::{Instruction, Operand, Register};
 use dynasmrt::{DynasmApi, dynasm};
