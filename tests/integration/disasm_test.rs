@@ -163,6 +163,40 @@ fn test_disasm_functions_binary() {
     );
 }
 
+/// Disassemble an x86-64 binary if build_tests.sh has produced one. We
+/// only assert that s11 exits successfully and reports the architecture
+/// header — we don't pin specific instruction mnemonics because the
+/// compiler is free to choose any encoding it wants.
+#[test]
+fn test_disasm_x86_64_binary_if_present() {
+    let binary = get_binary_path();
+    let test_elf = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("binaries")
+        .join("x86_64")
+        .join("simple_debug");
+    if !test_elf.exists() {
+        eprintln!(
+            "Skipping x86-64 disasm test: {:?} not present (run build_tests.sh on x86_64 host)",
+            test_elf
+        );
+        return;
+    }
+    let output = Command::new(binary)
+        .arg("disasm")
+        .arg(&test_elf)
+        .output()
+        .expect("Failed to execute s11");
+    assert!(
+        output.status.success(),
+        "s11 disasm failed on x86-64 binary: stderr={}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    // stdout in disasm mode is the per-instruction listing — should not
+    // contain the architecture header.
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("0x"), "expected hex addresses in output");
+}
+
 #[test]
 fn test_disasm_requires_binary() {
     let binary = get_binary_path();

@@ -2,8 +2,48 @@ use elf::{ElfBytes, endian::AnyEndian};
 use std::fs;
 use std::path::Path;
 
+/// Architecture detected from the ELF `e_machine` field. Drives
+/// per-arch behaviours: instruction alignment for window validation
+/// and NOP byte choice for padding.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DetectedArch {
+    Aarch64,
+    X86_64,
+    X86_32,
+}
+
+impl DetectedArch {
+    /// Required byte alignment for an instruction-window start/end.
+    pub fn instruction_alignment(&self) -> u64 {
+        match self {
+            DetectedArch::Aarch64 => 4,
+            DetectedArch::X86_64 | DetectedArch::X86_32 => 1,
+        }
+    }
+
+    /// Per-instruction NOP bytes used to pad a shorter patch back up to
+    /// the original window size. AArch64 NOP is 0xd5_03_20_1f (LE); x86
+    /// NOP is the single-byte 0x90.
+    pub fn nop_bytes(&self) -> &'static [u8] {
+        match self {
+            DetectedArch::Aarch64 => &[0x1f, 0x20, 0x03, 0xd5],
+            DetectedArch::X86_64 | DetectedArch::X86_32 => &[0x90],
+        }
+    }
+
+    fn from_e_machine(machine: u16) -> Option<Self> {
+        match machine {
+            elf::abi::EM_AARCH64 => Some(DetectedArch::Aarch64),
+            elf::abi::EM_X86_64 => Some(DetectedArch::X86_64),
+            elf::abi::EM_386 => Some(DetectedArch::X86_32),
+            _ => None,
+        }
+    }
+}
+
 pub struct ElfPatcher {
     file_data: Vec<u8>,
+    arch: DetectedArch,
 }
 
 #[derive(Debug, Clone)]
@@ -24,17 +64,17 @@ impl ElfPatcher {
     pub fn new(path: &Path) -> Result<Self, Box<dyn std::error::Error>> {
         let file_data = fs::read(path)?;
         let elf = ElfBytes::<AnyEndian>::minimal_parse(&file_data)?;
-
-        // Verify it's AArch64
-        if elf.ehdr.e_machine != elf::abi::EM_AARCH64 {
-            return Err(format!(
-                "Not an AArch64 binary (machine type: {})",
+        let arch = DetectedArch::from_e_machine(elf.ehdr.e_machine).ok_or_else(|| {
+            format!(
+                "Unsupported architecture (e_machine: {})",
                 elf.ehdr.e_machine
             )
-            .into());
-        }
+        })?;
+        Ok(Self { file_data, arch })
+    }
 
-        Ok(Self { file_data })
+    pub fn arch(&self) -> DetectedArch {
+        self.arch
     }
 
     pub fn get_text_sections(&self) -> Result<Vec<TextSection>, Box<dyn std::error::Error>> {
@@ -81,11 +121,14 @@ impl ElfPatcher {
                     return Err("Start address must be less than end address".to_string());
                 }
 
-                // Ensure addresses are 4-byte aligned (AArch64 instruction alignment)
-                if !window.start.is_multiple_of(4) || !window.end.is_multiple_of(4) {
-                    return Err(
-                        "Addresses must be 4-byte aligned for AArch64 instructions".to_string()
-                    );
+                let align = self.arch.instruction_alignment();
+                if align > 1
+                    && (!window.start.is_multiple_of(align) || !window.end.is_multiple_of(align))
+                {
+                    return Err(format!(
+                        "Addresses must be {}-byte aligned for {:?} instructions",
+                        align, self.arch
+                    ));
                 }
 
                 return Ok(section);
@@ -151,15 +194,15 @@ impl ElfPatcher {
         let patch_end = file_offset + new_code.len();
         patched_data[file_offset..patch_end].copy_from_slice(new_code);
 
-        // If new code is smaller than window, pad with NOPs
+        // If new code is smaller than window, pad with arch-appropriate NOPs.
         if new_code.len() < window_size {
             let remaining = window_size - new_code.len();
-            let nop_bytes = vec![0x1f, 0x20, 0x03, 0xd5]; // AArch64 NOP instruction
-
-            for i in 0..remaining / 4 {
-                let nop_start = patch_end + i * 4;
-                if nop_start + 4 <= file_offset + window_size {
-                    patched_data[nop_start..nop_start + 4].copy_from_slice(&nop_bytes);
+            let nop = self.arch.nop_bytes();
+            let n = nop.len();
+            for i in 0..remaining / n {
+                let nop_start = patch_end + i * n;
+                if nop_start + n <= file_offset + window_size {
+                    patched_data[nop_start..nop_start + n].copy_from_slice(nop);
                 }
             }
         }
@@ -184,6 +227,40 @@ pub fn parse_hex_address(addr_str: &str) -> Result<u64, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn detected_arch_alignment() {
+        assert_eq!(DetectedArch::Aarch64.instruction_alignment(), 4);
+        assert_eq!(DetectedArch::X86_64.instruction_alignment(), 1);
+        assert_eq!(DetectedArch::X86_32.instruction_alignment(), 1);
+    }
+
+    #[test]
+    fn detected_arch_nop_bytes() {
+        assert_eq!(
+            DetectedArch::Aarch64.nop_bytes(),
+            &[0x1f, 0x20, 0x03, 0xd5][..]
+        );
+        assert_eq!(DetectedArch::X86_64.nop_bytes(), &[0x90][..]);
+        assert_eq!(DetectedArch::X86_32.nop_bytes(), &[0x90][..]);
+    }
+
+    #[test]
+    fn detected_arch_from_e_machine() {
+        assert_eq!(
+            DetectedArch::from_e_machine(elf::abi::EM_AARCH64),
+            Some(DetectedArch::Aarch64)
+        );
+        assert_eq!(
+            DetectedArch::from_e_machine(elf::abi::EM_X86_64),
+            Some(DetectedArch::X86_64)
+        );
+        assert_eq!(
+            DetectedArch::from_e_machine(elf::abi::EM_386),
+            Some(DetectedArch::X86_32)
+        );
+        assert_eq!(DetectedArch::from_e_machine(0xffff), None);
+    }
 
     #[test]
     fn test_parse_hex_address() {

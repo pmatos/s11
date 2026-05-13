@@ -7,6 +7,7 @@
 //! - Hybrid: parallel execution combining symbolic + multiple stochastic workers
 
 pub mod candidate;
+pub mod candidate_x86;
 pub mod config;
 pub mod llm;
 pub mod parallel;
