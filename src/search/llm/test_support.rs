@@ -68,8 +68,9 @@ fn wait_until_executable_ready(path: &Path) {
         {
             Ok(status) if status.success() => return,
             Ok(status) => panic!("fake codex readiness probe exited with {status}"),
-            // ETXTBSY: the kernel can briefly reject exec of a just-written script.
-            Err(e) if e.raw_os_error() == Some(26) => std::thread::yield_now(),
+            Err(e) if e.kind() == std::io::ErrorKind::ExecutableFileBusy => {
+                std::thread::yield_now()
+            }
             Err(e) => panic!("fake codex readiness probe failed: {e}"),
         }
     }
@@ -112,9 +113,9 @@ if [ -n "$schema" ]; then
   [ -s "$schema" ]
 fi
 [ -n "$answer" ]
-cat > "$answer" <<'JSON'
+cat > "$answer" <<'__S11_FAKE_CODEX_JSON__'
 {}
-JSON
+__S11_FAKE_CODEX_JSON__
 "#,
         envelope
     )
