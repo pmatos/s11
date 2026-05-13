@@ -1,18 +1,13 @@
-#[cfg(unix)]
 use std::path::{Path, PathBuf};
-#[cfg(unix)]
 use std::sync::atomic::{AtomicU64, Ordering};
 
-#[cfg(unix)]
 static FAKE_CODEX_COUNTER: AtomicU64 = AtomicU64::new(0);
 
-#[cfg(unix)]
 pub(crate) struct FakeCodex {
     path: PathBuf,
     dir: PathBuf,
 }
 
-#[cfg(unix)]
 impl FakeCodex {
     pub(crate) fn new(body: &str) -> Self {
         use std::io::Write as _;
@@ -52,14 +47,12 @@ impl FakeCodex {
     }
 }
 
-#[cfg(unix)]
 impl Drop for FakeCodex {
     fn drop(&mut self) {
         let _ = std::fs::remove_dir_all(&self.dir);
     }
 }
 
-#[cfg(unix)]
 fn wait_until_executable_ready(path: &Path) {
     for _ in 0..1_000 {
         match std::process::Command::new(path)
@@ -74,15 +67,16 @@ fn wait_until_executable_ready(path: &Path) {
             Err(e) => panic!("fake codex readiness probe failed: {e}"),
         }
     }
-    panic!("fake codex executable was still busy after readiness probes");
+    panic!(
+        "fake codex executable at {} was still busy after 1000 readiness probes",
+        path.display()
+    );
 }
 
-#[cfg(unix)]
 pub(crate) fn envelope_answer_writer_script(envelope: &str) -> String {
     answer_writer_script(envelope)
 }
 
-#[cfg(unix)]
 pub(crate) fn assembly_answer_writer_script(assembly: &str) -> String {
     let envelope = format!(
         r#"{{"assembly":{}}}"#,
@@ -91,7 +85,6 @@ pub(crate) fn assembly_answer_writer_script(assembly: &str) -> String {
     answer_writer_script(&envelope)
 }
 
-#[cfg(unix)]
 fn answer_writer_script(envelope: &str) -> String {
     let envelope = shell_single_quote(envelope);
     format!(
@@ -120,7 +113,6 @@ printf '%s' {} > "$answer"
     )
 }
 
-#[cfg(unix)]
 fn shell_single_quote(value: &str) -> String {
     format!("'{}'", value.replace('\'', "'\"'\"'"))
 }

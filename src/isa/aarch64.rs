@@ -1183,7 +1183,18 @@ mod tests {
                 assert!(!format!("{}", instr).is_empty());
                 let _ = instr.destination();
                 let _ = instr.source_registers();
-                assert_eq!(instr.has_side_effects(), instr.modifies_flags());
+                let should_update_flags = matches!(
+                    instr,
+                    Instruction::Cmp { .. }
+                        | Instruction::Cmn { .. }
+                        | Instruction::Tst { .. }
+                        | Instruction::Negs { .. }
+                        | Instruction::Bics { .. }
+                        | Instruction::Adds { .. }
+                        | Instruction::Subs { .. }
+                        | Instruction::Ands { .. }
+                );
+                assert_eq!(instr.has_side_effects(), should_update_flags);
                 id
             })
             .collect();

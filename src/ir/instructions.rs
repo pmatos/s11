@@ -994,5 +994,38 @@ mod tests {
             let _ = instr.reads_flags();
             let _ = instr.is_encodable_aarch64();
         }
+
+        let cmp = Instruction::Cmp {
+            rn: Register::X1,
+            rm: Operand::Immediate(1),
+        };
+        assert_eq!(cmp.to_string(), "cmp x1, #1");
+        assert_eq!(cmp.destination(), None);
+        assert_eq!(cmp.source_registers(), vec![Register::X1]);
+        assert!(cmp.modifies_flags());
+        assert!(!cmp.reads_flags());
+
+        let csel = Instruction::Csel {
+            rd: Register::X0,
+            rn: Register::X1,
+            rm: Register::X2,
+            cond: Condition::EQ,
+        };
+        assert_eq!(csel.to_string(), "csel x0, x1, x2, eq");
+        assert_eq!(csel.destination(), Some(Register::X0));
+        assert_eq!(csel.source_registers(), vec![Register::X1, Register::X2]);
+        assert!(!csel.modifies_flags());
+        assert!(csel.reads_flags());
+
+        let adds = Instruction::Adds {
+            rd: Register::X0,
+            rn: Register::X1,
+            rm: Operand::Register(Register::X2),
+        };
+        assert_eq!(adds.to_string(), "adds x0, x1, x2");
+        assert_eq!(adds.destination(), Some(Register::X0));
+        assert_eq!(adds.source_registers(), vec![Register::X1, Register::X2]);
+        assert!(adds.modifies_flags());
+        assert!(!adds.reads_flags());
     }
 }
