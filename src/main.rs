@@ -914,6 +914,8 @@ fn parse_x86_register(reg_str: &str) -> Result<isa::x86::X86Register, String> {
     use isa::x86::X86Register;
     match reg_str.trim().to_lowercase().as_str() {
         // 64-bit names map to the canonical X86Register variants.
+        // Legacy high-byte aliases (ah/bh/ch/dh) are intentionally excluded
+        // because the minimal x86 IR models the low-byte/REX alias set.
         "rax" | "eax" | "ax" | "al" => Ok(X86Register::RAX),
         "rcx" | "ecx" | "cx" | "cl" => Ok(X86Register::RCX),
         "rdx" | "edx" | "dx" | "dl" => Ok(X86Register::RDX),
