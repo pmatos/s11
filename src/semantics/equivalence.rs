@@ -57,6 +57,21 @@ fn flag_writers_diverge(target: &[Instruction], candidate: &[Instruction]) -> bo
     target_flag_writers != candidate_flag_writers
 }
 
+/// Combined pre-SMT soundness guard. Single source of truth for the
+/// short-circuit applied at every public entry point — returning `Some(r)`
+/// here means callers must return `r` (or the metrics-wrapped equivalent)
+/// before invoking the solver. Returning `None` means proceed to SMT.
+///
+/// Today this is just the flag-writer trace check, but the shape leaves
+/// room to add more pre-SMT guards (e.g. memory ops, control flow) without
+/// touching every call site.
+fn pre_smt_guard(target: &[Instruction], candidate: &[Instruction]) -> Option<EquivalenceResult> {
+    if flag_writers_diverge(target, candidate) {
+        return Some(EquivalenceResult::NotEquivalent);
+    }
+    None
+}
+
 /// Result of equivalence checking
 #[derive(Debug, Clone, PartialEq)]
 pub enum EquivalenceResult {
@@ -147,9 +162,8 @@ impl EquivalenceConfig {
 /// Returns true if for all possible initial states, both sequences
 /// produce the same final state.
 pub fn check_equivalence(seq1: &[Instruction], seq2: &[Instruction]) -> EquivalenceResult {
-    // Soundness guard before SMT: see `flag_writers_diverge`.
-    if flag_writers_diverge(seq1, seq2) {
-        return EquivalenceResult::NotEquivalent;
+    if let Some(early) = pre_smt_guard(seq1, seq2) {
+        return early;
     }
 
     let solver_config = SolverConfig::default();
@@ -231,9 +245,8 @@ pub fn check_equivalence_with_config(
     seq2: &[Instruction],
     config: &EquivalenceConfig,
 ) -> EquivalenceResult {
-    // Soundness guard before SMT: see `flag_writers_diverge`.
-    if flag_writers_diverge(seq1, seq2) {
-        return EquivalenceResult::NotEquivalent;
+    if let Some(early) = pre_smt_guard(seq1, seq2) {
+        return early;
     }
 
     if let Some(fast) = run_fast_path(seq1, seq2, config) {
@@ -260,9 +273,8 @@ pub fn check_equivalence_with_config_metrics(
 ) -> (EquivalenceResult, EquivalenceMetrics) {
     let metrics = EquivalenceMetrics::default();
 
-    // Soundness guard before SMT: see `flag_writers_diverge`.
-    if flag_writers_diverge(seq1, seq2) {
-        return (EquivalenceResult::NotEquivalent, metrics);
+    if let Some(early) = pre_smt_guard(seq1, seq2) {
+        return (early, metrics);
     }
 
     if let Some(fast) = run_fast_path(seq1, seq2, config) {

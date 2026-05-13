@@ -420,8 +420,17 @@ impl Mutator {
                 5 => Instruction::Eon { rd, rn, rm },
                 _ => Instruction::Bic { rd, rn, rm },
             },
-            Instruction::Bics { rd, rn, rm } => match rng.random_range(0..2) {
-                0 => Instruction::Bic { rd, rn, rm },
+            // Bics now mirrors Bic's 6-peer logical cluster so MCMC chains
+            // starting at BICS have the same ergodicity as those starting at
+            // BIC. The original 1-peer version made BICS effectively a
+            // dead-end neighbour, slowing convergence.
+            Instruction::Bics { rd, rn, rm } => match rng.random_range(0..7) {
+                0 => Instruction::And { rd, rn, rm },
+                1 => Instruction::Orr { rd, rn, rm },
+                2 => Instruction::Eor { rd, rn, rm },
+                3 => Instruction::Bic { rd, rn, rm },
+                4 => Instruction::Orn { rd, rn, rm },
+                5 => Instruction::Eon { rd, rn, rm },
                 _ => Instruction::Bics { rd, rn, rm },
             },
             Instruction::Orn { rd, rn, rm } => match rng.random_range(0..5) {

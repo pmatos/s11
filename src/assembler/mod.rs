@@ -507,6 +507,15 @@ impl AArch64Assembler {
                         if *imm < 0 || *imm > 0xFFF {
                             return Err(format!("Immediate {} out of range for ADDS", imm));
                         }
+                        // The immediate-form encoding uses the `Xn|SP` register
+                        // class, which dynasm spells `XSP(...)`. Register index
+                        // 31 decodes as SP, not XZR — so we must refuse XZR as
+                        // `rn` here or we'd emit `ADDS Xd, SP, #imm`.
+                        if *rn == Register::XZR {
+                            return Err(
+                                "ADDS immediate with XZR as `rn` is not encodable (encoding slot is Xn|SP)".to_string(),
+                            );
+                        }
                         let imm = *imm as u32;
                         dynasm!(ops ; .arch aarch64 ; adds X(rd_reg), XSP(rn_reg), imm);
                         Ok(())
@@ -525,6 +534,11 @@ impl AArch64Assembler {
                     Operand::Immediate(imm) => {
                         if *imm < 0 || *imm > 0xFFF {
                             return Err(format!("Immediate {} out of range for SUBS", imm));
+                        }
+                        if *rn == Register::XZR {
+                            return Err(
+                                "SUBS immediate with XZR as `rn` is not encodable (encoding slot is Xn|SP)".to_string(),
+                            );
                         }
                         let imm = *imm as u32;
                         dynasm!(ops ; .arch aarch64 ; subs X(rd_reg), XSP(rn_reg), imm);
@@ -1058,10 +1072,12 @@ mod tests {
         let bytes = assembler
             .assemble_instructions(&instructions)
             .expect("MOVN encoding should succeed");
-        // Capstone may render this as `mov x0, #-65536` (canonicalises movn → mov #-N)
-        // so we only assert that the instruction is exactly 4 bytes and not zero.
-        assert_eq!(bytes.len(), 4);
-        assert_ne!(bytes, [0, 0, 0, 0]);
+        // Exact byte-level check. MOVN 64-bit base is 0x92800000; imm16<<5
+        // for #0xFFFF gives 0x1FFFE0; Rd=0 contributes nothing → word
+        // 0x929FFFE0, little-endian = [0xE0, 0xFF, 0x9F, 0x92]. An off-by-one
+        // in either the imm16 or hw bits would fail this rather than slip
+        // through a Capstone mnemonic check.
+        assert_eq!(bytes, [0xE0, 0xFF, 0x9F, 0x92]);
     }
 
     #[test]
@@ -1121,6 +1137,43 @@ mod tests {
         disassemble_and_verify(&bytes, "csetm", &["x3", "ne"]);
     }
 
+    /// Defense-in-depth: ADDS/SUBS with immediate `rm` and XZR as `rn` would
+    /// encode to `ADDS Xd, SP, #imm` because the immediate-form encoding
+    /// slot is `Xn|SP` (where register 31 means SP, not XZR). The encoder
+    /// must refuse this construction rather than silently using SP.
+    #[test]
+    fn test_adds_subs_imm_reject_xzr_rn() {
+        let mut assembler = AArch64Assembler::new();
+        for instr in [
+            Instruction::Adds {
+                rd: Register::X0,
+                rn: Register::XZR,
+                rm: Operand::Immediate(1),
+            },
+            Instruction::Subs {
+                rd: Register::X0,
+                rn: Register::XZR,
+                rm: Operand::Immediate(1),
+            },
+        ] {
+            let result = assembler.assemble_instructions(&[instr]);
+            assert!(
+                result.is_err(),
+                "Expected encoder to reject {:?}, got {:?}",
+                instr,
+                result
+            );
+        }
+        // Register-form ADDS/SUBS with XZR as rn must still succeed — the
+        // register-form encoding decodes 31 as XZR correctly.
+        let ok = assembler.assemble_instructions(&[Instruction::Adds {
+            rd: Register::X0,
+            rn: Register::XZR,
+            rm: Operand::Register(Register::X1),
+        }]);
+        assert!(ok.is_ok(), "register-form ADDS with XZR should encode");
+    }
+
     /// Defense-in-depth: assembler must refuse CSET/CSETM with AL or NV,
     /// even if a caller bypasses `is_encodable_aarch64`. Lowering
     /// `Cset { cond: AL }` to the alias would emit `csinc ..., nv` (because
@@ -1169,7 +1222,9 @@ mod tests {
         let bytes = assembler
             .assemble_instructions(&instructions)
             .expect("MOVN encoding with shift should succeed");
-        assert_eq!(bytes.len(), 4);
+        // Base 0x92800000 | hw=1<<21 (shift/16=1) = 0x200000 | imm16=1<<5 = 0x20
+        // → 0x92A00020, little-endian = [0x20, 0x00, 0xA0, 0x92].
+        assert_eq!(bytes, [0x20, 0x00, 0xA0, 0x92]);
     }
 
     /// Ensures we emit the 64-bit (sf=1) form, not the 32-bit Wn form —
