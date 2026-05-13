@@ -1530,7 +1530,7 @@ mod tests {
         ];
 
         for instr in cases {
-            let mut assembler = AArch64Assembler::default();
+            let mut assembler = AArch64Assembler {};
             assembler
                 .assemble_instructions(&[instr])
                 .unwrap_or_else(|e| panic!("{} should assemble: {}", instr, e));
