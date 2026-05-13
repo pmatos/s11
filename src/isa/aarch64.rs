@@ -578,7 +578,6 @@ fn mutate_shift_operand<R: RngExt>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::isa::InstructionType as _;
     use rand::SeedableRng;
     use rand_chacha::ChaCha8Rng;
 

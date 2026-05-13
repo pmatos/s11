@@ -21,11 +21,7 @@ fn check_test_binary(path: &PathBuf) {
 }
 
 fn get_binary_path() -> PathBuf {
-    let mut path = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    path.push("target");
-    path.push("debug");
-    path.push("s11");
-    path
+    PathBuf::from(env!("CARGO_BIN_EXE_s11"))
 }
 
 #[test]

@@ -93,6 +93,7 @@ coverage: build-tests
 # Emit an LCOV report at target/llvm-cov/lcov.info — the format consumed by CI/Codecov.
 coverage-lcov: build-tests
     @echo "Collecting coverage (LCOV)..."
+    @mkdir -p target/llvm-cov
     cargo llvm-cov --workspace --all-features --lcov --output-path target/llvm-cov/lcov.info
 
 # Help message (can be more detailed than just listing)

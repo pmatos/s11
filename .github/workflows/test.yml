@@ -8,6 +8,8 @@ on:
 
 env:
   CARGO_TERM_COLOR: always
+  # Fail the build on any warning so unused imports / dead code can't slip in.
+  RUSTFLAGS: "-D warnings"
 
 jobs:
   test:
