@@ -35,6 +35,7 @@ fn executable_window(path: &Path, width: u64) -> (u64, u64) {
             continue;
         }
 
+        // These opt tests use AArch64 fixture binaries, whose instructions are 4-byte aligned.
         let start = section.sh_addr.next_multiple_of(4);
         if start + width <= section.sh_addr + section.sh_size {
             return (start, start + width);

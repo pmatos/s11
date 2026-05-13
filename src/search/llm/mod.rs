@@ -7,7 +7,7 @@ pub mod ledger;
 pub mod outcome;
 pub mod prompt;
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod test_support;
 
 use std::time::{Duration, Instant};

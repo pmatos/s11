@@ -69,7 +69,7 @@ fn wait_until_executable_ready(path: &Path) {
             Ok(status) if status.success() => return,
             Ok(status) => panic!("fake codex readiness probe exited with {status}"),
             Err(e) if e.kind() == std::io::ErrorKind::ExecutableFileBusy => {
-                std::thread::yield_now()
+                std::thread::sleep(std::time::Duration::from_millis(1))
             }
             Err(e) => panic!("fake codex readiness probe failed: {e}"),
         }
@@ -93,6 +93,7 @@ pub(crate) fn assembly_answer_writer_script(assembly: &str) -> String {
 
 #[cfg(unix)]
 fn answer_writer_script(envelope: &str) -> String {
+    let envelope = shell_single_quote(envelope);
     format!(
         r#"answer=""
 schema=""
@@ -113,10 +114,13 @@ if [ -n "$schema" ]; then
   [ -s "$schema" ]
 fi
 [ -n "$answer" ]
-cat > "$answer" <<'__S11_FAKE_CODEX_JSON__'
-{}
-__S11_FAKE_CODEX_JSON__
+printf '%s' {} > "$answer"
 "#,
         envelope
     )
+}
+
+#[cfg(unix)]
+fn shell_single_quote(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "'\"'\"'"))
 }

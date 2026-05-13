@@ -12,6 +12,8 @@ mod isa;
 mod parser;
 mod search;
 mod semantics;
+#[cfg(test)]
+mod test_utils;
 mod validation;
 
 use assembler::AArch64Assembler;
@@ -1892,39 +1894,7 @@ mod cli_helper_tests {
     use search::llm::LlmTimings;
     use search::llm::ledger::UnsupportedMnemonicLedger;
     use search::result::SearchStatistics;
-    use std::fs;
-    use std::sync::atomic::{AtomicU64, Ordering};
-
-    static TEMP_ASM_COUNTER: AtomicU64 = AtomicU64::new(0);
-
-    struct TempAsm {
-        path: PathBuf,
-    }
-
-    impl TempAsm {
-        fn new(name: &str, content: &str) -> Self {
-            let id = TEMP_ASM_COUNTER.fetch_add(1, Ordering::Relaxed);
-            let path = std::env::temp_dir().join(format!(
-                "s11-{}-{}-{}-{}.s",
-                name,
-                std::process::id(),
-                std::thread::current().name().unwrap_or("test"),
-                id
-            ));
-            fs::write(&path, content).unwrap();
-            Self { path }
-        }
-
-        fn path(&self) -> &Path {
-            &self.path
-        }
-    }
-
-    impl Drop for TempAsm {
-        fn drop(&mut self) {
-            let _ = fs::remove_file(&self.path);
-        }
-    }
+    use test_utils::TempFile;
 
     fn options_for(algorithm: Algorithm) -> OptimizationOptions {
         OptimizationOptions {
@@ -2142,11 +2112,11 @@ mod cli_helper_tests {
 
     #[test]
     fn run_equiv_and_llm_opt_accept_equivalent_tiny_files() {
-        let asm1 = TempAsm::new("equiv-a", "mov x0, x1\n");
-        let asm2 = TempAsm::new("equiv-b", "mov x0, x1\n");
+        let asm1 = TempFile::new("s11-equiv-a", "s", "mov x0, x1\n");
+        let asm2 = TempFile::new("s11-equiv-b", "s", "mov x0, x1\n");
         run_equiv(asm1.path(), asm2.path(), "x0", 1, true, true).unwrap();
 
-        let llm_asm = TempAsm::new("llm", "mov x0, x1\n");
+        let llm_asm = TempFile::new("s11-llm", "s", "mov x0, x1\n");
         run_llm_opt(llm_asm.path(), "x0", 0, "test-model", 0, true).unwrap();
     }
 }

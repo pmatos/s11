@@ -804,38 +804,7 @@ pub fn parse_assembly_string(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::path::{Path, PathBuf};
-    use std::sync::atomic::{AtomicU64, Ordering};
-
-    static TEMP_FILE_COUNTER: AtomicU64 = AtomicU64::new(0);
-
-    struct TempFile {
-        path: PathBuf,
-    }
-
-    impl TempFile {
-        fn new(name: &str, content: &str) -> Self {
-            let id = TEMP_FILE_COUNTER.fetch_add(1, Ordering::Relaxed);
-            let path = std::env::temp_dir().join(format!(
-                "s11-parser-{}-{}-{}.s",
-                name,
-                std::process::id(),
-                id
-            ));
-            std::fs::write(&path, content).unwrap();
-            Self { path }
-        }
-
-        fn path(&self) -> &Path {
-            &self.path
-        }
-    }
-
-    impl Drop for TempFile {
-        fn drop(&mut self) {
-            let _ = std::fs::remove_file(&self.path);
-        }
-    }
+    use crate::test_utils::TempFile;
 
     // Register parsing tests
     #[test]
@@ -1231,7 +1200,7 @@ mod tests {
 
     #[test]
     fn parse_assembly_file_reads_file_and_reports_read_errors() {
-        let file = TempFile::new("coverage", "mov x0, x1\nadd x0, x0, #1\n");
+        let file = TempFile::new("s11-parser-coverage", "s", "mov x0, x1\nadd x0, x0, #1\n");
         let parsed = parse_assembly_file(file.path()).unwrap();
         assert_eq!(parsed.len(), 2);
 
