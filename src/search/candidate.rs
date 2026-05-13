@@ -136,13 +136,15 @@ pub fn generate_all_instructions(registers: &[Register], immediates: &[i64]) -> 
             instrs.push(Instruction::Negs { rd, rm });
         }
 
-        // MOVN: small representative imm set × four legal shift positions.
-        // Keep this small — the full u16 × 4-shift space would balloon the
-        // candidate count. The same parsimony rationale applies as the
-        // immediate-table choice above.
+        // MOVN / MOVZ / MOVK: small representative imm set × four legal shift
+        // positions. Keep this small — the full u16 × 4-shift space would
+        // balloon the candidate count. The same parsimony rationale applies
+        // as the immediate-table choice above.
         for imm in [0u16, 1, 0xFF, 0xFFFF] {
             for shift in [0u8, 16, 32, 48] {
                 instrs.push(Instruction::MovN { rd, imm, shift });
+                instrs.push(Instruction::MovZ { rd, imm, shift });
+                instrs.push(Instruction::MovK { rd, imm, shift });
             }
         }
 
@@ -175,7 +177,7 @@ pub fn generate_random_instruction<R: rand::RngExt>(
     let rd = registers[rng.random_range(0..registers.len())];
     let pick_reg = |rng: &mut R| registers[rng.random_range(0..registers.len())];
 
-    match rng.random_range(0..24) {
+    match rng.random_range(0..26) {
         0 => {
             let imm = if immediates.is_empty() {
                 0
@@ -299,10 +301,22 @@ pub fn generate_random_instruction<R: rand::RngExt>(
             rd,
             cond: crate::ir::types::Condition::random_normal(rng),
         },
-        _ => {
+        23 => {
             let rn = pick_reg(rng);
             let shift = random_shift_operand(rng, registers);
             Instruction::Ror { rd, rn, shift }
+        }
+        24 => {
+            let imm = (rng.random::<u32>() & 0xFFFF) as u16;
+            let shifts = [0u8, 16, 32, 48];
+            let shift = shifts[rng.random_range(0..shifts.len())];
+            Instruction::MovZ { rd, imm, shift }
+        }
+        _ => {
+            let imm = (rng.random::<u32>() & 0xFFFF) as u16;
+            let shifts = [0u8, 16, 32, 48];
+            let shift = shifts[rng.random_range(0..shifts.len())];
+            Instruction::MovK { rd, imm, shift }
         }
     }
 }
@@ -385,6 +399,8 @@ pub fn opcode_id(instr: &Instruction) -> u8 {
         Instruction::Cset { .. } => 31,
         Instruction::Csetm { .. } => 32,
         Instruction::Ror { .. } => 33,
+        Instruction::MovZ { .. } => 34,
+        Instruction::MovK { .. } => 35,
     }
 }
 
@@ -403,6 +419,8 @@ pub fn supports_immediate(instr: &Instruction) -> bool {
             | Instruction::Lsr { .. }
             | Instruction::Asr { .. }
             | Instruction::MovN { .. }
+            | Instruction::MovZ { .. }
+            | Instruction::MovK { .. }
             | Instruction::Adds { .. }
             | Instruction::Subs { .. }
             | Instruction::Ror { .. }
@@ -446,7 +464,11 @@ pub fn is_shift_op(instr: &Instruction) -> bool {
 pub fn is_move_op(instr: &Instruction) -> bool {
     matches!(
         instr,
-        Instruction::MovReg { .. } | Instruction::MovImm { .. } | Instruction::MovN { .. }
+        Instruction::MovReg { .. }
+            | Instruction::MovImm { .. }
+            | Instruction::MovN { .. }
+            | Instruction::MovZ { .. }
+            | Instruction::MovK { .. }
     )
 }
 

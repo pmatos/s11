@@ -188,8 +188,12 @@ impl Mutator {
                     *rm = self.random_register(rng);
                 }
             }
-            // MOVN: mutate rd, imm, or shift
-            Instruction::MovN { rd, imm, shift } => match rng.random_range(0..3) {
+            // MOVN / MOVZ / MOVK: mutate rd, imm, or shift. MOVK reads rd, so
+            // mutating rd here additionally changes the upper-lanes source —
+            // that's intentional and matches the other dest-mutating arms.
+            Instruction::MovN { rd, imm, shift }
+            | Instruction::MovZ { rd, imm, shift }
+            | Instruction::MovK { rd, imm, shift } => match rng.random_range(0..3) {
                 0 => *rd = self.random_register(rng),
                 1 => *imm = (rng.random::<u32>() & 0xFFFF) as u16,
                 _ => {
@@ -402,13 +406,28 @@ impl Mutator {
                 1 => Instruction::Neg { rd, rm },
                 _ => Instruction::Negs { rd, rm },
             },
-            // MOVN sits alongside MovImm as the only other immediate-move op.
-            Instruction::MovN { rd, imm, shift } => match rng.random_range(0..2) {
-                0 => Instruction::MovImm {
+            // Move-wide cluster: MOVN ↔ MOVZ ↔ MOVK (all share rd/imm/shift),
+            // plus a bridge to MovImm (only for shift=0 forms, since MovImm
+            // has no shift field). The bridge lets MCMC chains drift into and
+            // out of the simpler MovImm encoding.
+            Instruction::MovN { rd, imm, shift } => match rng.random_range(0..3) {
+                0 => Instruction::MovZ { rd, imm, shift },
+                1 => Instruction::MovK { rd, imm, shift },
+                _ => Instruction::MovN { rd, imm, shift },
+            },
+            Instruction::MovZ { rd, imm, shift } => match rng.random_range(0..4) {
+                0 => Instruction::MovN { rd, imm, shift },
+                1 => Instruction::MovK { rd, imm, shift },
+                2 => Instruction::MovImm {
                     rd,
                     imm: imm as i64,
                 },
-                _ => Instruction::MovN { rd, imm, shift },
+                _ => Instruction::MovZ { rd, imm, shift },
+            },
+            Instruction::MovK { rd, imm, shift } => match rng.random_range(0..3) {
+                0 => Instruction::MovN { rd, imm, shift },
+                1 => Instruction::MovZ { rd, imm, shift },
+                _ => Instruction::MovK { rd, imm, shift },
             },
             // Inverted-logical join the AND/ORR/EOR cluster.
             Instruction::Bic { rd, rn, rm } => match rng.random_range(0..7) {

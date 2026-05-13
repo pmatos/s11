@@ -136,6 +136,8 @@ impl InstructionType for Instruction {
             Instruction::Cset { .. } => 31,
             Instruction::Csetm { .. } => 32,
             Instruction::Ror { .. } => 33,
+            Instruction::MovZ { .. } => 34,
+            Instruction::MovK { .. } => 35,
         }
     }
 
@@ -174,6 +176,8 @@ impl InstructionType for Instruction {
             Instruction::Cset { .. } => "cset",
             Instruction::Csetm { .. } => "csetm",
             Instruction::Ror { .. } => "ror",
+            Instruction::MovZ { .. } => "movz",
+            Instruction::MovK { .. } => "movk",
         }
     }
 
@@ -328,11 +332,15 @@ impl InstructionGenerator<Instruction> for AArch64InstructionGenerator {
                 instructions.push(Instruction::Negs { rd, rm });
             }
 
-            // MOVN: small representative imm × {0,16,32,48} shift table —
-            // mirrors `search::candidate::generate_all_instructions`.
+            // MOVN / MOVZ / MOVK: small representative imm × {0,16,32,48}
+            // shift table. The same parsimony rationale as MOVN applies for
+            // MOVZ/MOVK — the full u16 × 4-shift space would balloon
+            // candidate counts.
             for imm in [0u16, 1, 0xFF, 0xFFFF] {
                 for shift in [0u8, 16, 32, 48] {
                     instructions.push(Instruction::MovN { rd, imm, shift });
+                    instructions.push(Instruction::MovZ { rd, imm, shift });
+                    instructions.push(Instruction::MovK { rd, imm, shift });
                 }
             }
 
@@ -352,8 +360,10 @@ impl InstructionGenerator<Instruction> for AArch64InstructionGenerator {
         registers: &[Register],
         immediates: &[i64],
     ) -> Instruction {
-        // 24 opcode slots: 0..13 original, 13..23 Tier 1, 23 = ROR.
-        let opcode = rng.random_range(0..24);
+        // 26 opcode slots: 0..13 original, 13..23 Tier 1 (slot 23 is a
+        // 4-way sub-multiplexer for ANDS/CSET/CSETM/ROR), 24 = MOVZ,
+        // 25 = MOVK.
+        let opcode = rng.random_range(0..26);
         let rd = registers[rng.random_range(0..registers.len())];
         let rn = registers[rng.random_range(0..registers.len())];
         let pick_reg = |rng: &mut R| registers[rng.random_range(0..registers.len())];
@@ -495,6 +505,24 @@ impl InstructionGenerator<Instruction> for AArch64InstructionGenerator {
                     }
                 }
             }
+            24 => {
+                let imm = (rng.random::<u32>() & 0xFFFF) as u16;
+                let shifts = [0u8, 16, 32, 48];
+                Instruction::MovZ {
+                    rd,
+                    imm,
+                    shift: shifts[rng.random_range(0..shifts.len())],
+                }
+            }
+            25 => {
+                let imm = (rng.random::<u32>() & 0xFFFF) as u16;
+                let shifts = [0u8, 16, 32, 48];
+                Instruction::MovK {
+                    rd,
+                    imm,
+                    shift: shifts[rng.random_range(0..shifts.len())],
+                }
+            }
             _ => unreachable!(),
         }
     }
@@ -576,6 +604,16 @@ impl InstructionGenerator<Instruction> for AArch64InstructionGenerator {
                     Instruction::Neg { rm, .. } => Instruction::Neg { rd: new_rd, rm },
                     Instruction::Negs { rm, .. } => Instruction::Negs { rd: new_rd, rm },
                     Instruction::MovN { imm, shift, .. } => Instruction::MovN {
+                        rd: new_rd,
+                        imm,
+                        shift,
+                    },
+                    Instruction::MovZ { imm, shift, .. } => Instruction::MovZ {
+                        rd: new_rd,
+                        imm,
+                        shift,
+                    },
+                    Instruction::MovK { imm, shift, .. } => Instruction::MovK {
                         rd: new_rd,
                         imm,
                         shift,
@@ -748,6 +786,27 @@ impl InstructionGenerator<Instruction> for AArch64InstructionGenerator {
                             shift,
                         }
                     }
+                    // MOVZ / MOVK: same rationale as MOVN — `imm` is the only
+                    // source operand; `shift` is left alone here. MOVK also
+                    // reads `rd`, but `rd` is the destination, not a source
+                    // operand we mutate in this strategy (the "change
+                    // destination register" branch above already handles it).
+                    Instruction::MovZ { rd, shift, .. } => {
+                        let new_imm = (rng.random::<u32>() & 0xFFFF) as u16;
+                        Instruction::MovZ {
+                            rd,
+                            imm: new_imm,
+                            shift,
+                        }
+                    }
+                    Instruction::MovK { rd, shift, .. } => {
+                        let new_imm = (rng.random::<u32>() & 0xFFFF) as u16;
+                        Instruction::MovK {
+                            rd,
+                            imm: new_imm,
+                            shift,
+                        }
+                    }
                     Instruction::Bic { rd, rn, rm: _ } => {
                         let new_rm =
                             Operand::Register(registers[rng.random_range(0..registers.len())]);
@@ -807,13 +866,14 @@ impl InstructionGenerator<Instruction> for AArch64InstructionGenerator {
 
     /// Total number of distinct opcode *families* (the upper bound on
     /// `opcode_id()`). Not the same as `generate_random`'s slot count —
-    /// `generate_random` samples 24 top-level slots and folds ANDS, CSET,
+    /// `generate_random` samples 26 top-level slots and folds ANDS, CSET,
     /// CSETM, and ROR into a sub-multiplexer on slot 23 to keep the slot
     /// table small. So `opcode_id < opcode_count` always holds, but the
-    /// random-generation distribution is not uniform across all 34 IDs.
+    /// random-generation distribution is not uniform across all 36 IDs.
     fn opcode_count(&self) -> u8 {
-        34 // 20 original + 14 Tier 1: MVN, NEG, NEGS, MovN, BIC, BICS, ORN, EON,
-        //                          ADDS, SUBS, ANDS, CSET, CSETM, ROR.
+        36 // 20 original + 14 Tier 1 (MVN, NEG, NEGS, MovN, BIC, BICS, ORN, EON,
+        //                          ADDS, SUBS, ANDS, CSET, CSETM, ROR)
+        //                          + 2 MOVK/MOVZ (issue #55).
     }
 }
 
@@ -990,6 +1050,16 @@ mod tests {
                 imm: 0x55aa,
                 shift: 16,
             },
+            Instruction::MovZ {
+                rd: Register::X0,
+                imm: 0x55aa,
+                shift: 32,
+            },
+            Instruction::MovK {
+                rd: Register::X0,
+                imm: 0x55aa,
+                shift: 48,
+            },
             Instruction::Bic {
                 rd: Register::X0,
                 rn: Register::X1,
@@ -1146,7 +1216,7 @@ mod tests {
         for _ in 0..100 {
             let instr = generator.generate_random(&mut rng, &regs, &imms);
             // Just verify it doesn't panic and produces valid instructions
-            assert!(instr.opcode_id() < 34);
+            assert!(instr.opcode_id() < generator.opcode_count());
         }
     }
 
@@ -1240,6 +1310,16 @@ mod tests {
                 imm: 1,
                 shift: 16,
             },
+            Instruction::MovZ {
+                rd: Register::X0,
+                imm: 1,
+                shift: 16,
+            },
+            Instruction::MovK {
+                rd: Register::X0,
+                imm: 1,
+                shift: 16,
+            },
             Instruction::Cset {
                 rd: Register::X0,
                 cond: Condition::EQ,
@@ -1282,6 +1362,16 @@ mod tests {
                 rm: Register::X2,
             },
             Instruction::MovN {
+                rd: Register::X0,
+                imm: 1,
+                shift: 0,
+            },
+            Instruction::MovZ {
+                rd: Register::X0,
+                imm: 1,
+                shift: 0,
+            },
+            Instruction::MovK {
                 rd: Register::X0,
                 imm: 1,
                 shift: 0,
