@@ -34,8 +34,12 @@ use z3::SatResult;
 ///
 /// Conservative on purpose: some valid rewrites that happen to produce
 /// identical final NZCV from different flag-writers will be wrongly
-/// rejected here. Closing that gap requires full NZCV modelling in SMT,
-/// which is tracked as a separate follow-up.
+/// rejected here. A symmetric incompleteness also remains — when both
+/// sequences contain the same structural flag-writer but with different
+/// upstream operands feeding it (e.g. `mov x1,#0; cmp x1,#0` vs
+/// `mov x1,#5; cmp x1,#0`), the guard does not detect the divergence.
+/// Closing either gap requires full NZCV modelling in SMT, tracked as
+/// issue #92.
 fn flag_writers_diverge(target: &[Instruction], candidate: &[Instruction]) -> bool {
     // Fast paths: most rewrites involve no flag writers at all.
     let tw = flags_live_out(target);
@@ -1118,6 +1122,55 @@ mod tests {
             check_equivalence(&adds, &add),
             EquivalenceResult::NotEquivalent,
             "Same guard must apply to the simple entry point"
+        );
+    }
+
+    /// Soundness regression: `BICS x0, x1, x2` → `BIC x0, x1, x2` drops the
+    /// NZCV side-effect. Must be rejected by the flag-writer guard.
+    #[test]
+    fn test_bics_to_bic_rewrite_rejected() {
+        let bics = vec![Instruction::Bics {
+            rd: Register::X0,
+            rn: Register::X1,
+            rm: Operand::Register(Register::X2),
+        }];
+        let bic = vec![Instruction::Bic {
+            rd: Register::X0,
+            rn: Register::X1,
+            rm: Operand::Register(Register::X2),
+        }];
+        let config =
+            EquivalenceConfig::with_live_out(LiveOutMask::from_registers(vec![Register::X0]));
+        assert_eq!(
+            check_equivalence_with_config(&bics, &bic, &config),
+            EquivalenceResult::NotEquivalent
+        );
+        assert_eq!(
+            check_equivalence(&bics, &bic),
+            EquivalenceResult::NotEquivalent
+        );
+    }
+
+    /// Soundness regression: `NEGS x0, x1` → `NEG x0, x1` drops NZCV.
+    #[test]
+    fn test_negs_to_neg_rewrite_rejected() {
+        let negs = vec![Instruction::Negs {
+            rd: Register::X0,
+            rm: Register::X1,
+        }];
+        let neg = vec![Instruction::Neg {
+            rd: Register::X0,
+            rm: Register::X1,
+        }];
+        let config =
+            EquivalenceConfig::with_live_out(LiveOutMask::from_registers(vec![Register::X0]));
+        assert_eq!(
+            check_equivalence_with_config(&negs, &neg, &config),
+            EquivalenceResult::NotEquivalent
+        );
+        assert_eq!(
+            check_equivalence(&negs, &neg),
+            EquivalenceResult::NotEquivalent
         );
     }
 

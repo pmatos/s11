@@ -805,6 +805,12 @@ impl InstructionGenerator<Instruction> for AArch64InstructionGenerator {
         }
     }
 
+    /// Total number of distinct opcode *families* (the upper bound on
+    /// `opcode_id()`). Not the same as `generate_random`'s slot count —
+    /// `generate_random` samples 24 top-level slots and folds ANDS, CSET,
+    /// CSETM, and ROR into a sub-multiplexer on slot 23 to keep the slot
+    /// table small. So `opcode_id < opcode_count` always holds, but the
+    /// random-generation distribution is not uniform across all 34 IDs.
     fn opcode_count(&self) -> u8 {
         34 // 20 original + 14 Tier 1: MVN, NEG, NEGS, MovN, BIC, BICS, ORN, EON,
         //                          ADDS, SUBS, ANDS, CSET, CSETM, ROR.
