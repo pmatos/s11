@@ -168,6 +168,10 @@ fn write_file(path: &Path, content: &str) -> Result<(), String> {
 mod tests {
     use super::*;
     use std::error::Error;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    #[cfg(unix)]
+    static FAKE_CODEX_COUNTER: AtomicU64 = AtomicU64::new(0);
 
     #[cfg(unix)]
     struct FakeCodex {
@@ -184,14 +188,20 @@ mod tests {
             let dir = std::env::temp_dir().join(format!(
                 "s11-fake-codex-{}-{}",
                 std::process::id(),
-                TEMP_COUNTER.fetch_add(1, Ordering::Relaxed)
+                FAKE_CODEX_COUNTER.fetch_add(1, Ordering::Relaxed)
             ));
             std::fs::create_dir(&dir).expect("create fake codex temp dir");
 
             let path = dir.join("codex");
             let mut file = std::fs::File::create(&path).expect("create fake codex script");
-            file.write_all(format!("#!/bin/sh\nset -eu\n{}", body).as_bytes())
-                .expect("write fake codex script");
+            file.write_all(
+                format!(
+                    "#!/bin/sh\nif [ \"${{1:-}}\" = \"__s11_ready_probe\" ]; then exit 0; fi\nset -eu\n{}",
+                    body
+                )
+                .as_bytes(),
+            )
+            .expect("write fake codex script");
             file.sync_all().expect("sync fake codex script");
             drop(file);
             let mut permissions = std::fs::metadata(&path)
@@ -199,7 +209,7 @@ mod tests {
                 .permissions();
             permissions.set_mode(0o700);
             std::fs::set_permissions(&path, permissions).expect("chmod fake codex script");
-            std::thread::sleep(std::time::Duration::from_millis(20));
+            wait_until_executable_ready(&path);
 
             Self { path, dir }
         }
@@ -214,6 +224,22 @@ mod tests {
         fn drop(&mut self) {
             let _ = std::fs::remove_dir_all(&self.dir);
         }
+    }
+
+    #[cfg(unix)]
+    fn wait_until_executable_ready(path: &Path) {
+        for _ in 0..100 {
+            match std::process::Command::new(path)
+                .arg("__s11_ready_probe")
+                .status()
+            {
+                Ok(status) if status.success() => return,
+                Ok(status) => panic!("fake codex readiness probe exited with {status}"),
+                Err(e) if e.raw_os_error() == Some(26) => std::thread::yield_now(),
+                Err(e) => panic!("fake codex readiness probe failed: {e}"),
+            }
+        }
+        panic!("fake codex executable was still busy after readiness probes");
     }
 
     #[cfg(unix)]

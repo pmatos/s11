@@ -2110,8 +2110,7 @@ mod cli_helper_tests {
             Algorithm::Llm,
         ] {
             let options = options_for(algorithm);
-            let result = run_optimization(&target, &options).unwrap();
-            assert!(result.is_none() || result.as_ref().is_some());
+            let _ = run_optimization(&target, &options).unwrap();
         }
         assert!(
             run_optimization(&[], &options_for(Algorithm::Enumerative))
