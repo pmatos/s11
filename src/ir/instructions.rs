@@ -247,7 +247,6 @@ impl Instruction {
     /// can co-occur with `destination().is_some()` — those write both a
     /// register and the NZCV flags. Earlier callers that assumed
     /// "flag-setter ⇒ no destination" must be re-verified.
-    #[allow(dead_code)]
     pub fn modifies_flags(&self) -> bool {
         matches!(
             self,

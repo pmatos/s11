@@ -1067,7 +1067,9 @@ mod tests {
         let bytes = assembler
             .assemble_instructions(&instructions)
             .expect("ROR imm encoding should succeed");
-        disassemble_and_verify(&bytes, "ror", &["x0", "x1"]);
+        // Include the literal shift amount: an off-by-one in the encoded
+        // immediate would otherwise slip through.
+        disassemble_and_verify(&bytes, "ror", &["x0", "x1", "#5"]);
     }
 
     #[test]

@@ -14,6 +14,23 @@ use crate::search::candidate::generate_random_instruction;
 use crate::search::config::MutationWeights;
 use rand::RngExt;
 
+/// If `rm` is already a register, keep it; if it's an immediate, replace it
+/// with a random register from `registers`. Used when mutating an
+/// immediate-accepting opcode (ADDS/SUBS) into a register-only opcode
+/// (ANDS) — keeps the resulting instruction encodable.
+fn clamp_to_register<R: RngExt>(rm: Operand, registers: &[Register], rng: &mut R) -> Operand {
+    match rm {
+        Operand::Register(_) => rm,
+        Operand::Immediate(_) => {
+            if registers.is_empty() {
+                rm
+            } else {
+                Operand::Register(registers[rng.random_range(0..registers.len())])
+            }
+        }
+    }
+}
+
 /// Mutation operator types
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MutationType {
@@ -422,16 +439,32 @@ impl Mutator {
                 _ => Instruction::Eon { rd, rn, rm },
             },
             // Flag-setting cluster: ADDS↔SUBS↔ANDS, and into/out of ADD/SUB/AND.
+            //
+            // Note: ADDS/SUBS accept `Operand::Immediate` (12-bit), but ANDS
+            // and AND are register-only (bitmask-immediate encoding is not
+            // supported). Forwarding an Immediate `rm` directly into ANDS
+            // would produce an un-encodable instruction that is_encodable
+            // silently rejects, burning search iterations. When mutating
+            // into ANDS, clamp `rm` to a register; the same logic applies
+            // when mutating into AND.
             Instruction::Adds { rd, rn, rm } => match rng.random_range(0..4) {
                 0 => Instruction::Add { rd, rn, rm },
                 1 => Instruction::Subs { rd, rn, rm },
-                2 => Instruction::Ands { rd, rn, rm },
+                2 => Instruction::Ands {
+                    rd,
+                    rn,
+                    rm: clamp_to_register(rm, &self.registers, rng),
+                },
                 _ => Instruction::Adds { rd, rn, rm },
             },
             Instruction::Subs { rd, rn, rm } => match rng.random_range(0..4) {
                 0 => Instruction::Sub { rd, rn, rm },
                 1 => Instruction::Adds { rd, rn, rm },
-                2 => Instruction::Ands { rd, rn, rm },
+                2 => Instruction::Ands {
+                    rd,
+                    rn,
+                    rm: clamp_to_register(rm, &self.registers, rng),
+                },
                 _ => Instruction::Subs { rd, rn, rm },
             },
             Instruction::Ands { rd, rn, rm } => match rng.random_range(0..4) {
