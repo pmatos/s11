@@ -494,9 +494,11 @@ impl AArch64Assembler {
             }
             Instruction::Adds { rd, rn, rm } => {
                 let rd_reg = register_to_dynasm(*rd)?;
-                let rn_reg = register_to_dynasm(*rn)?;
                 match rm {
                     Operand::Register(r) => {
+                        // Register-form encoding decodes 31 as XZR, so use
+                        // the plain X-mapping for `rn`.
+                        let rn_reg = register_to_dynasm(*rn)?;
                         let rm_reg = register_to_dynasm(*r)?;
                         dynasm!(ops ; .arch aarch64 ; adds X(rd_reg), X(rn_reg), X(rm_reg));
                         Ok(())
@@ -505,15 +507,12 @@ impl AArch64Assembler {
                         if *imm < 0 || *imm > 0xFFF {
                             return Err(format!("Immediate {} out of range for ADDS", imm));
                         }
-                        // The immediate-form encoding uses the `Xn|SP` register
-                        // class, which dynasm spells `XSP(...)`. Register index
-                        // 31 decodes as SP, not XZR — so we must refuse XZR as
-                        // `rn` here or we'd emit `ADDS Xd, SP, #imm`.
-                        if *rn == Register::XZR {
-                            return Err(
-                                "ADDS immediate with XZR as `rn` is not encodable (encoding slot is Xn|SP)".to_string(),
-                            );
-                        }
+                        // The immediate-form encoding uses the `Xn|SP` slot —
+                        // 31 decodes as SP, not XZR. `register_to_dynasm_xsp`
+                        // accepts SP and rejects XZR, keeping the encoding
+                        // unambiguous and consistent with what the parser /
+                        // is_encodable_aarch64 admit.
+                        let rn_reg = register_to_dynasm_xsp(*rn)?;
                         let imm = *imm as u32;
                         dynasm!(ops ; .arch aarch64 ; adds X(rd_reg), XSP(rn_reg), imm);
                         Ok(())
@@ -522,9 +521,9 @@ impl AArch64Assembler {
             }
             Instruction::Subs { rd, rn, rm } => {
                 let rd_reg = register_to_dynasm(*rd)?;
-                let rn_reg = register_to_dynasm(*rn)?;
                 match rm {
                     Operand::Register(r) => {
+                        let rn_reg = register_to_dynasm(*rn)?;
                         let rm_reg = register_to_dynasm(*r)?;
                         dynasm!(ops ; .arch aarch64 ; subs X(rd_reg), X(rn_reg), X(rm_reg));
                         Ok(())
@@ -533,11 +532,7 @@ impl AArch64Assembler {
                         if *imm < 0 || *imm > 0xFFF {
                             return Err(format!("Immediate {} out of range for SUBS", imm));
                         }
-                        if *rn == Register::XZR {
-                            return Err(
-                                "SUBS immediate with XZR as `rn` is not encodable (encoding slot is Xn|SP)".to_string(),
-                            );
-                        }
+                        let rn_reg = register_to_dynasm_xsp(*rn)?;
                         let imm = *imm as u32;
                         dynasm!(ops ; .arch aarch64 ; subs X(rd_reg), XSP(rn_reg), imm);
                         Ok(())
@@ -626,6 +621,25 @@ impl Default for AArch64Assembler {
 fn register_to_dynasm(reg: Register) -> Result<u8, String> {
     reg.index()
         .ok_or_else(|| format!("Register {:?} not supported in dynasm encoding", reg))
+}
+
+/// Map a register to the index used in the `Xn|SP` encoding slot (`XSP(...)`
+/// in dynasm). Index 31 means SP — XZR is **not** valid in this slot, so the
+/// XZR variant returns Err. Use this in immediate-form ADDS/SUBS/ADD/SUB
+/// where the encoding decodes 31 as SP.
+fn register_to_dynasm_xsp(reg: Register) -> Result<u8, String> {
+    match reg {
+        Register::XZR => {
+            Err("XZR is not encodable in the Xn|SP register slot (would decode as SP)".to_string())
+        }
+        Register::SP => Ok(31),
+        other => other.index().ok_or_else(|| {
+            format!(
+                "Register {:?} not supported in dynasm Xn|SP encoding",
+                other
+            )
+        }),
+    }
 }
 
 #[cfg(test)]
@@ -1133,6 +1147,36 @@ mod tests {
             .assemble_instructions(&instructions)
             .expect("CSETM encoding should succeed");
         disassemble_and_verify(&bytes, "csetm", &["x3", "ne"]);
+    }
+
+    /// ADDS/SUBS immediate-form accepts SP as `rn` (the `Xn|SP` encoding
+    /// slot decodes 31 as SP). The parser and `is_encodable_aarch64` both
+    /// admit this — the encoder must too.
+    #[test]
+    fn test_adds_subs_imm_accept_sp_rn() {
+        let mut assembler = AArch64Assembler::new();
+        for instr in [
+            Instruction::Adds {
+                rd: Register::X0,
+                rn: Register::SP,
+                rm: Operand::Immediate(8),
+            },
+            Instruction::Subs {
+                rd: Register::X0,
+                rn: Register::SP,
+                rm: Operand::Immediate(8),
+            },
+        ] {
+            let bytes = assembler
+                .assemble_instructions(&[instr])
+                .unwrap_or_else(|e| {
+                    panic!(
+                        "Expected SP-as-rn to encode, got Err({}) for {:?}",
+                        e, instr
+                    )
+                });
+            assert_eq!(bytes.len(), 4);
+        }
     }
 
     /// Defense-in-depth: ADDS/SUBS with immediate `rm` and XZR as `rn` would
