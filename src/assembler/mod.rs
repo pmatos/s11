@@ -498,8 +498,8 @@ impl AArch64Assembler {
                 let rd_reg = register_to_dynasm(*rd)?;
                 match rm {
                     Operand::Register(r) => {
-                        // Register-form encoding decodes 31 as XZR, so use
-                        // the plain X-mapping for `rn`.
+                        // Shifted-register form: slot 31 = XZR; plain
+                        // `register_to_dynasm` mapping is correct.
                         let rn_reg = register_to_dynasm(*rn)?;
                         let rm_reg = register_to_dynasm(*r)?;
                         dynasm!(ops ; .arch aarch64 ; adds X(rd_reg), X(rn_reg), X(rm_reg));
@@ -525,6 +525,7 @@ impl AArch64Assembler {
                 let rd_reg = register_to_dynasm(*rd)?;
                 match rm {
                     Operand::Register(r) => {
+                        // Shifted-register form: slot 31 = XZR.
                         let rn_reg = register_to_dynasm(*rn)?;
                         let rm_reg = register_to_dynasm(*r)?;
                         dynasm!(ops ; .arch aarch64 ; subs X(rd_reg), X(rn_reg), X(rm_reg));
@@ -534,6 +535,9 @@ impl AArch64Assembler {
                         if *imm < 0 || *imm > 0xFFF {
                             return Err(format!("Immediate {} out of range for SUBS", imm));
                         }
+                        // Immediate form uses the Xn|SP slot — same caveat
+                        // as ADDS above; `register_to_dynasm_xsp` accepts SP
+                        // and rejects XZR.
                         let rn_reg = register_to_dynasm_xsp(*rn)?;
                         let imm = *imm as u32;
                         dynasm!(ops ; .arch aarch64 ; subs X(rd_reg), XSP(rn_reg), imm);
@@ -626,9 +630,16 @@ fn register_to_dynasm(reg: Register) -> Result<u8, String> {
 }
 
 /// Map a register to the index used in the `Xn|SP` encoding slot (`XSP(...)`
-/// in dynasm). Index 31 means SP — XZR is **not** valid in this slot, so the
-/// XZR variant returns Err. Use this in immediate-form ADDS/SUBS/ADD/SUB
-/// where the encoding decodes 31 as SP.
+/// in dynasm). Index 31 means SP — XZR is **not** valid in this slot.
+///
+/// Use this wherever the encoding decodes register 31 as SP rather than XZR
+/// (currently the immediate-form ADDS/SUBS arms; the pre-existing ADD/SUB
+/// immediate arms have the same encoding shape and should migrate to this
+/// helper too — tracked as a follow-up).
+///
+/// We can't just call `reg.index().ok_or_else(...)` here: `Register::XZR`
+/// has `index() == Some(31)`, so a delegating implementation would silently
+/// alias XZR to SP in the Xn|SP slot, producing inverted semantics.
 fn register_to_dynasm_xsp(reg: Register) -> Result<u8, String> {
     match reg {
         Register::XZR => {
@@ -1178,6 +1189,52 @@ mod tests {
                     )
                 });
             assert_eq!(bytes.len(), 4);
+        }
+    }
+
+    /// Capstone round-trip for ADDS with SP as `rn` — guards against silent
+    /// off-by-one in the encoded slot. Capstone must disassemble back to
+    /// `adds` with `sp` in the rn position.
+    #[test]
+    fn test_adds_imm_sp_rn_roundtrip() {
+        let mut assembler = AArch64Assembler::new();
+        let bytes = assembler
+            .assemble_instructions(&[Instruction::Adds {
+                rd: Register::X0,
+                rn: Register::SP,
+                rm: Operand::Immediate(8),
+            }])
+            .expect("ADDS imm with SP rn should encode");
+        disassemble_and_verify(&bytes, "adds", &["x0", "sp", "#8"]);
+    }
+
+    /// Defense-in-depth: SP as `rd` for ADDS/SUBS is rejected. Architecturally,
+    /// the `rd` slot is `Xd|XZR` (decodes 31 as XZR), so dynasm's `X(31)`
+    /// maps to XZR — but `Register::SP` has `index() == None`, so
+    /// `register_to_dynasm(SP)` returns Err and the encoder bails early.
+    /// Test that this remains the case.
+    #[test]
+    fn test_adds_subs_imm_reject_sp_rd() {
+        let mut assembler = AArch64Assembler::new();
+        for instr in [
+            Instruction::Adds {
+                rd: Register::SP,
+                rn: Register::X0,
+                rm: Operand::Immediate(8),
+            },
+            Instruction::Subs {
+                rd: Register::SP,
+                rn: Register::X0,
+                rm: Operand::Immediate(8),
+            },
+        ] {
+            let result = assembler.assemble_instructions(&[instr]);
+            assert!(
+                result.is_err(),
+                "Expected encoder to reject SP as rd, got {:?} for {:?}",
+                result,
+                instr
+            );
         }
     }
 
