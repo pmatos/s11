@@ -390,24 +390,28 @@ fn parse_ror(operands: &[&str]) -> Result<Instruction, String> {
     Ok(Instruction::Ror { rd, rn, shift })
 }
 
-/// Parse MOVN instruction: `movn rd, #imm` or `movn rd, #imm, lsl #shift`.
-/// Operands are comma-split, so the LSL-with-shift form arrives as
-/// `["rd", "#imm", "lsl #shift"]` (3 entries, the third internally has the
-/// `lsl` keyword and the shift expression).
-fn parse_movn(operands: &[&str]) -> Result<Instruction, String> {
+/// Parse the operand list for a move-wide-immediate mnemonic (MOVN / MOVZ /
+/// MOVK). All three share the same operand grammar:
+/// `<mnem> rd, #imm` or `<mnem> rd, #imm, lsl #shift`. The `mnem` argument is
+/// used only in error messages so the diagnostic still names the original
+/// mnemonic the user typed.
+fn parse_movw_operands(mnem: &str, operands: &[&str]) -> Result<(Register, u16, u8), String> {
     if operands.len() != 2 && operands.len() != 3 {
         return Err(format!(
-            "movn requires 2 or 3 operands (rd, #imm[, lsl #shift]), got {}",
+            "{} requires 2 or 3 operands (rd, #imm[, lsl #shift]), got {}",
+            mnem,
             operands.len()
         ));
     }
     let rd = parse_register(operands[0])?;
     let imm_val = match parse_operand(operands[1])? {
         Operand::Immediate(v) => v,
-        Operand::Register(_) => return Err("movn second operand must be an immediate".to_string()),
+        Operand::Register(_) => {
+            return Err(format!("{} second operand must be an immediate", mnem));
+        }
     };
     if !(0..=0xFFFF).contains(&imm_val) {
-        return Err(format!("movn immediate {} out of u16 range", imm_val));
+        return Err(format!("{} immediate {} out of u16 range", mnem, imm_val));
     }
     let imm = imm_val as u16;
 
@@ -420,19 +424,42 @@ fn parse_movn(operands: &[&str]) -> Result<Instruction, String> {
         let kw = parts.next().unwrap_or("").trim();
         let rest = parts.next().unwrap_or("").trim();
         if !kw.eq_ignore_ascii_case("lsl") {
-            return Err(format!("movn shift form must be `lsl #N`, got `{}`", tail));
+            return Err(format!(
+                "{} shift form must be `lsl #N`, got `{}`",
+                mnem, tail
+            ));
         }
         let s = match parse_operand(rest)? {
             Operand::Immediate(v) => v,
-            Operand::Register(_) => return Err("movn shift must be an immediate".to_string()),
+            Operand::Register(_) => return Err(format!("{} shift must be an immediate", mnem)),
         };
         if !matches!(s, 0 | 16 | 32 | 48) {
-            return Err(format!("movn shift {} must be one of 0/16/32/48", s));
+            return Err(format!("{} shift {} must be one of 0/16/32/48", mnem, s));
         }
         s as u8
     };
 
+    Ok((rd, imm, shift))
+}
+
+/// Parse MOVN instruction: `movn rd, #imm` or `movn rd, #imm, lsl #shift`.
+fn parse_movn(operands: &[&str]) -> Result<Instruction, String> {
+    let (rd, imm, shift) = parse_movw_operands("movn", operands)?;
     Ok(Instruction::MovN { rd, imm, shift })
+}
+
+/// Parse MOVZ instruction: `movz rd, #imm` or `movz rd, #imm, lsl #shift`.
+fn parse_movz(operands: &[&str]) -> Result<Instruction, String> {
+    let (rd, imm, shift) = parse_movw_operands("movz", operands)?;
+    Ok(Instruction::MovZ { rd, imm, shift })
+}
+
+/// Parse MOVK instruction: `movk rd, #imm` or `movk rd, #imm, lsl #shift`.
+/// MOVK preserves the unmodified 16-bit lanes of rd, so callers must treat
+/// rd as live-in.
+fn parse_movk(operands: &[&str]) -> Result<Instruction, String> {
+    let (rd, imm, shift) = parse_movw_operands("movk", operands)?;
+    Ok(Instruction::MovK { rd, imm, shift })
 }
 
 /// Parse ADD instruction
@@ -730,6 +757,8 @@ pub fn parse_line(line: &str) -> Result<LineResult, ParseLineError> {
         "neg" => parse_neg(&operands).map_err(ParseLineError::Other)?,
         "negs" => parse_negs(&operands).map_err(ParseLineError::Other)?,
         "movn" => parse_movn(&operands).map_err(ParseLineError::Other)?,
+        "movz" => parse_movz(&operands).map_err(ParseLineError::Other)?,
+        "movk" => parse_movk(&operands).map_err(ParseLineError::Other)?,
         "bic" => parse_bic(&operands).map_err(ParseLineError::Other)?,
         "bics" => parse_bics(&operands).map_err(ParseLineError::Other)?,
         "orn" => parse_orn(&operands).map_err(ParseLineError::Other)?,
@@ -1161,8 +1190,9 @@ mod tests {
     fn parse_line_wrong_arity_reaches_each_parser_error() {
         for mnemonic in [
             "mov", "mvn", "neg", "negs", "bic", "bics", "orn", "eon", "adds", "subs", "ands",
-            "cset", "csetm", "ror", "movn", "add", "sub", "and", "orr", "eor", "lsl", "lsr", "asr",
-            "mul", "sdiv", "udiv", "cmp", "cmn", "tst", "csel", "csinc", "csinv", "csneg",
+            "cset", "csetm", "ror", "movn", "movz", "movk", "add", "sub", "and", "orr", "eor",
+            "lsl", "lsr", "asr", "mul", "sdiv", "udiv", "cmp", "cmn", "tst", "csel", "csinc",
+            "csinv", "csneg",
         ] {
             assert!(
                 matches!(parse_line(mnemonic), Err(ParseLineError::Other(_))),
@@ -1185,6 +1215,43 @@ mod tests {
             "movn x0, #1, asr #16",
             "movn x0, #1, lsl x2",
             "movn x0, #1, lsl #8",
+        ] {
+            assert!(parse_line(line).is_err(), "{} should fail", line);
+        }
+    }
+
+    #[test]
+    fn parse_movz_and_movk_accept_canonical_forms() {
+        let cases = [
+            ("movz x0, #0x1234", "movz x0, #4660"),
+            ("movz x0, #0xFFFF, lsl #48", "movz x0, #65535, lsl #48"),
+            ("movk x1, #0", "movk x1, #0"),
+            ("movk x1, #0x5678, lsl #16", "movk x1, #22136, lsl #16"),
+        ];
+        for (line, display) in cases {
+            let parsed = match parse_line(line).unwrap() {
+                LineResult::Instruction(instr) => instr,
+                LineResult::Skip => panic!("unexpected skip for {}", line),
+            };
+            assert_eq!(format!("{}", parsed), display);
+        }
+    }
+
+    #[test]
+    fn parse_movz_and_movk_reject_bad_forms() {
+        // Same grammar as MOVN: out-of-range imm, illegal shift, illegal
+        // shift kind, register shift operand, and missing operands all fail.
+        for line in [
+            "movz x0",
+            "movk x0",
+            "movz x0, x1",
+            "movk x0, x1",
+            "movz x0, #65536",
+            "movk x0, #65536",
+            "movz x0, #1, lsl #8",
+            "movk x0, #1, lsl #24",
+            "movz x0, #1, asr #16",
+            "movk x0, #1, lsl x2",
         ] {
             assert!(parse_line(line).is_err(), "{} should fail", line);
         }

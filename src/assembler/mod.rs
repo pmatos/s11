@@ -438,6 +438,30 @@ impl AArch64Assembler {
                 }
                 Ok(())
             }
+            Instruction::MovZ { rd, imm, shift } => {
+                let rd_reg = register_to_dynasm(*rd)?;
+                let imm = *imm as u32;
+                match shift {
+                    0 => dynasm!(ops ; .arch aarch64 ; movz X(rd_reg), imm),
+                    16 => dynasm!(ops ; .arch aarch64 ; movz X(rd_reg), imm, lsl #16),
+                    32 => dynasm!(ops ; .arch aarch64 ; movz X(rd_reg), imm, lsl #32),
+                    48 => dynasm!(ops ; .arch aarch64 ; movz X(rd_reg), imm, lsl #48),
+                    other => return Err(format!("MOVZ shift {} out of range", other)),
+                }
+                Ok(())
+            }
+            Instruction::MovK { rd, imm, shift } => {
+                let rd_reg = register_to_dynasm(*rd)?;
+                let imm = *imm as u32;
+                match shift {
+                    0 => dynasm!(ops ; .arch aarch64 ; movk X(rd_reg), imm),
+                    16 => dynasm!(ops ; .arch aarch64 ; movk X(rd_reg), imm, lsl #16),
+                    32 => dynasm!(ops ; .arch aarch64 ; movk X(rd_reg), imm, lsl #32),
+                    48 => dynasm!(ops ; .arch aarch64 ; movk X(rd_reg), imm, lsl #48),
+                    other => return Err(format!("MOVK shift {} out of range", other)),
+                }
+                Ok(())
+            }
             Instruction::Bic { rd, rn, rm } => {
                 let rd_reg = register_to_dynasm(*rd)?;
                 let rn_reg = register_to_dynasm(*rn)?;
@@ -1472,6 +1496,46 @@ mod tests {
                 imm: 3,
                 shift: 48,
             },
+            Instruction::MovZ {
+                rd: Register::X0,
+                imm: 0xABCD,
+                shift: 0,
+            },
+            Instruction::MovZ {
+                rd: Register::X0,
+                imm: 0xABCD,
+                shift: 16,
+            },
+            Instruction::MovZ {
+                rd: Register::X0,
+                imm: 0xABCD,
+                shift: 32,
+            },
+            Instruction::MovZ {
+                rd: Register::X0,
+                imm: 0xABCD,
+                shift: 48,
+            },
+            Instruction::MovK {
+                rd: Register::X0,
+                imm: 0xABCD,
+                shift: 0,
+            },
+            Instruction::MovK {
+                rd: Register::X0,
+                imm: 0xABCD,
+                shift: 16,
+            },
+            Instruction::MovK {
+                rd: Register::X0,
+                imm: 0xABCD,
+                shift: 32,
+            },
+            Instruction::MovK {
+                rd: Register::X0,
+                imm: 0xABCD,
+                shift: 48,
+            },
             Instruction::Bic {
                 rd: Register::X0,
                 rn: Register::X1,
@@ -1596,6 +1660,16 @@ mod tests {
                 rd: Register::X0,
                 imm: 1,
                 shift: 8,
+            },
+            Instruction::MovZ {
+                rd: Register::X0,
+                imm: 1,
+                shift: 8,
+            },
+            Instruction::MovK {
+                rd: Register::X0,
+                imm: 1,
+                shift: 24,
             },
             Instruction::Bic {
                 rd: Register::X0,

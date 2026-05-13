@@ -141,6 +141,20 @@ pub enum Instruction {
         imm: u16,
         shift: u8,
     },
+    // Move-wide-zero immediate: rd = (imm as u64) << shift, shift ∈ {0,16,32,48}
+    MovZ {
+        rd: Register,
+        imm: u16,
+        shift: u8,
+    },
+    // Move-wide-keep immediate: writes one 16-bit chunk, preserving the rest.
+    // rd = (rd & ~(0xFFFF << shift)) | ((imm as u64) << shift), shift ∈ {0,16,32,48}.
+    // Unlike MovN/MovZ this reads rd, so the rd register must be live-in.
+    MovK {
+        rd: Register,
+        imm: u16,
+        shift: u8,
+    },
 
     // Inverted-logical (second operand bitwise-NOTed before the op)
     Bic {
@@ -226,6 +240,8 @@ impl Instruction {
             | Instruction::Neg { rd, .. }
             | Instruction::Negs { rd, .. }
             | Instruction::MovN { rd, .. }
+            | Instruction::MovZ { rd, .. }
+            | Instruction::MovK { rd, .. }
             | Instruction::Bic { rd, .. }
             | Instruction::Bics { rd, .. }
             | Instruction::Orn { rd, .. }
@@ -332,8 +348,11 @@ impl Instruction {
             // MVN / NEG / NEGS: always encodable (register-only)
             Instruction::Mvn { .. } | Instruction::Neg { .. } | Instruction::Negs { .. } => true,
 
-            // MOVN: shift must be one of {0, 16, 32, 48}; u16 imm is always in range.
-            Instruction::MovN { shift, .. } => matches!(shift, 0 | 16 | 32 | 48),
+            // MOVN / MOVZ / MOVK: shift must be one of {0, 16, 32, 48};
+            // u16 imm is always in range.
+            Instruction::MovN { shift, .. }
+            | Instruction::MovZ { shift, .. }
+            | Instruction::MovK { shift, .. } => matches!(shift, 0 | 16 | 32 | 48),
 
             // BIC / BICS / ORN / EON: register-only (matching AND precedent).
             Instruction::Bic { rm, .. }
@@ -411,8 +430,10 @@ impl Instruction {
             Instruction::Mvn { rm, .. }
             | Instruction::Neg { rm, .. }
             | Instruction::Negs { rm, .. } => vec![*rm],
-            // MOVN takes no register source
-            Instruction::MovN { .. } => vec![],
+            // MOVN / MOVZ take no register source
+            Instruction::MovN { .. } | Instruction::MovZ { .. } => vec![],
+            // MOVK reads rd (preserves the unmodified 16-bit lanes)
+            Instruction::MovK { rd, .. } => vec![*rd],
             // Inverted-logical (BIC / BICS / ORN / EON) and flag-setting arith/logical
             Instruction::Bic { rn, rm, .. }
             | Instruction::Bics { rn, rm, .. }
@@ -482,6 +503,20 @@ impl fmt::Display for Instruction {
                     write!(f, "movn {}, #{}", rd, imm)
                 } else {
                     write!(f, "movn {}, #{}, lsl #{}", rd, imm, shift)
+                }
+            }
+            Instruction::MovZ { rd, imm, shift } => {
+                if *shift == 0 {
+                    write!(f, "movz {}, #{}", rd, imm)
+                } else {
+                    write!(f, "movz {}, #{}, lsl #{}", rd, imm, shift)
+                }
+            }
+            Instruction::MovK { rd, imm, shift } => {
+                if *shift == 0 {
+                    write!(f, "movk {}, #{}", rd, imm)
+                } else {
+                    write!(f, "movk {}, #{}, lsl #{}", rd, imm, shift)
                 }
             }
             Instruction::Bic { rd, rn, rm } => write!(f, "bic {}, {}, {}", rd, rn, rm),
@@ -934,6 +969,16 @@ mod tests {
                 rd: Register::X0,
                 imm: 1,
                 shift: 16,
+            },
+            Instruction::MovZ {
+                rd: Register::X0,
+                imm: 1,
+                shift: 32,
+            },
+            Instruction::MovK {
+                rd: Register::X0,
+                imm: 1,
+                shift: 48,
             },
             Instruction::Bic {
                 rd: Register::X0,

@@ -243,6 +243,20 @@ pub fn apply_instruction(mut state: MachineState, instruction: &Instruction) -> 
             let value = !((*imm as u64) << (*shift as u32));
             state.set_register(*rd, BV::from_u64(value, 64));
         }
+        Instruction::MovZ { rd, imm, shift } => {
+            let value = (*imm as u64) << (*shift as u32);
+            state.set_register(*rd, BV::from_u64(value, 64));
+        }
+        // MOVK keeps the 48 unwritten bits of rd. Encode as
+        // `(rd_old & ~mask) | new_chunk` so the solver sees the data-flow
+        // dependence on the prior rd value.
+        Instruction::MovK { rd, imm, shift } => {
+            let prev = state.get_register(*rd).clone();
+            let mask = BV::from_u64(!(0xFFFF_u64 << (*shift as u32)), 64);
+            let new_chunk = BV::from_u64((*imm as u64) << (*shift as u32), 64);
+            let result = prev.bvand(&mask).bvor(&new_chunk);
+            state.set_register(*rd, result);
+        }
         // BIC: rd = rn & !rm. BICS shares the SMT body — the flag effect is
         // not modelled (matches CMP/CMN/TST and ADDS/SUBS/ANDS). The
         // soundness barrier lives in `equivalence::flag_writers_diverge`,

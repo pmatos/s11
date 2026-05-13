@@ -187,6 +187,18 @@ pub fn apply_instruction_concrete(
             let value = !((*imm as u64) << (*shift as u32));
             state.set_register(*rd, ConcreteValue::new(value));
         }
+        // MOVZ: rd = (imm as u64) << shift (other lanes cleared to zero)
+        Instruction::MovZ { rd, imm, shift } => {
+            let value = (*imm as u64) << (*shift as u32);
+            state.set_register(*rd, ConcreteValue::new(value));
+        }
+        // MOVK: write one 16-bit chunk of rd, preserving the others.
+        Instruction::MovK { rd, imm, shift } => {
+            let prev = state.get_register(*rd).as_u64();
+            let mask = !(0xFFFF_u64 << (*shift as u32));
+            let value = (prev & mask) | ((*imm as u64) << (*shift as u32));
+            state.set_register(*rd, ConcreteValue::new(value));
+        }
         // BIC: rd = rn & !rm
         Instruction::Bic { rd, rn, rm } => {
             let lhs = state.get_register(*rn).as_u64();
@@ -1056,6 +1068,66 @@ mod tests {
                 case.imm,
                 case.shift,
                 case.expected
+            );
+        }
+    }
+
+    #[test]
+    fn test_movz_concrete_lifts_imm_into_shifted_chunk() {
+        let cases: [(u16, u8, u64); 4] = [
+            (0xABCD, 0, 0xABCD),
+            (0x1234, 16, 0x1234_0000),
+            (0x5678, 32, 0x5678_0000_0000),
+            (0xFFFF, 48, 0xFFFF_0000_0000_0000),
+        ];
+        for (imm, shift, expected) in cases {
+            let state = ConcreteMachineState::new_zeroed();
+            let instr = Instruction::MovZ {
+                rd: Register::X0,
+                imm,
+                shift,
+            };
+            let new_state = apply_instruction_concrete(state, &instr);
+            assert_eq!(
+                new_state.get_register(Register::X0).as_u64(),
+                expected,
+                "MOVZ(#{:#x}, lsl #{}) should be {:#x}",
+                imm,
+                shift,
+                expected
+            );
+        }
+    }
+
+    #[test]
+    fn test_movk_concrete_preserves_unwritten_lanes() {
+        // Pre-seed x0 with a known full 64-bit pattern; MOVK should rewrite
+        // exactly one 16-bit lane and leave the others untouched.
+        let mut state = ConcreteMachineState::new_zeroed();
+        state.set_register(
+            Register::X0,
+            crate::semantics::state::ConcreteValue::new(0x1111_2222_3333_4444),
+        );
+        let cases: [(u16, u8, u64); 4] = [
+            (0xAAAA, 0, 0x1111_2222_3333_AAAA),
+            (0xBBBB, 16, 0x1111_2222_BBBB_4444),
+            (0xCCCC, 32, 0x1111_CCCC_3333_4444),
+            (0xDDDD, 48, 0xDDDD_2222_3333_4444),
+        ];
+        for (imm, shift, expected) in cases {
+            let instr = Instruction::MovK {
+                rd: Register::X0,
+                imm,
+                shift,
+            };
+            let new_state = apply_instruction_concrete(state.clone(), &instr);
+            assert_eq!(
+                new_state.get_register(Register::X0).as_u64(),
+                expected,
+                "MOVK(#{:#x}, lsl #{}) should be {:#x}",
+                imm,
+                shift,
+                expected
             );
         }
     }
