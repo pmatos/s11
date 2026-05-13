@@ -198,6 +198,14 @@ pub fn generate_random_instruction<R: rand::RngExt>(
             let rm = random_operand(rng, registers, immediates);
             Instruction::Sub { rd, rn, rm }
         }
+        // AND / ORR / EOR are deliberately register-only here. AArch64's
+        // bitmask-immediate encoding for these is not supported by the
+        // assembler (see `src/assembler/mod.rs:139-156` — `Err("...
+        // immediate encoding not yet supported")` for the immediate arm),
+        // so any `Operand::Immediate` candidate would be silently rejected
+        // at encoding time. Picking only register-form here keeps the
+        // stochastic search emitting candidates the encoder actually
+        // accepts.
         4 => {
             let rn = pick_reg(rng);
             let rm = Operand::Register(pick_reg(rng));
