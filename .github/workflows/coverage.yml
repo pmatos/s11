@@ -10,6 +10,8 @@ env:
   CARGO_TERM_COLOR: always
   # Avoid incremental compilation for more reliable coverage data and smaller caches.
   CARGO_INCREMENTAL: 0
+  # Fail the build on any warning so unused imports / dead code can't slip in.
+  RUSTFLAGS: "-D warnings"
 
 jobs:
   coverage:

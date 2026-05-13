@@ -811,7 +811,6 @@ impl InstructionGenerator<RiscVInstruction> for RiscVInstructionGenerator {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::isa::InstructionType as _;
     use rand::SeedableRng;
     use rand_chacha::ChaCha8Rng;
 
