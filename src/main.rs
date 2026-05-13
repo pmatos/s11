@@ -1893,6 +1893,38 @@ mod cli_helper_tests {
     use search::llm::ledger::UnsupportedMnemonicLedger;
     use search::result::SearchStatistics;
     use std::fs;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    static TEMP_ASM_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+    struct TempAsm {
+        path: PathBuf,
+    }
+
+    impl TempAsm {
+        fn new(name: &str, content: &str) -> Self {
+            let id = TEMP_ASM_COUNTER.fetch_add(1, Ordering::Relaxed);
+            let path = std::env::temp_dir().join(format!(
+                "s11-{}-{}-{}-{}.s",
+                name,
+                std::process::id(),
+                std::thread::current().name().unwrap_or("test"),
+                id
+            ));
+            fs::write(&path, content).unwrap();
+            Self { path }
+        }
+
+        fn path(&self) -> &Path {
+            &self.path
+        }
+    }
+
+    impl Drop for TempAsm {
+        fn drop(&mut self) {
+            let _ = fs::remove_file(&self.path);
+        }
+    }
 
     fn options_for(algorithm: Algorithm) -> OptimizationOptions {
         OptimizationOptions {
@@ -1910,17 +1942,6 @@ mod cli_helper_tests {
             llm_max_calls: 0,
             llm_model: "test-model".to_string(),
         }
-    }
-
-    fn temp_asm(name: &str, content: &str) -> PathBuf {
-        let path = std::env::temp_dir().join(format!(
-            "s11-{}-{}-{}.s",
-            name,
-            std::process::id(),
-            std::thread::current().name().unwrap_or("test")
-        ));
-        fs::write(&path, content).unwrap();
-        path
     }
 
     #[test]
@@ -2121,15 +2142,11 @@ mod cli_helper_tests {
 
     #[test]
     fn run_equiv_and_llm_opt_accept_equivalent_tiny_files() {
-        let asm1 = temp_asm("equiv-a", "mov x0, x1\n");
-        let asm2 = temp_asm("equiv-b", "mov x0, x1\n");
-        run_equiv(&asm1, &asm2, "x0", 1, true, true).unwrap();
+        let asm1 = TempAsm::new("equiv-a", "mov x0, x1\n");
+        let asm2 = TempAsm::new("equiv-b", "mov x0, x1\n");
+        run_equiv(asm1.path(), asm2.path(), "x0", 1, true, true).unwrap();
 
-        let llm_asm = temp_asm("llm", "mov x0, x1\n");
-        run_llm_opt(&llm_asm, "x0", 0, "test-model", 0, true).unwrap();
-
-        fs::remove_file(asm1).unwrap();
-        fs::remove_file(asm2).unwrap();
-        fs::remove_file(llm_asm).unwrap();
+        let llm_asm = TempAsm::new("llm", "mov x0, x1\n");
+        run_llm_opt(llm_asm.path(), "x0", 0, "test-model", 0, true).unwrap();
     }
 }
