@@ -414,6 +414,42 @@ impl AArch64Assembler {
                 dynasm!(ops ; .arch aarch64 ; mvn X(rd_reg), X(rm_reg));
                 Ok(())
             }
+            Instruction::Clz { rd, rn } => {
+                let rd_reg = register_to_dynasm(*rd)?;
+                let rn_reg = register_to_dynasm(*rn)?;
+                dynasm!(ops ; .arch aarch64 ; clz X(rd_reg), X(rn_reg));
+                Ok(())
+            }
+            Instruction::Cls { rd, rn } => {
+                let rd_reg = register_to_dynasm(*rd)?;
+                let rn_reg = register_to_dynasm(*rn)?;
+                dynasm!(ops ; .arch aarch64 ; cls X(rd_reg), X(rn_reg));
+                Ok(())
+            }
+            Instruction::Rbit { rd, rn } => {
+                let rd_reg = register_to_dynasm(*rd)?;
+                let rn_reg = register_to_dynasm(*rn)?;
+                dynasm!(ops ; .arch aarch64 ; rbit X(rd_reg), X(rn_reg));
+                Ok(())
+            }
+            Instruction::Rev { rd, rn } => {
+                let rd_reg = register_to_dynasm(*rd)?;
+                let rn_reg = register_to_dynasm(*rn)?;
+                dynasm!(ops ; .arch aarch64 ; rev X(rd_reg), X(rn_reg));
+                Ok(())
+            }
+            Instruction::Rev32 { rd, rn } => {
+                let rd_reg = register_to_dynasm(*rd)?;
+                let rn_reg = register_to_dynasm(*rn)?;
+                dynasm!(ops ; .arch aarch64 ; rev32 X(rd_reg), X(rn_reg));
+                Ok(())
+            }
+            Instruction::Rev16 { rd, rn } => {
+                let rd_reg = register_to_dynasm(*rd)?;
+                let rn_reg = register_to_dynasm(*rn)?;
+                dynasm!(ops ; .arch aarch64 ; rev16 X(rd_reg), X(rn_reg));
+                Ok(())
+            }
             Instruction::Neg { rd, rm } => {
                 let rd_reg = register_to_dynasm(*rd)?;
                 let rm_reg = register_to_dynasm(*rm)?;
@@ -1733,5 +1769,62 @@ mod tests {
         }
         assert!(register_to_dynasm(Register::SP).is_err());
         assert_eq!(register_to_dynasm_xsp(Register::SP).unwrap(), 31);
+    }
+
+    #[test]
+    fn test_bit_manipulation_encoders_roundtrip() {
+        let cases: &[(Instruction, &str)] = &[
+            (
+                Instruction::Clz {
+                    rd: Register::X0,
+                    rn: Register::X1,
+                },
+                "clz",
+            ),
+            (
+                Instruction::Cls {
+                    rd: Register::X2,
+                    rn: Register::X3,
+                },
+                "cls",
+            ),
+            (
+                Instruction::Rbit {
+                    rd: Register::X4,
+                    rn: Register::X5,
+                },
+                "rbit",
+            ),
+            (
+                Instruction::Rev {
+                    rd: Register::X6,
+                    rn: Register::X7,
+                },
+                "rev",
+            ),
+            (
+                Instruction::Rev32 {
+                    rd: Register::X8,
+                    rn: Register::X9,
+                },
+                "rev32",
+            ),
+            (
+                Instruction::Rev16 {
+                    rd: Register::X10,
+                    rn: Register::X11,
+                },
+                "rev16",
+            ),
+        ];
+        for (instr, mnemonic) in cases {
+            let mut assembler = AArch64Assembler::new();
+            let bytes = assembler
+                .assemble_instructions(std::slice::from_ref(instr))
+                .unwrap_or_else(|e| panic!("{} encoding should succeed: {}", mnemonic, e));
+            let rd = instr.destination().unwrap().to_string();
+            let rn = instr.source_registers()[0].to_string();
+            disassemble_and_verify(&bytes, mnemonic, &[&rd, &rn]);
+        }
     }
 }

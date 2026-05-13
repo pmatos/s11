@@ -137,6 +137,16 @@ pub fn generate_all_instructions(registers: &[Register], immediates: &[i64]) -> 
             instrs.push(Instruction::Negs { rd, rm });
         }
 
+        // Single-source bit-manipulation: CLZ / CLS / RBIT / REV / REV32 / REV16.
+        for &rn in registers {
+            instrs.push(Instruction::Clz { rd, rn });
+            instrs.push(Instruction::Cls { rd, rn });
+            instrs.push(Instruction::Rbit { rd, rn });
+            instrs.push(Instruction::Rev { rd, rn });
+            instrs.push(Instruction::Rev32 { rd, rn });
+            instrs.push(Instruction::Rev16 { rd, rn });
+        }
+
         // MOVN / MOVZ / MOVK: small representative imm set × four legal shift
         // positions. Keep this small — the full u16 × 4-shift space would
         // balloon the candidate count. The same parsimony rationale applies
@@ -178,7 +188,7 @@ pub fn generate_random_instruction<R: rand::RngExt>(
     let rd = registers[rng.random_range(0..registers.len())];
     let pick_reg = |rng: &mut R| registers[rng.random_range(0..registers.len())];
 
-    match rng.random_range(0..26) {
+    match rng.random_range(0..27) {
         0 => {
             let imm = if immediates.is_empty() {
                 0
@@ -313,11 +323,23 @@ pub fn generate_random_instruction<R: rand::RngExt>(
             let shift = shifts[rng.random_range(0..shifts.len())];
             Instruction::MovZ { rd, imm, shift }
         }
-        _ => {
+        25 => {
             let imm = (rng.random::<u32>() & 0xFFFF) as u16;
             let shifts = MOVW_LEGAL_SHIFTS;
             let shift = shifts[rng.random_range(0..shifts.len())];
             Instruction::MovK { rd, imm, shift }
+        }
+        // Single-source bit-manipulation: CLZ / CLS / RBIT / REV / REV32 / REV16.
+        _ => {
+            let rn = pick_reg(rng);
+            match rng.random_range(0..6) {
+                0 => Instruction::Clz { rd, rn },
+                1 => Instruction::Cls { rd, rn },
+                2 => Instruction::Rbit { rd, rn },
+                3 => Instruction::Rev { rd, rn },
+                4 => Instruction::Rev32 { rd, rn },
+                _ => Instruction::Rev16 { rd, rn },
+            }
         }
     }
 }
@@ -402,6 +424,12 @@ pub fn opcode_id(instr: &Instruction) -> u8 {
         Instruction::Ror { .. } => 33,
         Instruction::MovZ { .. } => 34,
         Instruction::MovK { .. } => 35,
+        Instruction::Clz { .. } => 36,
+        Instruction::Cls { .. } => 37,
+        Instruction::Rbit { .. } => 38,
+        Instruction::Rev { .. } => 39,
+        Instruction::Rev32 { .. } => 40,
+        Instruction::Rev16 { .. } => 41,
     }
 }
 

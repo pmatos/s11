@@ -263,6 +263,23 @@ fn parse_mvn(operands: &[&str]) -> Result<Instruction, String> {
     Ok(Instruction::Mvn { rd, rm })
 }
 
+/// Parse a single-source bit-manipulation instruction (CLZ/CLS/RBIT/REV/REV32/REV16).
+fn parse_unary_rd_rn<F>(mnemonic: &str, operands: &[&str], build: F) -> Result<Instruction, String>
+where
+    F: FnOnce(Register, Register) -> Instruction,
+{
+    if operands.len() != 2 {
+        return Err(format!(
+            "{} requires 2 operands, got {}",
+            mnemonic,
+            operands.len()
+        ));
+    }
+    let rd = parse_register(operands[0])?;
+    let rn = parse_register(operands[1])?;
+    Ok(build(rd, rn))
+}
+
 /// Parse NEG instruction
 fn parse_neg(operands: &[&str]) -> Result<Instruction, String> {
     if operands.len() != 2 {
@@ -771,6 +788,18 @@ pub fn parse_line(line: &str) -> Result<LineResult, ParseLineError> {
         "cset" => parse_cset(&operands).map_err(ParseLineError::Other)?,
         "csetm" => parse_csetm(&operands).map_err(ParseLineError::Other)?,
         "ror" => parse_ror(&operands).map_err(ParseLineError::Other)?,
+        "clz" => parse_unary_rd_rn("clz", &operands, |rd, rn| Instruction::Clz { rd, rn })
+            .map_err(ParseLineError::Other)?,
+        "cls" => parse_unary_rd_rn("cls", &operands, |rd, rn| Instruction::Cls { rd, rn })
+            .map_err(ParseLineError::Other)?,
+        "rbit" => parse_unary_rd_rn("rbit", &operands, |rd, rn| Instruction::Rbit { rd, rn })
+            .map_err(ParseLineError::Other)?,
+        "rev" => parse_unary_rd_rn("rev", &operands, |rd, rn| Instruction::Rev { rd, rn })
+            .map_err(ParseLineError::Other)?,
+        "rev32" => parse_unary_rd_rn("rev32", &operands, |rd, rn| Instruction::Rev32 { rd, rn })
+            .map_err(ParseLineError::Other)?,
+        "rev16" => parse_unary_rd_rn("rev16", &operands, |rd, rn| Instruction::Rev16 { rd, rn })
+            .map_err(ParseLineError::Other)?,
         _ => return Err(ParseLineError::UnknownInstruction(opcode)),
     };
 
@@ -1194,7 +1223,7 @@ mod tests {
             "mov", "mvn", "neg", "negs", "bic", "bics", "orn", "eon", "adds", "subs", "ands",
             "cset", "csetm", "ror", "movn", "movz", "movk", "add", "sub", "and", "orr", "eor",
             "lsl", "lsr", "asr", "mul", "sdiv", "udiv", "cmp", "cmn", "tst", "csel", "csinc",
-            "csinv", "csneg",
+            "csinv", "csneg", "clz", "cls", "rbit", "rev", "rev32", "rev16",
         ] {
             assert!(
                 matches!(parse_line(mnemonic), Err(ParseLineError::Other(_))),

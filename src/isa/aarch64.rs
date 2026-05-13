@@ -139,6 +139,12 @@ impl InstructionType for Instruction {
             Instruction::Ror { .. } => 33,
             Instruction::MovZ { .. } => 34,
             Instruction::MovK { .. } => 35,
+            Instruction::Clz { .. } => 36,
+            Instruction::Cls { .. } => 37,
+            Instruction::Rbit { .. } => 38,
+            Instruction::Rev { .. } => 39,
+            Instruction::Rev32 { .. } => 40,
+            Instruction::Rev16 { .. } => 41,
         }
     }
 
@@ -179,6 +185,12 @@ impl InstructionType for Instruction {
             Instruction::Ror { .. } => "ror",
             Instruction::MovZ { .. } => "movz",
             Instruction::MovK { .. } => "movk",
+            Instruction::Clz { .. } => "clz",
+            Instruction::Cls { .. } => "cls",
+            Instruction::Rbit { .. } => "rbit",
+            Instruction::Rev { .. } => "rev",
+            Instruction::Rev32 { .. } => "rev32",
+            Instruction::Rev16 { .. } => "rev16",
         }
     }
 
@@ -333,6 +345,16 @@ impl InstructionGenerator<Instruction> for AArch64InstructionGenerator {
                 instructions.push(Instruction::Negs { rd, rm });
             }
 
+            // Single-source bit-manipulation: CLZ / CLS / RBIT / REV / REV32 / REV16.
+            for &rn in registers {
+                instructions.push(Instruction::Clz { rd, rn });
+                instructions.push(Instruction::Cls { rd, rn });
+                instructions.push(Instruction::Rbit { rd, rn });
+                instructions.push(Instruction::Rev { rd, rn });
+                instructions.push(Instruction::Rev32 { rd, rn });
+                instructions.push(Instruction::Rev16 { rd, rn });
+            }
+
             // MOVN / MOVZ / MOVK: small representative imm × {0,16,32,48}
             // shift table. The same parsimony rationale as MOVN applies for
             // MOVZ/MOVK — the full u16 × 4-shift space would balloon
@@ -361,10 +383,11 @@ impl InstructionGenerator<Instruction> for AArch64InstructionGenerator {
         registers: &[Register],
         immediates: &[i64],
     ) -> Instruction {
-        // 26 opcode slots: 0..13 original, 13..23 Tier 1 (slot 23 is a
+        // 27 opcode slots: 0..13 original, 13..23 Tier 1 (slot 23 is a
         // 4-way sub-multiplexer for ANDS/CSET/CSETM/ROR), 24 = MOVZ,
-        // 25 = MOVK.
-        let opcode = rng.random_range(0..26);
+        // 25 = MOVK, 26 = single-source bit-manipulation (CLZ/CLS/RBIT/REV*)
+        // 6-way sub-multiplexer.
+        let opcode = rng.random_range(0..27);
         let rd = registers[rng.random_range(0..registers.len())];
         let rn = registers[rng.random_range(0..registers.len())];
         let pick_reg = |rng: &mut R| registers[rng.random_range(0..registers.len())];
@@ -524,6 +547,18 @@ impl InstructionGenerator<Instruction> for AArch64InstructionGenerator {
                     shift: shifts[rng.random_range(0..shifts.len())],
                 }
             }
+            // Single-source bit-manipulation: CLZ / CLS / RBIT / REV / REV32 / REV16.
+            26 => {
+                let rn = pick_reg(rng);
+                match rng.random_range(0..6) {
+                    0 => Instruction::Clz { rd, rn },
+                    1 => Instruction::Cls { rd, rn },
+                    2 => Instruction::Rbit { rd, rn },
+                    3 => Instruction::Rev { rd, rn },
+                    4 => Instruction::Rev32 { rd, rn },
+                    _ => Instruction::Rev16 { rd, rn },
+                }
+            }
             _ => unreachable!(),
         }
     }
@@ -633,6 +668,12 @@ impl InstructionGenerator<Instruction> for AArch64InstructionGenerator {
                         rn,
                         shift,
                     },
+                    Instruction::Clz { rn, .. } => Instruction::Clz { rd: new_rd, rn },
+                    Instruction::Cls { rn, .. } => Instruction::Cls { rd: new_rd, rn },
+                    Instruction::Rbit { rn, .. } => Instruction::Rbit { rd: new_rd, rn },
+                    Instruction::Rev { rn, .. } => Instruction::Rev { rd: new_rd, rn },
+                    Instruction::Rev32 { rn, .. } => Instruction::Rev32 { rd: new_rd, rn },
+                    Instruction::Rev16 { rn, .. } => Instruction::Rev16 { rd: new_rd, rn },
                 }
             }
             2 => {
@@ -859,6 +900,30 @@ impl InstructionGenerator<Instruction> for AArch64InstructionGenerator {
                             shift: new_shift,
                         }
                     }
+                    Instruction::Clz { rd, .. } => Instruction::Clz {
+                        rd,
+                        rn: registers[rng.random_range(0..registers.len())],
+                    },
+                    Instruction::Cls { rd, .. } => Instruction::Cls {
+                        rd,
+                        rn: registers[rng.random_range(0..registers.len())],
+                    },
+                    Instruction::Rbit { rd, .. } => Instruction::Rbit {
+                        rd,
+                        rn: registers[rng.random_range(0..registers.len())],
+                    },
+                    Instruction::Rev { rd, .. } => Instruction::Rev {
+                        rd,
+                        rn: registers[rng.random_range(0..registers.len())],
+                    },
+                    Instruction::Rev32 { rd, .. } => Instruction::Rev32 {
+                        rd,
+                        rn: registers[rng.random_range(0..registers.len())],
+                    },
+                    Instruction::Rev16 { rd, .. } => Instruction::Rev16 {
+                        rd,
+                        rn: registers[rng.random_range(0..registers.len())],
+                    },
                 }
             }
             _ => unreachable!(),
@@ -867,14 +932,17 @@ impl InstructionGenerator<Instruction> for AArch64InstructionGenerator {
 
     /// Total number of distinct opcode *families* (the upper bound on
     /// `opcode_id()`). Not the same as `generate_random`'s slot count —
-    /// `generate_random` samples 26 top-level slots and folds ANDS, CSET,
-    /// CSETM, and ROR into a sub-multiplexer on slot 23 to keep the slot
-    /// table small. So `opcode_id < opcode_count` always holds, but the
-    /// random-generation distribution is not uniform across all 36 IDs.
+    /// `generate_random` samples 27 top-level slots and folds ANDS, CSET,
+    /// CSETM, and ROR into a sub-multiplexer on slot 23 (plus the six
+    /// single-source bit-manipulation ops into a sub-multiplexer on slot 26)
+    /// to keep the slot table small. So `opcode_id < opcode_count` always
+    /// holds, but the random-generation distribution is not uniform across
+    /// all 42 IDs.
     fn opcode_count(&self) -> u8 {
-        36 // 20 original + 14 Tier 1 (MVN, NEG, NEGS, MovN, BIC, BICS, ORN, EON,
-        //                          ADDS, SUBS, ANDS, CSET, CSETM, ROR)
-        //                          + 2 MOVK/MOVZ (issue #55).
+        42 // 20 original + 14 Tier 1 (MVN, NEG, NEGS, MovN, BIC, BICS, ORN,
+        //  EON, ADDS, SUBS, ANDS, CSET, CSETM, ROR) + 2 MOVK/MOVZ (issue
+        //  #55) + 6 single-source bit-manipulation (CLZ, CLS, RBIT, REV,
+        //  REV32, REV16).
     }
 }
 
@@ -1108,6 +1176,30 @@ mod tests {
                 rd: Register::X0,
                 rn: Register::X1,
                 shift: Operand::Immediate(8),
+            },
+            Instruction::Clz {
+                rd: Register::X0,
+                rn: Register::X1,
+            },
+            Instruction::Cls {
+                rd: Register::X0,
+                rn: Register::X1,
+            },
+            Instruction::Rbit {
+                rd: Register::X0,
+                rn: Register::X1,
+            },
+            Instruction::Rev {
+                rd: Register::X0,
+                rn: Register::X1,
+            },
+            Instruction::Rev32 {
+                rd: Register::X0,
+                rn: Register::X1,
+            },
+            Instruction::Rev16 {
+                rd: Register::X0,
+                rn: Register::X1,
             },
         ]
     }

@@ -218,6 +218,32 @@ pub enum Instruction {
         rn: Register,
         shift: Operand,
     },
+
+    // Single-source bit-manipulation (always register-only, {rd, rn})
+    Clz {
+        rd: Register,
+        rn: Register,
+    },
+    Cls {
+        rd: Register,
+        rn: Register,
+    },
+    Rbit {
+        rd: Register,
+        rn: Register,
+    },
+    Rev {
+        rd: Register,
+        rn: Register,
+    },
+    Rev32 {
+        rd: Register,
+        rn: Register,
+    },
+    Rev16 {
+        rd: Register,
+        rn: Register,
+    },
 }
 
 impl Instruction {
@@ -257,7 +283,13 @@ impl Instruction {
             | Instruction::Ands { rd, .. }
             | Instruction::Cset { rd, .. }
             | Instruction::Csetm { rd, .. }
-            | Instruction::Ror { rd, .. } => Some(*rd),
+            | Instruction::Ror { rd, .. }
+            | Instruction::Clz { rd, .. }
+            | Instruction::Cls { rd, .. }
+            | Instruction::Rbit { rd, .. }
+            | Instruction::Rev { rd, .. }
+            | Instruction::Rev32 { rd, .. }
+            | Instruction::Rev16 { rd, .. } => Some(*rd),
             // Comparison instructions only set flags, no destination register
             Instruction::Cmp { .. } | Instruction::Cmn { .. } | Instruction::Tst { .. } => None,
         }
@@ -385,6 +417,14 @@ impl Instruction {
                 Operand::Register(_) => true,
                 Operand::Immediate(amt) => *amt >= 0 && *amt <= 63,
             },
+
+            // Single-source bit-manipulation: always encodable (register-only).
+            Instruction::Clz { .. }
+            | Instruction::Cls { .. }
+            | Instruction::Rbit { .. }
+            | Instruction::Rev { .. }
+            | Instruction::Rev32 { .. }
+            | Instruction::Rev16 { .. } => true,
         }
     }
 
@@ -464,6 +504,13 @@ impl Instruction {
                 }
                 regs
             }
+            // Single-source bit-manipulation: rn is the only source.
+            Instruction::Clz { rn, .. }
+            | Instruction::Cls { rn, .. }
+            | Instruction::Rbit { rn, .. }
+            | Instruction::Rev { rn, .. }
+            | Instruction::Rev32 { rn, .. }
+            | Instruction::Rev16 { rn, .. } => vec![*rn],
         }
     }
 }
@@ -535,6 +582,12 @@ impl fmt::Display for Instruction {
             Instruction::Cset { rd, cond } => write!(f, "cset {}, {}", rd, cond),
             Instruction::Csetm { rd, cond } => write!(f, "csetm {}, {}", rd, cond),
             Instruction::Ror { rd, rn, shift } => write!(f, "ror {}, {}, {}", rd, rn, shift),
+            Instruction::Clz { rd, rn } => write!(f, "clz {}, {}", rd, rn),
+            Instruction::Cls { rd, rn } => write!(f, "cls {}, {}", rd, rn),
+            Instruction::Rbit { rd, rn } => write!(f, "rbit {}, {}", rd, rn),
+            Instruction::Rev { rd, rn } => write!(f, "rev {}, {}", rd, rn),
+            Instruction::Rev32 { rd, rn } => write!(f, "rev32 {}, {}", rd, rn),
+            Instruction::Rev16 { rd, rn } => write!(f, "rev16 {}, {}", rd, rn),
         }
     }
 }

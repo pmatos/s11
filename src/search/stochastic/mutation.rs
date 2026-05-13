@@ -189,6 +189,19 @@ impl Mutator {
                     *rm = self.random_register(rng);
                 }
             }
+            // Single-source bit-manipulation: CLZ, CLS, RBIT, REV, REV32, REV16.
+            Instruction::Clz { rd, rn }
+            | Instruction::Cls { rd, rn }
+            | Instruction::Rbit { rd, rn }
+            | Instruction::Rev { rd, rn }
+            | Instruction::Rev32 { rd, rn }
+            | Instruction::Rev16 { rd, rn } => {
+                if rng.random_bool(0.5) {
+                    *rd = self.random_register(rng);
+                } else {
+                    *rn = self.random_register(rng);
+                }
+            }
             // MOVN / MOVZ / MOVK: mutate rd, imm, or shift. MOVK reads rd, so
             // mutating rd here additionally changes the upper-lanes source —
             // that's intentional and matches the other dest-mutating arms.
@@ -405,6 +418,55 @@ impl Mutator {
                 0 => Instruction::Mvn { rd, rm },
                 1 => Instruction::Neg { rd, rm },
                 _ => Instruction::Negs { rd, rm },
+            },
+            // Single-source bit-manipulation: 6-way peer cluster.
+            Instruction::Clz { rd, rn } => match rng.random_range(0..6) {
+                0 => Instruction::Cls { rd, rn },
+                1 => Instruction::Rbit { rd, rn },
+                2 => Instruction::Rev { rd, rn },
+                3 => Instruction::Rev32 { rd, rn },
+                4 => Instruction::Rev16 { rd, rn },
+                _ => Instruction::Clz { rd, rn },
+            },
+            Instruction::Cls { rd, rn } => match rng.random_range(0..6) {
+                0 => Instruction::Clz { rd, rn },
+                1 => Instruction::Rbit { rd, rn },
+                2 => Instruction::Rev { rd, rn },
+                3 => Instruction::Rev32 { rd, rn },
+                4 => Instruction::Rev16 { rd, rn },
+                _ => Instruction::Cls { rd, rn },
+            },
+            Instruction::Rbit { rd, rn } => match rng.random_range(0..6) {
+                0 => Instruction::Clz { rd, rn },
+                1 => Instruction::Cls { rd, rn },
+                2 => Instruction::Rev { rd, rn },
+                3 => Instruction::Rev32 { rd, rn },
+                4 => Instruction::Rev16 { rd, rn },
+                _ => Instruction::Rbit { rd, rn },
+            },
+            Instruction::Rev { rd, rn } => match rng.random_range(0..6) {
+                0 => Instruction::Clz { rd, rn },
+                1 => Instruction::Cls { rd, rn },
+                2 => Instruction::Rbit { rd, rn },
+                3 => Instruction::Rev32 { rd, rn },
+                4 => Instruction::Rev16 { rd, rn },
+                _ => Instruction::Rev { rd, rn },
+            },
+            Instruction::Rev32 { rd, rn } => match rng.random_range(0..6) {
+                0 => Instruction::Clz { rd, rn },
+                1 => Instruction::Cls { rd, rn },
+                2 => Instruction::Rbit { rd, rn },
+                3 => Instruction::Rev { rd, rn },
+                4 => Instruction::Rev16 { rd, rn },
+                _ => Instruction::Rev32 { rd, rn },
+            },
+            Instruction::Rev16 { rd, rn } => match rng.random_range(0..6) {
+                0 => Instruction::Clz { rd, rn },
+                1 => Instruction::Cls { rd, rn },
+                2 => Instruction::Rbit { rd, rn },
+                3 => Instruction::Rev { rd, rn },
+                4 => Instruction::Rev32 { rd, rn },
+                _ => Instruction::Rev16 { rd, rn },
             },
             // Move-wide cluster: MOVN ↔ MOVZ ↔ MOVK (all share rd/imm/shift),
             // plus a single MovImm bridge anchored at MOVZ.

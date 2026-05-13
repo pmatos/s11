@@ -276,6 +276,44 @@ pub fn apply_instruction_concrete(
             let amount = (eval_operand(&state, shift).as_u64() & 63) as u32;
             state.set_register(*rd, ConcreteValue::new(value.rotate_right(amount)));
         }
+        // CLZ: count leading zero bits (returns 64 for input 0).
+        Instruction::Clz { rd, rn } => {
+            let value = state.get_register(*rn).as_u64();
+            state.set_register(*rd, ConcreteValue::new(value.leading_zeros() as u64));
+        }
+        // CLS: count leading bits that match the sign bit, excluding the sign
+        // bit itself. Equivalent to `clz(x ^ (x asr 63)) - 1`; for input 0 or
+        // all-ones the result is 63.
+        Instruction::Cls { rd, rn } => {
+            let value = state.get_register(*rn).as_u64();
+            let folded = value ^ ((value as i64 >> 63) as u64);
+            let result = (folded.leading_zeros() as u64).saturating_sub(1);
+            state.set_register(*rd, ConcreteValue::new(result));
+        }
+        // RBIT: reverse the bit order of the 64-bit value.
+        Instruction::Rbit { rd, rn } => {
+            let value = state.get_register(*rn).as_u64();
+            state.set_register(*rd, ConcreteValue::new(value.reverse_bits()));
+        }
+        // REV: reverse the byte order of the 64-bit value.
+        Instruction::Rev { rd, rn } => {
+            let value = state.get_register(*rn).as_u64();
+            state.set_register(*rd, ConcreteValue::new(value.swap_bytes()));
+        }
+        // REV32: byte-reverse within each 32-bit half (independently).
+        Instruction::Rev32 { rd, rn } => {
+            let value = state.get_register(*rn).as_u64();
+            let lo = (value as u32).swap_bytes() as u64;
+            let hi = ((value >> 32) as u32).swap_bytes() as u64;
+            state.set_register(*rd, ConcreteValue::new(lo | (hi << 32)));
+        }
+        // REV16: byte-reverse within each 16-bit half (four halves).
+        Instruction::Rev16 { rd, rn } => {
+            let value = state.get_register(*rn).as_u64();
+            let result =
+                ((value & 0xFF00_FF00_FF00_FF00) >> 8) | ((value & 0x00FF_00FF_00FF_00FF) << 8);
+            state.set_register(*rd, ConcreteValue::new(result));
+        }
     }
     state
 }
@@ -1246,6 +1284,208 @@ mod tests {
                 "MVN({:#x}) should be {:#x}",
                 input,
                 expected
+            );
+        }
+    }
+
+    fn apply_unary(instr: Instruction, input: u64) -> u64 {
+        let state = state_with(vec![(Register::X1, input)]);
+        apply_instruction_concrete(state, &instr)
+            .get_register(Register::X0)
+            .as_u64()
+    }
+
+    #[test]
+    fn test_clz_matches_leading_zeros() {
+        let cases: &[u64] = &[
+            0,
+            1,
+            2,
+            0xFF,
+            0x8000_0000,
+            0x8000_0000_0000_0000,
+            u64::MAX,
+            0xDEAD_BEEF_DEAD_BEEF,
+        ];
+        for &input in cases {
+            let got = apply_unary(
+                Instruction::Clz {
+                    rd: Register::X0,
+                    rn: Register::X1,
+                },
+                input,
+            );
+            assert_eq!(
+                got,
+                input.leading_zeros() as u64,
+                "CLZ({:#x}) mismatch",
+                input
+            );
+        }
+    }
+
+    #[test]
+    fn test_cls_matches_arm_spec() {
+        // AArch64 CLS: count of consecutive bits matching the sign bit *after*
+        // the sign bit. Spec values from the Arm reference for 64-bit form.
+        let cases: &[(u64, u64)] = &[
+            (0, 63),
+            (u64::MAX, 63),
+            (1, 62),
+            (0x8000_0000_0000_0000, 0),
+            (0x7FFF_FFFF_FFFF_FFFF, 0),
+            (0xC000_0000_0000_0000, 1),
+            (0x3FFF_FFFF_FFFF_FFFF, 1),
+        ];
+        for &(input, expected) in cases {
+            let got = apply_unary(
+                Instruction::Cls {
+                    rd: Register::X0,
+                    rn: Register::X1,
+                },
+                input,
+            );
+            assert_eq!(got, expected, "CLS({:#x}) should be {}", input, expected);
+        }
+    }
+
+    #[test]
+    fn test_rbit_matches_reverse_bits() {
+        let cases: &[u64] = &[
+            0,
+            1,
+            0x8000_0000_0000_0000,
+            u64::MAX,
+            0xAAAA_AAAA_AAAA_AAAA,
+            0xDEAD_BEEF_CAFE_BABE,
+        ];
+        for &input in cases {
+            let got = apply_unary(
+                Instruction::Rbit {
+                    rd: Register::X0,
+                    rn: Register::X1,
+                },
+                input,
+            );
+            assert_eq!(
+                got,
+                input.reverse_bits(),
+                "RBIT({:#x}) should match u64::reverse_bits",
+                input
+            );
+        }
+    }
+
+    #[test]
+    fn test_rev_matches_swap_bytes() {
+        let cases: &[u64] = &[0, u64::MAX, 0x0102_0304_0506_0708, 0xDEAD_BEEF_CAFE_BABE];
+        for &input in cases {
+            let got = apply_unary(
+                Instruction::Rev {
+                    rd: Register::X0,
+                    rn: Register::X1,
+                },
+                input,
+            );
+            assert_eq!(
+                got,
+                input.swap_bytes(),
+                "REV({:#x}) should match u64::swap_bytes",
+                input
+            );
+        }
+    }
+
+    #[test]
+    fn test_rev32_byte_reverses_each_word() {
+        let cases: &[(u64, u64)] = &[
+            (0x0102_0304_0506_0708, 0x0403_0201_0807_0605),
+            (0, 0),
+            (u64::MAX, u64::MAX),
+            (0xDEAD_BEEF_CAFE_BABE, 0xEFBE_ADDE_BEBA_FECA),
+        ];
+        for &(input, expected) in cases {
+            let got = apply_unary(
+                Instruction::Rev32 {
+                    rd: Register::X0,
+                    rn: Register::X1,
+                },
+                input,
+            );
+            assert_eq!(
+                got, expected,
+                "REV32({:#x}) should be {:#x}",
+                input, expected
+            );
+        }
+    }
+
+    #[test]
+    fn test_rev16_byte_reverses_each_halfword() {
+        let cases: &[(u64, u64)] = &[
+            (0x0102_0304_0506_0708, 0x0201_0403_0605_0807),
+            (0, 0),
+            (u64::MAX, u64::MAX),
+            (0xDEAD_BEEF_CAFE_BABE, 0xADDE_EFBE_FECA_BEBA),
+        ];
+        for &(input, expected) in cases {
+            let got = apply_unary(
+                Instruction::Rev16 {
+                    rd: Register::X0,
+                    rn: Register::X1,
+                },
+                input,
+            );
+            assert_eq!(
+                got, expected,
+                "REV16({:#x}) should be {:#x}",
+                input, expected
+            );
+        }
+    }
+
+    #[test]
+    fn test_rev_is_involution() {
+        let input = 0xDEAD_BEEF_CAFE_BABE_u64;
+        let state = state_with(vec![(Register::X1, input)]);
+        let seq = [
+            Instruction::Rev {
+                rd: Register::X0,
+                rn: Register::X1,
+            },
+            Instruction::Rev {
+                rd: Register::X0,
+                rn: Register::X0,
+            },
+        ];
+        let final_state = apply_sequence_concrete(state, &seq);
+        assert_eq!(final_state.get_register(Register::X0).as_u64(), input);
+    }
+
+    #[test]
+    fn test_rbit_clz_equals_trailing_zeros() {
+        // For nonzero x, RBIT then CLZ returns the count of trailing zeros.
+        let cases: &[u64] = &[1, 2, 4, 0x80, 0x8000_0000_0000_0000, 0xDEAD_BEEF];
+        for &input in cases {
+            let state = state_with(vec![(Register::X1, input)]);
+            let seq = [
+                Instruction::Rbit {
+                    rd: Register::X0,
+                    rn: Register::X1,
+                },
+                Instruction::Clz {
+                    rd: Register::X0,
+                    rn: Register::X0,
+                },
+            ];
+            let got = apply_sequence_concrete(state, &seq)
+                .get_register(Register::X0)
+                .as_u64();
+            assert_eq!(
+                got,
+                input.trailing_zeros() as u64,
+                "RBIT;CLZ({:#x}) should equal trailing_zeros",
+                input
             );
         }
     }
