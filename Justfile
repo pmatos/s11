@@ -84,6 +84,17 @@ llm-demo: build
 mutants *ARGS:
     ./scripts/run-mutants.sh {{ARGS}}
 
+# Generate an HTML coverage report locally (open target/llvm-cov/html/index.html).
+# Requires `cargo install cargo-llvm-cov` and the `llvm-tools-preview` rustup component.
+coverage: build-tests
+    @echo "Collecting coverage (HTML)..."
+    cargo llvm-cov --workspace --all-features --html
+
+# Emit an LCOV report at target/llvm-cov/lcov.info — the format consumed by CI/Codecov.
+coverage-lcov: build-tests
+    @echo "Collecting coverage (LCOV)..."
+    cargo llvm-cov --workspace --all-features --lcov --output-path target/llvm-cov/lcov.info
+
 # Help message (can be more detailed than just listing)
 help:
     @echo "Available commands for AArch64 Super-Optimizer MVP (run with 'just <command>'):"
@@ -96,6 +107,8 @@ help:
     @echo "  build-tests   - Build AArch64 test binaries"
     @echo "  test-all      - Run complete test suite"
     @echo "  mutants       - Run cargo-mutants locally (slow; informational)"
+    @echo "  coverage      - Generate HTML coverage report via cargo-llvm-cov"
+    @echo "  coverage-lcov - Generate LCOV coverage report (CI format)"
     @echo "  clean         - Remove build artifacts from the target directory"
     @echo "  check         - Check the code for errors without compiling"
     @echo "  fmt           - Format the Rust code"

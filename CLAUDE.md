@@ -47,6 +47,24 @@ This prevents pushing code that will fail CI checks.
 
 Note: Clippy linting is run separately in the `rust-clippy.yml` workflow which performs security analysis and uploads results to GitHub's security tab.
 
+### Code Coverage
+
+Source-based coverage uses [`cargo-llvm-cov`](https://github.com/taiki-e/cargo-llvm-cov). Install once with:
+
+```
+rustup component add llvm-tools-preview
+cargo install cargo-llvm-cov
+```
+
+Local recipes:
+
+- `just coverage` — HTML report at `target/llvm-cov/html/index.html`.
+- `just coverage-lcov` — LCOV at `target/llvm-cov/lcov.info` (CI format).
+
+Both recipes depend on `build-tests` so that AArch64 integration-test binaries are present.
+
+In CI, `.github/workflows/coverage.yml` runs on PRs and pushes to `main`, collects LCOV across unit + integration tests, and uploads to [Codecov](https://codecov.io/) using the `CODECOV_TOKEN` repo secret. Project/patch thresholds live in `codecov.yml`.
+
 ### Mutation Testing (informational, local-only)
 
 Mutation testing runs via [cargo-mutants](https://mutants.rs/) and is **informational only** — it does not gate merges. It is **not** wired into CI to keep GitHub Actions minutes for the test/clippy/CodeQL workflows.
