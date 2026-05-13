@@ -1471,7 +1471,7 @@ fn run_equiv(
         .split(',')
         .map(|s| s.trim())
         .filter(|s| !s.is_empty())
-        .map(|s| parser::parse_register(s))
+        .map(parser::parse_register)
         .collect::<Result<Vec<_>, _>>()
         .map_err(|e| format!("invalid live-out register: {}", e))?;
 

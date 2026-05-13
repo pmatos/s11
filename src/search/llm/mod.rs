@@ -7,6 +7,9 @@ pub mod ledger;
 pub mod outcome;
 pub mod prompt;
 
+#[cfg(test)]
+mod test_support;
+
 use std::time::{Duration, Instant};
 
 use crate::ir::Instruction;
@@ -286,100 +289,8 @@ mod tests {
     use super::*;
     use crate::ir::{Operand, Register};
     use crate::search::config::LlmConfig;
-    use std::path::{Path, PathBuf};
-    use std::sync::atomic::{AtomicU64, Ordering};
-
     #[cfg(unix)]
-    static FAKE_CODEX_COUNTER: AtomicU64 = AtomicU64::new(0);
-
-    #[cfg(unix)]
-    struct FakeCodex {
-        path: PathBuf,
-        dir: PathBuf,
-    }
-
-    #[cfg(unix)]
-    impl FakeCodex {
-        fn new(body: &str) -> Self {
-            use std::io::Write as _;
-            use std::os::unix::fs::PermissionsExt;
-
-            let dir = std::env::temp_dir().join(format!(
-                "s11-llm-search-fake-codex-{}-{}",
-                std::process::id(),
-                FAKE_CODEX_COUNTER.fetch_add(1, Ordering::Relaxed)
-            ));
-            std::fs::create_dir(&dir).expect("create fake codex temp dir");
-
-            let path = dir.join("codex");
-            let mut file = std::fs::File::create(&path).expect("create fake codex script");
-            file.write_all(
-                format!(
-                    "#!/bin/sh\nif [ \"${{1:-}}\" = \"__s11_ready_probe\" ]; then exit 0; fi\nset -eu\n{}",
-                    body
-                )
-                .as_bytes(),
-            )
-            .expect("write fake codex script");
-            file.sync_all().expect("sync fake codex script");
-            drop(file);
-            let mut permissions = std::fs::metadata(&path)
-                .expect("stat fake codex script")
-                .permissions();
-            permissions.set_mode(0o700);
-            std::fs::set_permissions(&path, permissions).expect("chmod fake codex script");
-            wait_until_executable_ready(&path);
-
-            Self { path, dir }
-        }
-
-        fn path_string(&self) -> String {
-            self.path.to_string_lossy().into_owned()
-        }
-    }
-
-    #[cfg(unix)]
-    impl Drop for FakeCodex {
-        fn drop(&mut self) {
-            let _ = std::fs::remove_dir_all(&self.dir);
-        }
-    }
-
-    #[cfg(unix)]
-    fn wait_until_executable_ready(path: &Path) {
-        for _ in 0..100 {
-            match std::process::Command::new(path)
-                .arg("__s11_ready_probe")
-                .status()
-            {
-                Ok(status) if status.success() => return,
-                Ok(status) => panic!("fake codex readiness probe exited with {status}"),
-                Err(e) if e.raw_os_error() == Some(26) => std::thread::yield_now(),
-                Err(e) => panic!("fake codex readiness probe failed: {e}"),
-            }
-        }
-        panic!("fake codex executable was still busy after readiness probes");
-    }
-
-    #[cfg(unix)]
-    fn answer_writer_script(assembly: &str) -> String {
-        format!(
-            r#"answer=""
-while [ "$#" -gt 0 ]; do
-  if [ "$1" = "-o" ]; then
-    shift
-    answer="$1"
-  fi
-  shift || true
-done
-[ -n "$answer" ]
-cat > "$answer" <<'JSON'
-{{"assembly":{}}}
-JSON
-"#,
-            serde_json::to_string(assembly).expect("quote assembly for fake response")
-        )
-    }
+    use crate::search::llm::test_support::{FakeCodex, assembly_answer_writer_script};
 
     #[cfg(unix)]
     fn cfg_with_fake_codex(fake: &FakeCodex, max_calls: u32) -> SearchConfig {
@@ -500,7 +411,7 @@ JSON
     #[cfg(unix)]
     #[test]
     fn fake_codex_success_returns_first_equivalent_shorter_candidate() {
-        let fake = FakeCodex::new(&answer_writer_script("add x0, x1, #1"));
+        let fake = FakeCodex::new(&assembly_answer_writer_script("add x0, x1, #1"));
         let mut search = LlmSearch::new();
 
         let result = search.search(
@@ -536,7 +447,7 @@ JSON
     #[cfg(unix)]
     #[test]
     fn fake_codex_parse_failure_records_unsupported_mnemonics() {
-        let fake = FakeCodex::new(&answer_writer_script("ldr x0, [x1]\nstr x2, [x3]"));
+        let fake = FakeCodex::new(&assembly_answer_writer_script("ldr x0, [x1]\nstr x2, [x3]"));
         let mut search = LlmSearch::new();
 
         let result = search.search(
@@ -557,7 +468,7 @@ JSON
     #[cfg(unix)]
     #[test]
     fn fake_codex_parse_failure_without_unknown_mnemonic_stays_unrecorded() {
-        let fake = FakeCodex::new(&answer_writer_script("mov x0"));
+        let fake = FakeCodex::new(&assembly_answer_writer_script("mov x0"));
         let mut search = LlmSearch::new();
 
         let result = search.search(
@@ -574,7 +485,7 @@ JSON
     #[cfg(unix)]
     #[test]
     fn fake_codex_not_shorter_candidate_is_rejected_without_verification() {
-        let fake = FakeCodex::new(&answer_writer_script("mov x0, x1\nadd x0, x0, #1"));
+        let fake = FakeCodex::new(&assembly_answer_writer_script("mov x0, x1\nadd x0, x0, #1"));
         let mut search = LlmSearch::new();
 
         let result = search.search(
@@ -592,7 +503,7 @@ JSON
     #[cfg(unix)]
     #[test]
     fn fake_codex_equiv_fail_counts_verification_but_not_smt_fast_path() {
-        let fake = FakeCodex::new(&answer_writer_script("mov x0, #5"));
+        let fake = FakeCodex::new(&assembly_answer_writer_script("mov x0, #5"));
         let mut search = LlmSearch::new();
 
         let result = search.search(
@@ -628,7 +539,7 @@ JSON
     #[cfg(unix)]
     #[test]
     fn zero_timeout_breaks_before_first_codex_call() {
-        let fake = FakeCodex::new(&answer_writer_script("add x0, x1, #1"));
+        let fake = FakeCodex::new(&assembly_answer_writer_script("add x0, x1, #1"));
         let config = cfg_with_fake_codex(&fake, 3).with_timeout(Duration::ZERO);
         let mut search = LlmSearch::new();
 

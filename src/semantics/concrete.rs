@@ -85,21 +85,15 @@ pub fn apply_instruction_concrete(
             let rhs = state.get_register(*rm).as_i64();
             let result = if rhs == 0 {
                 0 // Division by zero returns 0 in AArch64
-            } else if lhs == i64::MIN && rhs == -1 {
-                i64::MIN // Overflow case returns dividend
             } else {
-                lhs / rhs
+                lhs.checked_div(rhs).unwrap_or(i64::MIN) // Overflow case returns dividend
             };
             state.set_register(*rd, ConcreteValue::from_i64(result));
         }
         Instruction::Udiv { rd, rn, rm } => {
             let lhs = state.get_register(*rn).as_u64();
             let rhs = state.get_register(*rm).as_u64();
-            let result = if rhs == 0 {
-                0 // Division by zero returns 0 in AArch64
-            } else {
-                lhs / rhs
-            };
+            let result = lhs.checked_div(rhs).unwrap_or(0); // Division by zero returns 0 in AArch64
             state.set_register(*rd, ConcreteValue::new(result));
         }
         // CMP: Compare (subtract and set flags, discard result)
