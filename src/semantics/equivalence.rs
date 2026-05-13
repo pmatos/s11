@@ -770,8 +770,7 @@ mod tests {
                 rm: Operand::Register(Register::X3),
             },
         ];
-        let config =
-            EquivalenceConfig::with_live_out(LiveOut::from_registers(vec![Register::X0]));
+        let config = EquivalenceConfig::with_live_out(LiveOut::from_registers(vec![Register::X0]));
         assert_eq!(
             check_equivalence_with_config(&seq1, &seq2, &config),
             EquivalenceResult::Equivalent
@@ -797,8 +796,7 @@ mod tests {
                 rm: Operand::Register(Register::X3),
             },
         ];
-        let config =
-            EquivalenceConfig::with_live_out(LiveOut::from_registers(vec![Register::X0]));
+        let config = EquivalenceConfig::with_live_out(LiveOut::from_registers(vec![Register::X0]));
         assert_eq!(
             check_equivalence_with_config(&seq1, &seq2, &config),
             EquivalenceResult::Equivalent
@@ -824,8 +822,7 @@ mod tests {
                 rm: Operand::Register(Register::X3),
             },
         ];
-        let config =
-            EquivalenceConfig::with_live_out(LiveOut::from_registers(vec![Register::X0]));
+        let config = EquivalenceConfig::with_live_out(LiveOut::from_registers(vec![Register::X0]));
         assert_eq!(
             check_equivalence_with_config(&seq1, &seq2, &config),
             EquivalenceResult::Equivalent
@@ -852,8 +849,7 @@ mod tests {
         ];
         // X2 differs between the two sequences (NEG doesn't touch X2 but the
         // 2-op form sets X2 to 0). Restrict equivalence to live-out X0.
-        let config =
-            EquivalenceConfig::with_live_out(LiveOut::from_registers(vec![Register::X0]));
+        let config = EquivalenceConfig::with_live_out(LiveOut::from_registers(vec![Register::X0]));
         assert_eq!(
             check_equivalence_with_config(&seq1, &seq2, &config),
             EquivalenceResult::Equivalent
@@ -877,8 +873,7 @@ mod tests {
             rn: Register::X1,
             rm: Operand::Immediate(1),
         }];
-        let config =
-            EquivalenceConfig::with_live_out(LiveOut::from_registers(vec![Register::X0]));
+        let config = EquivalenceConfig::with_live_out(LiveOut::from_registers(vec![Register::X0]));
         assert_eq!(
             check_equivalence_with_config(&adds, &add, &config),
             EquivalenceResult::NotEquivalent,
@@ -905,8 +900,7 @@ mod tests {
             rn: Register::X1,
             rm: Operand::Register(Register::X2),
         }];
-        let config =
-            EquivalenceConfig::with_live_out(LiveOutMask::from_registers(vec![Register::X0]));
+        let config = EquivalenceConfig::with_live_out(LiveOut::from_registers(vec![Register::X0]));
         assert_eq!(
             check_equivalence_with_config(&bics, &bic, &config),
             EquivalenceResult::NotEquivalent
@@ -928,8 +922,7 @@ mod tests {
             rd: Register::X0,
             rm: Register::X1,
         }];
-        let config =
-            EquivalenceConfig::with_live_out(LiveOutMask::from_registers(vec![Register::X0]));
+        let config = EquivalenceConfig::with_live_out(LiveOut::from_registers(vec![Register::X0]));
         assert_eq!(
             check_equivalence_with_config(&negs, &neg, &config),
             EquivalenceResult::NotEquivalent
@@ -966,8 +959,7 @@ mod tests {
             rn: Register::X1,
             rm: Operand::Immediate(1),
         }];
-        let config =
-            EquivalenceConfig::with_live_out(LiveOutMask::from_registers(vec![Register::X0]));
+        let config = EquivalenceConfig::with_live_out(LiveOut::from_registers(vec![Register::X0]));
         assert_eq!(
             check_equivalence_with_config(&target, &candidate, &config),
             EquivalenceResult::NotEquivalent,

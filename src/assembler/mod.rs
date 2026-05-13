@@ -546,7 +546,21 @@ impl AArch64Assembler {
             }
             // CSET / CSETM lower to CSINC/CSINV with XZR sources and inverted cond.
             // Capstone canonicalises the disassembly back to `cset`/`csetm`.
+            //
+            // Defense-in-depth: reject AL/NV here too. `is_encodable_aarch64`
+            // already filters them at the IR level, but a caller could
+            // construct the variant directly and bypass that check. Without
+            // this guard, `Cset { cond: AL }` would lower to `csinc ..., nv`
+            // (because invert(AL) = NV), which on AArch64 writes 0 — the
+            // opposite of the IR's "always 1" semantics. CSETM has the
+            // symmetric issue.
             Instruction::Cset { rd, cond } => {
+                if matches!(cond, Condition::AL | Condition::NV) {
+                    return Err(format!(
+                        "CSET with {} is not encodable (AL/NV reserved)",
+                        cond
+                    ));
+                }
                 let rd_reg = register_to_dynasm(*rd)?;
                 let xzr: u8 = 31;
                 let inv = cond.invert();
@@ -554,6 +568,12 @@ impl AArch64Assembler {
                 Ok(())
             }
             Instruction::Csetm { rd, cond } => {
+                if matches!(cond, Condition::AL | Condition::NV) {
+                    return Err(format!(
+                        "CSETM with {} is not encodable (AL/NV reserved)",
+                        cond
+                    ));
+                }
                 let rd_reg = register_to_dynasm(*rd)?;
                 let xzr: u8 = 31;
                 let inv = cond.invert();
@@ -1097,6 +1117,43 @@ mod tests {
             .assemble_instructions(&instructions)
             .expect("CSETM encoding should succeed");
         disassemble_and_verify(&bytes, "csetm", &["x3", "ne"]);
+    }
+
+    /// Defense-in-depth: assembler must refuse CSET/CSETM with AL or NV,
+    /// even if a caller bypasses `is_encodable_aarch64`. Lowering
+    /// `Cset { cond: AL }` to the alias would emit `csinc ..., nv` (because
+    /// invert(AL) = NV), which on AArch64 writes 0 — the opposite of the
+    /// IR's "always 1" semantics.
+    #[test]
+    fn test_cset_rejects_al_at_encoder() {
+        let mut assembler = AArch64Assembler::new();
+        let cases = [
+            Instruction::Cset {
+                rd: Register::X0,
+                cond: Condition::AL,
+            },
+            Instruction::Cset {
+                rd: Register::X0,
+                cond: Condition::NV,
+            },
+            Instruction::Csetm {
+                rd: Register::X0,
+                cond: Condition::AL,
+            },
+            Instruction::Csetm {
+                rd: Register::X0,
+                cond: Condition::NV,
+            },
+        ];
+        for instr in cases {
+            let result = assembler.assemble_instructions(&[instr]);
+            assert!(
+                result.is_err(),
+                "Expected encoder to reject {:?}, got {:?}",
+                instr,
+                result
+            );
+        }
     }
 
     #[test]
