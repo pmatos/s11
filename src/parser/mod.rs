@@ -289,7 +289,7 @@ fn parse_bic(operands: &[&str]) -> Result<Instruction, String> {
     }
     let rd = parse_register(operands[0])?;
     let rn = parse_register(operands[1])?;
-    let rm = parse_operand(operands[2])?;
+    let rm = Operand::Register(parse_register(operands[2])?);
     Ok(Instruction::Bic { rd, rn, rm })
 }
 
@@ -300,7 +300,7 @@ fn parse_bics(operands: &[&str]) -> Result<Instruction, String> {
     }
     let rd = parse_register(operands[0])?;
     let rn = parse_register(operands[1])?;
-    let rm = parse_operand(operands[2])?;
+    let rm = Operand::Register(parse_register(operands[2])?);
     Ok(Instruction::Bics { rd, rn, rm })
 }
 
@@ -311,7 +311,7 @@ fn parse_orn(operands: &[&str]) -> Result<Instruction, String> {
     }
     let rd = parse_register(operands[0])?;
     let rn = parse_register(operands[1])?;
-    let rm = parse_operand(operands[2])?;
+    let rm = Operand::Register(parse_register(operands[2])?);
     Ok(Instruction::Orn { rd, rn, rm })
 }
 
@@ -322,7 +322,7 @@ fn parse_eon(operands: &[&str]) -> Result<Instruction, String> {
     }
     let rd = parse_register(operands[0])?;
     let rn = parse_register(operands[1])?;
-    let rm = parse_operand(operands[2])?;
+    let rm = Operand::Register(parse_register(operands[2])?);
     Ok(Instruction::Eon { rd, rn, rm })
 }
 
@@ -355,7 +355,7 @@ fn parse_ands(operands: &[&str]) -> Result<Instruction, String> {
     }
     let rd = parse_register(operands[0])?;
     let rn = parse_register(operands[1])?;
-    let rm = parse_operand(operands[2])?;
+    let rm = Operand::Register(parse_register(operands[2])?);
     Ok(Instruction::Ands { rd, rn, rm })
 }
 
