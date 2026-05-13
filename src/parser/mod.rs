@@ -1082,4 +1082,135 @@ mod tests {
             }
         }
     }
+
+    #[test]
+    fn parse_all_aarch64_register_names() {
+        for idx in 0..=30 {
+            let name = format!("x{}", idx);
+            assert_eq!(
+                parse_register(&name).unwrap(),
+                Register::from_index(idx).unwrap()
+            );
+        }
+        assert_eq!(parse_register("wzr").unwrap(), Register::XZR);
+        assert_eq!(parse_register("fp").unwrap(), Register::X29);
+        assert_eq!(parse_register("lr").unwrap(), Register::X30);
+    }
+
+    #[test]
+    fn parse_all_condition_codes_and_aliases() {
+        let cases = [
+            ("eq", Condition::EQ),
+            ("ne", Condition::NE),
+            ("cs", Condition::CS),
+            ("hs", Condition::CS),
+            ("cc", Condition::CC),
+            ("lo", Condition::CC),
+            ("mi", Condition::MI),
+            ("pl", Condition::PL),
+            ("vs", Condition::VS),
+            ("vc", Condition::VC),
+            ("hi", Condition::HI),
+            ("ls", Condition::LS),
+            ("ge", Condition::GE),
+            ("lt", Condition::LT),
+            ("gt", Condition::GT),
+            ("le", Condition::LE),
+            ("al", Condition::AL),
+            ("nv", Condition::NV),
+        ];
+        for (text, cond) in cases {
+            assert_eq!(parse_condition(text).unwrap(), cond);
+            assert_eq!(parse_condition(&text.to_uppercase()).unwrap(), cond);
+        }
+        assert!(parse_condition("bad").is_err());
+    }
+
+    #[test]
+    fn parse_line_covers_all_core_mnemonics() {
+        let cases = [
+            ("sub x0, x1, #3", "sub x0, x1, #3"),
+            ("and x0, x1, x2", "and x0, x1, x2"),
+            ("orr x0, x1, x2", "orr x0, x1, x2"),
+            ("eor x0, x1, x2", "eor x0, x1, x2"),
+            ("lsl x0, x1, #4", "lsl x0, x1, #4"),
+            ("lsr x0, x1, x2", "lsr x0, x1, x2"),
+            ("asr x0, x1, #8", "asr x0, x1, #8"),
+            ("mul x0, x1, x2", "mul x0, x1, x2"),
+            ("sdiv x0, x1, x2", "sdiv x0, x1, x2"),
+            ("udiv x0, x1, x2", "udiv x0, x1, x2"),
+            ("cmp x1, #5", "cmp x1, #5"),
+            ("cmn x1, x2", "cmn x1, x2"),
+            ("tst x1, x2", "tst x1, x2"),
+            ("csinc x0, x1, x2, ne", "csinc x0, x1, x2, ne"),
+            ("csinv x0, x1, x2, lt", "csinv x0, x1, x2, lt"),
+            ("csneg x0, x1, x2, ge", "csneg x0, x1, x2, ge"),
+        ];
+
+        for (line, display) in cases {
+            let parsed = match parse_line(line).unwrap() {
+                LineResult::Instruction(instr) => instr,
+                LineResult::Skip => panic!("unexpected skip for {}", line),
+            };
+            assert_eq!(format!("{}", parsed), display);
+        }
+    }
+
+    #[test]
+    fn parse_line_wrong_arity_reaches_each_parser_error() {
+        for mnemonic in [
+            "mov", "mvn", "neg", "negs", "bic", "bics", "orn", "eon", "adds", "subs", "ands",
+            "cset", "csetm", "ror", "movn", "add", "sub", "and", "orr", "eor", "lsl", "lsr", "asr",
+            "mul", "sdiv", "udiv", "cmp", "cmn", "tst", "csel", "csinc", "csinv", "csneg",
+        ] {
+            assert!(
+                matches!(parse_line(mnemonic), Err(ParseLineError::Other(_))),
+                "{} should reject missing operands",
+                mnemonic
+            );
+        }
+        assert!(matches!(
+            parse_line("definitely_unknown"),
+            Err(ParseLineError::UnknownInstruction(m)) if m == "definitely_unknown"
+        ));
+    }
+
+    #[test]
+    fn parse_movn_rejects_bad_forms() {
+        for line in [
+            "movn x0",
+            "movn x0, x1",
+            "movn x0, #65536",
+            "movn x0, #1, asr #16",
+            "movn x0, #1, lsl x2",
+            "movn x0, #1, lsl #8",
+        ] {
+            assert!(parse_line(line).is_err(), "{} should fail", line);
+        }
+    }
+
+    #[test]
+    fn parse_error_display_includes_optional_column_marker() {
+        let err = ParseError::new(3, "bad operand", "add x0").with_column(5);
+        let rendered = err.to_string();
+        assert!(rendered.contains("line 3, column 5"));
+        assert!(rendered.contains("^"));
+    }
+
+    #[test]
+    fn parse_assembly_file_reads_file_and_reports_read_errors() {
+        let path = std::env::temp_dir().join(format!(
+            "s11-parser-{}-{}.s",
+            std::process::id(),
+            "coverage"
+        ));
+        std::fs::write(&path, "mov x0, x1\nadd x0, x0, #1\n").unwrap();
+        let parsed = parse_assembly_file(&path).unwrap();
+        assert_eq!(parsed.len(), 2);
+        std::fs::remove_file(&path).unwrap();
+
+        let missing = path.with_extension("missing");
+        let err = parse_assembly_file(&missing).unwrap_err();
+        assert!(err.to_string().contains("failed to read file"));
+    }
 }

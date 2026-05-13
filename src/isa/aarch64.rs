@@ -870,6 +870,176 @@ mod tests {
     use super::*;
     use rand::SeedableRng;
     use rand_chacha::ChaCha8Rng;
+    use std::collections::BTreeSet;
+
+    fn all_instruction_families() -> Vec<Instruction> {
+        vec![
+            Instruction::MovReg {
+                rd: Register::X0,
+                rn: Register::X1,
+            },
+            Instruction::MovImm {
+                rd: Register::X0,
+                imm: 7,
+            },
+            Instruction::Add {
+                rd: Register::X0,
+                rn: Register::X1,
+                rm: Operand::Register(Register::X2),
+            },
+            Instruction::Sub {
+                rd: Register::X0,
+                rn: Register::X1,
+                rm: Operand::Immediate(3),
+            },
+            Instruction::And {
+                rd: Register::X0,
+                rn: Register::X1,
+                rm: Operand::Register(Register::X2),
+            },
+            Instruction::Orr {
+                rd: Register::X0,
+                rn: Register::X1,
+                rm: Operand::Register(Register::X2),
+            },
+            Instruction::Eor {
+                rd: Register::X0,
+                rn: Register::X1,
+                rm: Operand::Register(Register::X2),
+            },
+            Instruction::Lsl {
+                rd: Register::X0,
+                rn: Register::X1,
+                shift: Operand::Register(Register::X2),
+            },
+            Instruction::Lsr {
+                rd: Register::X0,
+                rn: Register::X1,
+                shift: Operand::Immediate(4),
+            },
+            Instruction::Asr {
+                rd: Register::X0,
+                rn: Register::X1,
+                shift: Operand::Register(Register::X2),
+            },
+            Instruction::Mul {
+                rd: Register::X0,
+                rn: Register::X1,
+                rm: Register::X2,
+            },
+            Instruction::Sdiv {
+                rd: Register::X0,
+                rn: Register::X1,
+                rm: Register::X2,
+            },
+            Instruction::Udiv {
+                rd: Register::X0,
+                rn: Register::X1,
+                rm: Register::X2,
+            },
+            Instruction::Cmp {
+                rn: Register::X1,
+                rm: Operand::Register(Register::X2),
+            },
+            Instruction::Cmn {
+                rn: Register::X1,
+                rm: Operand::Immediate(9),
+            },
+            Instruction::Tst {
+                rn: Register::X1,
+                rm: Operand::Register(Register::X2),
+            },
+            Instruction::Csel {
+                rd: Register::X0,
+                rn: Register::X1,
+                rm: Register::X2,
+                cond: Condition::EQ,
+            },
+            Instruction::Csinc {
+                rd: Register::X0,
+                rn: Register::X1,
+                rm: Register::X2,
+                cond: Condition::NE,
+            },
+            Instruction::Csinv {
+                rd: Register::X0,
+                rn: Register::X1,
+                rm: Register::X2,
+                cond: Condition::LT,
+            },
+            Instruction::Csneg {
+                rd: Register::X0,
+                rn: Register::X1,
+                rm: Register::X2,
+                cond: Condition::GT,
+            },
+            Instruction::Mvn {
+                rd: Register::X0,
+                rm: Register::X1,
+            },
+            Instruction::Neg {
+                rd: Register::X0,
+                rm: Register::X1,
+            },
+            Instruction::Negs {
+                rd: Register::X0,
+                rm: Register::X1,
+            },
+            Instruction::MovN {
+                rd: Register::X0,
+                imm: 0x55aa,
+                shift: 16,
+            },
+            Instruction::Bic {
+                rd: Register::X0,
+                rn: Register::X1,
+                rm: Operand::Register(Register::X2),
+            },
+            Instruction::Bics {
+                rd: Register::X0,
+                rn: Register::X1,
+                rm: Operand::Register(Register::X2),
+            },
+            Instruction::Orn {
+                rd: Register::X0,
+                rn: Register::X1,
+                rm: Operand::Register(Register::X2),
+            },
+            Instruction::Eon {
+                rd: Register::X0,
+                rn: Register::X1,
+                rm: Operand::Register(Register::X2),
+            },
+            Instruction::Adds {
+                rd: Register::X0,
+                rn: Register::X1,
+                rm: Operand::Immediate(1),
+            },
+            Instruction::Subs {
+                rd: Register::X0,
+                rn: Register::X1,
+                rm: Operand::Register(Register::X2),
+            },
+            Instruction::Ands {
+                rd: Register::X0,
+                rn: Register::X1,
+                rm: Operand::Register(Register::X2),
+            },
+            Instruction::Cset {
+                rd: Register::X0,
+                cond: Condition::GE,
+            },
+            Instruction::Csetm {
+                rd: Register::X0,
+                cond: Condition::LE,
+            },
+            Instruction::Ror {
+                rd: Register::X0,
+                rn: Register::X1,
+                shift: Operand::Immediate(8),
+            },
+        ]
+    }
 
     #[test]
     fn test_aarch64_isa_metadata() {
@@ -878,6 +1048,8 @@ mod tests {
         assert_eq!(isa.register_count(), 31);
         assert_eq!(isa.register_width(), 64);
         assert_eq!(isa.instruction_size(), Some(4));
+        assert_eq!(isa.zero_register(), Some(Register::XZR));
+        assert_eq!(isa.general_registers().len(), 31);
     }
 
     #[test]
@@ -990,6 +1162,142 @@ mod tests {
         for _ in 0..100 {
             let mutated = generator.mutate(&mut rng, &original, &regs, &imms);
             assert!(mutated.opcode_id() < generator.opcode_count());
+        }
+    }
+
+    #[test]
+    fn all_instruction_families_cover_trait_methods() {
+        let generator = AArch64InstructionGenerator;
+        let seen: BTreeSet<u8> = all_instruction_families()
+            .iter()
+            .map(|instr| {
+                let id = instr.opcode_id();
+                assert!(id < generator.opcode_count());
+                assert!(!instr.mnemonic().is_empty());
+                assert!(!format!("{}", instr).is_empty());
+                let _ = instr.destination();
+                let _ = instr.source_registers();
+                assert!(!instr.has_side_effects());
+                id
+            })
+            .collect();
+        assert_eq!(seen.len(), generator.opcode_count() as usize);
+    }
+
+    #[test]
+    fn generate_all_covers_every_aarch64_family() {
+        let generator = AArch64InstructionGenerator;
+        let regs = vec![Register::X0, Register::X1];
+        let imms = vec![0, 1];
+        let ids: BTreeSet<u8> = generator
+            .generate_all(&regs, &imms)
+            .iter()
+            .map(InstructionType::opcode_id)
+            .collect();
+        for required in [
+            Instruction::MovReg {
+                rd: Register::X0,
+                rn: Register::X1,
+            },
+            Instruction::MovImm {
+                rd: Register::X0,
+                imm: 1,
+            },
+            Instruction::Add {
+                rd: Register::X0,
+                rn: Register::X1,
+                rm: Operand::Immediate(1),
+            },
+            Instruction::Lsl {
+                rd: Register::X0,
+                rn: Register::X1,
+                shift: Operand::Immediate(1),
+            },
+            Instruction::Mul {
+                rd: Register::X0,
+                rn: Register::X1,
+                rm: Register::X0,
+            },
+            Instruction::MovN {
+                rd: Register::X0,
+                imm: 1,
+                shift: 16,
+            },
+            Instruction::Cset {
+                rd: Register::X0,
+                cond: Condition::EQ,
+            },
+            Instruction::Ror {
+                rd: Register::X0,
+                rn: Register::X1,
+                shift: Operand::Register(Register::X0),
+            },
+        ] {
+            assert!(ids.contains(&required.opcode_id()), "missing {}", required);
+        }
+    }
+
+    #[test]
+    fn random_generation_reaches_representative_families() {
+        let generator = AArch64InstructionGenerator;
+        let regs = vec![Register::X0, Register::X1, Register::X2];
+        let imms = vec![0, 1, 2, 16, 32];
+        let mut rng = ChaCha8Rng::seed_from_u64(0xA64);
+        let mut ids = BTreeSet::new();
+
+        for _ in 0..5_000 {
+            ids.insert(
+                generator
+                    .generate_random(&mut rng, &regs, &imms)
+                    .opcode_id(),
+            );
+        }
+
+        for instr in [
+            Instruction::MovReg {
+                rd: Register::X0,
+                rn: Register::X1,
+            },
+            Instruction::Sdiv {
+                rd: Register::X0,
+                rn: Register::X1,
+                rm: Register::X2,
+            },
+            Instruction::MovN {
+                rd: Register::X0,
+                imm: 1,
+                shift: 0,
+            },
+            Instruction::Csetm {
+                rd: Register::X0,
+                cond: Condition::NE,
+            },
+            Instruction::Ror {
+                rd: Register::X0,
+                rn: Register::X1,
+                shift: Operand::Immediate(1),
+            },
+        ] {
+            assert!(
+                ids.contains(&instr.opcode_id()),
+                "random never made {}",
+                instr
+            );
+        }
+    }
+
+    #[test]
+    fn mutation_exercises_every_aarch64_instruction_shape() {
+        let generator = AArch64InstructionGenerator;
+        let regs = vec![Register::X0, Register::X1, Register::X2, Register::X3];
+        let imms = vec![0, 1, 7, 16, 32];
+        let mut rng = ChaCha8Rng::seed_from_u64(0xA640);
+
+        for original in all_instruction_families() {
+            for _ in 0..200 {
+                let mutated = generator.mutate(&mut rng, &original, &regs, &imms);
+                assert!(mutated.opcode_id() < generator.opcode_count());
+            }
         }
     }
 }

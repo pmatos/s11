@@ -572,4 +572,139 @@ mod tests {
             disasm[0].1
         );
     }
+
+    #[test]
+    fn mode_accessors_report_selected_backend() {
+        assert_eq!(X86Assembler::new_64().mode(), X86Mode::Mode64);
+        assert_eq!(X86Assembler::new_32().mode(), X86Mode::Mode32);
+    }
+
+    #[test]
+    fn x86_32_encodes_all_minimal_variants() {
+        let cases = [
+            (
+                X86Instruction::MovImm {
+                    rd: X86Register::RAX,
+                    imm: 1,
+                },
+                "mov",
+            ),
+            (
+                X86Instruction::AddReg {
+                    rd: X86Register::RAX,
+                    rs: X86Register::RBX,
+                },
+                "add",
+            ),
+            (
+                X86Instruction::SubReg {
+                    rd: X86Register::RAX,
+                    rs: X86Register::RBX,
+                },
+                "sub",
+            ),
+            (
+                X86Instruction::SubImm {
+                    rd: X86Register::RAX,
+                    imm: 1,
+                },
+                "sub",
+            ),
+            (
+                X86Instruction::AndReg {
+                    rd: X86Register::RAX,
+                    rs: X86Register::RBX,
+                },
+                "and",
+            ),
+            (
+                X86Instruction::AndImm {
+                    rd: X86Register::RAX,
+                    imm: 1,
+                },
+                "and",
+            ),
+            (
+                X86Instruction::OrReg {
+                    rd: X86Register::RAX,
+                    rs: X86Register::RBX,
+                },
+                "or",
+            ),
+            (
+                X86Instruction::OrImm {
+                    rd: X86Register::RAX,
+                    imm: 1,
+                },
+                "or",
+            ),
+            (
+                X86Instruction::XorReg {
+                    rd: X86Register::RAX,
+                    rs: X86Register::RBX,
+                },
+                "xor",
+            ),
+            (
+                X86Instruction::XorImm {
+                    rd: X86Register::RAX,
+                    imm: 1,
+                },
+                "xor",
+            ),
+            (
+                X86Instruction::CmpReg {
+                    rn: X86Register::RAX,
+                    rs: X86Register::RBX,
+                },
+                "cmp",
+            ),
+            (
+                X86Instruction::CmpImm {
+                    rn: X86Register::RAX,
+                    imm: 1,
+                },
+                "cmp",
+            ),
+        ];
+
+        for (instr, mnemonic) in cases {
+            let mut asm = X86Assembler::new_32();
+            let bytes = asm
+                .assemble_instructions(&[instr])
+                .unwrap_or_else(|e| panic!("{:?} should encode: {}", instr, e));
+            let disasm = disasm_x86_32(&bytes);
+            assert_eq!(disasm[0].0, mnemonic);
+        }
+    }
+
+    #[test]
+    fn x86_64_movabs_and_immediate_range_errors() {
+        let mut asm = X86Assembler::new_64();
+        let bytes = asm
+            .assemble_instructions(&[X86Instruction::MovImm {
+                rd: X86Register::RAX,
+                imm: i64::MAX,
+            }])
+            .expect("movabs should encode full-width immediate");
+        let disasm = disasm_x86_64(&bytes);
+        assert_eq!(disasm[0].0, "movabs");
+
+        let err = asm
+            .assemble_instructions(&[X86Instruction::AddImm {
+                rd: X86Register::RAX,
+                imm: i64::MAX,
+            }])
+            .expect_err("imm32-only arithmetic should reject i64::MAX");
+        assert!(err.contains("does not fit in 32 bits"));
+
+        let mut asm32 = X86Assembler::new_32();
+        let err = asm32
+            .assemble_instructions(&[X86Instruction::MovImm {
+                rd: X86Register::RAX,
+                imm: i64::MAX,
+            }])
+            .expect_err("x86-32 mov imm requires imm32");
+        assert!(err.contains("does not fit in 32 bits"));
+    }
 }

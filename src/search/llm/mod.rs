@@ -286,6 +286,119 @@ mod tests {
     use super::*;
     use crate::ir::{Operand, Register};
     use crate::search::config::LlmConfig;
+    use std::path::PathBuf;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    #[cfg(unix)]
+    static FAKE_CODEX_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+    #[cfg(unix)]
+    struct FakeCodex {
+        path: PathBuf,
+        dir: PathBuf,
+    }
+
+    #[cfg(unix)]
+    impl FakeCodex {
+        fn new(body: &str) -> Self {
+            use std::io::Write as _;
+            use std::os::unix::fs::PermissionsExt;
+
+            let dir = std::env::temp_dir().join(format!(
+                "s11-llm-search-fake-codex-{}-{}",
+                std::process::id(),
+                FAKE_CODEX_COUNTER.fetch_add(1, Ordering::Relaxed)
+            ));
+            std::fs::create_dir(&dir).expect("create fake codex temp dir");
+
+            let path = dir.join("codex");
+            let mut file = std::fs::File::create(&path).expect("create fake codex script");
+            file.write_all(format!("#!/bin/sh\nset -eu\n{}", body).as_bytes())
+                .expect("write fake codex script");
+            file.sync_all().expect("sync fake codex script");
+            drop(file);
+            let mut permissions = std::fs::metadata(&path)
+                .expect("stat fake codex script")
+                .permissions();
+            permissions.set_mode(0o700);
+            std::fs::set_permissions(&path, permissions).expect("chmod fake codex script");
+            std::thread::sleep(std::time::Duration::from_millis(20));
+
+            Self { path, dir }
+        }
+
+        fn path_string(&self) -> String {
+            self.path.to_string_lossy().into_owned()
+        }
+    }
+
+    #[cfg(unix)]
+    impl Drop for FakeCodex {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.dir);
+        }
+    }
+
+    #[cfg(unix)]
+    fn answer_writer_script(assembly: &str) -> String {
+        format!(
+            r#"answer=""
+while [ "$#" -gt 0 ]; do
+  if [ "$1" = "-o" ]; then
+    shift
+    answer="$1"
+  fi
+  shift || true
+done
+[ -n "$answer" ]
+cat > "$answer" <<'JSON'
+{{"assembly":{}}}
+JSON
+"#,
+            serde_json::to_string(assembly).expect("quote assembly for fake response")
+        )
+    }
+
+    #[cfg(unix)]
+    fn cfg_with_fake_codex(fake: &FakeCodex, max_calls: u32) -> SearchConfig {
+        SearchConfig::default()
+            .with_timeout(Duration::from_secs(5))
+            .with_verbose(true)
+            .with_llm(
+                LlmConfig::default()
+                    .with_max_codex_calls(max_calls)
+                    .with_model("fake-model")
+                    .with_codex_bin(fake.path_string()),
+            )
+    }
+
+    fn reducible_target() -> Vec<Instruction> {
+        vec![
+            Instruction::MovReg {
+                rd: Register::X0,
+                rn: Register::X1,
+            },
+            Instruction::Add {
+                rd: Register::X0,
+                rn: Register::X0,
+                rm: Operand::Immediate(1),
+            },
+        ]
+    }
+
+    fn constant_two_target() -> Vec<Instruction> {
+        vec![
+            Instruction::MovImm {
+                rd: Register::X0,
+                imm: 1,
+            },
+            Instruction::Add {
+                rd: Register::X0,
+                rn: Register::X0,
+                rm: Operand::Immediate(1),
+            },
+        ]
+    }
 
     fn live_out_x0() -> LiveOut {
         LiveOut::from_registers(vec![Register::X0])
@@ -360,5 +473,147 @@ mod tests {
             timings.codex_calls, 0,
             "max_codex_calls = 0 means zero codex invocations"
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn fake_codex_success_returns_first_equivalent_shorter_candidate() {
+        let fake = FakeCodex::new(&answer_writer_script("add x0, x1, #1"));
+        let mut search = LlmSearch::new();
+
+        let result = search.search(
+            &reducible_target(),
+            &live_out_x0(),
+            &cfg_with_fake_codex(&fake, 1),
+        );
+
+        assert!(result.found_optimization);
+        let optimized = result
+            .optimized_sequence
+            .expect("success should include optimized sequence");
+        assert_eq!(optimized.len(), 1);
+        assert!(search.ledger().is_empty());
+
+        let timings = search.timings();
+        assert_eq!(timings.codex_calls, 1);
+        assert_eq!(timings.verifications, 1);
+        assert_eq!(timings.smt_calls, 1);
+        assert!(timings.smt_formula_bytes_total > 0);
+
+        let stats = search.statistics();
+        assert_eq!(stats.candidates_evaluated, 1);
+        assert_eq!(stats.improvements_found, 1);
+        assert_eq!(stats.best_cost_found, 1);
+
+        search.reset();
+        assert_eq!(search.statistics().candidates_evaluated, 0);
+        assert!(search.ledger().is_empty());
+        assert_eq!(search.timings().codex_calls, 0);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn fake_codex_parse_failure_records_unsupported_mnemonics() {
+        let fake = FakeCodex::new(&answer_writer_script("ldr x0, [x1]\nstr x2, [x3]"));
+        let mut search = LlmSearch::new();
+
+        let result = search.search(
+            &reducible_target(),
+            &live_out_x0(),
+            &cfg_with_fake_codex(&fake, 1),
+        );
+
+        assert!(!result.found_optimization);
+        assert_eq!(
+            search.ledger().sorted_entries(),
+            vec![("ldr".to_string(), 1), ("str".to_string(), 1)]
+        );
+        assert_eq!(search.timings().codex_calls, 1);
+        assert_eq!(search.timings().verifications, 0);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn fake_codex_parse_failure_without_unknown_mnemonic_stays_unrecorded() {
+        let fake = FakeCodex::new(&answer_writer_script("mov x0"));
+        let mut search = LlmSearch::new();
+
+        let result = search.search(
+            &reducible_target(),
+            &live_out_x0(),
+            &cfg_with_fake_codex(&fake, 1),
+        );
+
+        assert!(!result.found_optimization);
+        assert!(search.ledger().is_empty());
+        assert_eq!(search.timings().verifications, 0);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn fake_codex_not_shorter_candidate_is_rejected_without_verification() {
+        let fake = FakeCodex::new(&answer_writer_script("mov x0, x1\nadd x0, x0, #1"));
+        let mut search = LlmSearch::new();
+
+        let result = search.search(
+            &reducible_target(),
+            &live_out_x0(),
+            &cfg_with_fake_codex(&fake, 1),
+        );
+
+        assert!(!result.found_optimization);
+        assert!(search.ledger().is_empty());
+        assert_eq!(search.timings().codex_calls, 1);
+        assert_eq!(search.timings().verifications, 0);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn fake_codex_equiv_fail_counts_verification_but_not_smt_fast_path() {
+        let fake = FakeCodex::new(&answer_writer_script("mov x0, #5"));
+        let mut search = LlmSearch::new();
+
+        let result = search.search(
+            &constant_two_target(),
+            &live_out_x0(),
+            &cfg_with_fake_codex(&fake, 1),
+        );
+
+        assert!(!result.found_optimization);
+        assert_eq!(search.timings().codex_calls, 1);
+        assert_eq!(search.timings().verifications, 1);
+        assert_eq!(search.timings().smt_calls, 0);
+        assert_eq!(search.statistics().smt_queries, 1);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn fake_codex_nonzero_exit_is_skipped() {
+        let fake = FakeCodex::new("echo no candidate today >&2\nexit 9\n");
+        let mut search = LlmSearch::new();
+
+        let result = search.search(
+            &reducible_target(),
+            &live_out_x0(),
+            &cfg_with_fake_codex(&fake, 1),
+        );
+
+        assert!(!result.found_optimization);
+        assert_eq!(search.timings().codex_calls, 1);
+        assert_eq!(search.statistics().candidates_evaluated, 0);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn zero_timeout_breaks_before_first_codex_call() {
+        let fake = FakeCodex::new(&answer_writer_script("add x0, x1, #1"));
+        let config = cfg_with_fake_codex(&fake, 3).with_timeout(Duration::ZERO);
+        let mut search = LlmSearch::new();
+
+        let result = search.search(&reducible_target(), &live_out_x0(), &config);
+
+        assert!(!result.found_optimization);
+        assert_eq!(search.timings().codex_calls, 0);
+        assert_eq!(search.statistics().candidates_evaluated, 0);
     }
 }

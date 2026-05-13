@@ -305,4 +305,44 @@ mod tests {
         assert_eq!(stats.smt_success_rate(), 0.0);
         assert_eq!(stats.throughput(), 0.0);
     }
+
+    #[test]
+    fn test_format_summary_includes_optional_sections() {
+        let mut stats = SearchStatistics::new(Algorithm::Stochastic);
+        stats.start_timer();
+        stats.elapsed_time = Duration::from_millis(500);
+        stats.candidates_evaluated = 100;
+        stats.candidates_passed_fast = 25;
+        stats.smt_queries = 10;
+        stats.smt_equivalent = 2;
+        stats.iterations = 50;
+        stats.accepted_proposals = 5;
+        stats.original_cost = 3;
+        stats.best_cost_found = 2;
+        stats.improvements_found = 1;
+
+        let summary = stats.format_summary();
+        assert!(summary.contains("Algorithm: stochastic"));
+        assert!(summary.contains("Fast pass rate"));
+        assert!(summary.contains("SMT queries"));
+        assert!(summary.contains("Acceptance rate"));
+        assert!(summary.contains("Improvements found: 1"));
+    }
+
+    #[test]
+    fn test_display_for_search_results() {
+        let stats = SearchStatistics::default();
+        let no_opt = SearchResult::no_optimization(sample_sequence(), stats.clone());
+        let no_opt_text = format!("{}", no_opt);
+        assert!(no_opt_text.contains("No optimization found."));
+        assert!(no_opt_text.contains("Original sequence"));
+        assert!(no_opt_text.contains("mov x0, x1"));
+
+        let with_opt =
+            SearchResult::with_optimization(sample_sequence(), optimized_sequence(), stats);
+        let with_opt_text = format!("{}", with_opt);
+        assert!(with_opt_text.contains("Optimization found!"));
+        assert!(with_opt_text.contains("Optimized sequence"));
+        assert!(with_opt_text.contains("Savings: 1 instructions"));
+    }
 }

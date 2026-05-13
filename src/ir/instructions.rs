@@ -815,4 +815,184 @@ mod tests {
             .is_encodable_aarch64()
         );
     }
+
+    #[test]
+    fn all_instruction_variants_cover_helpers_and_display() {
+        let cases = vec![
+            Instruction::MovReg {
+                rd: Register::X0,
+                rn: Register::X1,
+            },
+            Instruction::MovImm {
+                rd: Register::X0,
+                imm: 1,
+            },
+            Instruction::Add {
+                rd: Register::X0,
+                rn: Register::X1,
+                rm: Operand::Register(Register::X2),
+            },
+            Instruction::Sub {
+                rd: Register::X0,
+                rn: Register::X1,
+                rm: Operand::Immediate(1),
+            },
+            Instruction::And {
+                rd: Register::X0,
+                rn: Register::X1,
+                rm: Operand::Register(Register::X2),
+            },
+            Instruction::Orr {
+                rd: Register::X0,
+                rn: Register::X1,
+                rm: Operand::Register(Register::X2),
+            },
+            Instruction::Eor {
+                rd: Register::X0,
+                rn: Register::X1,
+                rm: Operand::Register(Register::X2),
+            },
+            Instruction::Lsl {
+                rd: Register::X0,
+                rn: Register::X1,
+                shift: Operand::Register(Register::X2),
+            },
+            Instruction::Lsr {
+                rd: Register::X0,
+                rn: Register::X1,
+                shift: Operand::Immediate(2),
+            },
+            Instruction::Asr {
+                rd: Register::X0,
+                rn: Register::X1,
+                shift: Operand::Register(Register::X2),
+            },
+            Instruction::Mul {
+                rd: Register::X0,
+                rn: Register::X1,
+                rm: Register::X2,
+            },
+            Instruction::Sdiv {
+                rd: Register::X0,
+                rn: Register::X1,
+                rm: Register::X2,
+            },
+            Instruction::Udiv {
+                rd: Register::X0,
+                rn: Register::X1,
+                rm: Register::X2,
+            },
+            Instruction::Cmp {
+                rn: Register::X1,
+                rm: Operand::Immediate(1),
+            },
+            Instruction::Cmn {
+                rn: Register::X1,
+                rm: Operand::Register(Register::X2),
+            },
+            Instruction::Tst {
+                rn: Register::X1,
+                rm: Operand::Register(Register::X2),
+            },
+            Instruction::Csel {
+                rd: Register::X0,
+                rn: Register::X1,
+                rm: Register::X2,
+                cond: Condition::EQ,
+            },
+            Instruction::Csinc {
+                rd: Register::X0,
+                rn: Register::X1,
+                rm: Register::X2,
+                cond: Condition::NE,
+            },
+            Instruction::Csinv {
+                rd: Register::X0,
+                rn: Register::X1,
+                rm: Register::X2,
+                cond: Condition::LT,
+            },
+            Instruction::Csneg {
+                rd: Register::X0,
+                rn: Register::X1,
+                rm: Register::X2,
+                cond: Condition::GT,
+            },
+            Instruction::Mvn {
+                rd: Register::X0,
+                rm: Register::X1,
+            },
+            Instruction::Neg {
+                rd: Register::X0,
+                rm: Register::X1,
+            },
+            Instruction::Negs {
+                rd: Register::X0,
+                rm: Register::X1,
+            },
+            Instruction::MovN {
+                rd: Register::X0,
+                imm: 1,
+                shift: 16,
+            },
+            Instruction::Bic {
+                rd: Register::X0,
+                rn: Register::X1,
+                rm: Operand::Register(Register::X2),
+            },
+            Instruction::Bics {
+                rd: Register::X0,
+                rn: Register::X1,
+                rm: Operand::Register(Register::X2),
+            },
+            Instruction::Orn {
+                rd: Register::X0,
+                rn: Register::X1,
+                rm: Operand::Register(Register::X2),
+            },
+            Instruction::Eon {
+                rd: Register::X0,
+                rn: Register::X1,
+                rm: Operand::Register(Register::X2),
+            },
+            Instruction::Adds {
+                rd: Register::X0,
+                rn: Register::X1,
+                rm: Operand::Immediate(1),
+            },
+            Instruction::Subs {
+                rd: Register::X0,
+                rn: Register::X1,
+                rm: Operand::Register(Register::X2),
+            },
+            Instruction::Ands {
+                rd: Register::X0,
+                rn: Register::X1,
+                rm: Operand::Register(Register::X2),
+            },
+            Instruction::Cset {
+                rd: Register::X0,
+                cond: Condition::GE,
+            },
+            Instruction::Csetm {
+                rd: Register::X0,
+                cond: Condition::LE,
+            },
+            Instruction::Ror {
+                rd: Register::X0,
+                rn: Register::X1,
+                shift: Operand::Immediate(4),
+            },
+        ];
+
+        for instr in cases {
+            let rendered = format!("{}", instr);
+            assert!(!rendered.is_empty());
+            let _ = instr.destination();
+            let _ = instr.source_registers();
+            let _ = instr.modifies_flags();
+            let _ = instr.reads_flags();
+            let _ = instr.is_encodable_aarch64();
+        }
+    }
 }

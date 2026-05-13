@@ -167,6 +167,82 @@ fn write_file(path: &Path, content: &str) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::error::Error;
+
+    #[cfg(unix)]
+    struct FakeCodex {
+        path: PathBuf,
+        dir: PathBuf,
+    }
+
+    #[cfg(unix)]
+    impl FakeCodex {
+        fn new(body: &str) -> Self {
+            use std::io::Write as _;
+            use std::os::unix::fs::PermissionsExt;
+
+            let dir = std::env::temp_dir().join(format!(
+                "s11-fake-codex-{}-{}",
+                std::process::id(),
+                TEMP_COUNTER.fetch_add(1, Ordering::Relaxed)
+            ));
+            std::fs::create_dir(&dir).expect("create fake codex temp dir");
+
+            let path = dir.join("codex");
+            let mut file = std::fs::File::create(&path).expect("create fake codex script");
+            file.write_all(format!("#!/bin/sh\nset -eu\n{}", body).as_bytes())
+                .expect("write fake codex script");
+            file.sync_all().expect("sync fake codex script");
+            drop(file);
+            let mut permissions = std::fs::metadata(&path)
+                .expect("stat fake codex script")
+                .permissions();
+            permissions.set_mode(0o700);
+            std::fs::set_permissions(&path, permissions).expect("chmod fake codex script");
+            std::thread::sleep(std::time::Duration::from_millis(20));
+
+            Self { path, dir }
+        }
+
+        fn path_string(&self) -> String {
+            self.path.to_string_lossy().into_owned()
+        }
+    }
+
+    #[cfg(unix)]
+    impl Drop for FakeCodex {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.dir);
+        }
+    }
+
+    #[cfg(unix)]
+    fn answer_writer_script(envelope: &str) -> String {
+        format!(
+            r#"answer=""
+schema=""
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --output-schema)
+      shift
+      schema="$1"
+      ;;
+    -o)
+      shift
+      answer="$1"
+      ;;
+  esac
+  shift || true
+done
+[ -s "$schema" ]
+[ -n "$answer" ]
+cat > "$answer" <<'JSON'
+{}
+JSON
+"#,
+            envelope
+        )
+    }
 
     #[test]
     fn parses_basic_envelope() {
@@ -210,5 +286,101 @@ mod tests {
     fn ignores_extra_fields() {
         let json = r#"{"assembly":"mov x0, x1", "rationale":"shorter"}"#;
         assert_eq!(parse_codex_envelope(json), Ok("mov x0, x1".to_string()));
+    }
+
+    #[test]
+    fn error_display_and_source_are_covered() {
+        assert_eq!(
+            EnvelopeError::InvalidJson.to_string(),
+            "envelope is not valid JSON"
+        );
+        assert_eq!(
+            EnvelopeError::MissingAssemblyField.to_string(),
+            "envelope is missing the `assembly` field"
+        );
+        assert_eq!(
+            EnvelopeError::EmptyAssembly.to_string(),
+            "envelope `assembly` field is empty or whitespace-only"
+        );
+
+        let io = CodexError::Io("spawn failed".to_string());
+        assert_eq!(io.to_string(), "codex io error: spawn failed");
+        assert!(io.source().is_none());
+
+        let nonzero = CodexError::NonZeroExit {
+            status: 7,
+            stderr: "bad prompt".to_string(),
+        };
+        assert_eq!(
+            nonzero.to_string(),
+            "codex exited with status 7: bad prompt"
+        );
+        assert!(nonzero.source().is_none());
+
+        let envelope = CodexError::Envelope(EnvelopeError::EmptyAssembly);
+        assert_eq!(
+            envelope.to_string(),
+            "codex envelope parse error: envelope `assembly` field is empty or whitespace-only"
+        );
+        assert!(envelope.source().is_some());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn invoke_codex_reads_answer_file_from_fake_cli() {
+        let fake = FakeCodex::new(&answer_writer_script(r#"{"assembly":"mov x0, x1"}"#));
+        let config = LlmConfig::default()
+            .with_model("fake-model")
+            .with_codex_bin(fake.path_string());
+
+        let asm = invoke_codex(&config, "try a candidate", r#"{"type":"object"}"#)
+            .expect("fake codex should produce an answer");
+
+        assert_eq!(asm, "mov x0, x1");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn invoke_codex_reports_nonzero_exit() {
+        let fake = FakeCodex::new("echo fake failure >&2\nexit 7\n");
+        let config = LlmConfig::default().with_codex_bin(fake.path_string());
+
+        let err = invoke_codex(&config, "try a candidate", "{}").unwrap_err();
+
+        match err {
+            CodexError::NonZeroExit { status, stderr } => {
+                assert_eq!(status, 7);
+                assert!(stderr.contains("fake failure"));
+            }
+            other => panic!("expected nonzero exit, got {other:?}"),
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn invoke_codex_reports_missing_answer_file() {
+        let fake = FakeCodex::new("exit 0\n");
+        let config = LlmConfig::default().with_codex_bin(fake.path_string());
+
+        let err = invoke_codex(&config, "try a candidate", "{}").unwrap_err();
+
+        match err {
+            CodexError::Io(message) => assert!(message.contains("reading answer file")),
+            other => panic!("expected answer-file IO error, got {other:?}"),
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn invoke_codex_reports_envelope_errors() {
+        let fake = FakeCodex::new(&answer_writer_script(r#"{"assembly":"   "}"#));
+        let config = LlmConfig::default().with_codex_bin(fake.path_string());
+
+        let err = invoke_codex(&config, "try a candidate", "{}").unwrap_err();
+
+        assert!(matches!(
+            err,
+            CodexError::Envelope(EnvelopeError::EmptyAssembly)
+        ));
     }
 }
