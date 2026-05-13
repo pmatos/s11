@@ -1,5 +1,5 @@
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 fn check_test_binary(path: &PathBuf) {
@@ -24,6 +24,26 @@ fn get_binary_path() -> PathBuf {
     PathBuf::from(env!("CARGO_BIN_EXE_s11"))
 }
 
+fn executable_window(path: &Path, width: u64) -> (u64, u64) {
+    let data = std::fs::read(path).expect("read test ELF");
+    let elf =
+        elf::ElfBytes::<elf::endian::AnyEndian>::minimal_parse(&data).expect("parse test ELF");
+    let section_headers = elf.section_headers().expect("read section headers");
+
+    for section in section_headers.iter() {
+        if section.sh_flags & elf::abi::SHF_EXECINSTR as u64 == 0 || section.sh_size < width {
+            continue;
+        }
+
+        let start = section.sh_addr.next_multiple_of(4);
+        if start + width <= section.sh_addr + section.sh_size {
+            return (start, start + width);
+        }
+    }
+
+    panic!("no executable window of {width} bytes found in {path:?}");
+}
+
 #[test]
 fn test_opt_basic_functionality() {
     let binary = get_binary_path();
@@ -32,14 +52,15 @@ fn test_opt_basic_functionality() {
         .join("arrays_debug");
 
     check_test_binary(&test_elf);
+    let (start_addr, end_addr) = executable_window(&test_elf, 4);
 
     let output = Command::new(binary)
         .arg("opt")
         .arg(&test_elf)
         .arg("--start-addr")
-        .arg("0x5c8")
+        .arg(format!("0x{start_addr:x}"))
         .arg("--end-addr")
-        .arg("0x5cc")
+        .arg(format!("0x{end_addr:x}"))
         .output()
         .expect("Failed to execute s11");
 
@@ -238,15 +259,16 @@ fn test_opt_address_alignment() {
     let test_elf = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("binaries")
         .join("simple_debug");
+    let (start_addr, _) = executable_window(&test_elf, 8);
 
     // Test with unaligned addresses (not 4-byte aligned)
     let output = Command::new(binary)
         .arg("opt")
         .arg(&test_elf)
         .arg("--start-addr")
-        .arg("0x5c9") // Unaligned
+        .arg(format!("0x{:x}", start_addr + 1)) // Unaligned
         .arg("--end-addr")
-        .arg("0x5cd") // Unaligned
+        .arg(format!("0x{:x}", start_addr + 5)) // Unaligned
         .output()
         .expect("Failed to execute s11");
 
@@ -268,12 +290,13 @@ fn test_opt_hex_address_formats() {
     let test_elf = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("binaries")
         .join("simple_debug");
+    let (start_addr, end_addr) = executable_window(&test_elf, 4);
 
     // Test different hex formats
-    let test_cases = vec![
-        ("0x5c8", "0x5cc"), // 0x prefix
-        ("0X5c8", "0X5cc"), // 0X prefix
-        ("5c8", "5cc"),     // No prefix
+    let test_cases = [
+        (format!("0x{start_addr:x}"), format!("0x{end_addr:x}")), // 0x prefix
+        (format!("0X{start_addr:x}"), format!("0X{end_addr:x}")), // 0X prefix
+        (format!("{start_addr:x}"), format!("{end_addr:x}")),     // No prefix
     ];
 
     for (start, end) in test_cases {
@@ -281,9 +304,9 @@ fn test_opt_hex_address_formats() {
             .arg("opt")
             .arg(&test_elf)
             .arg("--start-addr")
-            .arg(start)
+            .arg(&start)
             .arg("--end-addr")
-            .arg(end)
+            .arg(&end)
             .output()
             .expect("Failed to execute s11");
 
