@@ -61,6 +61,13 @@ fn instruction_latency(instr: &Instruction) -> u64 {
         Instruction::Cset { .. } | Instruction::Csetm { .. } => 1,
         // Rotate right
         Instruction::Ror { .. } => 1,
+        // Single-source bit-manipulation (CLZ/CLS/RBIT/REV*): single-cycle ALU.
+        Instruction::Clz { .. }
+        | Instruction::Cls { .. }
+        | Instruction::Rbit { .. }
+        | Instruction::Rev { .. }
+        | Instruction::Rev32 { .. }
+        | Instruction::Rev16 { .. } => 1,
     }
 }
 

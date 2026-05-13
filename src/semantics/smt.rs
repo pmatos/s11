@@ -20,6 +20,46 @@ fn fresh_bv(prefix: &str) -> BV {
     BV::new_const(format!("{}_{}", prefix, id), 64)
 }
 
+/// Reverse the byte order of a 64-bit BV by concatenating its 8 byte slices
+/// with byte 0 placed in the most-significant position.
+fn bv_swap_bytes_64(value: &BV) -> BV {
+    // Place byte 0 (originally at bits [7:0]) at the new top, byte 7
+    // (originally at bits [63:56]) at the new bottom.
+    let mut result = value.extract(7, 0);
+    for i in 1..8u32 {
+        let lo = i * 8;
+        let hi = lo + 7;
+        result = result.concat(&value.extract(hi, lo));
+    }
+    result
+}
+
+/// Reverse the bit order of a 64-bit BV via 64 single-bit extracts.
+fn bv_reverse_bits_64(value: &BV) -> BV {
+    // Bit 0 of `value` becomes the new MSB; bit 63 becomes the new LSB.
+    let mut result = value.extract(0, 0);
+    for i in 1..64u32 {
+        result = result.concat(&value.extract(i, i));
+    }
+    result
+}
+
+/// Count leading zeros of a 64-bit BV using a nested ITE chain.
+/// Iterates bit positions from LSB upward; later iterations overwrite the
+/// result when their bit is set, so the final result reflects the
+/// most-significant set bit (or 64 if no bit is set).
+fn bv_clz_64(value: &BV) -> BV {
+    let mut result = BV::from_u64(64, 64);
+    let one_bit = BV::from_u64(1, 1);
+    for pos in 0..64u32 {
+        let bit = value.extract(pos, pos);
+        let is_set = bit.eq(&one_bit);
+        let clz_if_top = BV::from_u64(63 - pos as u64, 64);
+        result = is_set.ite(&clz_if_top, &result);
+    }
+    result
+}
+
 /// Configuration for the SMT solver
 #[derive(Debug, Clone)]
 pub struct SolverConfig {
@@ -322,6 +362,68 @@ pub fn apply_instruction(mut state: MachineState, instruction: &Instruction) -> 
             let hi = value.bvshl(&complement);
             state.set_register(*rd, lo.bvor(&hi));
         }
+        // CLZ: count leading zero bits; returns 64 when the value is zero.
+        Instruction::Clz { rd, rn } => {
+            let value = state.get_register(*rn).clone();
+            state.set_register(*rd, bv_clz_64(&value));
+        }
+        // CLS: count leading sign-bit replicas (excluding the sign bit).
+        // Fold the sign bit out via `x XOR (x ASR 63)` so the answer reduces
+        // to `clz(folded) - 1`. For all-sign inputs (0 or -1) folded is zero,
+        // clz is 64, and the result clamps to 63 via bvsub (no underflow at
+        // 64-bit width).
+        Instruction::Cls { rd, rn } => {
+            let value = state.get_register(*rn).clone();
+            let asr = value.bvashr(&BV::from_u64(63, 64));
+            let folded = value.bvxor(&asr);
+            let clz = bv_clz_64(&folded);
+            let result = clz.bvsub(&BV::from_u64(1, 64));
+            state.set_register(*rd, result);
+        }
+        // RBIT: reverse the 64 bits.
+        Instruction::Rbit { rd, rn } => {
+            let value = state.get_register(*rn).clone();
+            state.set_register(*rd, bv_reverse_bits_64(&value));
+        }
+        // REV: byte-reverse the 64-bit value.
+        Instruction::Rev { rd, rn } => {
+            let value = state.get_register(*rn).clone();
+            state.set_register(*rd, bv_swap_bytes_64(&value));
+        }
+        // REV32: byte-reverse within each 32-bit half independently.
+        Instruction::Rev32 { rd, rn } => {
+            let value = state.get_register(*rn).clone();
+            let lo = value.extract(31, 0);
+            let hi = value.extract(63, 32);
+            // Each half byte-reversed: concat its 4 byte slices with the
+            // original LSB byte at the new MSB position.
+            let rev_half = |h: &BV| -> BV {
+                let mut acc = h.extract(7, 0);
+                for i in 1..4u32 {
+                    let l = i * 8;
+                    acc = acc.concat(&h.extract(l + 7, l));
+                }
+                acc
+            };
+            let result = rev_half(&hi).concat(&rev_half(&lo));
+            state.set_register(*rd, result);
+        }
+        // REV16: byte-reverse within each 16-bit half (four halves).
+        Instruction::Rev16 { rd, rn } => {
+            let value = state.get_register(*rn).clone();
+            // For each of the 4 half-words, swap its high and low byte.
+            let swap_half = |start: u32| -> BV {
+                value
+                    .extract(start + 7, start)
+                    .concat(&value.extract(start + 15, start + 8))
+            };
+            let h3 = swap_half(48);
+            let h2 = swap_half(32);
+            let h1 = swap_half(16);
+            let h0 = swap_half(0);
+            let result = h3.concat(&h2).concat(&h1).concat(&h0);
+            state.set_register(*rd, result);
+        }
     }
     state
 }
@@ -501,6 +603,122 @@ mod tests {
             solver.check(),
             SatResult::Sat,
             "CSEL must not be proved equivalent to MOV — SMT model is unsound"
+        );
+    }
+
+    fn assert_involution(op: fn(Register, Register) -> Instruction, label: &str) {
+        let initial = MachineState::new_symbolic("pre");
+        let initial_x1 = initial.get_register(Register::X1).clone();
+        let seq = vec![
+            op(Register::X0, Register::X1),
+            op(Register::X0, Register::X0),
+        ];
+        let final_state = apply_sequence(initial, &seq);
+        let final_x0 = final_state.get_register(Register::X0);
+
+        let solver = Solver::new();
+        solver.assert(&final_x0.eq(&initial_x1).not());
+        assert_eq!(
+            solver.check(),
+            SatResult::Unsat,
+            "{} should be an involution: op(op(x)) must equal x",
+            label
+        );
+    }
+
+    #[test]
+    fn test_rev_smt_is_involution() {
+        assert_involution(|rd, rn| Instruction::Rev { rd, rn }, "REV");
+    }
+
+    #[test]
+    fn test_rbit_smt_is_involution() {
+        assert_involution(|rd, rn| Instruction::Rbit { rd, rn }, "RBIT");
+    }
+
+    #[test]
+    fn test_rev32_smt_is_involution() {
+        assert_involution(|rd, rn| Instruction::Rev32 { rd, rn }, "REV32");
+    }
+
+    #[test]
+    fn test_rev16_smt_is_involution() {
+        assert_involution(|rd, rn| Instruction::Rev16 { rd, rn }, "REV16");
+    }
+
+    #[test]
+    fn test_clz_of_one_is_63() {
+        // CLZ of an input known to equal 1 must be 63. Concrete constant
+        // rewrite: `MOV x1, #1; CLZ x0, x1` ≡ `MOV x0, #63`.
+        let initial = MachineState::new_symbolic("pre");
+        let seq = vec![
+            Instruction::MovImm {
+                rd: Register::X1,
+                imm: 1,
+            },
+            Instruction::Clz {
+                rd: Register::X0,
+                rn: Register::X1,
+            },
+        ];
+        let final_state = apply_sequence(initial, &seq);
+        let final_x0 = final_state.get_register(Register::X0);
+        let solver = Solver::new();
+        solver.assert(&final_x0.eq(&BV::from_u64(63, 64)).not());
+        assert_eq!(solver.check(), SatResult::Unsat, "CLZ(1) must be 63");
+    }
+
+    /// Floor-log2 acceptance test (issue #58): for nonzero `x1`, the sequence
+    /// `CLZ x0, x1; MOV x2, #63; SUB x0, x2, x0` produces the highest-set-bit
+    /// position. We characterise that position bitwise — the bit at the
+    /// resulting index is set, and no higher bit is set — and assert the
+    /// solver cannot find a counterexample. The "modulo zero-input edge case"
+    /// caveat from the issue is encoded as the `x1 != 0` precondition.
+    #[test]
+    fn test_clz_floor_log2_pattern() {
+        let initial = MachineState::new_symbolic("pre");
+        let initial_x1 = initial.get_register(Register::X1).clone();
+
+        let seq = vec![
+            Instruction::Clz {
+                rd: Register::X0,
+                rn: Register::X1,
+            },
+            Instruction::MovImm {
+                rd: Register::X2,
+                imm: 63,
+            },
+            Instruction::Sub {
+                rd: Register::X0,
+                rn: Register::X2,
+                rm: Operand::Register(Register::X0),
+            },
+        ];
+        let final_state = apply_sequence(initial, &seq);
+        let result = final_state.get_register(Register::X0).clone();
+
+        let zero = BV::from_u64(0, 64);
+        let one = BV::from_u64(1, 64);
+
+        // Bit at position `result` is set: (x1 >> result) & 1 == 1.
+        let bit_at_result = initial_x1.bvlshr(&result).bvand(&one).eq(&one);
+
+        // No higher bit set: x1 >> (result + 1) == 0. SMTLIB BV shifts wider
+        // than the bit-width yield zero, so result == 63 makes this vacuous.
+        let next = result.bvadd(&one);
+        let higher_zero = initial_x1.bvlshr(&next).eq(&zero);
+
+        let solver = Solver::new();
+        let nonzero = initial_x1.bvugt(&zero);
+        solver.assert(&nonzero);
+        // Look for a counterexample: nonzero x1 where the post-condition fails.
+        let violated = z3::ast::Bool::or(&[&bit_at_result.not(), &higher_zero.not()]);
+        solver.assert(&violated);
+
+        assert_eq!(
+            solver.check(),
+            SatResult::Unsat,
+            "CLZ; MOV #63; SUB pattern must produce floor_log2(x1) for nonzero x1"
         );
     }
 }
