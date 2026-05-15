@@ -110,6 +110,29 @@ pub fn generate_all_instructions(registers: &[Register], immediates: &[i64]) -> 
                     instrs.push(Instruction::Orr { rd, rn, rm: sr_ror });
                     instrs.push(Instruction::Eor { rd, rn, rm: sr_ror });
                 }
+                // Issue #60: extended-register form for ADD/SUB/CMP/CMN.
+                // Shift in 0..=4 (the imm3 field). Eight kinds × five shifts
+                // produces 40 extra candidates per (rd, rn, rm) triple, which
+                // is comparable to the shifted-register pool above.
+                use crate::ir::ExtendKind;
+                for kind in [
+                    ExtendKind::Uxtb,
+                    ExtendKind::Uxth,
+                    ExtendKind::Uxtw,
+                    ExtendKind::Uxtx,
+                    ExtendKind::Sxtb,
+                    ExtendKind::Sxth,
+                    ExtendKind::Sxtw,
+                    ExtendKind::Sxtx,
+                ] {
+                    for shift in 0u8..=4 {
+                        let er = Operand::ExtendedRegister { reg: rm, kind, shift };
+                        instrs.push(Instruction::Add { rd, rn, rm: er });
+                        instrs.push(Instruction::Sub { rd, rn, rm: er });
+                        instrs.push(Instruction::Cmp { rn, rm: er });
+                        instrs.push(Instruction::Cmn { rn, rm: er });
+                    }
+                }
             }
 
             // Shift operations with immediate shift amount (0-63 is valid, but we use small values)
@@ -935,6 +958,51 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn enumerate_emits_add_with_extended_register() {
+        // Issue #60: the enumerator must emit at least one
+        // ADD candidate per (rd, rn, rm, kind, shift) tuple with the
+        // extended-register operand form, so the search can discover the
+        // collapse pattern UXTB+ADD ≡ ADD,UXTB.
+        let regs = vec![Register::X0, Register::X1, Register::X2];
+        let imms = vec![];
+        let candidates = generate_all_instructions(&regs, &imms);
+        let has_uxtb = candidates.iter().any(|c| {
+            matches!(
+                c,
+                Instruction::Add {
+                    rm: Operand::ExtendedRegister {
+                        kind: crate::ir::ExtendKind::Uxtb,
+                        shift: 0,
+                        ..
+                    },
+                    ..
+                }
+            )
+        });
+        assert!(has_uxtb, "enumeration missing ADD with UXTB extended-reg");
+    }
+
+    #[test]
+    fn enumerate_emits_cmp_with_extended_register() {
+        let regs = vec![Register::X0, Register::X1, Register::X2];
+        let imms = vec![];
+        let candidates = generate_all_instructions(&regs, &imms);
+        let has_sxth = candidates.iter().any(|c| {
+            matches!(
+                c,
+                Instruction::Cmp {
+                    rm: Operand::ExtendedRegister {
+                        kind: crate::ir::ExtendKind::Sxth,
+                        ..
+                    },
+                    ..
+                }
+            )
+        });
+        assert!(has_sxth, "enumeration missing CMP with SXTH extended-reg");
     }
 
     #[test]
