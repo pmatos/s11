@@ -446,7 +446,10 @@ pub fn apply_instruction_concrete(
             let value = state.get_register(*rn).as_u64();
             // Shift left then arithmetic-right by the same amount, computed on
             // i64, to sign-extend the field MSB across the upper bits.
-            let shift_left = 64 - (*lsb + *width) as u32;
+            // Widen lsb/width to u32 before the sum so we never narrowly wrap
+            // through u8 when the caller passes unvalidated immediates
+            // (validated paths are bounded by is_encodable_aarch64).
+            let shift_left = 64 - ((*lsb as u32) + (*width as u32));
             let intermediate = (value << shift_left) as i64;
             // Right shift by (64 - width) sign-extends from bit (width-1).
             let result = (intermediate >> (64 - *width as u32)) as u64;
