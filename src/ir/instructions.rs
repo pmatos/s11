@@ -418,13 +418,16 @@ impl Instruction {
                 Operand::Immediate(amt) => *amt >= 0 && *amt <= 63,
             },
 
-            // Single-source bit-manipulation: always encodable (register-only).
-            Instruction::Clz { .. }
-            | Instruction::Cls { .. }
-            | Instruction::Rbit { .. }
-            | Instruction::Rev { .. }
-            | Instruction::Rev32 { .. }
-            | Instruction::Rev16 { .. } => true,
+            // Single-source bit-manipulation: register-only, Xn class (no SP).
+            // AArch64 reg-31 in this slot is XZR, so SP must be rejected before
+            // any caller (SMT, equivalence, LLM) reasons about the candidate.
+            // XZR remains encodable.
+            Instruction::Clz { rd, rn }
+            | Instruction::Cls { rd, rn }
+            | Instruction::Rbit { rd, rn }
+            | Instruction::Rev { rd, rn }
+            | Instruction::Rev32 { rd, rn }
+            | Instruction::Rev16 { rd, rn } => *rd != Register::SP && *rn != Register::SP,
         }
     }
 
@@ -794,6 +797,59 @@ mod tests {
                 rd: Register::X0,
                 rn: Register::X1,
                 rm: Operand::Immediate(0)
+            }
+            .is_encodable_aarch64()
+        );
+    }
+
+    #[test]
+    fn test_is_encodable_bit_manip_rejects_sp() {
+        // Xn class — SP must be rejected on both rd and rn. XZR is valid.
+        for instr in [
+            Instruction::Clz {
+                rd: Register::SP,
+                rn: Register::X1,
+            },
+            Instruction::Cls {
+                rd: Register::X0,
+                rn: Register::SP,
+            },
+            Instruction::Rbit {
+                rd: Register::SP,
+                rn: Register::SP,
+            },
+            Instruction::Rev {
+                rd: Register::SP,
+                rn: Register::X1,
+            },
+            Instruction::Rev32 {
+                rd: Register::X0,
+                rn: Register::SP,
+            },
+            Instruction::Rev16 {
+                rd: Register::SP,
+                rn: Register::X1,
+            },
+        ] {
+            assert!(
+                !instr.is_encodable_aarch64(),
+                "SP must be rejected: {}",
+                instr
+            );
+        }
+
+        // XZR is part of the Xn class and stays encodable.
+        assert!(
+            Instruction::Clz {
+                rd: Register::XZR,
+                rn: Register::X1
+            }
+            .is_encodable_aarch64()
+        );
+        assert!(
+            Instruction::Rev {
+                rd: Register::X0,
+                rn: Register::XZR
             }
             .is_encodable_aarch64()
         );
