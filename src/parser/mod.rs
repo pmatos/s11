@@ -130,7 +130,41 @@ pub fn parse_register(s: &str) -> Result<Register, String> {
         "x29" | "fp" => Ok(Register::X29),
         "x30" | "lr" => Ok(Register::X30),
         "xzr" | "wzr" => Ok(Register::XZR),
-        "sp" => Ok(Register::SP),
+        "sp" | "wsp" => Ok(Register::SP),
+        // Issue #60: accept W-form aliases for the inner register of the
+        // extended-register operand. The IR stores 64-bit X-registers
+        // exclusively; semantics mask to the correct width per ExtendKind.
+        "w0" => Ok(Register::X0),
+        "w1" => Ok(Register::X1),
+        "w2" => Ok(Register::X2),
+        "w3" => Ok(Register::X3),
+        "w4" => Ok(Register::X4),
+        "w5" => Ok(Register::X5),
+        "w6" => Ok(Register::X6),
+        "w7" => Ok(Register::X7),
+        "w8" => Ok(Register::X8),
+        "w9" => Ok(Register::X9),
+        "w10" => Ok(Register::X10),
+        "w11" => Ok(Register::X11),
+        "w12" => Ok(Register::X12),
+        "w13" => Ok(Register::X13),
+        "w14" => Ok(Register::X14),
+        "w15" => Ok(Register::X15),
+        "w16" => Ok(Register::X16),
+        "w17" => Ok(Register::X17),
+        "w18" => Ok(Register::X18),
+        "w19" => Ok(Register::X19),
+        "w20" => Ok(Register::X20),
+        "w21" => Ok(Register::X21),
+        "w22" => Ok(Register::X22),
+        "w23" => Ok(Register::X23),
+        "w24" => Ok(Register::X24),
+        "w25" => Ok(Register::X25),
+        "w26" => Ok(Register::X26),
+        "w27" => Ok(Register::X27),
+        "w28" => Ok(Register::X28),
+        "w29" => Ok(Register::X29),
+        "w30" => Ok(Register::X30),
         _ => Err(format!("unknown register: {}", s)),
     }
 }
@@ -532,15 +566,82 @@ fn parse_shifted_register_tail(mnem: &str, reg: Register, tail: &str) -> Result<
     })
 }
 
+/// Parse the trailing extend modifier (`"<kind> #<shift>"`) attached to an
+/// extended-register operand. Returns the assembled `Operand::ExtendedRegister`.
+/// Shift is 0..=4 (the ARM ARM imm3 field). Issue #60.
+fn parse_extended_register_tail(
+    mnem: &str,
+    reg: Register,
+    tail: &str,
+) -> Result<Operand, String> {
+    let tail = tail.trim();
+    let mut parts = tail.splitn(2, char::is_whitespace);
+    let kw = parts.next().unwrap_or("").trim();
+    let rest = parts.next().unwrap_or("").trim();
+    let kind = match kw.to_ascii_lowercase().as_str() {
+        "uxtb" => crate::ir::ExtendKind::Uxtb,
+        "uxth" => crate::ir::ExtendKind::Uxth,
+        "uxtw" => crate::ir::ExtendKind::Uxtw,
+        "uxtx" => crate::ir::ExtendKind::Uxtx,
+        "sxtb" => crate::ir::ExtendKind::Sxtb,
+        "sxth" => crate::ir::ExtendKind::Sxth,
+        "sxtw" => crate::ir::ExtendKind::Sxtw,
+        "sxtx" => crate::ir::ExtendKind::Sxtx,
+        _ => {
+            return Err(format!(
+                "{} extend kind must be one of uxtb/uxth/uxtw/uxtx/sxtb/sxth/sxtw/sxtx, got `{}`",
+                mnem, kw
+            ));
+        }
+    };
+    // The shift amount is the imm3 field of the ARM ARM encoding (0..=4).
+    // The `#` prefix is conventional but optional in our parser.
+    let shift = if rest.is_empty() {
+        0
+    } else {
+        match parse_operand(rest)? {
+            Operand::Immediate(v) => v,
+            _ => return Err(format!("{} extend shift must be an immediate", mnem)),
+        }
+    };
+    if !(0..=4).contains(&shift) {
+        return Err(format!(
+            "{} extend shift {} out of range (0..=4)",
+            mnem, shift
+        ));
+    }
+    Ok(Operand::ExtendedRegister {
+        reg,
+        kind,
+        shift: shift as u8,
+    })
+}
+
+/// Returns true if the lowercased keyword names an extend kind
+/// (UXTB/UXTH/UXTW/UXTX/SXTB/SXTH/SXTW/SXTX) rather than a shift kind.
+fn is_extend_keyword(kw: &str) -> bool {
+    matches!(
+        kw.to_ascii_lowercase().as_str(),
+        "uxtb" | "uxth" | "uxtw" | "uxtx" | "sxtb" | "sxth" | "sxtw" | "sxtx"
+    )
+}
+
 /// Parse the rm slot for the 3-operand arith/logical instructions
-/// (Add/Sub/And/Orr/Eor). Returns either the existing register/immediate form
-/// or a new shifted-register operand if a 4th comma-separated token is present.
+/// (Add/Sub/And/Orr/Eor). Returns the register/immediate form, a
+/// shifted-register operand, or an extended-register operand based on the
+/// shape and the keyword in the 4th token.
 fn parse_rm_3op(mnem: &str, operands: &[&str]) -> Result<Operand, String> {
     if operands.len() == 3 {
         parse_operand(operands[2])
     } else if operands.len() == 4 {
         let reg = parse_register(operands[2])?;
-        parse_shifted_register_tail(mnem, reg, operands[3])
+        let tail = operands[3].trim();
+        let kw = tail.split_whitespace().next().unwrap_or("");
+        if is_extend_keyword(kw) {
+            parse_extended_register_tail(mnem, reg, tail)
+        } else {
+            parse_shifted_register_tail(mnem, reg, tail)
+        }
     } else {
         Err(format!(
             "{} requires 3 or 4 operands, got {}",
@@ -743,7 +844,13 @@ fn parse_rm_2op(mnem: &str, operands: &[&str]) -> Result<Operand, String> {
         parse_operand(operands[1])
     } else if operands.len() == 3 {
         let reg = parse_register(operands[1])?;
-        parse_shifted_register_tail(mnem, reg, operands[2])
+        let tail = operands[2].trim();
+        let kw = tail.split_whitespace().next().unwrap_or("");
+        if is_extend_keyword(kw) {
+            parse_extended_register_tail(mnem, reg, tail)
+        } else {
+            parse_shifted_register_tail(mnem, reg, tail)
+        }
     } else {
         Err(format!(
             "{} requires 2 or 3 operands, got {}",
@@ -1608,6 +1715,58 @@ mod tests {
         let missing = file.path().with_extension("missing");
         let err = parse_assembly_file(&missing).unwrap_err();
         assert!(err.to_string().contains("failed to read file"));
+    }
+
+    #[test]
+    fn parse_add_extended_register_uxtb() {
+        use crate::ir::ExtendKind;
+        // Issue #60: `add x0, x1, w2, uxtb #2` produces an Add with an
+        // ExtendedRegister rm. The inner register parses as w2 (alias of x2).
+        let parsed = match parse_line("add x0, x1, w2, uxtb #2").unwrap() {
+            LineResult::Instruction(instr) => instr,
+            LineResult::Skip => panic!("unexpected skip"),
+        };
+        assert_eq!(
+            parsed,
+            Instruction::Add {
+                rd: Register::X0,
+                rn: Register::X1,
+                rm: Operand::ExtendedRegister {
+                    reg: Register::X2,
+                    kind: ExtendKind::Uxtb,
+                    shift: 2,
+                },
+            }
+        );
+    }
+
+    #[test]
+    fn parse_cmp_extended_register_sxth() {
+        use crate::ir::ExtendKind;
+        let parsed = match parse_line("cmp x1, w2, sxth #1").unwrap() {
+            LineResult::Instruction(instr) => instr,
+            LineResult::Skip => panic!("unexpected skip"),
+        };
+        assert_eq!(
+            parsed,
+            Instruction::Cmp {
+                rn: Register::X1,
+                rm: Operand::ExtendedRegister {
+                    reg: Register::X2,
+                    kind: ExtendKind::Sxth,
+                    shift: 1,
+                },
+            }
+        );
+    }
+
+    #[test]
+    fn parse_extended_register_rejects_oversized_shift() {
+        // Shift > 4 must be rejected at the parser (the encodability gate
+        // would also reject, but the parser's range check fires earlier).
+        assert!(parse_line("add x0, x1, w2, uxtb #5").is_err());
+        // And rejected for non-arith opcodes.
+        assert!(parse_line("and x0, x1, w2, uxtb #2").is_err());
     }
 
     #[test]
