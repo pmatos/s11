@@ -1929,12 +1929,24 @@ mod cli_helper_tests {
             ("rev", "x0, x1"),
             ("rev32", "x0, x1"),
             ("rev16", "x0, x1"),
+            // Issue #60: extended-register operand form for ADD/SUB/CMP/CMN
+            // and the five standalone UBFM/SBFM-alias mnemonics. Capstone
+            // emits W-form register names for byte/half/word kinds.
+            ("add", "x0, x1, w2, uxtb #2"),
+            ("sub", "x0, x1, w2, sxth #1"),
+            ("cmp", "x1, w2, uxtw #3"),
+            ("cmn", "x1, x2, sxtx #0"),
+            ("uxtb", "w0, w1"),
+            ("uxth", "w0, w1"),
+            ("sxtb", "x0, w1"),
+            ("sxth", "x0, w1"),
+            ("sxtw", "x0, w1"),
         ];
 
         // Tripwire: bump in lockstep when adding/removing rows. Catches
         // accidental row deletion and forces a re-read when adding a parser
         // mnemonic without a matching test row.
-        assert_eq!(cases.len(), 52);
+        assert_eq!(cases.len(), 61);
 
         for (mnem, ops) in cases {
             match convert_capstone_op(mnem, ops) {
