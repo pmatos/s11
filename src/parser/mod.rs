@@ -130,10 +130,25 @@ pub fn parse_register(s: &str) -> Result<Register, String> {
         "x29" | "fp" => Ok(Register::X29),
         "x30" | "lr" => Ok(Register::X30),
         "xzr" | "wzr" => Ok(Register::XZR),
-        "sp" | "wsp" => Ok(Register::SP),
-        // Issue #60: accept W-form aliases for the inner register of the
-        // extended-register operand. The IR stores 64-bit X-registers
-        // exclusively; semantics mask to the correct width per ExtendKind.
+        "sp" => Ok(Register::SP),
+        _ => Err(format!("unknown register: {}", s)),
+    }
+}
+
+/// Parse a register that may be written in W-form. Scoped to the inner
+/// register of `Operand::ExtendedRegister`, where the ARM ARM architecturally
+/// writes byte/half/word extends with a W-form source and UXTX/SXTX with an
+/// X-form source. Issue #60.
+///
+/// Accepting W-form names is **only** valid here — `parse_register` itself
+/// still rejects them, so e.g. `add w0, w1, w2` (a 32-bit ADD that this IR
+/// does not model) remains a parse error instead of silently parsing as a
+/// 64-bit ADD.
+pub fn parse_w_or_x_register(s: &str) -> Result<Register, String> {
+    if let Ok(reg) = parse_register(s) {
+        return Ok(reg);
+    }
+    match s.to_lowercase().as_str() {
         "w0" => Ok(Register::X0),
         "w1" => Ok(Register::X1),
         "w2" => Ok(Register::X2),
@@ -165,6 +180,7 @@ pub fn parse_register(s: &str) -> Result<Register, String> {
         "w28" => Ok(Register::X28),
         "w29" => Ok(Register::X29),
         "w30" => Ok(Register::X30),
+        "wsp" => Ok(Register::SP),
         _ => Err(format!("unknown register: {}", s)),
     }
 }
@@ -630,12 +646,15 @@ fn parse_rm_3op(mnem: &str, operands: &[&str]) -> Result<Operand, String> {
     if operands.len() == 3 {
         parse_operand(operands[2])
     } else if operands.len() == 4 {
-        let reg = parse_register(operands[2])?;
         let tail = operands[3].trim();
         let kw = tail.split_whitespace().next().unwrap_or("");
         if is_extend_keyword(kw) {
+            // Extended-register form: the inner register may be W-form for
+            // byte/half/word kinds. Issue #60.
+            let reg = parse_w_or_x_register(operands[2])?;
             parse_extended_register_tail(mnem, reg, tail)
         } else {
+            let reg = parse_register(operands[2])?;
             parse_shifted_register_tail(mnem, reg, tail)
         }
     } else {
@@ -839,12 +858,15 @@ fn parse_rm_2op(mnem: &str, operands: &[&str]) -> Result<Operand, String> {
     if operands.len() == 2 {
         parse_operand(operands[1])
     } else if operands.len() == 3 {
-        let reg = parse_register(operands[1])?;
         let tail = operands[2].trim();
         let kw = tail.split_whitespace().next().unwrap_or("");
         if is_extend_keyword(kw) {
+            // Extended-register form: the inner register may be W-form for
+            // byte/half/word kinds. Issue #60.
+            let reg = parse_w_or_x_register(operands[1])?;
             parse_extended_register_tail(mnem, reg, tail)
         } else {
+            let reg = parse_register(operands[1])?;
             parse_shifted_register_tail(mnem, reg, tail)
         }
     } else {
@@ -1754,6 +1776,23 @@ mod tests {
                 },
             }
         );
+    }
+
+    #[test]
+    fn parse_w_form_arithmetic_rejected() {
+        // Issue #60 follow-up (Codex review): the IR does not model 32-bit
+        // W-form arithmetic. Accepting `w0..w30` only inside the extended-
+        // register tail keeps `add w0, w1, w2` (which would otherwise alias
+        // to a 64-bit ADD with the wrong semantics) a parse error.
+        assert!(parse_line("add w0, w1, w2").is_err());
+        assert!(parse_line("sub w3, w4, w5").is_err());
+        assert!(parse_line("uxtb w0, w1").is_err());
+        // The extended-register inner register still accepts W-form.
+        assert!(parse_line("add x0, x1, w2, uxtb #0").is_ok());
+        assert!(parse_line("cmp x1, w2, sxth #1").is_ok());
+        // UXTX/SXTX accept X-form inner register (still works through the
+        // parse_w_or_x_register fallback to parse_register).
+        assert!(parse_line("add x0, x1, x2, uxtx #2").is_ok());
     }
 
     #[test]
