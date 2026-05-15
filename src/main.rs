@@ -449,7 +449,7 @@ fn optimize_elf_binary(
     }
 
     // Convert to IR
-    let ir_instructions = convert_to_ir(&instructions)?;
+    let ir_instructions = convert_to_ir(&instructions);
     println!("Converted {} instructions to IR:", ir_instructions.len());
 
     for instr in &ir_instructions {
@@ -809,7 +809,7 @@ fn convert_capstone_op(mnemonic: &str, op_str: &str) -> ConvertOutcome {
     }
 }
 
-fn convert_to_ir(instructions: &capstone::Instructions) -> Result<Vec<Instruction>, String> {
+fn convert_to_ir(instructions: &capstone::Instructions) -> Vec<Instruction> {
     let mut ir_instructions = Vec::new();
 
     for instruction in instructions.iter() {
@@ -825,7 +825,7 @@ fn convert_to_ir(instructions: &capstone::Instructions) -> Result<Vec<Instructio
         }
     }
 
-    Ok(ir_instructions)
+    ir_instructions
 }
 
 // ============================================================================
@@ -1930,6 +1930,11 @@ mod cli_helper_tests {
             ("rev32", "x0, x1"),
             ("rev16", "x0, x1"),
         ];
+
+        // Tripwire: bump in lockstep when adding/removing rows. Catches
+        // accidental row deletion and forces a re-read when adding a parser
+        // mnemonic without a matching test row.
+        assert_eq!(cases.len(), 52);
 
         for (mnem, ops) in cases {
             match convert_capstone_op(mnem, ops) {
