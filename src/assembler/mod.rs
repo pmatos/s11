@@ -791,10 +791,15 @@ impl AArch64Assembler {
                 dynasm!(ops ; .arch aarch64 ; sxtb X(rd_reg), W(rn_reg));
                 Ok(())
             }
-            // SXTH/SXTW/UXTH encoder bodies land in follow-up slices.
-            Instruction::Sxth { .. }
-            | Instruction::Sxtw { .. }
-            | Instruction::Uxth { .. } => {
+            // UXTH Wd, Wn — alias of UBFM Wd, Wn, #0, #15. Issue #60.
+            Instruction::Uxth { rd, rn } => {
+                let rd_reg = register_to_dynasm(*rd)?;
+                let rn_reg = register_to_dynasm(*rn)?;
+                dynasm!(ops ; .arch aarch64 ; uxth W(rd_reg), W(rn_reg));
+                Ok(())
+            }
+            // SXTH/SXTW encoder bodies land in follow-up slices.
+            Instruction::Sxth { .. } | Instruction::Sxtw { .. } => {
                 Err("standalone extend encoding not yet implemented".to_string())
             }
             Instruction::Neg { rd, rm } => {
@@ -2344,6 +2349,20 @@ mod tests {
             }])
             .expect("UXTB encoding should succeed");
         disassemble_and_verify(&bytes, "uxtb", &["w0", "w1"]);
+    }
+
+    /// Issue #60: UXTH zero-extends the low halfword of Wn, so Capstone
+    /// disassembles as `uxth w<rd>, w<rn>` (32-bit form).
+    #[test]
+    fn test_uxth_encoder_round_trip() {
+        let mut assembler = AArch64Assembler::new();
+        let bytes = assembler
+            .assemble_instructions(&[Instruction::Uxth {
+                rd: Register::X0,
+                rn: Register::X1,
+            }])
+            .expect("UXTH encoding should succeed");
+        disassemble_and_verify(&bytes, "uxth", &["w0", "w1"]);
     }
 
     /// Issue #60: SXTB sign-extends the low byte of Wn into the full 64-bit
