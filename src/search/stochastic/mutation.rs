@@ -268,13 +268,19 @@ impl Mutator {
                     *rm = self.random_register(rng);
                 }
             }
-            // Single-source bit-manipulation: CLZ, CLS, RBIT, REV, REV32, REV16.
+            // Single-source bit-manipulation: CLZ, CLS, RBIT, REV, REV32, REV16,
+            // plus the standalone extends SXTB/SXTH/SXTW/UXTB/UXTH (issue #60).
             Instruction::Clz { rd, rn }
             | Instruction::Cls { rd, rn }
             | Instruction::Rbit { rd, rn }
             | Instruction::Rev { rd, rn }
             | Instruction::Rev32 { rd, rn }
-            | Instruction::Rev16 { rd, rn } => {
+            | Instruction::Rev16 { rd, rn }
+            | Instruction::Sxtb { rd, rn }
+            | Instruction::Sxth { rd, rn }
+            | Instruction::Sxtw { rd, rn }
+            | Instruction::Uxtb { rd, rn }
+            | Instruction::Uxth { rd, rn } => {
                 if rng.random_bool(0.5) {
                     *rd = self.random_register(rng);
                 } else {
@@ -583,6 +589,13 @@ impl Mutator {
                 4 => Instruction::Rev32 { rd, rn },
                 _ => Instruction::Rev16 { rd, rn },
             },
+            // SXTB/SXTH/SXTW/UXTB/UXTH: bridging chains land in a later slice.
+            // Issue #60.
+            Instruction::Sxtb { rd, rn } => Instruction::Sxtb { rd, rn },
+            Instruction::Sxth { rd, rn } => Instruction::Sxth { rd, rn },
+            Instruction::Sxtw { rd, rn } => Instruction::Sxtw { rd, rn },
+            Instruction::Uxtb { rd, rn } => Instruction::Uxtb { rd, rn },
+            Instruction::Uxth { rd, rn } => Instruction::Uxth { rd, rn },
             // Move-wide cluster: MOVN ↔ MOVZ ↔ MOVK (all share rd/imm/shift),
             // plus a single MovImm bridge anchored at MOVZ.
             //

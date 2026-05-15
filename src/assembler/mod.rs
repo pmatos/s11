@@ -775,6 +775,15 @@ impl AArch64Assembler {
                 dynasm!(ops ; .arch aarch64 ; rev16 X(rd_reg), X(rn_reg));
                 Ok(())
             }
+            // SXTB/SXTH/SXTW/UXTB/UXTH standalone extends. Issue #60.
+            // Encoder bodies land in a follow-up slice.
+            Instruction::Sxtb { .. }
+            | Instruction::Sxth { .. }
+            | Instruction::Sxtw { .. }
+            | Instruction::Uxtb { .. }
+            | Instruction::Uxth { .. } => {
+                Err("standalone extend encoding not yet implemented".to_string())
+            }
             Instruction::Neg { rd, rm } => {
                 let rd_reg = register_to_dynasm(*rd)?;
                 let rm_reg = register_to_dynasm(*rm)?;

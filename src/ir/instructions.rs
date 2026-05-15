@@ -290,6 +290,31 @@ pub enum Instruction {
         rd: Register,
         rn: Register,
     },
+
+    // Standalone sign/zero-extend (UBFM/SBFM aliases). Issue #60.
+    // The Rn slot is architecturally a W-register for byte/half/word
+    // extends and X-register for the (out-of-scope) UXTX/SXTX. The IR
+    // models Rn as 64-bit X; semantics mask the low N bits explicitly.
+    Sxtb {
+        rd: Register,
+        rn: Register,
+    },
+    Sxth {
+        rd: Register,
+        rn: Register,
+    },
+    Sxtw {
+        rd: Register,
+        rn: Register,
+    },
+    Uxtb {
+        rd: Register,
+        rn: Register,
+    },
+    Uxth {
+        rd: Register,
+        rn: Register,
+    },
 }
 
 impl Instruction {
@@ -340,7 +365,12 @@ impl Instruction {
             | Instruction::Rbit { rd, .. }
             | Instruction::Rev { rd, .. }
             | Instruction::Rev32 { rd, .. }
-            | Instruction::Rev16 { rd, .. } => Some(*rd),
+            | Instruction::Rev16 { rd, .. }
+            | Instruction::Sxtb { rd, .. }
+            | Instruction::Sxth { rd, .. }
+            | Instruction::Sxtw { rd, .. }
+            | Instruction::Uxtb { rd, .. }
+            | Instruction::Uxth { rd, .. } => Some(*rd),
             // Comparison instructions only set flags, no destination register
             Instruction::Cmp { .. }
             | Instruction::Cmn { .. }
@@ -556,7 +586,12 @@ impl Instruction {
             | Instruction::Rbit { rd, rn }
             | Instruction::Rev { rd, rn }
             | Instruction::Rev32 { rd, rn }
-            | Instruction::Rev16 { rd, rn } => *rd != Register::SP && *rn != Register::SP,
+            | Instruction::Rev16 { rd, rn }
+            | Instruction::Sxtb { rd, rn }
+            | Instruction::Sxth { rd, rn }
+            | Instruction::Sxtw { rd, rn }
+            | Instruction::Uxtb { rd, rn }
+            | Instruction::Uxth { rd, rn } => *rd != Register::SP && *rn != Register::SP,
         }
     }
 
@@ -663,7 +698,12 @@ impl Instruction {
             | Instruction::Rbit { rn, .. }
             | Instruction::Rev { rn, .. }
             | Instruction::Rev32 { rn, .. }
-            | Instruction::Rev16 { rn, .. } => vec![*rn],
+            | Instruction::Rev16 { rn, .. }
+            | Instruction::Sxtb { rn, .. }
+            | Instruction::Sxth { rn, .. }
+            | Instruction::Sxtw { rn, .. }
+            | Instruction::Uxtb { rn, .. }
+            | Instruction::Uxth { rn, .. } => vec![*rn],
         }
     }
 }
@@ -756,6 +796,11 @@ impl fmt::Display for Instruction {
             Instruction::Rev { rd, rn } => write!(f, "rev {}, {}", rd, rn),
             Instruction::Rev32 { rd, rn } => write!(f, "rev32 {}, {}", rd, rn),
             Instruction::Rev16 { rd, rn } => write!(f, "rev16 {}, {}", rd, rn),
+            Instruction::Sxtb { rd, rn } => write!(f, "sxtb {}, {}", rd, rn),
+            Instruction::Sxth { rd, rn } => write!(f, "sxth {}, {}", rd, rn),
+            Instruction::Sxtw { rd, rn } => write!(f, "sxtw {}, {}", rd, rn),
+            Instruction::Uxtb { rd, rn } => write!(f, "uxtb {}, {}", rd, rn),
+            Instruction::Uxth { rd, rn } => write!(f, "uxth {}, {}", rd, rn),
         }
     }
 }

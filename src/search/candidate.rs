@@ -597,6 +597,11 @@ pub fn opcode_id(instr: &Instruction) -> u8 {
         Instruction::Umulh { .. } => 46,
         Instruction::Ccmp { .. } => 47,
         Instruction::Ccmn { .. } => 48,
+        Instruction::Sxtb { .. } => 49,
+        Instruction::Sxth { .. } => 50,
+        Instruction::Sxtw { .. } => 51,
+        Instruction::Uxtb { .. } => 52,
+        Instruction::Uxth { .. } => 53,
     }
 }
 

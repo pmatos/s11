@@ -157,6 +157,11 @@ impl InstructionType for Instruction {
             Instruction::Umulh { .. } => 46,
             Instruction::Ccmp { .. } => 47,
             Instruction::Ccmn { .. } => 48,
+            Instruction::Sxtb { .. } => 49,
+            Instruction::Sxth { .. } => 50,
+            Instruction::Sxtw { .. } => 51,
+            Instruction::Uxtb { .. } => 52,
+            Instruction::Uxth { .. } => 53,
         }
     }
 
@@ -210,6 +215,11 @@ impl InstructionType for Instruction {
             Instruction::Umulh { .. } => "umulh",
             Instruction::Ccmp { .. } => "ccmp",
             Instruction::Ccmn { .. } => "ccmn",
+            Instruction::Sxtb { .. } => "sxtb",
+            Instruction::Sxth { .. } => "sxth",
+            Instruction::Sxtw { .. } => "sxtw",
+            Instruction::Uxtb { .. } => "uxtb",
+            Instruction::Uxth { .. } => "uxth",
         }
     }
 
@@ -838,6 +848,11 @@ impl InstructionGenerator<Instruction> for AArch64InstructionGenerator {
                     Instruction::Rev { rn, .. } => Instruction::Rev { rd: new_rd, rn },
                     Instruction::Rev32 { rn, .. } => Instruction::Rev32 { rd: new_rd, rn },
                     Instruction::Rev16 { rn, .. } => Instruction::Rev16 { rd: new_rd, rn },
+                    Instruction::Sxtb { rn, .. } => Instruction::Sxtb { rd: new_rd, rn },
+                    Instruction::Sxth { rn, .. } => Instruction::Sxth { rd: new_rd, rn },
+                    Instruction::Sxtw { rn, .. } => Instruction::Sxtw { rd: new_rd, rn },
+                    Instruction::Uxtb { rn, .. } => Instruction::Uxtb { rd: new_rd, rn },
+                    Instruction::Uxth { rn, .. } => Instruction::Uxth { rd: new_rd, rn },
                 }
             }
             2 => {
@@ -1158,6 +1173,26 @@ impl InstructionGenerator<Instruction> for AArch64InstructionGenerator {
                         rn: registers[rng.random_range(0..registers.len())],
                     },
                     Instruction::Rev16 { rd, .. } => Instruction::Rev16 {
+                        rd,
+                        rn: registers[rng.random_range(0..registers.len())],
+                    },
+                    Instruction::Sxtb { rd, .. } => Instruction::Sxtb {
+                        rd,
+                        rn: registers[rng.random_range(0..registers.len())],
+                    },
+                    Instruction::Sxth { rd, .. } => Instruction::Sxth {
+                        rd,
+                        rn: registers[rng.random_range(0..registers.len())],
+                    },
+                    Instruction::Sxtw { rd, .. } => Instruction::Sxtw {
+                        rd,
+                        rn: registers[rng.random_range(0..registers.len())],
+                    },
+                    Instruction::Uxtb { rd, .. } => Instruction::Uxtb {
+                        rd,
+                        rn: registers[rng.random_range(0..registers.len())],
+                    },
+                    Instruction::Uxth { rd, .. } => Instruction::Uxth {
                         rd,
                         rn: registers[rng.random_range(0..registers.len())],
                     },
