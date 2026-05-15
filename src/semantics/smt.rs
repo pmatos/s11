@@ -46,8 +46,12 @@ fn bv_reverse_bits_64(value: &BV) -> BV {
 
 /// Count leading zeros of a 64-bit BV using a nested ITE chain.
 /// Iterates bit positions from LSB upward; later iterations overwrite the
-/// result when their bit is set, so the final result reflects the
-/// most-significant set bit (or 64 if no bit is set).
+/// result when their bit is set, so the final result is the CLZ of the
+/// input — the number of leading zeros — derived from the highest-set-bit
+/// position found (or 64 if no bit is set).
+//
+// TODO(#112): replace this 64-deep ITE chain with an O(log n) binary-search
+// decomposition (top-32 / top-16 / … / top-1) to reduce Z3 formula depth.
 fn bv_clz_64(value: &BV) -> BV {
     let mut result = BV::from_u64(64, 64);
     let one_bit = BV::from_u64(1, 1);
@@ -369,9 +373,11 @@ pub fn apply_instruction(mut state: MachineState, instruction: &Instruction) -> 
         }
         // CLS: count leading sign-bit replicas (excluding the sign bit).
         // Fold the sign bit out via `x XOR (x ASR 63)` so the answer reduces
-        // to `clz(folded) - 1`. For all-sign inputs (0 or -1) folded is zero,
-        // clz is 64, and the result clamps to 63 via bvsub (no underflow at
-        // 64-bit width).
+        // to `clz(folded) - 1`. Bit 63 of `folded` is always 0 (a positive
+        // sign cancels its own top bit; a negative sign inverts it to 0),
+        // so `bv_clz_64(folded) ∈ [1, 64]` and the subtraction lands in
+        // `[0, 63]` — `bvsub` never wraps. For all-sign inputs (0 or -1)
+        // folded is zero, clz is 64, and the result is 63.
         Instruction::Cls { rd, rn } => {
             let value = state.get_register(*rn).clone();
             let asr = value.bvashr(&BV::from_u64(63, 64));

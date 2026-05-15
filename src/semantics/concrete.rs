@@ -287,7 +287,10 @@ pub fn apply_instruction_concrete(
         Instruction::Cls { rd, rn } => {
             let value = state.get_register(*rn).as_u64();
             let folded = value ^ ((value as i64 >> 63) as u64);
-            let result = (folded.leading_zeros() as u64).saturating_sub(1);
+            // After the sign-fold `x ^ (x ASR 63)`, bit 63 of `folded` is
+            // always 0, so `leading_zeros(folded) >= 1` and the subtraction
+            // cannot underflow.
+            let result = folded.leading_zeros() as u64 - 1;
             state.set_register(*rd, ConcreteValue::new(result));
         }
         // RBIT: reverse the bit order of the 64-bit value.
