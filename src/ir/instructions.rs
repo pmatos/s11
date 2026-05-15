@@ -448,6 +448,10 @@ impl Instruction {
                         && *rd != Register::SP
                         && *rn != Register::SP
                 }
+                // ExtendedRegister encodability tightening lands in a later
+                // slice; reject by default so logical opcodes inheriting this
+                // pattern keep the same conservative gate. Issue #60.
+                Operand::ExtendedRegister { .. } => false,
             },
 
             // AND/ORR/EOR: register operand or shifted-register (all 4 kinds, ROR allowed).
@@ -463,6 +467,8 @@ impl Instruction {
                         && *rd != Register::SP
                         && *rn != Register::SP
                 }
+                // Logical opcodes do not accept the extended-register form.
+                Operand::ExtendedRegister { .. } => false,
             },
 
             // Shift instructions: shift amount 0-63 for 64-bit registers.
@@ -474,6 +480,7 @@ impl Instruction {
                 Operand::Register(_) => true,
                 Operand::Immediate(amt) => *amt >= 0 && *amt <= 63,
                 Operand::ShiftedRegister { .. } => false,
+                Operand::ExtendedRegister { .. } => false,
             },
 
             // MUL/SDIV/UDIV: always register operands, always encodable
@@ -497,6 +504,7 @@ impl Instruction {
                         && *reg != Register::SP
                         && *rn != Register::SP
                 }
+                Operand::ExtendedRegister { .. } => false,
             },
 
             // TST: register operand or shifted-register (all 4 kinds, ROR allowed).
@@ -506,6 +514,7 @@ impl Instruction {
                 Operand::ShiftedRegister { reg, amount, .. } => {
                     *amount <= 63 && *reg != Register::SP && *rn != Register::SP
                 }
+                Operand::ExtendedRegister { .. } => false,
             },
 
             // Conditional select: always encodable (register-only)
@@ -535,6 +544,7 @@ impl Instruction {
                 Operand::Register(_) => true,
                 Operand::Immediate(imm) => *imm >= 0 && *imm <= 0xFFF,
                 Operand::ShiftedRegister { .. } => false,
+                Operand::ExtendedRegister { .. } => false,
             },
             // ANDS: register-only (same as AND). ShiftedRegister out of scope (#59).
             Instruction::Ands { rm, .. } => matches!(rm, Operand::Register(_)),
@@ -565,6 +575,7 @@ impl Instruction {
                     Operand::Register(reg) => *reg != Register::SP,
                     Operand::Immediate(imm) => (0..=31).contains(imm),
                     Operand::ShiftedRegister { .. } => false,
+                    Operand::ExtendedRegister { .. } => false,
                 }
             }
 
@@ -575,6 +586,7 @@ impl Instruction {
                 Operand::Register(_) => true,
                 Operand::Immediate(amt) => *amt >= 0 && *amt <= 63,
                 Operand::ShiftedRegister { .. } => false,
+                Operand::ExtendedRegister { .. } => false,
             },
 
             // Single-source bit-manipulation: register-only, Xn class (no SP).
@@ -610,6 +622,7 @@ impl Instruction {
                 match rm {
                     Operand::Register(r) => regs.push(*r),
                     Operand::ShiftedRegister { reg, .. } => regs.push(*reg),
+                    Operand::ExtendedRegister { reg, .. } => regs.push(*reg),
                     Operand::Immediate(_) => {}
                 }
                 regs
@@ -641,6 +654,7 @@ impl Instruction {
                 match rm {
                     Operand::Register(r) => regs.push(*r),
                     Operand::ShiftedRegister { reg, .. } => regs.push(*reg),
+                    Operand::ExtendedRegister { reg, .. } => regs.push(*reg),
                     Operand::Immediate(_) => {}
                 }
                 regs

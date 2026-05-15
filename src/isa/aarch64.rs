@@ -70,10 +70,11 @@ impl OperandType for Operand {
         match self {
             Operand::Register(r) => Some(*r),
             Operand::Immediate(_) => None,
-            // ShiftedRegister carries a register but is not a plain register
-            // operand; callers asking "is this a register?" should treat it as
-            // a distinct shape.
+            // ShiftedRegister/ExtendedRegister carry a register but are not
+            // plain register operands; callers asking "is this a register?"
+            // should treat them as distinct shapes.
             Operand::ShiftedRegister { .. } => None,
+            Operand::ExtendedRegister { .. } => None,
         }
     }
 
@@ -82,6 +83,7 @@ impl OperandType for Operand {
             Operand::Register(_) => None,
             Operand::Immediate(i) => Some(*i),
             Operand::ShiftedRegister { .. } => None,
+            Operand::ExtendedRegister { .. } => None,
         }
     }
 
@@ -1228,7 +1230,9 @@ fn mutate_operand<R: RngExt>(
     immediates: &[i64],
 ) -> Operand {
     match operand {
-        Operand::Register(_) | Operand::ShiftedRegister { .. } => {
+        Operand::Register(_)
+        | Operand::ShiftedRegister { .. }
+        | Operand::ExtendedRegister { .. } => {
             if rng.random_bool(0.7) {
                 Operand::Register(registers[rng.random_range(0..registers.len())])
             } else {
@@ -1252,7 +1256,9 @@ fn mutate_shift_operand<R: RngExt>(
 ) -> Operand {
     let shift_amounts: [i64; 7] = [0, 1, 2, 4, 8, 16, 32];
     match operand {
-        Operand::Register(_) | Operand::ShiftedRegister { .. } => {
+        Operand::Register(_)
+        | Operand::ShiftedRegister { .. }
+        | Operand::ExtendedRegister { .. } => {
             if rng.random_bool(0.5) {
                 Operand::Register(registers[rng.random_range(0..registers.len())])
             } else {

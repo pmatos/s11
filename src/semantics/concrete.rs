@@ -19,6 +19,21 @@ fn eval_operand(state: &ConcreteMachineState, operand: &Operand) -> ConcreteValu
             };
             ConcreteValue::new(shifted)
         }
+        // Issue #60: extract low N bits, sign/zero-extend to 64, then shl.
+        Operand::ExtendedRegister { reg, kind, shift } => {
+            let value = state.get_register(*reg).as_u64();
+            let extended = match kind {
+                crate::ir::ExtendKind::Uxtb => value & 0xFF,
+                crate::ir::ExtendKind::Uxth => value & 0xFFFF,
+                crate::ir::ExtendKind::Uxtw => value & 0xFFFF_FFFF,
+                crate::ir::ExtendKind::Uxtx => value,
+                crate::ir::ExtendKind::Sxtb => (value as i8) as i64 as u64,
+                crate::ir::ExtendKind::Sxth => (value as i16) as i64 as u64,
+                crate::ir::ExtendKind::Sxtw => (value as i32) as i64 as u64,
+                crate::ir::ExtendKind::Sxtx => value,
+            };
+            ConcreteValue::new(extended.wrapping_shl(*shift as u32))
+        }
     }
 }
 

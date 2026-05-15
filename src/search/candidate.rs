@@ -477,9 +477,10 @@ pub fn generate_random_instruction<R: rand::RngExt>(
                 Operand::Register(r) => Operand::Register(r),
                 Operand::Immediate(v) => Operand::Immediate(v.rem_euclid(32)),
                 // random_operand only returns Register/Immediate, but the
-                // compiler can't prove that — drop ShiftedRegister to a plain
-                // register (CCMP rejects shifted form anyway).
-                Operand::ShiftedRegister { reg, .. } => Operand::Register(reg),
+                // compiler can't prove that — drop ShiftedRegister/Extended-
+                // Register to a plain register (CCMP rejects both forms).
+                Operand::ShiftedRegister { reg, .. }
+                | Operand::ExtendedRegister { reg, .. } => Operand::Register(reg),
             };
             let nzcv = (rng.random::<u32>() & 0x0F) as u8;
             let cond = crate::ir::types::Condition::random_normal(rng);

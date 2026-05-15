@@ -250,7 +250,7 @@ fn parse_mov(operands: &[&str]) -> Result<Instruction, String> {
     match src {
         Operand::Register(rn) => Ok(Instruction::MovReg { rd, rn }),
         Operand::Immediate(imm) => Ok(Instruction::MovImm { rd, imm }),
-        Operand::ShiftedRegister { .. } => {
+        Operand::ShiftedRegister { .. } | Operand::ExtendedRegister { .. } => {
             Err("mov second operand must be a register or immediate".to_string())
         }
     }
@@ -427,7 +427,9 @@ fn parse_movw_operands(mnem: &str, operands: &[&str]) -> Result<(Register, u16, 
     let rd = parse_register(operands[0])?;
     let imm_val = match parse_operand(operands[1])? {
         Operand::Immediate(v) => v,
-        Operand::Register(_) | Operand::ShiftedRegister { .. } => {
+        Operand::Register(_)
+        | Operand::ShiftedRegister { .. }
+        | Operand::ExtendedRegister { .. } => {
             return Err(format!("{} second operand must be an immediate", mnem));
         }
     };
@@ -452,7 +454,9 @@ fn parse_movw_operands(mnem: &str, operands: &[&str]) -> Result<(Register, u16, 
         }
         let s = match parse_operand(rest)? {
             Operand::Immediate(v) => v,
-            Operand::Register(_) | Operand::ShiftedRegister { .. } => {
+            Operand::Register(_)
+        | Operand::ShiftedRegister { .. }
+        | Operand::ExtendedRegister { .. } => {
                 return Err(format!("{} shift must be an immediate", mnem));
             }
         };
@@ -509,7 +513,9 @@ fn parse_shifted_register_tail(mnem: &str, reg: Register, tail: &str) -> Result<
     };
     let amt = match parse_operand(rest)? {
         Operand::Immediate(v) => v,
-        Operand::Register(_) | Operand::ShiftedRegister { .. } => {
+        Operand::Register(_)
+        | Operand::ShiftedRegister { .. }
+        | Operand::ExtendedRegister { .. } => {
             return Err(format!("{} shift amount must be an immediate", mnem));
         }
     };

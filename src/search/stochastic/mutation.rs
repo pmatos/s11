@@ -39,9 +39,12 @@ fn strip_ror_for_arith(rm: Operand) -> Operand {
 fn clamp_to_register<R: RngExt>(rm: Operand, registers: &[Register], rng: &mut R) -> Operand {
     match rm {
         Operand::Register(_) => rm,
-        // ShiftedRegister carries a real register; preserve it as a plain
-        // register (drop the shift) when the destination opcode is register-only.
-        Operand::ShiftedRegister { reg, .. } => Operand::Register(reg),
+        // ShiftedRegister/ExtendedRegister carry a real register; preserve
+        // it as a plain register (drop the modifier) when the destination
+        // opcode is register-only.
+        Operand::ShiftedRegister { reg, .. } | Operand::ExtendedRegister { reg, .. } => {
+            Operand::Register(reg)
+        }
         Operand::Immediate(_) => {
             if registers.is_empty() {
                 rm
@@ -236,10 +239,12 @@ impl Mutator {
                         *rm = match self.random_operand(rng) {
                             Operand::Register(r) => Operand::Register(r),
                             Operand::Immediate(v) => Operand::Immediate(v.rem_euclid(32)),
-                            // CCMP/CCMN reject shifted-register operands;
-                            // collapse to a plain register (consistent with
-                            // candidate::generate_random_instruction case 27).
-                            Operand::ShiftedRegister { reg, .. } => Operand::Register(reg),
+                            // CCMP/CCMN reject shifted-register or extended-
+                            // register operands; collapse to a plain register
+                            // (consistent with candidate::generate_random_-
+                            // instruction case 27).
+                            Operand::ShiftedRegister { reg, .. }
+                            | Operand::ExtendedRegister { reg, .. } => Operand::Register(reg),
                         };
                     }
                     2 => *nzcv = (rng.random::<u32>() & 0x0F) as u8,

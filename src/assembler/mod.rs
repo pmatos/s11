@@ -287,6 +287,7 @@ impl AArch64Assembler {
                             ops, add, rd_reg, rn_reg, rm_reg_num, kind, *amount
                         )
                     }
+                    Operand::ExtendedRegister { .. } => Err("ExtendedRegister encoding not yet implemented".to_string()),
                 }
             }
             Instruction::Sub { rd, rn, rm } => {
@@ -319,6 +320,7 @@ impl AArch64Assembler {
                             ops, sub, rd_reg, rn_reg, rm_reg_num, kind, *amount
                         )
                     }
+                    Operand::ExtendedRegister { .. } => Err("ExtendedRegister encoding not yet implemented".to_string()),
                 }
             }
             Instruction::And { rd, rn, rm } => {
@@ -345,6 +347,7 @@ impl AArch64Assembler {
                             ops, and, rd_reg, rn_reg, rm_reg_num, kind, *amount
                         )
                     }
+                    Operand::ExtendedRegister { .. } => Err("ExtendedRegister encoding not yet implemented".to_string()),
                 }
             }
             Instruction::Orr { rd, rn, rm } => {
@@ -371,6 +374,7 @@ impl AArch64Assembler {
                             ops, orr, rd_reg, rn_reg, rm_reg_num, kind, *amount
                         )
                     }
+                    Operand::ExtendedRegister { .. } => Err("ExtendedRegister encoding not yet implemented".to_string()),
                 }
             }
             Instruction::Eor { rd, rn, rm } => {
@@ -397,6 +401,7 @@ impl AArch64Assembler {
                             ops, eor, rd_reg, rn_reg, rm_reg_num, kind, *amount
                         )
                     }
+                    Operand::ExtendedRegister { .. } => Err("ExtendedRegister encoding not yet implemented".to_string()),
                 }
             }
             Instruction::Lsl { rd, rn, shift } => {
@@ -430,6 +435,7 @@ impl AArch64Assembler {
                     Operand::ShiftedRegister { .. } => {
                         Err("LSL shift amount cannot be a ShiftedRegister".to_string())
                     }
+                    Operand::ExtendedRegister { .. } => Err("ExtendedRegister encoding not yet implemented".to_string()),
                 }
             }
             Instruction::Lsr { rd, rn, shift } => {
@@ -461,6 +467,7 @@ impl AArch64Assembler {
                     Operand::ShiftedRegister { .. } => {
                         Err("LSR shift amount cannot be a ShiftedRegister".to_string())
                     }
+                    Operand::ExtendedRegister { .. } => Err("ExtendedRegister encoding not yet implemented".to_string()),
                 }
             }
             Instruction::Asr { rd, rn, shift } => {
@@ -492,6 +499,7 @@ impl AArch64Assembler {
                     Operand::ShiftedRegister { .. } => {
                         Err("ASR shift amount cannot be a ShiftedRegister".to_string())
                     }
+                    Operand::ExtendedRegister { .. } => Err("ExtendedRegister encoding not yet implemented".to_string()),
                 }
             }
             Instruction::Mul { rd, rn, rm } => {
@@ -610,6 +618,7 @@ impl AArch64Assembler {
                         let rm_reg_num = register_to_dynasm(*reg)?;
                         emit_shifted_reg_2op_arith!(ops, cmp, rn_reg, rm_reg_num, kind, *amount)
                     }
+                    Operand::ExtendedRegister { .. } => Err("ExtendedRegister encoding not yet implemented".to_string()),
                 }
             }
             Instruction::Cmn { rn, rm } => {
@@ -638,6 +647,7 @@ impl AArch64Assembler {
                         let rm_reg_num = register_to_dynasm(*reg)?;
                         emit_shifted_reg_2op_arith!(ops, cmn, rn_reg, rm_reg_num, kind, *amount)
                     }
+                    Operand::ExtendedRegister { .. } => Err("ExtendedRegister encoding not yet implemented".to_string()),
                 }
             }
             Instruction::Tst { rn, rm } => {
@@ -659,6 +669,7 @@ impl AArch64Assembler {
                         let rm_reg_num = register_to_dynasm(*reg)?;
                         emit_shifted_reg_2op_logical!(ops, tst, rn_reg, rm_reg_num, kind, *amount)
                     }
+                    Operand::ExtendedRegister { .. } => Err("ExtendedRegister encoding not yet implemented".to_string()),
                 }
             }
             Instruction::Csel { rd, rn, rm, cond } => {
@@ -708,6 +719,7 @@ impl AArch64Assembler {
                     Operand::ShiftedRegister { .. } => {
                         return Err("CCMP does not support shifted-register operand".to_string());
                     }
+                    Operand::ExtendedRegister { .. } => { return Err("ExtendedRegister encoding not yet implemented".to_string()); }
                 }
                 Ok(())
             }
@@ -730,6 +742,7 @@ impl AArch64Assembler {
                     Operand::ShiftedRegister { .. } => {
                         return Err("CCMN does not support shifted-register operand".to_string());
                     }
+                    Operand::ExtendedRegister { .. } => { return Err("ExtendedRegister encoding not yet implemented".to_string()); }
                 }
                 Ok(())
             }
@@ -875,6 +888,7 @@ impl AArch64Assembler {
                     Operand::ShiftedRegister { .. } => {
                         Err("BIC shifted-register form not yet supported (issue #59 covers AND/ORR/EOR/TST only)".to_string())
                     }
+                    Operand::ExtendedRegister { .. } => Err("ExtendedRegister encoding not yet implemented".to_string()),
                 }
             }
             Instruction::Bics { rd, rn, rm } => {
@@ -892,6 +906,7 @@ impl AArch64Assembler {
                     Operand::ShiftedRegister { .. } => {
                         Err("BICS shifted-register form not yet supported".to_string())
                     }
+                    Operand::ExtendedRegister { .. } => Err("ExtendedRegister encoding not yet implemented".to_string()),
                 }
             }
             Instruction::Orn { rd, rn, rm } => {
@@ -909,6 +924,7 @@ impl AArch64Assembler {
                     Operand::ShiftedRegister { .. } => {
                         Err("ORN shifted-register form not yet supported".to_string())
                     }
+                    Operand::ExtendedRegister { .. } => Err("ExtendedRegister encoding not yet implemented".to_string()),
                 }
             }
             Instruction::Eon { rd, rn, rm } => {
@@ -926,6 +942,7 @@ impl AArch64Assembler {
                     Operand::ShiftedRegister { .. } => {
                         Err("EON shifted-register form not yet supported".to_string())
                     }
+                    Operand::ExtendedRegister { .. } => Err("ExtendedRegister encoding not yet implemented".to_string()),
                 }
             }
             Instruction::Adds { rd, rn, rm } => {
@@ -956,6 +973,7 @@ impl AArch64Assembler {
                     Operand::ShiftedRegister { .. } => {
                         Err("ADDS shifted-register form not yet supported (issue #59 covers ADD without flags)".to_string())
                     }
+                    Operand::ExtendedRegister { .. } => Err("ExtendedRegister encoding not yet implemented".to_string()),
                 }
             }
             Instruction::Subs { rd, rn, rm } => {
@@ -983,6 +1001,7 @@ impl AArch64Assembler {
                     Operand::ShiftedRegister { .. } => {
                         Err("SUBS shifted-register form not yet supported".to_string())
                     }
+                    Operand::ExtendedRegister { .. } => Err("ExtendedRegister encoding not yet implemented".to_string()),
                 }
             }
             Instruction::Ands { rd, rn, rm } => {
@@ -1000,6 +1019,7 @@ impl AArch64Assembler {
                     Operand::ShiftedRegister { .. } => {
                         Err("ANDS shifted-register form not yet supported".to_string())
                     }
+                    Operand::ExtendedRegister { .. } => Err("ExtendedRegister encoding not yet implemented".to_string()),
                 }
             }
             // CSET / CSETM lower to CSINC/CSINV with XZR sources and inverted cond.
@@ -1058,6 +1078,7 @@ impl AArch64Assembler {
                     Operand::ShiftedRegister { .. } => {
                         Err("ROR shift amount cannot be a ShiftedRegister".to_string())
                     }
+                    Operand::ExtendedRegister { .. } => Err("ExtendedRegister encoding not yet implemented".to_string()),
                 }
             }
         }
