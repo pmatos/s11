@@ -145,6 +145,11 @@ impl InstructionType for Instruction {
             Instruction::Rev { .. } => 39,
             Instruction::Rev32 { .. } => 40,
             Instruction::Rev16 { .. } => 41,
+            Instruction::Madd { .. } => 42,
+            Instruction::Msub { .. } => 43,
+            Instruction::Mneg { .. } => 44,
+            Instruction::Smulh { .. } => 45,
+            Instruction::Umulh { .. } => 46,
         }
     }
 
@@ -191,6 +196,11 @@ impl InstructionType for Instruction {
             Instruction::Rev { .. } => "rev",
             Instruction::Rev32 { .. } => "rev32",
             Instruction::Rev16 { .. } => "rev16",
+            Instruction::Madd { .. } => "madd",
+            Instruction::Msub { .. } => "msub",
+            Instruction::Mneg { .. } => "mneg",
+            Instruction::Smulh { .. } => "smulh",
+            Instruction::Umulh { .. } => "umulh",
         }
     }
 
@@ -302,6 +312,23 @@ impl InstructionGenerator<Instruction> for AArch64InstructionGenerator {
             }
         }
 
+        // Multiply-accumulate family. MADD/MSUB add a 4th register slot,
+        // so candidate count grows by |registers|^4 per variant
+        // (e.g. 8^4 = 4096 per arm). MNEG/SMULH/UMULH are 3-operand like MUL.
+        for &rd in registers {
+            for &rn in registers {
+                for &rm in registers {
+                    instructions.push(Instruction::Mneg { rd, rn, rm });
+                    instructions.push(Instruction::Smulh { rd, rn, rm });
+                    instructions.push(Instruction::Umulh { rd, rn, rm });
+                    for &ra in registers {
+                        instructions.push(Instruction::Madd { rd, rn, rm, ra });
+                        instructions.push(Instruction::Msub { rd, rn, rm, ra });
+                    }
+                }
+            }
+        }
+
         // Tier 1 inverted-logical / flag-setting binary ops (register form).
         for &rd in registers {
             for &rn in registers {
@@ -383,11 +410,12 @@ impl InstructionGenerator<Instruction> for AArch64InstructionGenerator {
         registers: &[Register],
         immediates: &[i64],
     ) -> Instruction {
-        // 27 opcode slots: 0..13 original, 13..23 Tier 1 (slot 23 is a
+        // 28 opcode slots: 0..13 original, 13..23 Tier 1 (slot 23 is a
         // 4-way sub-multiplexer for ANDS/CSET/CSETM/ROR), 24 = MOVZ,
         // 25 = MOVK, 26 = single-source bit-manipulation (CLZ/CLS/RBIT/REV*)
-        // 6-way sub-multiplexer.
-        let opcode = rng.random_range(0..27);
+        // 6-way sub-multiplexer, 27 = multiply-accumulate family (issue
+        // #56: 5-way sub-multiplexer for MADD/MSUB/MNEG/SMULH/UMULH).
+        let opcode = rng.random_range(0..28);
         let rd = registers[rng.random_range(0..registers.len())];
         let rn = registers[rng.random_range(0..registers.len())];
         let pick_reg = |rng: &mut R| registers[rng.random_range(0..registers.len())];
@@ -559,6 +587,23 @@ impl InstructionGenerator<Instruction> for AArch64InstructionGenerator {
                     _ => Instruction::Rev16 { rd, rn },
                 }
             }
+            // Multiply-accumulate family.
+            27 => {
+                let rm = pick_reg(rng);
+                match rng.random_range(0..5) {
+                    0 => {
+                        let ra = pick_reg(rng);
+                        Instruction::Madd { rd, rn, rm, ra }
+                    }
+                    1 => {
+                        let ra = pick_reg(rng);
+                        Instruction::Msub { rd, rn, rm, ra }
+                    }
+                    2 => Instruction::Mneg { rd, rn, rm },
+                    3 => Instruction::Smulh { rd, rn, rm },
+                    _ => Instruction::Umulh { rd, rn, rm },
+                }
+            }
             _ => unreachable!(),
         }
     }
@@ -607,6 +652,21 @@ impl InstructionGenerator<Instruction> for AArch64InstructionGenerator {
                     Instruction::Mul { rn, rm, .. } => Instruction::Mul { rd: new_rd, rn, rm },
                     Instruction::Sdiv { rn, rm, .. } => Instruction::Sdiv { rd: new_rd, rn, rm },
                     Instruction::Udiv { rn, rm, .. } => Instruction::Udiv { rd: new_rd, rn, rm },
+                    Instruction::Madd { rn, rm, ra, .. } => Instruction::Madd {
+                        rd: new_rd,
+                        rn,
+                        rm,
+                        ra,
+                    },
+                    Instruction::Msub { rn, rm, ra, .. } => Instruction::Msub {
+                        rd: new_rd,
+                        rn,
+                        rm,
+                        ra,
+                    },
+                    Instruction::Mneg { rn, rm, .. } => Instruction::Mneg { rd: new_rd, rn, rm },
+                    Instruction::Smulh { rn, rm, .. } => Instruction::Smulh { rd: new_rd, rn, rm },
+                    Instruction::Umulh { rn, rm, .. } => Instruction::Umulh { rd: new_rd, rn, rm },
                     // Comparison instructions have no destination - generate random instead
                     Instruction::Cmp { .. } | Instruction::Cmn { .. } | Instruction::Tst { .. } => {
                         self.generate_random(rng, registers, immediates)
@@ -746,6 +806,58 @@ impl InstructionGenerator<Instruction> for AArch64InstructionGenerator {
                     Instruction::Udiv { rd, rn, .. } => {
                         let new_rm = registers[rng.random_range(0..registers.len())];
                         Instruction::Udiv { rd, rn, rm: new_rm }
+                    }
+                    Instruction::Madd { rd, rn, rm, ra } => {
+                        // Pick one of {rm, ra} to substitute (rd handled by
+                        // strategy 1; rn by the broader source-mutation path).
+                        if rng.random_bool(0.5) {
+                            let new_rm = registers[rng.random_range(0..registers.len())];
+                            Instruction::Madd {
+                                rd,
+                                rn,
+                                rm: new_rm,
+                                ra,
+                            }
+                        } else {
+                            let new_ra = registers[rng.random_range(0..registers.len())];
+                            Instruction::Madd {
+                                rd,
+                                rn,
+                                rm,
+                                ra: new_ra,
+                            }
+                        }
+                    }
+                    Instruction::Msub { rd, rn, rm, ra } => {
+                        if rng.random_bool(0.5) {
+                            let new_rm = registers[rng.random_range(0..registers.len())];
+                            Instruction::Msub {
+                                rd,
+                                rn,
+                                rm: new_rm,
+                                ra,
+                            }
+                        } else {
+                            let new_ra = registers[rng.random_range(0..registers.len())];
+                            Instruction::Msub {
+                                rd,
+                                rn,
+                                rm,
+                                ra: new_ra,
+                            }
+                        }
+                    }
+                    Instruction::Mneg { rd, rn, .. } => {
+                        let new_rm = registers[rng.random_range(0..registers.len())];
+                        Instruction::Mneg { rd, rn, rm: new_rm }
+                    }
+                    Instruction::Smulh { rd, rn, .. } => {
+                        let new_rm = registers[rng.random_range(0..registers.len())];
+                        Instruction::Smulh { rd, rn, rm: new_rm }
+                    }
+                    Instruction::Umulh { rd, rn, .. } => {
+                        let new_rm = registers[rng.random_range(0..registers.len())];
+                        Instruction::Umulh { rd, rn, rm: new_rm }
                     }
                     // Comparison instructions - change operand
                     Instruction::Cmp { rn, rm } => {
@@ -939,10 +1051,11 @@ impl InstructionGenerator<Instruction> for AArch64InstructionGenerator {
     /// holds, but the random-generation distribution is not uniform across
     /// all 42 IDs.
     fn opcode_count(&self) -> u8 {
-        42 // 20 original + 14 Tier 1 (MVN, NEG, NEGS, MovN, BIC, BICS, ORN,
+        47 // 20 original + 14 Tier 1 (MVN, NEG, NEGS, MovN, BIC, BICS, ORN,
         //  EON, ADDS, SUBS, ANDS, CSET, CSETM, ROR) + 2 MOVK/MOVZ (issue
         //  #55) + 6 single-source bit-manipulation (CLZ, CLS, RBIT, REV,
-        //  REV32, REV16).
+        //  REV32, REV16) + 5 multiply-accumulate family (issue #56:
+        //  MADD, MSUB, MNEG, SMULH, UMULH).
     }
 }
 
@@ -1200,6 +1313,33 @@ mod tests {
             Instruction::Rev16 {
                 rd: Register::X0,
                 rn: Register::X1,
+            },
+            Instruction::Madd {
+                rd: Register::X0,
+                rn: Register::X1,
+                rm: Register::X2,
+                ra: Register::X3,
+            },
+            Instruction::Msub {
+                rd: Register::X0,
+                rn: Register::X1,
+                rm: Register::X2,
+                ra: Register::X3,
+            },
+            Instruction::Mneg {
+                rd: Register::X0,
+                rn: Register::X1,
+                rm: Register::X2,
+            },
+            Instruction::Smulh {
+                rd: Register::X0,
+                rn: Register::X1,
+                rm: Register::X2,
+            },
+            Instruction::Umulh {
+                rd: Register::X0,
+                rn: Register::X1,
+                rm: Register::X2,
             },
         ]
     }

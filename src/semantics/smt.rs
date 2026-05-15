@@ -251,6 +251,37 @@ pub fn apply_instruction(mut state: MachineState, instruction: &Instruction) -> 
             let result = is_zero.ite(&zero, &div_result);
             state.set_register(*rd, result);
         }
+        Instruction::Madd { rd, rn, rm, ra } => {
+            let a = state.get_register(*rn).clone();
+            let b = state.get_register(*rm).clone();
+            let c = state.get_register(*ra).clone();
+            state.set_register(*rd, c.bvadd(&a.bvmul(&b)));
+        }
+        Instruction::Msub { rd, rn, rm, ra } => {
+            let a = state.get_register(*rn).clone();
+            let b = state.get_register(*rm).clone();
+            let c = state.get_register(*ra).clone();
+            state.set_register(*rd, c.bvsub(&a.bvmul(&b)));
+        }
+        Instruction::Mneg { rd, rn, rm } => {
+            let a = state.get_register(*rn).clone();
+            let b = state.get_register(*rm).clone();
+            state.set_register(*rd, a.bvmul(&b).bvneg());
+        }
+        Instruction::Smulh { rd, rn, rm } => {
+            // 64-bit sign-extend to 128, multiply, extract upper 64 bits.
+            let a = state.get_register(*rn).sign_ext(64);
+            let b = state.get_register(*rm).sign_ext(64);
+            let prod = a.bvmul(&b);
+            state.set_register(*rd, prod.extract(127, 64));
+        }
+        Instruction::Umulh { rd, rn, rm } => {
+            // 64-bit zero-extend to 128, multiply, extract upper 64 bits.
+            let a = state.get_register(*rn).zero_ext(64);
+            let b = state.get_register(*rm).zero_ext(64);
+            let prod = a.bvmul(&b);
+            state.set_register(*rd, prod.extract(127, 64));
+        }
         // Comparison instructions set flags but don't modify registers
         // For now, we don't model flags in SMT - these are no-ops for register state
         Instruction::Cmp { .. } | Instruction::Cmn { .. } | Instruction::Tst { .. } => {

@@ -598,6 +598,73 @@ fn parse_mul(operands: &[&str]) -> Result<Instruction, String> {
     Ok(Instruction::Mul { rd, rn, rm })
 }
 
+/// Parse MADD instruction (4 register operands: rd, rn, rm, ra)
+fn parse_madd(operands: &[&str]) -> Result<Instruction, String> {
+    if operands.len() != 4 {
+        return Err(format!("madd requires 4 operands, got {}", operands.len()));
+    }
+
+    let rd = parse_register(operands[0])?;
+    let rn = parse_register(operands[1])?;
+    let rm = parse_register(operands[2])?;
+    let ra = parse_register(operands[3])?;
+
+    Ok(Instruction::Madd { rd, rn, rm, ra })
+}
+
+/// Parse MSUB instruction (4 register operands: rd, rn, rm, ra)
+fn parse_msub(operands: &[&str]) -> Result<Instruction, String> {
+    if operands.len() != 4 {
+        return Err(format!("msub requires 4 operands, got {}", operands.len()));
+    }
+
+    let rd = parse_register(operands[0])?;
+    let rn = parse_register(operands[1])?;
+    let rm = parse_register(operands[2])?;
+    let ra = parse_register(operands[3])?;
+
+    Ok(Instruction::Msub { rd, rn, rm, ra })
+}
+
+/// Parse MNEG instruction (3 register operands: rd, rn, rm)
+fn parse_mneg(operands: &[&str]) -> Result<Instruction, String> {
+    if operands.len() != 3 {
+        return Err(format!("mneg requires 3 operands, got {}", operands.len()));
+    }
+
+    let rd = parse_register(operands[0])?;
+    let rn = parse_register(operands[1])?;
+    let rm = parse_register(operands[2])?;
+
+    Ok(Instruction::Mneg { rd, rn, rm })
+}
+
+/// Parse SMULH instruction (3 register operands: rd, rn, rm)
+fn parse_smulh(operands: &[&str]) -> Result<Instruction, String> {
+    if operands.len() != 3 {
+        return Err(format!("smulh requires 3 operands, got {}", operands.len()));
+    }
+
+    let rd = parse_register(operands[0])?;
+    let rn = parse_register(operands[1])?;
+    let rm = parse_register(operands[2])?;
+
+    Ok(Instruction::Smulh { rd, rn, rm })
+}
+
+/// Parse UMULH instruction (3 register operands: rd, rn, rm)
+fn parse_umulh(operands: &[&str]) -> Result<Instruction, String> {
+    if operands.len() != 3 {
+        return Err(format!("umulh requires 3 operands, got {}", operands.len()));
+    }
+
+    let rd = parse_register(operands[0])?;
+    let rn = parse_register(operands[1])?;
+    let rm = parse_register(operands[2])?;
+
+    Ok(Instruction::Umulh { rd, rn, rm })
+}
+
 /// Parse SDIV instruction
 fn parse_sdiv(operands: &[&str]) -> Result<Instruction, String> {
     if operands.len() != 3 {
@@ -763,6 +830,11 @@ pub fn parse_line(line: &str) -> Result<LineResult, ParseLineError> {
         "lsr" => parse_lsr(&operands).map_err(ParseLineError::Other)?,
         "asr" => parse_asr(&operands).map_err(ParseLineError::Other)?,
         "mul" => parse_mul(&operands).map_err(ParseLineError::Other)?,
+        "madd" => parse_madd(&operands).map_err(ParseLineError::Other)?,
+        "msub" => parse_msub(&operands).map_err(ParseLineError::Other)?,
+        "mneg" => parse_mneg(&operands).map_err(ParseLineError::Other)?,
+        "smulh" => parse_smulh(&operands).map_err(ParseLineError::Other)?,
+        "umulh" => parse_umulh(&operands).map_err(ParseLineError::Other)?,
         "sdiv" => parse_sdiv(&operands).map_err(ParseLineError::Other)?,
         "udiv" => parse_udiv(&operands).map_err(ParseLineError::Other)?,
         "cmp" => parse_cmp(&operands).map_err(ParseLineError::Other)?,
@@ -1198,6 +1270,11 @@ mod tests {
             ("lsr x0, x1, x2", "lsr x0, x1, x2"),
             ("asr x0, x1, #8", "asr x0, x1, #8"),
             ("mul x0, x1, x2", "mul x0, x1, x2"),
+            ("madd x0, x1, x2, x3", "madd x0, x1, x2, x3"),
+            ("msub x0, x1, x2, x3", "msub x0, x1, x2, x3"),
+            ("mneg x0, x1, x2", "mneg x0, x1, x2"),
+            ("smulh x0, x1, x2", "smulh x0, x1, x2"),
+            ("umulh x0, x1, x2", "umulh x0, x1, x2"),
             ("sdiv x0, x1, x2", "sdiv x0, x1, x2"),
             ("udiv x0, x1, x2", "udiv x0, x1, x2"),
             ("cmp x1, #5", "cmp x1, #5"),
@@ -1228,8 +1305,9 @@ mod tests {
         for mnemonic in [
             "mov", "mvn", "neg", "negs", "bic", "bics", "orn", "eon", "adds", "subs", "ands",
             "cset", "csetm", "ror", "movn", "movz", "movk", "add", "sub", "and", "orr", "eor",
-            "lsl", "lsr", "asr", "mul", "sdiv", "udiv", "cmp", "cmn", "tst", "csel", "csinc",
-            "csinv", "csneg", "clz", "cls", "rbit", "rev", "rev32", "rev16",
+            "lsl", "lsr", "asr", "mul", "madd", "msub", "mneg", "smulh", "umulh", "sdiv", "udiv",
+            "cmp", "cmn", "tst", "csel", "csinc", "csinv", "csneg", "clz", "cls", "rbit", "rev",
+            "rev32", "rev16",
         ] {
             assert!(
                 matches!(parse_line(mnemonic), Err(ParseLineError::Other(_))),

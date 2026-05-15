@@ -96,6 +96,41 @@ pub fn apply_instruction_concrete(
             let result = lhs.checked_div(rhs).unwrap_or(0); // Division by zero returns 0 in AArch64
             state.set_register(*rd, ConcreteValue::new(result));
         }
+        Instruction::Madd { rd, rn, rm, ra } => {
+            let a = state.get_register(*rn).as_u64();
+            let b = state.get_register(*rm).as_u64();
+            let c = state.get_register(*ra).as_u64();
+            let result = c.wrapping_add(a.wrapping_mul(b));
+            state.set_register(*rd, ConcreteValue::new(result));
+        }
+        Instruction::Msub { rd, rn, rm, ra } => {
+            let a = state.get_register(*rn).as_u64();
+            let b = state.get_register(*rm).as_u64();
+            let c = state.get_register(*ra).as_u64();
+            let result = c.wrapping_sub(a.wrapping_mul(b));
+            state.set_register(*rd, ConcreteValue::new(result));
+        }
+        Instruction::Mneg { rd, rn, rm } => {
+            let a = state.get_register(*rn).as_u64();
+            let b = state.get_register(*rm).as_u64();
+            let result = 0u64.wrapping_sub(a.wrapping_mul(b));
+            state.set_register(*rd, ConcreteValue::new(result));
+        }
+        Instruction::Smulh { rd, rn, rm } => {
+            let a = state.get_register(*rn).as_i64() as i128;
+            let b = state.get_register(*rm).as_i64() as i128;
+            // wrapping_mul for i128 is sufficient: a×b fits in 128 bits when
+            // |a|,|b| ≤ i64::MAX, except for i64::MIN×i64::MIN which still
+            // fits in i128 since i64::MIN as i128 is -2^63.
+            let result = (a.wrapping_mul(b) >> 64) as i64;
+            state.set_register(*rd, ConcreteValue::from_i64(result));
+        }
+        Instruction::Umulh { rd, rn, rm } => {
+            let a = state.get_register(*rn).as_u64() as u128;
+            let b = state.get_register(*rm).as_u64() as u128;
+            let result = ((a * b) >> 64) as u64;
+            state.set_register(*rd, ConcreteValue::new(result));
+        }
         // CMP: Compare (subtract and set flags, discard result)
         Instruction::Cmp { rn, rm } => {
             let lhs = state.get_register(*rn).as_u64();
@@ -730,6 +765,90 @@ mod tests {
             new_state.get_register(Register::X0).as_u64(),
             u64::MAX.wrapping_mul(2)
         );
+    }
+
+    /// Issue #56 acceptance: UMULH must match Rust's u128 high-half product
+    /// across edge cases (boundaries, identity, max×max).
+    #[test]
+    fn test_umulh_matches_rust_u128() {
+        let cases: [(u64, u64); 16] = [
+            (0, 0),
+            (0, 12345),
+            (1, u64::MAX),
+            (u64::MAX, u64::MAX),
+            (u64::MAX, 1),
+            (u64::MAX, 2),
+            (1 << 32, 1 << 32),
+            (1 << 32, (1 << 32) - 1),
+            (0xDEAD_BEEF, 0x1234_5678),
+            (0xFFFF_FFFF_FFFF_FFFE, 2),
+            (0x8000_0000_0000_0000, 0x8000_0000_0000_0000),
+            (0xAAAA_AAAA_AAAA_AAAA, 0x5555_5555_5555_5555),
+            (0xCAFE_F00D, 0xBABE_BEEF),
+            ((1u64 << 63) - 1, (1u64 << 63) - 1),
+            (u64::MAX - 1, u64::MAX - 1),
+            (0xFFFF_FFFF, 0xFFFF_FFFF),
+        ];
+
+        for (a, b) in cases {
+            let state = state_with(vec![(Register::X1, a), (Register::X2, b)]);
+            let instr = Instruction::Umulh {
+                rd: Register::X0,
+                rn: Register::X1,
+                rm: Register::X2,
+            };
+            let new_state = apply_instruction_concrete(state, &instr);
+            let expected = (((a as u128) * (b as u128)) >> 64) as u64;
+            assert_eq!(
+                new_state.get_register(Register::X0).as_u64(),
+                expected,
+                "umulh(0x{:x}, 0x{:x})",
+                a,
+                b
+            );
+        }
+    }
+
+    /// Issue #56 acceptance: SMULH must match Rust's i128 high-half product
+    /// across edge cases (signed boundaries, zero, identity, MIN×-1).
+    #[test]
+    fn test_smulh_matches_rust_i128() {
+        let cases: [(i64, i64); 16] = [
+            (0, 0),
+            (0, 12345),
+            (1, i64::MAX),
+            (-1, i64::MIN),
+            (i64::MAX, i64::MAX),
+            (i64::MIN, i64::MIN),
+            (i64::MIN, -1),
+            (i64::MIN, 1),
+            (i64::MAX, -1),
+            (123456789, -987654321),
+            (-1, -1),
+            (2, i64::MAX),
+            (-2, i64::MIN),
+            (1 << 32, 1 << 32),
+            (-(1 << 32), 1 << 32),
+            (0xDEAD_BEEF, 0x1234_5678),
+        ];
+
+        for (a, b) in cases {
+            let state = state_with(vec![(Register::X1, a as u64), (Register::X2, b as u64)]);
+            let instr = Instruction::Smulh {
+                rd: Register::X0,
+                rn: Register::X1,
+                rm: Register::X2,
+            };
+            let new_state = apply_instruction_concrete(state, &instr);
+            let expected = ((a as i128).wrapping_mul(b as i128) >> 64) as i64;
+            assert_eq!(
+                new_state.get_register(Register::X0).as_i64(),
+                expected,
+                "smulh(0x{:x}, 0x{:x})",
+                a,
+                b
+            );
+        }
     }
 
     #[test]
