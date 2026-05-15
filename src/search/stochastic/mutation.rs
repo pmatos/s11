@@ -236,6 +236,10 @@ impl Mutator {
                         *rm = match self.random_operand(rng) {
                             Operand::Register(r) => Operand::Register(r),
                             Operand::Immediate(v) => Operand::Immediate(v.rem_euclid(32)),
+                            // CCMP/CCMN reject shifted-register operands;
+                            // collapse to a plain register (consistent with
+                            // candidate::generate_random_instruction case 27).
+                            Operand::ShiftedRegister { reg, .. } => Operand::Register(reg),
                         };
                     }
                     2 => *nzcv = (rng.random::<u32>() & 0x0F) as u8,

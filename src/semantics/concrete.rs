@@ -1868,6 +1868,22 @@ mod tests {
     }
 
     #[test]
+    fn test_csinc_nv_selects_rn_concrete() {
+        // Concrete-interpreter pair for the SMT test
+        // `test_csel_nv_evaluates_as_always_true`. NV per ARM ARM still
+        // satisfies condition_holds = true; CSINC must select rn, not rm+1.
+        let state = state_with(vec![(Register::X1, 7), (Register::X2, 2)]);
+        let csinc = Instruction::Csinc {
+            rd: Register::X0,
+            rn: Register::X1,
+            rm: Register::X2,
+            cond: Condition::NV,
+        };
+        let after = apply_instruction_concrete(state, &csinc);
+        assert_eq!(after.get_register(Register::X0).as_u64(), 7);
+    }
+
+    #[test]
     fn test_ccmp_immediate_rm() {
         // Pre-condition Z=1 so EQ holds. The true branch computes
         // 31 - 31 = 0, so the resulting Z must again be 1. Use EQ (not AL,

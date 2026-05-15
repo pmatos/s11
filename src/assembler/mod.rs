@@ -144,10 +144,11 @@ macro_rules! emit_shifted_reg_2op_logical {
     }};
 }
 
-/// CCMP/CCMN reg form: `ccmp Xn, Xm, #nzcv, cond`. The condition suffix and
-/// the `#nzcv` literal must be compile-time, so we expand 14 condition × use
-/// `$nzcv` as a u32-cast expression at emit time. AL and NV are forbidden by
-/// `is_encodable_aarch64` and excluded from the macro arms.
+/// CCMP/CCMN reg form: `ccmp Xn, Xm, #nzcv, cond`. The condition suffix
+/// must be a compile-time literal for dynasm-rs, so we expand 14 condition
+/// arms; `$nzcv` is bound to a `u32`-cast value once at the top so the
+/// dynasm `#` literal slot accepts it at emit time. AL and NV are forbidden
+/// by `is_encodable_aarch64` and excluded from the macro arms.
 macro_rules! emit_ccmp_reg {
     ($ops:expr, $mnem:ident, $rn:expr, $rm:expr, $nzcv:expr, $cond:expr) => {{
         let n = $nzcv as u32;
@@ -1494,6 +1495,21 @@ mod tests {
             .assemble_instructions(&instructions)
             .expect("CCMN register form should encode");
         disassemble_and_verify(&bytes, "ccmn", &["x0", "x1", "#0xf", "lt"]);
+    }
+
+    #[test]
+    fn test_ccmn_imm_correctness() {
+        let mut assembler = AArch64Assembler::new();
+        let instructions = vec![Instruction::Ccmn {
+            rn: Register::X4,
+            rm: Operand::Immediate(7),
+            nzcv: 4,
+            cond: Condition::GE,
+        }];
+        let bytes = assembler
+            .assemble_instructions(&instructions)
+            .expect("CCMN immediate form should encode");
+        disassemble_and_verify(&bytes, "ccmn", &["x4", "#7", "#4", "ge"]);
     }
 
     #[test]

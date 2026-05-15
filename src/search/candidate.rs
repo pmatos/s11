@@ -452,7 +452,13 @@ pub fn generate_random_instruction<R: rand::RngExt>(
             // (encoded in the Xn slot, not XSP). `generate_all_instructions`
             // filters SP at enumeration time; mirror that here so the
             // mutator does not bleed avoidable is_encodable_aarch64
-            // rejections.
+            // rejections. The debug_assert guards against a degenerate
+            // `registers = [SP]` caller, which would otherwise spin
+            // forever in the retry loop below.
+            debug_assert!(
+                registers.iter().any(|r| *r != Register::SP),
+                "CCMP/CCMN random generator requires at least one non-SP register",
+            );
             let pick_non_sp = |rng: &mut R| loop {
                 let r = pick_reg(rng);
                 if r != Register::SP {
