@@ -820,7 +820,7 @@ fn convert_to_ir(instructions: &capstone::Instructions) -> Result<Vec<Instructio
             ConvertOutcome::Instruction(instr) => ir_instructions.push(instr),
             ConvertOutcome::Skip => {}
             ConvertOutcome::Unsupported(line) => {
-                println!("Warning: Skipping unsupported instruction: {}", line);
+                eprintln!("Warning: Skipping unsupported instruction: {}", line);
             }
         }
     }
