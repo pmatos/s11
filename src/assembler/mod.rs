@@ -144,6 +144,63 @@ macro_rules! emit_shifted_reg_2op_logical {
     }};
 }
 
+/// CCMP/CCMN reg form: `ccmp Xn, Xm, #nzcv, cond`. The condition suffix and
+/// the `#nzcv` literal must be compile-time, so we expand 14 condition × use
+/// `$nzcv` as a u32-cast expression at emit time. AL and NV are forbidden by
+/// `is_encodable_aarch64` and excluded from the macro arms.
+macro_rules! emit_ccmp_reg {
+    ($ops:expr, $mnem:ident, $rn:expr, $rm:expr, $nzcv:expr, $cond:expr) => {{
+        let n = $nzcv as u32;
+        match $cond {
+            Condition::EQ => dynasm!($ops ; .arch aarch64 ; $mnem X($rn), X($rm), #n, eq),
+            Condition::NE => dynasm!($ops ; .arch aarch64 ; $mnem X($rn), X($rm), #n, ne),
+            Condition::CS => dynasm!($ops ; .arch aarch64 ; $mnem X($rn), X($rm), #n, cs),
+            Condition::CC => dynasm!($ops ; .arch aarch64 ; $mnem X($rn), X($rm), #n, cc),
+            Condition::MI => dynasm!($ops ; .arch aarch64 ; $mnem X($rn), X($rm), #n, mi),
+            Condition::PL => dynasm!($ops ; .arch aarch64 ; $mnem X($rn), X($rm), #n, pl),
+            Condition::VS => dynasm!($ops ; .arch aarch64 ; $mnem X($rn), X($rm), #n, vs),
+            Condition::VC => dynasm!($ops ; .arch aarch64 ; $mnem X($rn), X($rm), #n, vc),
+            Condition::HI => dynasm!($ops ; .arch aarch64 ; $mnem X($rn), X($rm), #n, hi),
+            Condition::LS => dynasm!($ops ; .arch aarch64 ; $mnem X($rn), X($rm), #n, ls),
+            Condition::GE => dynasm!($ops ; .arch aarch64 ; $mnem X($rn), X($rm), #n, ge),
+            Condition::LT => dynasm!($ops ; .arch aarch64 ; $mnem X($rn), X($rm), #n, lt),
+            Condition::GT => dynasm!($ops ; .arch aarch64 ; $mnem X($rn), X($rm), #n, gt),
+            Condition::LE => dynasm!($ops ; .arch aarch64 ; $mnem X($rn), X($rm), #n, le),
+            Condition::AL | Condition::NV => {
+                return Err("CCMP/CCMN forbid AL/NV per ARM ARM C6.2.36".to_string());
+            }
+        }
+    }};
+}
+
+/// CCMP/CCMN immediate form: `ccmp Xn, #imm5, #nzcv, cond`.
+macro_rules! emit_ccmp_imm {
+    ($ops:expr, $mnem:ident, $rn:expr, $imm5:expr, $nzcv:expr, $cond:expr) => {{
+        let i = $imm5 as u32;
+        let n = $nzcv as u32;
+        match $cond {
+            Condition::EQ => dynasm!($ops ; .arch aarch64 ; $mnem X($rn), #i, #n, eq),
+            Condition::NE => dynasm!($ops ; .arch aarch64 ; $mnem X($rn), #i, #n, ne),
+            Condition::CS => dynasm!($ops ; .arch aarch64 ; $mnem X($rn), #i, #n, cs),
+            Condition::CC => dynasm!($ops ; .arch aarch64 ; $mnem X($rn), #i, #n, cc),
+            Condition::MI => dynasm!($ops ; .arch aarch64 ; $mnem X($rn), #i, #n, mi),
+            Condition::PL => dynasm!($ops ; .arch aarch64 ; $mnem X($rn), #i, #n, pl),
+            Condition::VS => dynasm!($ops ; .arch aarch64 ; $mnem X($rn), #i, #n, vs),
+            Condition::VC => dynasm!($ops ; .arch aarch64 ; $mnem X($rn), #i, #n, vc),
+            Condition::HI => dynasm!($ops ; .arch aarch64 ; $mnem X($rn), #i, #n, hi),
+            Condition::LS => dynasm!($ops ; .arch aarch64 ; $mnem X($rn), #i, #n, ls),
+            Condition::GE => dynasm!($ops ; .arch aarch64 ; $mnem X($rn), #i, #n, ge),
+            Condition::LT => dynasm!($ops ; .arch aarch64 ; $mnem X($rn), #i, #n, lt),
+            Condition::GT => dynasm!($ops ; .arch aarch64 ; $mnem X($rn), #i, #n, gt),
+            Condition::LE => dynasm!($ops ; .arch aarch64 ; $mnem X($rn), #i, #n, le),
+            Condition::AL | Condition::NV => {
+                return Err("CCMP/CCMN forbid AL/NV per ARM ARM C6.2.36".to_string());
+            }
+        }
+    }};
+}
+
+
 pub struct AArch64Assembler;
 
 impl AArch64Assembler {
@@ -630,6 +687,54 @@ impl AArch64Assembler {
                 let rn_reg = register_to_dynasm(*rn)?;
                 let rm_reg = register_to_dynasm(*rm)?;
                 emit_csel!(ops, csneg, rd_reg, rn_reg, rm_reg, *cond);
+                Ok(())
+            }
+            Instruction::Ccmp { rn, rm, nzcv, cond } => {
+                if *nzcv > 15 {
+                    return Err(format!("CCMP nzcv {} out of range (0..=15)", nzcv));
+                }
+                let rn_reg = register_to_dynasm(*rn)?;
+                match rm {
+                    Operand::Register(rm_reg) => {
+                        let rm_idx = register_to_dynasm(*rm_reg)?;
+                        emit_ccmp_reg!(ops, ccmp, rn_reg, rm_idx, *nzcv, *cond);
+                    }
+                    Operand::Immediate(imm) => {
+                        if *imm < 0 || *imm > 31 {
+                            return Err(format!("CCMP imm5 {} out of range (0..=31)", imm));
+                        }
+                        emit_ccmp_imm!(ops, ccmp, rn_reg, *imm, *nzcv, *cond);
+                    }
+                    Operand::ShiftedRegister { .. } => {
+                        return Err(
+                            "CCMP does not support shifted-register operand".to_string()
+                        );
+                    }
+                }
+                Ok(())
+            }
+            Instruction::Ccmn { rn, rm, nzcv, cond } => {
+                if *nzcv > 15 {
+                    return Err(format!("CCMN nzcv {} out of range (0..=15)", nzcv));
+                }
+                let rn_reg = register_to_dynasm(*rn)?;
+                match rm {
+                    Operand::Register(rm_reg) => {
+                        let rm_idx = register_to_dynasm(*rm_reg)?;
+                        emit_ccmp_reg!(ops, ccmn, rn_reg, rm_idx, *nzcv, *cond);
+                    }
+                    Operand::Immediate(imm) => {
+                        if *imm < 0 || *imm > 31 {
+                            return Err(format!("CCMN imm5 {} out of range (0..=31)", imm));
+                        }
+                        emit_ccmp_imm!(ops, ccmn, rn_reg, *imm, *nzcv, *cond);
+                    }
+                    Operand::ShiftedRegister { .. } => {
+                        return Err(
+                            "CCMN does not support shifted-register operand".to_string()
+                        );
+                    }
+                }
                 Ok(())
             }
             Instruction::Mvn { rd, rm } => {
@@ -1344,6 +1449,51 @@ mod tests {
             .assemble_instructions(&instructions)
             .expect("CSNEG encoding should succeed");
         disassemble_and_verify(&bytes, "csneg", &["x20", "x21", "x22", "ge"]);
+    }
+
+    #[test]
+    fn test_ccmp_reg_correctness() {
+        let mut assembler = AArch64Assembler::new();
+        let instructions = vec![Instruction::Ccmp {
+            rn: Register::X1,
+            rm: Operand::Register(Register::X2),
+            nzcv: 5,
+            cond: Condition::EQ,
+        }];
+        let bytes = assembler
+            .assemble_instructions(&instructions)
+            .expect("CCMP register form should encode");
+        disassemble_and_verify(&bytes, "ccmp", &["x1", "x2", "#5", "eq"]);
+    }
+
+    #[test]
+    fn test_ccmp_imm_correctness() {
+        let mut assembler = AArch64Assembler::new();
+        let instructions = vec![Instruction::Ccmp {
+            rn: Register::X3,
+            rm: Operand::Immediate(15),
+            nzcv: 0,
+            cond: Condition::NE,
+        }];
+        let bytes = assembler
+            .assemble_instructions(&instructions)
+            .expect("CCMP immediate form should encode");
+        disassemble_and_verify(&bytes, "ccmp", &["x3", "#0xf", "#0", "ne"]);
+    }
+
+    #[test]
+    fn test_ccmn_reg_correctness() {
+        let mut assembler = AArch64Assembler::new();
+        let instructions = vec![Instruction::Ccmn {
+            rn: Register::X0,
+            rm: Operand::Register(Register::X1),
+            nzcv: 15,
+            cond: Condition::LT,
+        }];
+        let bytes = assembler
+            .assemble_instructions(&instructions)
+            .expect("CCMN register form should encode");
+        disassemble_and_verify(&bytes, "ccmn", &["x0", "x1", "#0xf", "lt"]);
     }
 
     #[test]

@@ -5,20 +5,9 @@
 use crate::ir::{Instruction, Operand, Register};
 use crate::semantics::live_out::LiveOutRegisters;
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 use z3::ast::BV;
 use z3::{Params, Solver};
-
-/// Monotonic counter used to generate unique names for fresh symbolic values
-/// produced when modelling instructions whose result depends on state we do
-/// not symbolically track (currently: the CSEL family, which reads NZCV).
-static FRESH_BV_COUNTER: AtomicU64 = AtomicU64::new(0);
-
-fn fresh_bv(prefix: &str) -> BV {
-    let id = FRESH_BV_COUNTER.fetch_add(1, Ordering::Relaxed);
-    BV::new_const(format!("{}_{}", prefix, id), 64)
-}
 
 /// Reverse the byte order of a 64-bit BV by concatenating its 8 byte slices
 /// with byte 0 placed in the most-significant position.
@@ -133,6 +122,11 @@ pub fn create_solver_with_config(cfg: &SolverConfig) -> Solver {
 pub struct MachineState {
     /// Register values as 64-bit bitvectors
     pub registers: HashMap<Register, BV>,
+    /// NZCV condition flags as 1-bit bitvectors
+    pub n: BV,
+    pub z: BV,
+    pub c: BV,
+    pub v: BV,
 }
 
 impl MachineState {
@@ -154,7 +148,18 @@ impl MachineState {
         // SP is also symbolic
         registers.insert(Register::SP, BV::new_const(format!("{}_sp", prefix), 64));
 
-        MachineState { registers }
+        let n = BV::new_const(format!("{}_n", prefix), 1);
+        let z = BV::new_const(format!("{}_z", prefix), 1);
+        let c = BV::new_const(format!("{}_c", prefix), 1);
+        let v = BV::new_const(format!("{}_v", prefix), 1);
+
+        MachineState {
+            registers,
+            n,
+            z,
+            c,
+            v,
+        }
     }
 
     /// Get the value of a register
@@ -168,6 +173,19 @@ impl MachineState {
         if reg != Register::XZR {
             self.registers.insert(reg, value);
         }
+    }
+
+    /// Read the four NZCV flag bitvectors.
+    pub fn get_flags(&self) -> (&BV, &BV, &BV, &BV) {
+        (&self.n, &self.z, &self.c, &self.v)
+    }
+
+    /// Replace all four NZCV flag bitvectors at once.
+    pub fn set_flags(&mut self, n: BV, z: BV, c: BV, v: BV) {
+        self.n = n;
+        self.z = z;
+        self.c = c;
+        self.v = v;
     }
 
     /// Evaluate an operand to get its value
@@ -186,6 +204,110 @@ impl MachineState {
                 }
             }
         }
+    }
+}
+
+/// Symbolic NZCV flag tuple `(N, Z, C, V)` produced by flag-computing helpers.
+type Nzcv = (BV, BV, BV, BV);
+
+fn bv_one() -> BV {
+    BV::from_u64(1, 1)
+}
+
+fn bv_zero() -> BV {
+    BV::from_u64(0, 1)
+}
+
+/// Compute symbolic NZCV for the subtraction `lhs - rhs`. Mirrors
+/// `ConditionFlags::from_sub` in `state.rs` bit-for-bit.
+pub fn compute_flags_sub(lhs: &BV, rhs: &BV) -> Nzcv {
+    let result = lhs.bvsub(rhs);
+    let zero64 = BV::from_u64(0, 64);
+    let n = result.extract(63, 63);
+    let z = result.eq(&zero64).ite(&bv_one(), &bv_zero());
+    let c = lhs.bvuge(rhs).ite(&bv_one(), &bv_zero());
+    // Signed overflow on subtraction: (lhs and rhs differ in sign) AND
+    // (lhs and result differ in sign).
+    let lhs_sign = lhs.extract(63, 63);
+    let rhs_sign = rhs.extract(63, 63);
+    let res_sign = result.extract(63, 63);
+    let v = lhs_sign.bvxor(&rhs_sign).bvand(&lhs_sign.bvxor(&res_sign));
+    (n, z, c, v)
+}
+
+/// Compute symbolic NZCV for the addition `lhs + rhs`. Mirrors
+/// `ConditionFlags::from_add` in `state.rs`.
+pub fn compute_flags_add(lhs: &BV, rhs: &BV) -> Nzcv {
+    let result = lhs.bvadd(rhs);
+    let zero64 = BV::from_u64(0, 64);
+    let n = result.extract(63, 63);
+    let z = result.eq(&zero64).ite(&bv_one(), &bv_zero());
+    // Carry on add: result < lhs (unsigned).
+    let c = result.bvult(lhs).ite(&bv_one(), &bv_zero());
+    // Signed overflow on add: (lhs and rhs share sign) AND (lhs and result
+    // differ in sign).
+    let lhs_sign = lhs.extract(63, 63);
+    let rhs_sign = rhs.extract(63, 63);
+    let res_sign = result.extract(63, 63);
+    let one_bit = bv_one();
+    let signs_match = lhs_sign.bvxor(&rhs_sign).bvxor(&one_bit); // 1 when signs match
+    let signs_flip = lhs_sign.bvxor(&res_sign); // 1 when lhs and result differ
+    let v = signs_match.bvand(&signs_flip);
+    (n, z, c, v)
+}
+
+/// Convert a 4-bit NZCV literal to four 1-bit BV constants.
+/// Layout per ARM ARM: bit3 = N, bit2 = Z, bit1 = C, bit0 = V.
+pub fn nzcv_to_bvs(byte: u8) -> Nzcv {
+    (
+        BV::from_u64(((byte >> 3) & 1) as u64, 1),
+        BV::from_u64(((byte >> 2) & 1) as u64, 1),
+        BV::from_u64(((byte >> 1) & 1) as u64, 1),
+        BV::from_u64((byte & 1) as u64, 1),
+    )
+}
+
+/// Compute symbolic NZCV for a logical (AND/ORR/EOR/TST) result. C and V are
+/// always cleared per the AArch64 ARM.
+pub fn compute_flags_logical(result: &BV) -> Nzcv {
+    let zero64 = BV::from_u64(0, 64);
+    let n = result.extract(63, 63);
+    let z = result.eq(&zero64).ite(&bv_one(), &bv_zero());
+    (n, z, bv_zero(), bv_zero())
+}
+
+/// Translate a `Condition` code into a 1-bit symbolic predicate over the
+/// supplied NZCV flag BVs. Mirrors `ConditionFlags::evaluate` in `state.rs`
+/// and `evaluate_condition` in `concrete.rs` for all 16 condition codes.
+pub fn condition_to_smt(cond: crate::ir::types::Condition, n: &BV, z: &BV, c: &BV, v: &BV) -> BV {
+    use crate::ir::types::Condition;
+    let one = bv_one();
+    let zero = bv_zero();
+    let not_n = n.bvxor(&one);
+    let not_z = z.bvxor(&one);
+    let not_c = c.bvxor(&one);
+    let not_v = v.bvxor(&one);
+    let n_eq_v = n.bvxor(v).bvxor(&one); // 1 iff N == V
+
+    match cond {
+        Condition::EQ => z.clone(),
+        Condition::NE => not_z,
+        Condition::CS => c.clone(),
+        Condition::CC => not_c,
+        Condition::MI => n.clone(),
+        Condition::PL => not_n,
+        Condition::VS => v.clone(),
+        Condition::VC => not_v,
+        Condition::HI => c.bvand(&not_z),
+        Condition::LS => not_c.bvor(z),
+        Condition::GE => n_eq_v.clone(),
+        Condition::LT => n_eq_v.bvxor(&one), // N != V
+        Condition::GT => not_z.bvand(&n_eq_v),
+        Condition::LE => z.bvor(&n_eq_v.bvxor(&one)),
+        Condition::AL => one,
+        // NV is reserved in AArch64 and treated as "never" by
+        // `ConditionFlags::evaluate`; mirror that here.
+        Condition::NV => zero,
     }
 }
 
@@ -309,22 +431,86 @@ pub fn apply_instruction(mut state: MachineState, instruction: &Instruction) -> 
             let prod = a.bvmul(&b);
             state.set_register(*rd, prod.extract(127, 64));
         }
-        // Comparison instructions set flags but don't modify registers
-        // For now, we don't model flags in SMT - these are no-ops for register state
-        Instruction::Cmp { .. } | Instruction::Cmn { .. } | Instruction::Tst { .. } => {
-            // These only affect flags, which we don't model symbolically yet
-            // No register state changes
+        // Comparison instructions set flags and don't modify registers.
+        Instruction::Cmp { rn, rm } => {
+            let lhs = state.get_register(*rn).clone();
+            let rhs = state.eval_operand(rm);
+            let (n, z, c, v) = compute_flags_sub(&lhs, &rhs);
+            state.set_flags(n, z, c, v);
         }
-        // CSEL family depends on NZCV, which we don't model symbolically.
-        // Emit a fresh, unconstrained BV per use site so the solver can never
-        // prove equivalence across the conditional select. Sound (cannot
-        // wrongly accept) but uninformative (cannot prove valid rewrites that
-        // span CSEL chains). Flag-aware modelling is deferred.
-        Instruction::Csel { rd, .. }
-        | Instruction::Csinc { rd, .. }
-        | Instruction::Csinv { rd, .. }
-        | Instruction::Csneg { rd, .. } => {
-            state.set_register(*rd, fresh_bv("csel_result"));
+        Instruction::Cmn { rn, rm } => {
+            let lhs = state.get_register(*rn).clone();
+            let rhs = state.eval_operand(rm);
+            let (n, z, c, v) = compute_flags_add(&lhs, &rhs);
+            state.set_flags(n, z, c, v);
+        }
+        Instruction::Tst { rn, rm } => {
+            let lhs = state.get_register(*rn).clone();
+            let rhs = state.eval_operand(rm);
+            let result = lhs.bvand(&rhs);
+            let (n, z, c, v) = compute_flags_logical(&result);
+            state.set_flags(n, z, c, v);
+        }
+        // CCMP / CCMN: ITE between freshly-computed sub/add NZCV (true branch)
+        // and the unpacked 4-bit immediate (false branch), gated on the
+        // current symbolic NZCV-derived predicate.
+        Instruction::Ccmp { rn, rm, nzcv, cond } => {
+            let lhs = state.get_register(*rn).clone();
+            let rhs = state.eval_operand(rm);
+            let (n_t, z_t, c_t, v_t) = compute_flags_sub(&lhs, &rhs);
+            let pred =
+                condition_to_smt(*cond, &state.n, &state.z, &state.c, &state.v).eq(&bv_one());
+            let (n_f, z_f, c_f, v_f) = nzcv_to_bvs(*nzcv);
+            state.set_flags(
+                pred.ite(&n_t, &n_f),
+                pred.ite(&z_t, &z_f),
+                pred.ite(&c_t, &c_f),
+                pred.ite(&v_t, &v_f),
+            );
+        }
+        Instruction::Ccmn { rn, rm, nzcv, cond } => {
+            let lhs = state.get_register(*rn).clone();
+            let rhs = state.eval_operand(rm);
+            let (n_t, z_t, c_t, v_t) = compute_flags_add(&lhs, &rhs);
+            let pred =
+                condition_to_smt(*cond, &state.n, &state.z, &state.c, &state.v).eq(&bv_one());
+            let (n_f, z_f, c_f, v_f) = nzcv_to_bvs(*nzcv);
+            state.set_flags(
+                pred.ite(&n_t, &n_f),
+                pred.ite(&z_t, &z_f),
+                pred.ite(&c_t, &c_f),
+                pred.ite(&v_t, &v_f),
+            );
+        }
+        // CSEL family: rd = cond ? rn : f(rm), encoded as an SMT ITE over the
+        // 1-bit predicate produced by condition_to_smt.
+        Instruction::Csel { rd, rn, rm, cond } => {
+            let rn_v = state.get_register(*rn).clone();
+            let rm_v = state.get_register(*rm).clone();
+            let pred =
+                condition_to_smt(*cond, &state.n, &state.z, &state.c, &state.v).eq(&bv_one());
+            state.set_register(*rd, pred.ite(&rn_v, &rm_v));
+        }
+        Instruction::Csinc { rd, rn, rm, cond } => {
+            let rn_v = state.get_register(*rn).clone();
+            let rm_plus_one = state.get_register(*rm).bvadd(&BV::from_u64(1, 64));
+            let pred =
+                condition_to_smt(*cond, &state.n, &state.z, &state.c, &state.v).eq(&bv_one());
+            state.set_register(*rd, pred.ite(&rn_v, &rm_plus_one));
+        }
+        Instruction::Csinv { rd, rn, rm, cond } => {
+            let rn_v = state.get_register(*rn).clone();
+            let rm_not = state.get_register(*rm).bvnot();
+            let pred =
+                condition_to_smt(*cond, &state.n, &state.z, &state.c, &state.v).eq(&bv_one());
+            state.set_register(*rd, pred.ite(&rn_v, &rm_not));
+        }
+        Instruction::Csneg { rd, rn, rm, cond } => {
+            let rn_v = state.get_register(*rn).clone();
+            let rm_neg = state.get_register(*rm).bvneg();
+            let pred =
+                condition_to_smt(*cond, &state.n, &state.z, &state.c, &state.v).eq(&bv_one());
+            state.set_register(*rd, pred.ite(&rn_v, &rm_neg));
         }
         Instruction::Mvn { rd, rm } => {
             let value = state.get_register(*rm).bvnot();
@@ -334,12 +520,14 @@ pub fn apply_instruction(mut state: MachineState, instruction: &Instruction) -> 
             let value = state.get_register(*rm).bvneg();
             state.set_register(*rd, value);
         }
-        // NEGS writes rd just like NEG; flag side-effects are not modelled
-        // symbolically (matches CMP/CMN/TST). Soundness barrier: callers must
-        // refuse to drop flag-writers when flags are live-out.
+        // NEGS = SUBS rd, XZR, rm — write rd and the resulting NZCV.
         Instruction::Negs { rd, rm } => {
-            let value = state.get_register(*rm).bvneg();
+            let rhs = state.get_register(*rm).clone();
+            let zero = BV::from_u64(0, 64);
+            let value = zero.bvsub(&rhs);
+            let (n, z, c, v) = compute_flags_sub(&zero, &rhs);
             state.set_register(*rd, value);
+            state.set_flags(n, z, c, v);
         }
         Instruction::MovN { rd, imm, shift } => {
             let value = !((*imm as u64) << (*shift as u32));
@@ -359,15 +547,21 @@ pub fn apply_instruction(mut state: MachineState, instruction: &Instruction) -> 
             let result = prev.bvand(&mask).bvor(&new_chunk);
             state.set_register(*rd, result);
         }
-        // BIC: rd = rn & !rm. BICS shares the SMT body — the flag effect is
-        // not modelled (matches CMP/CMN/TST and ADDS/SUBS/ANDS). The
-        // soundness barrier lives in `equivalence::flag_writers_diverge`,
-        // which refuses any rewrite that drops a flag-writer the target had.
-        Instruction::Bic { rd, rn, rm } | Instruction::Bics { rd, rn, rm } => {
+        // BIC: rd = rn & !rm (no flag side-effect).
+        Instruction::Bic { rd, rn, rm } => {
             let lhs = state.get_register(*rn).clone();
             let rhs = state.eval_operand(rm);
             let result = lhs.bvand(rhs.bvnot());
             state.set_register(*rd, result);
+        }
+        // BICS: same data path as BIC plus logical-NZCV computation.
+        Instruction::Bics { rd, rn, rm } => {
+            let lhs = state.get_register(*rn).clone();
+            let rhs = state.eval_operand(rm);
+            let result = lhs.bvand(rhs.bvnot());
+            let (n, z, c, v) = compute_flags_logical(&result);
+            state.set_register(*rd, result);
+            state.set_flags(n, z, c, v);
         }
         Instruction::Orn { rd, rn, rm } => {
             let lhs = state.get_register(*rn).clone();
@@ -381,29 +575,44 @@ pub fn apply_instruction(mut state: MachineState, instruction: &Instruction) -> 
             let result = lhs.bvxor(rhs.bvnot());
             state.set_register(*rd, result);
         }
-        // Flag-setting arith/logical: rd is modelled symbolically (same as
-        // ADD/SUB/AND); flag side-effects are NOT modelled (matches CMP/CMN/TST).
-        // Soundness barrier: callers must refuse to drop flag-writers when
-        // flags are live-out (see `flags_live_out` and `modifies_flags`).
+        // Flag-setting arithmetic/logical instructions: write rd AND set the
+        // four NZCV flag BVs via the appropriate compute_flags helper.
         Instruction::Adds { rd, rn, rm } => {
             let lhs = state.get_register(*rn).clone();
             let rhs = state.eval_operand(rm);
+            let (n, z, c, v) = compute_flags_add(&lhs, &rhs);
             state.set_register(*rd, lhs.bvadd(&rhs));
+            state.set_flags(n, z, c, v);
         }
         Instruction::Subs { rd, rn, rm } => {
             let lhs = state.get_register(*rn).clone();
             let rhs = state.eval_operand(rm);
+            let (n, z, c, v) = compute_flags_sub(&lhs, &rhs);
             state.set_register(*rd, lhs.bvsub(&rhs));
+            state.set_flags(n, z, c, v);
         }
         Instruction::Ands { rd, rn, rm } => {
             let lhs = state.get_register(*rn).clone();
             let rhs = state.eval_operand(rm);
-            state.set_register(*rd, lhs.bvand(&rhs));
+            let result = lhs.bvand(&rhs);
+            let (n, z, c, v) = compute_flags_logical(&result);
+            state.set_register(*rd, result);
+            state.set_flags(n, z, c, v);
         }
-        // CSET / CSETM: depend on NZCV, which we don't model symbolically.
-        // Emit a fresh symbolic value per use (matches CSEL family policy).
-        Instruction::Cset { rd, .. } | Instruction::Csetm { rd, .. } => {
-            state.set_register(*rd, fresh_bv("cset_result"));
+        // CSET / CSETM: rd = cond ? 1 : 0 (or all-ones for CSETM).
+        Instruction::Cset { rd, cond } => {
+            let pred =
+                condition_to_smt(*cond, &state.n, &state.z, &state.c, &state.v).eq(&bv_one());
+            let one64 = BV::from_u64(1, 64);
+            let zero64 = BV::from_u64(0, 64);
+            state.set_register(*rd, pred.ite(&one64, &zero64));
+        }
+        Instruction::Csetm { rd, cond } => {
+            let pred =
+                condition_to_smt(*cond, &state.n, &state.z, &state.c, &state.v).eq(&bv_one());
+            let ones = BV::from_u64(u64::MAX, 64);
+            let zero64 = BV::from_u64(0, 64);
+            state.set_register(*rd, pred.ite(&ones, &zero64));
         }
         // ROR: composed via bv_ror_64 (see helper at top of file for the
         // edge-case discussion at n == 0).
@@ -488,7 +697,17 @@ pub fn apply_sequence(mut state: MachineState, instructions: &[Instruction]) -> 
     state
 }
 
-/// Check if two machine states are not equal (for any register values)
+fn flags_not_equal(state1: &MachineState, state2: &MachineState) -> z3::ast::Bool {
+    z3::ast::Bool::or(&[
+        &state1.n.eq(&state2.n).not(),
+        &state1.z.eq(&state2.z).not(),
+        &state1.c.eq(&state2.c).not(),
+        &state1.v.eq(&state2.v).not(),
+    ])
+}
+
+/// Check if two machine states are not equal (full state: every register plus
+/// the four NZCV flags). Used by the unmasked `check_equivalence` entry point.
 pub fn states_not_equal(state1: &MachineState, state2: &MachineState) -> z3::ast::Bool {
     let mut not_equal = z3::ast::Bool::from_bool(false);
 
@@ -508,14 +727,17 @@ pub fn states_not_equal(state1: &MachineState, state2: &MachineState) -> z3::ast
     let sp_not_equal = sp1.eq(sp2).not();
     not_equal = z3::ast::Bool::or(&[&not_equal, &sp_not_equal]);
 
-    not_equal
+    // And the NZCV flag bits.
+    z3::ast::Bool::or(&[&not_equal, &flags_not_equal(state1, state2)])
 }
 
-/// Check if two machine states are not equal for the specified live-out registers
+/// Check if two machine states are not equal for the specified live-out
+/// registers, optionally including the NZCV flag bits.
 pub fn states_not_equal_for_live_out(
     state1: &MachineState,
     state2: &MachineState,
     live_out: &LiveOutRegisters,
+    flags_live: bool,
 ) -> z3::ast::Bool {
     let mut not_equal = z3::ast::Bool::from_bool(false);
 
@@ -524,6 +746,10 @@ pub fn states_not_equal_for_live_out(
         let val2 = state2.get_register(*reg);
         let reg_not_equal = val1.eq(val2).not();
         not_equal = z3::ast::Bool::or(&[&not_equal, &reg_not_equal]);
+    }
+
+    if flags_live {
+        not_equal = z3::ast::Bool::or(&[&not_equal, &flags_not_equal(state1, state2)]);
     }
 
     not_equal
@@ -855,5 +1081,505 @@ mod tests {
             SatResult::Unsat,
             "CLZ; MOV #63; SUB pattern must produce floor_log2(x1) for nonzero x1"
         );
+    }
+
+    #[test]
+    fn test_symbolic_state_has_independent_nzcv_flags() {
+        // After new_symbolic, each NZCV flag is its own 1-bit symbolic BV.
+        // Two independent states must be free to disagree on every flag bit
+        // simultaneously — i.e. the conjunction (n1!=n2 ∧ z1!=z2 ∧ c1!=c2 ∧ v1!=v2)
+        // must be satisfiable. This proves the four flags are distinct
+        // symbolic constants, not aliased to the same name or to register BVs.
+        let s1 = MachineState::new_symbolic("a");
+        let s2 = MachineState::new_symbolic("b");
+        let (n1, z1, c1, v1) = s1.get_flags();
+        let (n2, z2, c2, v2) = s2.get_flags();
+
+        let solver = Solver::new();
+        solver.assert(&n1.eq(n2).not());
+        solver.assert(&z1.eq(z2).not());
+        solver.assert(&c1.eq(c2).not());
+        solver.assert(&v1.eq(v2).not());
+        assert_eq!(solver.check(), SatResult::Sat);
+    }
+
+    fn assert_state_flags_equal_bvs(state: &MachineState, expected: &Nzcv, ctx: &str) {
+        let solver = Solver::new();
+        let (n_e, z_e, c_e, v_e) = expected;
+        let neq = z3::ast::Bool::or(&[
+            &state.n.eq(n_e).not(),
+            &state.z.eq(z_e).not(),
+            &state.c.eq(c_e).not(),
+            &state.v.eq(v_e).not(),
+        ]);
+        solver.assert(&neq);
+        assert_eq!(solver.check(), SatResult::Unsat, "{}", ctx);
+    }
+
+    #[test]
+    fn test_cmp_sets_symbolic_flags() {
+        // Applying CMP X0, X1 must leave the four flag BVs in agreement with
+        // compute_flags_sub(X0, X1) — a property check across all symbolic
+        // input values.
+        let state = MachineState::new_symbolic("pre");
+        let x0 = state.get_register(Register::X0).clone();
+        let x1 = state.get_register(Register::X1).clone();
+        let expected = compute_flags_sub(&x0, &x1);
+        let after = apply_instruction(
+            state,
+            &Instruction::Cmp {
+                rn: Register::X0,
+                rm: Operand::Register(Register::X1),
+            },
+        );
+        assert_state_flags_equal_bvs(&after, &expected, "CMP x0, x1");
+    }
+
+    fn force_flags(state: &mut MachineState, n: u64, z: u64, c: u64, v: u64) {
+        state.set_flags(
+            BV::from_u64(n, 1),
+            BV::from_u64(z, 1),
+            BV::from_u64(c, 1),
+            BV::from_u64(v, 1),
+        );
+    }
+
+    fn assert_register_eq(state: &MachineState, reg: Register, expected: &BV, ctx: &str) {
+        let solver = Solver::new();
+        solver.assert(&state.get_register(reg).eq(expected).not());
+        assert_eq!(solver.check(), SatResult::Unsat, "{}", ctx);
+    }
+
+    #[test]
+    fn test_states_not_equal_detects_flag_divergence() {
+        // Build two symbolic states whose registers are pin-locked equal
+        // and whose flags are forced to differ. states_not_equal must be
+        // satisfiable in this configuration — proving that flag inequality
+        // is part of full-state equivalence.
+        let mut s1 = MachineState::new_symbolic("a");
+        let mut s2 = MachineState::new_symbolic("b");
+        // Force each register and SP to the same concrete value across
+        // both states so register equality holds trivially.
+        for i in 0..=30 {
+            if let Some(reg) = Register::from_index(i) {
+                let v = BV::from_u64(0, 64);
+                s1.set_register(reg, v.clone());
+                s2.set_register(reg, v);
+            }
+        }
+        s1.set_register(Register::SP, BV::from_u64(0, 64));
+        s2.set_register(Register::SP, BV::from_u64(0, 64));
+        // Force flags: s1 has Z=1, s2 has Z=0. Registers are identical.
+        force_flags(&mut s1, 0, 1, 0, 0);
+        force_flags(&mut s2, 0, 0, 0, 0);
+
+        let solver = Solver::new();
+        solver.assert(&states_not_equal(&s1, &s2));
+        assert_eq!(solver.check(), SatResult::Sat);
+    }
+
+    #[test]
+    fn test_csel_family_uses_symbolic_flag_ite() {
+        // For each CS-family variant, pin the NZCV flags concretely so that
+        // EQ is true (Z=1) or false (Z=0) and assert rd takes the spec-defined
+        // branch in each case.
+        let rn_val = BV::from_u64(7, 64);
+        let rm_val = BV::from_u64(2, 64);
+
+        let setup = |cond_true: bool| {
+            let mut s = MachineState::new_symbolic("pre");
+            s.set_register(Register::X1, rn_val.clone());
+            s.set_register(Register::X2, rm_val.clone());
+            force_flags(&mut s, 0, cond_true as u64, 0, 0);
+            s
+        };
+
+        // CSEL: x0 = z==1 ? x1 : x2
+        for &cond_true in &[true, false] {
+            let s = setup(cond_true);
+            let after = apply_instruction(
+                s,
+                &Instruction::Csel {
+                    rd: Register::X0,
+                    rn: Register::X1,
+                    rm: Register::X2,
+                    cond: crate::ir::types::Condition::EQ,
+                },
+            );
+            let expected = if cond_true { &rn_val } else { &rm_val };
+            assert_register_eq(&after, Register::X0, expected, "CSEL EQ branch");
+        }
+
+        // CSINC: x0 = z==1 ? x1 : (x2 + 1)
+        let s = setup(false);
+        let after = apply_instruction(
+            s,
+            &Instruction::Csinc {
+                rd: Register::X0,
+                rn: Register::X1,
+                rm: Register::X2,
+                cond: crate::ir::types::Condition::EQ,
+            },
+        );
+        assert_register_eq(
+            &after,
+            Register::X0,
+            &BV::from_u64(3, 64),
+            "CSINC EQ-false branch is rm+1",
+        );
+
+        // CSINV: x0 = z==1 ? x1 : ~x2
+        let s = setup(false);
+        let after = apply_instruction(
+            s,
+            &Instruction::Csinv {
+                rd: Register::X0,
+                rn: Register::X1,
+                rm: Register::X2,
+                cond: crate::ir::types::Condition::EQ,
+            },
+        );
+        assert_register_eq(
+            &after,
+            Register::X0,
+            &BV::from_u64(!2u64, 64),
+            "CSINV EQ-false branch is ~rm",
+        );
+
+        // CSNEG: x0 = z==1 ? x1 : -x2
+        let s = setup(false);
+        let after = apply_instruction(
+            s,
+            &Instruction::Csneg {
+                rd: Register::X0,
+                rn: Register::X1,
+                rm: Register::X2,
+                cond: crate::ir::types::Condition::EQ,
+            },
+        );
+        assert_register_eq(
+            &after,
+            Register::X0,
+            &BV::from_u64((-2i64) as u64, 64),
+            "CSNEG EQ-false branch is -rm",
+        );
+
+        // CSET: x0 = z==1 ? 1 : 0
+        for &cond_true in &[true, false] {
+            let s = setup(cond_true);
+            let after = apply_instruction(
+                s,
+                &Instruction::Cset {
+                    rd: Register::X0,
+                    cond: crate::ir::types::Condition::EQ,
+                },
+            );
+            let expected = BV::from_u64(cond_true as u64, 64);
+            assert_register_eq(&after, Register::X0, &expected, "CSET EQ");
+        }
+
+        // CSETM: x0 = z==1 ? -1 : 0
+        for &cond_true in &[true, false] {
+            let s = setup(cond_true);
+            let after = apply_instruction(
+                s,
+                &Instruction::Csetm {
+                    rd: Register::X0,
+                    cond: crate::ir::types::Condition::EQ,
+                },
+            );
+            let expected = BV::from_u64(if cond_true { u64::MAX } else { 0 }, 64);
+            assert_register_eq(&after, Register::X0, &expected, "CSETM EQ");
+        }
+    }
+
+    #[test]
+    fn test_ccmp_true_branch_matches_compute_flags_sub() {
+        // Force the predicate to true (Z=1, cond=EQ) so the true branch
+        // applies: state flags must equal compute_flags_sub(x1, x2).
+        let mut state = MachineState::new_symbolic("pre");
+        force_flags(&mut state, 0, 1, 0, 0);
+        let x1 = state.get_register(Register::X1).clone();
+        let x2 = state.get_register(Register::X2).clone();
+        let expected = compute_flags_sub(&x1, &x2);
+        let after = apply_instruction(
+            state,
+            &Instruction::Ccmp {
+                rn: Register::X1,
+                rm: Operand::Register(Register::X2),
+                nzcv: 0b1010,
+                cond: crate::ir::types::Condition::EQ,
+            },
+        );
+        assert_state_flags_equal_bvs(&after, &expected, "CCMP EQ-true matches CMP");
+    }
+
+    #[test]
+    fn test_ccmp_false_branch_uses_nzcv_literal_smt() {
+        // Force the predicate to false (Z=0, cond=EQ) so the false branch
+        // applies: state flags must equal the 4-bit nzcv literal.
+        let mut state = MachineState::new_symbolic("pre");
+        force_flags(&mut state, 0, 0, 0, 0);
+        let expected = nzcv_to_bvs(0b1010);
+        let after = apply_instruction(
+            state,
+            &Instruction::Ccmp {
+                rn: Register::X1,
+                rm: Operand::Register(Register::X2),
+                nzcv: 0b1010,
+                cond: crate::ir::types::Condition::EQ,
+            },
+        );
+        assert_state_flags_equal_bvs(&after, &expected, "CCMP EQ-false uses nzcv literal");
+    }
+
+    #[test]
+    fn test_ccmn_true_branch_matches_compute_flags_add() {
+        let mut state = MachineState::new_symbolic("pre");
+        force_flags(&mut state, 0, 1, 0, 0);
+        let x1 = state.get_register(Register::X1).clone();
+        let x2 = state.get_register(Register::X2).clone();
+        let expected = compute_flags_add(&x1, &x2);
+        let after = apply_instruction(
+            state,
+            &Instruction::Ccmn {
+                rn: Register::X1,
+                rm: Operand::Register(Register::X2),
+                nzcv: 0,
+                cond: crate::ir::types::Condition::EQ,
+            },
+        );
+        assert_state_flags_equal_bvs(&after, &expected, "CCMN EQ-true matches CMN");
+    }
+
+    #[test]
+    fn test_flag_writers_set_symbolic_flags() {
+        // Apply each flag-writing instruction over symbolic x0/x1 and prove
+        // its final NZCV agrees with the helper that mirrors concrete
+        // semantics. Covers every variant of modifies_flags() except CMP
+        // (already verified in test_cmp_sets_symbolic_flags).
+        let pre = MachineState::new_symbolic("pre");
+        let x0 = pre.get_register(Register::X0).clone();
+        let x1 = pre.get_register(Register::X1).clone();
+        let rm_reg = Operand::Register(Register::X1);
+
+        let cases: Vec<(Instruction, Nzcv, &'static str)> = vec![
+            (
+                Instruction::Cmn {
+                    rn: Register::X0,
+                    rm: rm_reg.clone(),
+                },
+                compute_flags_add(&x0, &x1),
+                "CMN x0, x1",
+            ),
+            (
+                Instruction::Tst {
+                    rn: Register::X0,
+                    rm: rm_reg.clone(),
+                },
+                compute_flags_logical(&x0.bvand(&x1)),
+                "TST x0, x1",
+            ),
+            (
+                Instruction::Adds {
+                    rd: Register::X2,
+                    rn: Register::X0,
+                    rm: rm_reg.clone(),
+                },
+                compute_flags_add(&x0, &x1),
+                "ADDS x2, x0, x1",
+            ),
+            (
+                Instruction::Subs {
+                    rd: Register::X2,
+                    rn: Register::X0,
+                    rm: rm_reg.clone(),
+                },
+                compute_flags_sub(&x0, &x1),
+                "SUBS x2, x0, x1",
+            ),
+            (
+                Instruction::Ands {
+                    rd: Register::X2,
+                    rn: Register::X0,
+                    rm: rm_reg.clone(),
+                },
+                compute_flags_logical(&x0.bvand(&x1)),
+                "ANDS x2, x0, x1",
+            ),
+            (
+                Instruction::Negs {
+                    rd: Register::X2,
+                    rm: Register::X1,
+                },
+                compute_flags_sub(&BV::from_u64(0, 64), &x1),
+                "NEGS x2, x1",
+            ),
+            (
+                Instruction::Bics {
+                    rd: Register::X2,
+                    rn: Register::X0,
+                    rm: rm_reg.clone(),
+                },
+                compute_flags_logical(&x0.bvand(&x1.bvnot())),
+                "BICS x2, x0, x1",
+            ),
+        ];
+
+        for (instr, expected, ctx) in cases {
+            let after = apply_instruction(pre.clone(), &instr);
+            assert_state_flags_equal_bvs(&after, &expected, ctx);
+        }
+    }
+
+    fn assert_flags_match(
+        actual: Nzcv,
+        expected: crate::semantics::state::ConditionFlags,
+        ctx: &str,
+    ) {
+        let (n, z, c, v) = actual;
+        let solver = Solver::new();
+        let exp_n = BV::from_u64(expected.n as u64, 1);
+        let exp_z = BV::from_u64(expected.z as u64, 1);
+        let exp_c = BV::from_u64(expected.c as u64, 1);
+        let exp_v = BV::from_u64(expected.v as u64, 1);
+        let neq = z3::ast::Bool::or(&[
+            &n.eq(&exp_n).not(),
+            &z.eq(&exp_z).not(),
+            &c.eq(&exp_c).not(),
+            &v.eq(&exp_v).not(),
+        ]);
+        solver.assert(&neq);
+        assert_eq!(solver.check(), SatResult::Unsat, "{}", ctx);
+    }
+
+    #[test]
+    fn test_compute_flags_sub_matches_concrete() {
+        use crate::semantics::state::ConditionFlags;
+        let cases: &[(u64, u64)] = &[
+            (5, 3),                // positive non-zero result, C set, no overflow
+            (3, 3),                // zero result
+            (0, 1),                // borrow / N set
+            (i64::MIN as u64, 1),  // signed overflow
+            (i64::MAX as u64, !0), // signed overflow other direction
+        ];
+        for &(a, b) in cases {
+            let lhs = BV::from_u64(a, 64);
+            let rhs = BV::from_u64(b, 64);
+            let expected = ConditionFlags::from_sub(a, b, a.wrapping_sub(b));
+            assert_flags_match(
+                compute_flags_sub(&lhs, &rhs),
+                expected,
+                &format!("compute_flags_sub({a}, {b}) vs ConditionFlags::from_sub"),
+            );
+        }
+    }
+
+    #[test]
+    fn test_compute_flags_add_matches_concrete() {
+        use crate::semantics::state::ConditionFlags;
+        let cases: &[(u64, u64)] = &[
+            (5, 3),
+            (0, 0),
+            (u64::MAX, 1),        // unsigned wrap → C set
+            (i64::MAX as u64, 1), // signed overflow
+            (i64::MIN as u64, i64::MIN as u64),
+        ];
+        for &(a, b) in cases {
+            let lhs = BV::from_u64(a, 64);
+            let rhs = BV::from_u64(b, 64);
+            let expected = ConditionFlags::from_add(a, b, a.wrapping_add(b));
+            assert_flags_match(
+                compute_flags_add(&lhs, &rhs),
+                expected,
+                &format!("compute_flags_add({a}, {b}) vs ConditionFlags::from_add"),
+            );
+        }
+    }
+
+    #[test]
+    fn test_compute_flags_logical_matches_concrete() {
+        use crate::semantics::state::ConditionFlags;
+        let cases: &[u64] = &[0, 1, !0, 1 << 63, 0x5555_5555_5555_5555];
+        for &r in cases {
+            let result = BV::from_u64(r, 64);
+            let expected = ConditionFlags::from_logical(r);
+            assert_flags_match(
+                compute_flags_logical(&result),
+                expected,
+                &format!("compute_flags_logical({r}) vs ConditionFlags::from_logical"),
+            );
+        }
+    }
+
+    #[test]
+    fn test_condition_to_smt_matches_concrete() {
+        use crate::ir::types::Condition;
+        use crate::semantics::state::ConditionFlags;
+        let conds = [
+            Condition::EQ,
+            Condition::NE,
+            Condition::CS,
+            Condition::CC,
+            Condition::MI,
+            Condition::PL,
+            Condition::VS,
+            Condition::VC,
+            Condition::HI,
+            Condition::LS,
+            Condition::GE,
+            Condition::LT,
+            Condition::GT,
+            Condition::LE,
+            Condition::AL,
+            Condition::NV,
+        ];
+        for nb in 0..16u8 {
+            let n = (nb >> 3) & 1 == 1;
+            let z = (nb >> 2) & 1 == 1;
+            let c = (nb >> 1) & 1 == 1;
+            let v = nb & 1 == 1;
+            let flags = ConditionFlags { n, z, c, v };
+            let n_bv = BV::from_u64(n as u64, 1);
+            let z_bv = BV::from_u64(z as u64, 1);
+            let c_bv = BV::from_u64(c as u64, 1);
+            let v_bv = BV::from_u64(v as u64, 1);
+            for &cond in &conds {
+                let expected = flags.evaluate(cond);
+                let smt = condition_to_smt(cond, &n_bv, &z_bv, &c_bv, &v_bv);
+                let solver = Solver::new();
+                let expected_bv = BV::from_u64(expected as u64, 1);
+                solver.assert(&smt.eq(&expected_bv).not());
+                assert_eq!(
+                    solver.check(),
+                    SatResult::Unsat,
+                    "condition_to_smt({:?}) disagrees with concrete at flags={:?}",
+                    cond,
+                    flags,
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_set_flags_round_trip() {
+        // set_flags writes; get_flags reads back the exact BVs.
+        let mut s = MachineState::new_symbolic("rt");
+        let n_in = BV::from_u64(1, 1);
+        let z_in = BV::from_u64(0, 1);
+        let c_in = BV::from_u64(1, 1);
+        let v_in = BV::from_u64(0, 1);
+        s.set_flags(n_in.clone(), z_in.clone(), c_in.clone(), v_in.clone());
+        let (n_out, z_out, c_out, v_out) = s.get_flags();
+
+        let solver = Solver::new();
+        let neq = z3::ast::Bool::or(&[
+            &n_out.eq(&n_in).not(),
+            &z_out.eq(&z_in).not(),
+            &c_out.eq(&c_in).not(),
+            &v_out.eq(&v_in).not(),
+        ]);
+        solver.assert(&neq);
+        assert_eq!(solver.check(), SatResult::Unsat);
     }
 }

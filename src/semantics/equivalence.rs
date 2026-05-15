@@ -19,42 +19,17 @@ use crate::validation::random::{
 use std::time::Duration;
 use z3::SatResult;
 
-/// Soundness guard: SMT does not model NZCV, so any rewrite that disturbs
-/// the flag-writing trace cannot be proved equivalent — a downstream
-/// conditional branch (or CSEL chain) would observe different flags.
-/// Equivalent in registers ≠ equivalent in flags.
-///
-/// This guard fires when the sub-sequence of flag-writing instructions in
-/// `target` differs in any way from the sub-sequence in `candidate` — drop,
-/// swap, reorder, or replace-with-different-flag-writer all count. The
-/// comparison is `Instruction`-level structural equality, so a `CMP x2, #0`
-/// in target vs `ADDS x0, x1, #1` in candidate (both modify NZCV but with
-/// different operands and different flag-setting rules) is correctly
-/// rejected — see the regression tests below.
-///
-/// Conservative on purpose: some valid rewrites that happen to produce
-/// identical final NZCV from different flag-writers will be wrongly
-/// rejected here. A symmetric incompleteness also remains — when both
-/// sequences contain the same structural flag-writer but with different
-/// upstream operands feeding it (e.g. `mov x1,#0; cmp x1,#0` vs
-/// `mov x1,#5; cmp x1,#0`), the guard does not detect the divergence.
-/// Closing either gap requires full NZCV modelling in SMT, tracked as
-/// issue #92.
+/// Cheap pre-SMT fast-path: rejects when only one sequence has flag-writers.
+/// Issue #92 closed the structural-equality version of this guard — now that
+/// SMT models symbolic NZCV (see `compute_flags_*` and `condition_to_smt` in
+/// `smt.rs`), any finer divergence is settled by the solver. We keep the
+/// asymmetric writes-vs-no-writes check because it short-circuits in O(n)
+/// without invoking Z3 and remains sound: if one sequence writes flags and
+/// the other does not, their flags cannot agree once flags become live.
 fn flag_writers_diverge(target: &[Instruction], candidate: &[Instruction]) -> bool {
-    // Fast paths: most rewrites involve no flag writers at all.
     let tw = flags_live_out(target);
     let cw = flags_live_out(candidate);
-    if !tw && !cw {
-        return false;
-    }
-    if tw != cw {
-        return true; // target writes flags, candidate doesn't (or vice versa)
-    }
-    let target_flag_writers: Vec<&Instruction> =
-        target.iter().filter(|i| i.modifies_flags()).collect();
-    let candidate_flag_writers: Vec<&Instruction> =
-        candidate.iter().filter(|i| i.modifies_flags()).collect();
-    target_flag_writers != candidate_flag_writers
+    tw != cw
 }
 
 /// Combined pre-SMT soundness guard. Single source of truth for the
@@ -96,6 +71,9 @@ pub struct EquivalenceConfig {
     pub smt_timeout: Option<Duration>,
     /// Skip SMT verification (fast path only)
     pub fast_only: bool,
+    /// Treat NZCV as live-out (include flag equality in both fast-path and
+    /// SMT comparisons).
+    pub flags_live: bool,
 }
 
 impl Default for EquivalenceConfig {
@@ -105,6 +83,7 @@ impl Default for EquivalenceConfig {
             random_test_count: 10,
             smt_timeout: Some(Duration::from_secs(30)),
             fast_only: false,
+            flags_live: false,
         }
     }
 }
@@ -153,6 +132,14 @@ impl EquivalenceConfig {
     /// Builder method to enable fast-only mode
     pub fn set_fast_only(mut self, fast_only: bool) -> Self {
         self.fast_only = fast_only;
+        self
+    }
+
+    /// Builder method to mark NZCV as live-out — flag inequality then
+    /// participates in both the fast-path concrete comparison and the SMT
+    /// formula. Mirrors `X86LiveOutMask::with_flags(true)` on the x86 side.
+    pub fn with_flags(mut self, flags_live: bool) -> Self {
+        self.flags_live = flags_live;
         self
     }
 }
@@ -217,7 +204,7 @@ fn run_fast_path(
         let state1 = apply_sequence_concrete(input.clone(), seq1);
         let state2 = apply_sequence_concrete(input.clone(), seq2);
 
-        if !states_equal_for_live_out(&state1, &state2, live_out_registers) {
+        if !states_equal_for_live_out(&state1, &state2, live_out_registers, config.flags_live) {
             return Some(EquivalenceResult::NotEquivalentFast(input.clone()));
         }
     }
@@ -227,7 +214,7 @@ fn run_fast_path(
         let state1 = apply_sequence_concrete(input.clone(), seq1);
         let state2 = apply_sequence_concrete(input.clone(), seq2);
 
-        if !states_equal_for_live_out(&state1, &state2, live_out_registers) {
+        if !states_equal_for_live_out(&state1, &state2, live_out_registers, config.flags_live) {
             return Some(EquivalenceResult::NotEquivalentFast(input.clone()));
         }
     }
@@ -318,6 +305,7 @@ fn build_smt_solver(
         &final_state1,
         &final_state2,
         config.live_out.registers(),
+        config.flags_live,
     ));
     solver
 }
@@ -399,7 +387,9 @@ pub fn find_counterexample_concrete(
         let state1 = apply_sequence_concrete(input.clone(), seq1);
         let state2 = apply_sequence_concrete(input.clone(), seq2);
 
-        if let Some(diff) = find_first_difference(&state1, &state2, live_out_registers) {
+        if let Some(diff) =
+            find_first_difference(&state1, &state2, live_out_registers, config.flags_live)
+        {
             return Some(diff);
         }
     }
@@ -409,7 +399,9 @@ pub fn find_counterexample_concrete(
         let state1 = apply_sequence_concrete(input.clone(), seq1);
         let state2 = apply_sequence_concrete(input.clone(), seq2);
 
-        if let Some(diff) = find_first_difference(&state1, &state2, live_out_registers) {
+        if let Some(diff) =
+            find_first_difference(&state1, &state2, live_out_registers, config.flags_live)
+        {
             return Some(diff);
         }
     }
@@ -712,6 +704,223 @@ mod tests {
         assert!(
             discovered.is_some(),
             "enumerative search must discover `ADD X0, X1, X2, LSL #3` as equivalent to LSL+ADD"
+        );
+    }
+
+    #[test]
+    fn issue_57_acceptance_ccmp_branchless_equiv_to_cmp_csel() {
+        // The issue 57 acceptance criterion: SMT proves a CCMP-based
+        // branchless `(a==b) && (a<c)` ≡ the multi-instruction CMP+CSET
+        // form, with the result deposited in X3.
+        //
+        // CCMP form (3 instructions):
+        //   CMP x0, x1            ; flags from x0 - x1
+        //   CCMP x0, x2, #0, EQ   ; if EQ: flags = x0 - x2; else flags = 0
+        //   CSET x3, LT
+        //
+        // Multi-instruction form (5 instructions):
+        //   CMP x0, x1
+        //   CSET xtmp, EQ         ; (x0 == x1)
+        //   CMP x0, x2
+        //   CSET x3, LT           ; (x0 < x2 signed)
+        //   AND x3, x3, xtmp
+        let target = vec![
+            Instruction::Cmp {
+                rn: Register::X0,
+                rm: Operand::Register(Register::X1),
+            },
+            Instruction::Ccmp {
+                rn: Register::X0,
+                rm: Operand::Register(Register::X2),
+                nzcv: 0,
+                cond: crate::ir::types::Condition::EQ,
+            },
+            Instruction::Cset {
+                rd: Register::X3,
+                cond: crate::ir::types::Condition::LT,
+            },
+        ];
+        let candidate = vec![
+            Instruction::Cmp {
+                rn: Register::X0,
+                rm: Operand::Register(Register::X1),
+            },
+            Instruction::Cset {
+                rd: Register::X4,
+                cond: crate::ir::types::Condition::EQ,
+            },
+            Instruction::Cmp {
+                rn: Register::X0,
+                rm: Operand::Register(Register::X2),
+            },
+            Instruction::Cset {
+                rd: Register::X3,
+                cond: crate::ir::types::Condition::LT,
+            },
+            Instruction::And {
+                rd: Register::X3,
+                rn: Register::X3,
+                rm: Operand::Register(Register::X4),
+            },
+        ];
+        let cfg =
+            EquivalenceConfig::default().live_out(LiveOut::from_registers(vec![Register::X3]));
+        assert_eq!(
+            check_equivalence_with_config(&target, &candidate, &cfg),
+            EquivalenceResult::Equivalent,
+            "Issue 57 acceptance: CCMP branchless ≡ CMP+CSET multi-instruction form"
+        );
+    }
+
+    #[test]
+    fn cmp_then_csel_is_flag_dependent() {
+        // CMP x1, x2; CSEL x0, x3, x4, eq writes x0 = (x1==x2 ? x3 : x4),
+        // which is not equivalent to MOV x0, x3 in general. With both
+        // sequences as their own target, equivalence should hold.
+        let cmp_csel = vec![
+            Instruction::Cmp {
+                rn: Register::X1,
+                rm: Operand::Register(Register::X2),
+            },
+            Instruction::Csel {
+                rd: Register::X0,
+                rn: Register::X3,
+                rm: Register::X4,
+                cond: crate::ir::types::Condition::EQ,
+            },
+        ];
+        let mov_only = vec![Instruction::MovReg {
+            rd: Register::X0,
+            rn: Register::X3,
+        }];
+        let cfg =
+            EquivalenceConfig::default().live_out(LiveOut::from_registers(vec![Register::X0]));
+        assert_ne!(
+            check_equivalence_with_config(&cmp_csel, &mov_only, &cfg),
+            EquivalenceResult::Equivalent,
+            "CMP+CSEL outcome depends on x1==x2; cannot collapse to MOV"
+        );
+        // Self-equivalence: a sequence equals itself.
+        assert_eq!(
+            check_equivalence_with_config(&cmp_csel, &cmp_csel, &cfg),
+            EquivalenceResult::Equivalent
+        );
+    }
+
+    #[test]
+    fn csinc_wraps_on_max_input() {
+        // CSINC x0, x1, x2, EQ with EQ=false sets x0 = x2 + 1 (wrapping).
+        // Build a target with x2 forced to u64::MAX and EQ forced false;
+        // candidate `MOV x0, #0` matches by 2's-complement wraparound.
+        let target = vec![
+            // Force EQ false: CMP x1, x1+1 always sets Z=0 — easier path:
+            // pin x2 to u64::MAX via MOVN (which writes !((imm)<<shift)),
+            // and use MovN with imm=0 to get all-ones (0xFFFF_FFFF_FFFF_FFFF).
+            Instruction::MovN {
+                rd: Register::X2,
+                imm: 0,
+                shift: 0,
+            },
+            Instruction::Cmp {
+                rn: Register::X1,
+                rm: Operand::Immediate(1),
+            },
+            // After CMP x1, #1 the condition NE is data-dependent on x1.
+            // Use unconditional fall-through by picking CSINC with NV
+            // (always-false on AArch64, treated as `never`).
+            Instruction::Csinc {
+                rd: Register::X0,
+                rn: Register::X1,
+                rm: Register::X2,
+                cond: crate::ir::types::Condition::NV,
+            },
+        ];
+        let candidate = vec![
+            Instruction::MovN {
+                rd: Register::X2,
+                imm: 0,
+                shift: 0,
+            },
+            Instruction::Cmp {
+                rn: Register::X1,
+                rm: Operand::Immediate(1),
+            },
+            Instruction::MovImm {
+                rd: Register::X0,
+                imm: 0,
+            },
+        ];
+        let cfg =
+            EquivalenceConfig::default().live_out(LiveOut::from_registers(vec![Register::X0]));
+        assert_eq!(
+            check_equivalence_with_config(&target, &candidate, &cfg),
+            EquivalenceResult::Equivalent,
+            "CSINC with rm = u64::MAX must wrap to 0"
+        );
+    }
+
+    #[test]
+    fn cmp_equivalent_to_subs_xzr_with_flags_live() {
+        // CMP x1, x2 and SUBS XZR, x1, x2 leave registers unchanged and
+        // write identical NZCV. With flags as live-out, SMT must prove
+        // equivalence — but only if the pre-SMT guard does not reject
+        // them as having "different flag-writers" by structural equality.
+        let seq_cmp = vec![Instruction::Cmp {
+            rn: Register::X1,
+            rm: Operand::Register(Register::X2),
+        }];
+        let seq_subs = vec![Instruction::Subs {
+            rd: Register::XZR,
+            rn: Register::X1,
+            rm: Operand::Register(Register::X2),
+        }];
+        let cfg = EquivalenceConfig::default().with_flags(true);
+        assert_eq!(
+            check_equivalence_with_config(&seq_cmp, &seq_subs, &cfg),
+            EquivalenceResult::Equivalent
+        );
+    }
+
+    #[test]
+    fn issue_92_regression_mismatched_upstream_flags() {
+        // Issue #92: two sequences with structurally identical flag-writers
+        // but feeding them different upstream values produce different NZCV.
+        // With flags live, SMT must reject the rewrite. The fast-path will
+        // also catch it on random inputs (the constants -7 != +7).
+        let target = vec![
+            Instruction::MovImm {
+                rd: Register::X1,
+                imm: 0,
+            },
+            Instruction::Cmp {
+                rn: Register::X1,
+                rm: Operand::Immediate(0),
+            },
+            Instruction::MovImm {
+                rd: Register::X0,
+                imm: 7,
+            },
+        ];
+        let candidate = vec![
+            Instruction::MovImm {
+                rd: Register::X1,
+                imm: 5,
+            },
+            Instruction::Cmp {
+                rn: Register::X1,
+                rm: Operand::Immediate(0),
+            },
+            Instruction::MovImm {
+                rd: Register::X0,
+                imm: 7,
+            },
+        ];
+        let cfg = EquivalenceConfig::default()
+            .live_out(LiveOut::from_registers(vec![Register::X0]))
+            .with_flags(true);
+        assert_ne!(
+            check_equivalence_with_config(&target, &candidate, &cfg),
+            EquivalenceResult::Equivalent
         );
     }
 
@@ -1330,16 +1539,14 @@ mod tests {
         );
     }
 
-    /// Soundness regression for the strengthened flag-writer guard:
     /// `ADD x0, x1, #1; CMP x2, #0` (writes flags from `CMP x2, #0`) vs
     /// `ADDS x0, x1, #1` (writes flags from `ADDS x0, x1, #1`). Both
-    /// sequences write X0 to x1+1 and both have a flag-writer, so the SMT
-    /// register check would pass and the old "any writer present" guard
-    /// would also pass — but the post-sequence NZCV differs. The
-    /// strengthened guard rejects on structural flag-writer-sequence
-    /// inequality.
+    /// sequences write X0 to x1+1 and both have a flag-writer, so the
+    /// pre-SMT guard now lets SMT settle it. With flags live-out the
+    /// solver sees the NZCV divergence; with flags dead the rewrite is
+    /// genuinely sound (registers alone match).
     #[test]
-    fn test_swapped_flag_writer_rewrite_rejected() {
+    fn test_swapped_flag_writer_rewrite_rejected_when_flags_live() {
         let target = vec![
             Instruction::Add {
                 rd: Register::X0,
@@ -1356,12 +1563,16 @@ mod tests {
             rn: Register::X1,
             rm: Operand::Immediate(1),
         }];
-        let config = EquivalenceConfig::with_live_out(LiveOut::from_registers(vec![Register::X0]));
-        assert_eq!(
-            check_equivalence_with_config(&target, &candidate, &config),
-            EquivalenceResult::NotEquivalent,
-            "Replacing one flag-writer with a different flag-writer changes NZCV"
+        let cfg_flags_live =
+            EquivalenceConfig::with_live_out(LiveOut::from_registers(vec![Register::X0]))
+                .with_flags(true);
+        assert_ne!(
+            check_equivalence_with_config(&target, &candidate, &cfg_flags_live),
+            EquivalenceResult::Equivalent,
+            "When NZCV is live, the two flag-writers produce different flags"
         );
+        // Same with the no-config entry point, which now includes flags in
+        // the unmasked full-state comparison.
         assert_eq!(
             check_equivalence(&target, &candidate),
             EquivalenceResult::NotEquivalent

@@ -155,6 +155,23 @@ pub enum Instruction {
         cond: Condition,
     },
 
+    // Conditional compare (subtract): if `cond` holds, set NZCV from
+    // `rn - operand(rm)`; otherwise set NZCV to the 4-bit `nzcv` literal
+    // (bit3=N, bit2=Z, bit1=C, bit0=V). Reads and writes NZCV.
+    Ccmp {
+        rn: Register,
+        rm: Operand,
+        nzcv: u8,
+        cond: Condition,
+    },
+    // Conditional compare negative (add): same as Ccmp with `rn + operand(rm)`.
+    Ccmn {
+        rn: Register,
+        rm: Operand,
+        nzcv: u8,
+        cond: Condition,
+    },
+
     // Bitwise NOT (alias of ORN with XZR)
     Mvn {
         rd: Register,
@@ -325,7 +342,11 @@ impl Instruction {
             | Instruction::Rev32 { rd, .. }
             | Instruction::Rev16 { rd, .. } => Some(*rd),
             // Comparison instructions only set flags, no destination register
-            Instruction::Cmp { .. } | Instruction::Cmn { .. } | Instruction::Tst { .. } => None,
+            Instruction::Cmp { .. }
+            | Instruction::Cmn { .. }
+            | Instruction::Tst { .. }
+            | Instruction::Ccmp { .. }
+            | Instruction::Ccmn { .. } => None,
         }
     }
 
@@ -346,6 +367,8 @@ impl Instruction {
                 | Instruction::Adds { .. }
                 | Instruction::Subs { .. }
                 | Instruction::Ands { .. }
+                | Instruction::Ccmp { .. }
+                | Instruction::Ccmn { .. }
         )
     }
 
@@ -360,6 +383,8 @@ impl Instruction {
                 | Instruction::Csneg { .. }
                 | Instruction::Cset { .. }
                 | Instruction::Csetm { .. }
+                | Instruction::Ccmp { .. }
+                | Instruction::Ccmn { .. }
         )
     }
 
@@ -490,6 +515,29 @@ impl Instruction {
                 !matches!(cond, Condition::AL | Condition::NV)
             }
 
+            // CCMP / CCMN: reject AL/NV (ARM ARM C6.2.36); reject SP in `rn`
+            // (Xn slot, not XSP); the `rm` immediate is a 5-bit unsigned literal
+            // (0..=31); `nzcv` is a 4-bit unsigned literal (0..=15). The
+            // shifted-register form is not encoded in this IR — CCMP's
+            // architectural register form is a plain Xm without shift, so we
+            // reject `Operand::ShiftedRegister` here.
+            Instruction::Ccmp { rn, rm, nzcv, cond } | Instruction::Ccmn { rn, rm, nzcv, cond } => {
+                if matches!(cond, Condition::AL | Condition::NV) {
+                    return false;
+                }
+                if *rn == Register::SP {
+                    return false;
+                }
+                if *nzcv > 15 {
+                    return false;
+                }
+                match rm {
+                    Operand::Register(reg) => *reg != Register::SP,
+                    Operand::Immediate(imm) => (0..=31).contains(imm),
+                    Operand::ShiftedRegister { .. } => false,
+                }
+            }
+
             // ROR: shift amount 0..=63 (same as LSL/LSR/ASR). ShiftedRegister
             // in the shift slot is rejected (semantically nonsense; same as
             // LSL/LSR/ASR above).
@@ -559,6 +607,16 @@ impl Instruction {
                     Operand::Register(r) => regs.push(*r),
                     Operand::ShiftedRegister { reg, .. } => regs.push(*reg),
                     Operand::Immediate(_) => {}
+                }
+                regs
+            }
+            // CCMP / CCMN read rn and rm (if register). They also read NZCV
+            // (via `cond`), but the live-out machinery models flag liveness
+            // separately via `reads_flags` and `modifies_flags`.
+            Instruction::Ccmp { rn, rm, .. } | Instruction::Ccmn { rn, rm, .. } => {
+                let mut regs = vec![*rn];
+                if let Operand::Register(r) = rm {
+                    regs.push(*r);
                 }
                 regs
             }
@@ -651,6 +709,12 @@ impl fmt::Display for Instruction {
             }
             Instruction::Csneg { rd, rn, rm, cond } => {
                 write!(f, "csneg {}, {}, {}, {}", rd, rn, rm, cond)
+            }
+            Instruction::Ccmp { rn, rm, nzcv, cond } => {
+                write!(f, "ccmp {}, {}, #{}, {}", rn, rm, nzcv, cond)
+            }
+            Instruction::Ccmn { rn, rm, nzcv, cond } => {
+                write!(f, "ccmn {}, {}, #{}, {}", rn, rm, nzcv, cond)
             }
             Instruction::Mvn { rd, rm } => write!(f, "mvn {}, {}", rd, rm),
             Instruction::Neg { rd, rm } => write!(f, "neg {}, {}", rd, rm),
