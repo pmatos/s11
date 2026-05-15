@@ -368,9 +368,10 @@ impl Mutator {
                 1 => Instruction::Lsr { rd, rn, shift },
                 _ => Instruction::Asr { rd, rn, shift },
             },
-            Instruction::Mul { rd, rn, rm } => match rng.random_range(0..3) {
+            Instruction::Mul { rd, rn, rm } => match rng.random_range(0..4) {
                 0 => Instruction::Sdiv { rd, rn, rm },
                 1 => Instruction::Udiv { rd, rn, rm },
+                2 => Instruction::Mneg { rd, rn, rm },
                 _ => Instruction::Mul { rd, rn, rm },
             },
             Instruction::Sdiv { rd, rn, rm } => match rng.random_range(0..3) {
@@ -626,7 +627,13 @@ impl Mutator {
                 1 => Instruction::Mneg { rd, rn, rm },
                 _ => Instruction::Msub { rd, rn, rm, ra },
             },
-            Instruction::Mneg { rd, rn, rm } => Instruction::Mneg { rd, rn, rm },
+            // MNEG ↔ MUL is the sign-flip bridge (MNEG = -(rn*rm), MUL = rn*rm).
+            // MNEG also already receives reverse edges from MADD/MSUB above
+            // (which collapse `ra` when they convert).
+            Instruction::Mneg { rd, rn, rm } => match rng.random_range(0..2) {
+                0 => Instruction::Mul { rd, rn, rm },
+                _ => Instruction::Mneg { rd, rn, rm },
+            },
             // High-half multiply cluster (signed ↔ unsigned).
             Instruction::Smulh { rd, rn, rm } => match rng.random_range(0..2) {
                 0 => Instruction::Umulh { rd, rn, rm },
