@@ -661,6 +661,62 @@ mod tests {
         );
     }
 
+    /// Issue #60 end-to-end discovery test: the enumerator's candidate set
+    /// contains a length-1 instruction equivalent to the 2-instruction
+    /// `UXTB t, X2 ; ADD X0, X1, t` target sequence — namely the
+    /// extended-register form `ADD X0, X1, X2, UXTB #0`. This is the
+    /// canonical acceptance criterion for issue #60.
+    #[test]
+    fn test_optimizer_discovers_extended_register_collapse() {
+        use crate::ir::ExtendKind;
+        use crate::search::candidate::generate_all_instructions;
+
+        // Target sequence: UXTB X10, X2 ; ADD X0, X1, X10.
+        let target = vec![
+            Instruction::Uxtb {
+                rd: Register::X10,
+                rn: Register::X2,
+            },
+            Instruction::Add {
+                rd: Register::X0,
+                rn: Register::X1,
+                rm: Operand::Register(Register::X10),
+            },
+        ];
+
+        // Live-out is just X0; the temp X10 is dead after the sequence.
+        let config = EquivalenceConfig {
+            live_out: LiveOut::from_registers(vec![Register::X0]),
+            ..Default::default()
+        };
+
+        // Small pool keeps enumeration tractable for a unit test.
+        let regs = vec![Register::X0, Register::X1, Register::X2, Register::X10];
+        let imms = vec![0i64];
+        let candidates = generate_all_instructions(&regs, &imms);
+
+        let discovered = candidates.iter().find(|c| {
+            matches!(
+                c,
+                Instruction::Add {
+                    rd: Register::X0,
+                    rn: Register::X1,
+                    rm: Operand::ExtendedRegister {
+                        reg: Register::X2,
+                        kind: ExtendKind::Uxtb,
+                        shift: 0,
+                    },
+                }
+            ) && check_equivalence_with_config(&target, std::slice::from_ref(*c), &config)
+                == EquivalenceResult::Equivalent
+        });
+
+        assert!(
+            discovered.is_some(),
+            "enumerative search must discover `ADD X0, X1, X2, UXTB #0` as equivalent to UXTB+ADD"
+        );
+    }
+
     /// Issue #59 end-to-end discovery test: the enumerator's candidate set
     /// contains a length-1 instruction equivalent to the 2-instruction
     /// `LSL t, X2, #3 ; ADD X0, X1, t` target sequence — namely the
