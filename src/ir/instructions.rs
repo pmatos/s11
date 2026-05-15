@@ -448,14 +448,20 @@ impl Instruction {
                         && *rd != Register::SP
                         && *rn != Register::SP
                 }
-                // Issue #60: extended-register form. Shift 0..=4, SP rejected
-                // in every slot (conservative — matches the shifted-register
-                // policy; ARM ARM would allow SP for rd/rn but we defer that).
+                // Issue #60: extended-register form. Shift 0..=4. Both SP
+                // and XZR are rejected in the rd/rn slots: the encoding is
+                // `Xn|SP` (XSP), so register-number 31 in those slots is
+                // SP — accepting XZR (also reg 31) would silently alias to
+                // SP at encode time (codex review on #144). The inner-reg
+                // slot rejects SP for the same conservative reason as the
+                // shifted-register policy.
                 Operand::ExtendedRegister { reg, shift, .. } => {
                     *shift <= 4
                         && *reg != Register::SP
                         && *rd != Register::SP
+                        && *rd != Register::XZR
                         && *rn != Register::SP
+                        && *rn != Register::XZR
                 }
             },
 
@@ -510,9 +516,14 @@ impl Instruction {
                         && *rn != Register::SP
                 }
                 // Issue #60: extended-register form for CMP/CMN — same shift
-                // bound and SP rejection policy as ADD/SUB above, without rd.
+                // bound and SP/XZR rejection policy as ADD/SUB above, without
+                // rd. CMP/CMN's rn is XSP-encoded, so XZR would alias to SP
+                // (codex review on #144).
                 Operand::ExtendedRegister { reg, shift, .. } => {
-                    *shift <= 4 && *reg != Register::SP && *rn != Register::SP
+                    *shift <= 4
+                        && *reg != Register::SP
+                        && *rn != Register::SP
+                        && *rn != Register::XZR
                 }
             },
 
@@ -1757,8 +1768,11 @@ mod tests {
         };
         assert!(!bad_shift.is_encodable_aarch64());
 
-        // SP rejected as rd, rn, and as the inner register.
-        for victim in [Register::SP] {
+        // SP and XZR are both rejected in the rd/rn slots — the encoding's
+        // Xn|SP class would otherwise alias XZR (reg 31) to SP. The inner-
+        // reg slot only rejects SP (XZR is fine there; the source register
+        // is Xm or Wm and 31 ↔ XZR/WZR there). Codex review on #144.
+        for victim in [Register::SP, Register::XZR] {
             assert!(
                 !Instruction::Add {
                     rd: victim,
@@ -1783,19 +1797,32 @@ mod tests {
                 }
                 .is_encodable_aarch64()
             );
-            assert!(
-                !Instruction::Add {
-                    rd: Register::X0,
-                    rn: Register::X1,
-                    rm: Operand::ExtendedRegister {
-                        reg: victim,
-                        kind: ExtendKind::Uxtb,
-                        shift: 0,
-                    },
-                }
-                .is_encodable_aarch64()
-            );
         }
+        // Inner-reg slot: SP rejected, XZR allowed.
+        assert!(
+            !Instruction::Add {
+                rd: Register::X0,
+                rn: Register::X1,
+                rm: Operand::ExtendedRegister {
+                    reg: Register::SP,
+                    kind: ExtendKind::Uxtb,
+                    shift: 0,
+                },
+            }
+            .is_encodable_aarch64()
+        );
+        assert!(
+            Instruction::Add {
+                rd: Register::X0,
+                rn: Register::X1,
+                rm: Operand::ExtendedRegister {
+                    reg: Register::XZR,
+                    kind: ExtendKind::Uxtb,
+                    shift: 0,
+                },
+            }
+            .is_encodable_aarch64()
+        );
 
         // CMP/CMN: rn is allowed to be non-SP; rd doesn't apply.
         let cmp_ok = Instruction::Cmp {
