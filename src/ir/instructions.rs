@@ -3,6 +3,12 @@
 use crate::ir::types::{Condition, Operand, Register};
 use std::fmt;
 
+/// Legal `lsl` amounts for the move-wide immediate family (MOVN / MOVZ / MOVK).
+/// Single source of truth shared by `is_encodable_aarch64`, the parser, and
+/// every random-generation / mutation site so the four positions cannot drift
+/// out of sync across the codebase.
+pub const MOVW_LEGAL_SHIFTS: [u8; 4] = [0, 16, 32, 48];
+
 /// AArch64 instructions supported by the IR
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[allow(dead_code)]
@@ -348,11 +354,11 @@ impl Instruction {
             // MVN / NEG / NEGS: always encodable (register-only)
             Instruction::Mvn { .. } | Instruction::Neg { .. } | Instruction::Negs { .. } => true,
 
-            // MOVN / MOVZ / MOVK: shift must be one of {0, 16, 32, 48};
+            // MOVN / MOVZ / MOVK: shift must be one of MOVW_LEGAL_SHIFTS;
             // u16 imm is always in range.
             Instruction::MovN { shift, .. }
             | Instruction::MovZ { shift, .. }
-            | Instruction::MovK { shift, .. } => matches!(shift, 0 | 16 | 32 | 48),
+            | Instruction::MovK { shift, .. } => MOVW_LEGAL_SHIFTS.contains(shift),
 
             // BIC / BICS / ORN / EON: register-only (matching AND precedent).
             Instruction::Bic { rm, .. }
