@@ -1947,6 +1947,55 @@ mod tests {
     }
 
     #[test]
+    fn test_add_with_uxtb_extended_register_operand() {
+        // Issue #60: ADD X0, X1, X2, UXTB #2 takes the low byte of X2,
+        // zero-extends it to 64, shifts left by 2, then adds X1.
+        // X1 = 0x100, X2 = 0xDEAD_BEEF_CAFE_5678 → byte = 0x78 → shifted
+        // by 2 = 0x1E0 → + 0x100 = 0x2E0.
+        let state = state_with(vec![
+            (Register::X1, 0x100),
+            (Register::X2, 0xDEAD_BEEF_CAFE_5678),
+        ]);
+        let after = apply_instruction_concrete(
+            state,
+            &Instruction::Add {
+                rd: Register::X0,
+                rn: Register::X1,
+                rm: Operand::ExtendedRegister {
+                    reg: Register::X2,
+                    kind: crate::ir::ExtendKind::Uxtb,
+                    shift: 2,
+                },
+            },
+        );
+        assert_eq!(after.get_register(Register::X0).as_u64(), 0x2E0);
+    }
+
+    #[test]
+    fn test_sub_with_sxtb_extended_register_operand() {
+        // ADD/SUB with SXTB must sign-extend the low byte. If X2's low byte
+        // is 0xFF (i.e. -1 as i8), then SUB X0, X1, X2, SXTB #0 computes
+        // X1 - (-1) = X1 + 1.
+        let state = state_with(vec![
+            (Register::X1, 100),
+            (Register::X2, 0xFF),
+        ]);
+        let after = apply_instruction_concrete(
+            state,
+            &Instruction::Sub {
+                rd: Register::X0,
+                rn: Register::X1,
+                rm: Operand::ExtendedRegister {
+                    reg: Register::X2,
+                    kind: crate::ir::ExtendKind::Sxtb,
+                    shift: 0,
+                },
+            },
+        );
+        assert_eq!(after.get_register(Register::X0).as_u64(), 101);
+    }
+
+    #[test]
     fn test_uxtb_extracts_low_byte() {
         // UXTB X0, X1 with X1 = 0xDEAD_BEEF_CAFE_5678 → X0 = 0x78.
         let state = state_with(vec![(Register::X1, 0xDEAD_BEEF_CAFE_5678)]);
