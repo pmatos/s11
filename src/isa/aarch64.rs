@@ -480,6 +480,37 @@ impl InstructionGenerator<Instruction> for AArch64InstructionGenerator {
             }
         }
 
+        // Bit-field aliases (issue #61: UBFX/SBFX/BFI/BFXIL/UBFIZ/SBFIZ).
+        // Sparse (lsb, width) sampling to keep the enumerative budget bounded.
+        // Filter SP from both rd and rn (matches is_encodable_aarch64). 2D
+        // constraint lsb + width <= 64 enforced via the if-guard. Mirrors the
+        // sampling tables in `src/search/candidate.rs::generate_all_instructions`.
+        const BITFIELD_LSB_SAMPLES: [u8; 5] = [0, 1, 16, 32, 63];
+        const BITFIELD_WIDTH_SAMPLES: [u8; 6] = [1, 4, 8, 16, 32, 64];
+        for &rd in registers {
+            if rd == Register::SP {
+                continue;
+            }
+            for &rn in registers {
+                if rn == Register::SP {
+                    continue;
+                }
+                for &lsb in &BITFIELD_LSB_SAMPLES {
+                    for &width in &BITFIELD_WIDTH_SAMPLES {
+                        if (lsb as u16 + width as u16) > 64 {
+                            continue;
+                        }
+                        instructions.push(Instruction::Ubfx { rd, rn, lsb, width });
+                        instructions.push(Instruction::Sbfx { rd, rn, lsb, width });
+                        instructions.push(Instruction::Bfi { rd, rn, lsb, width });
+                        instructions.push(Instruction::Bfxil { rd, rn, lsb, width });
+                        instructions.push(Instruction::Ubfiz { rd, rn, lsb, width });
+                        instructions.push(Instruction::Sbfiz { rd, rn, lsb, width });
+                    }
+                }
+            }
+        }
+
         instructions
     }
 
@@ -1353,7 +1384,7 @@ impl InstructionGenerator<Instruction> for AArch64InstructionGenerator {
 
     /// Total number of distinct opcode *families* (the upper bound on
     /// `opcode_id()`). Not the same as `generate_random`'s slot count —
-    /// `generate_random` samples 29 top-level slots and folds several
+    /// `generate_random` samples 30 top-level slots and folds several
     /// families into sub-multiplexers (e.g. CLZ/CLS/RBIT/REV*/REV16 on
     /// slot 26, the five multiply-accumulate ops on slot 27, the two
     /// conditional-compare ops on slot 28, and the six bit-field aliases
