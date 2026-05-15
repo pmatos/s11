@@ -1941,12 +1941,19 @@ mod cli_helper_tests {
             ("sxtb", "x0, w1"),
             ("sxth", "x0, w1"),
             ("sxtw", "x0, w1"),
+            // Issue #61: bit-field aliases of UBFM/SBFM/BFM.
+            ("ubfx", "x0, x1, #8, #16"),
+            ("sbfx", "x0, x1, #8, #16"),
+            ("bfi", "x0, x1, #4, #8"),
+            ("bfxil", "x0, x1, #8, #8"),
+            ("ubfiz", "x0, x1, #4, #8"),
+            ("sbfiz", "x0, x1, #4, #8"),
         ];
 
         // Tripwire: bump in lockstep when adding/removing rows. Catches
         // accidental row deletion and forces a re-read when adding a parser
         // mnemonic without a matching test row.
-        assert_eq!(cases.len(), 61);
+        assert_eq!(cases.len(), 67);
 
         for (mnem, ops) in cases {
             match convert_capstone_op(mnem, ops) {
