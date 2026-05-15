@@ -58,7 +58,15 @@ pub fn classify(
         );
     }
 
-    let cfg = EquivalenceConfig::default().live_out(live_out.clone());
+    // Treat NZCV as live-out for parity with the stochastic (`mcmc.rs`) and
+    // symbolic (`synthesis.rs`) verification paths. The softened
+    // `flag_writers_diverge` guard relies on flags being part of the
+    // comparison; without `with_flags(true)` here a future relaxation of any
+    // upstream flag-liveness early-exit could silently accept flag-divergent
+    // rewrites.
+    let cfg = EquivalenceConfig::default()
+        .live_out(live_out.clone())
+        .with_flags(true);
     let (result, metrics) = check_equivalence_with_config_metrics(target, &candidate, &cfg);
     let outcome = match result {
         EquivalenceResult::Equivalent => IterationOutcome::Success(candidate),
