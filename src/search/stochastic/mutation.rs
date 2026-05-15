@@ -407,9 +407,17 @@ impl Mutator {
                 _ => Instruction::Negs { rd, rm },
             },
             // Move-wide cluster: MOVN ↔ MOVZ ↔ MOVK (all share rd/imm/shift),
-            // plus a bridge to MovImm (only for shift=0 forms, since MovImm
-            // has no shift field). The bridge lets MCMC chains drift into and
-            // out of the simpler MovImm encoding.
+            // plus a single MovImm bridge anchored at MOVZ.
+            //
+            // Topology note: before this PR, MOVN had a direct MOVN ↔ MovImm
+            // edge. We removed it so MOVN now reaches MovImm via two hops
+            // (MOVN → MOVZ → MovImm). Ergodicity is preserved — every move
+            // family member can still reach every other — but mixing time
+            // along the MOVN/MovImm corridor is one step longer. The trade
+            // is intentional: MOVZ is the natural pivot, since `MovZ {imm,
+            // shift=0}` is exactly the bit pattern MovImm holds, so the
+            // MOVZ ↔ MovImm bridge has a clear semantic anchor that a direct
+            // MOVN ↔ MovImm bridge lacked.
             Instruction::MovN { rd, imm, shift } => match rng.random_range(0..3) {
                 0 => Instruction::MovZ { rd, imm, shift },
                 1 => Instruction::MovK { rd, imm, shift },
