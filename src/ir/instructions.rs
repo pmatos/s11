@@ -448,10 +448,15 @@ impl Instruction {
                         && *rd != Register::SP
                         && *rn != Register::SP
                 }
-                // ExtendedRegister encodability tightening lands in a later
-                // slice; reject by default so logical opcodes inheriting this
-                // pattern keep the same conservative gate. Issue #60.
-                Operand::ExtendedRegister { .. } => false,
+                // Issue #60: extended-register form. Shift 0..=4, SP rejected
+                // in every slot (conservative — matches the shifted-register
+                // policy; ARM ARM would allow SP for rd/rn but we defer that).
+                Operand::ExtendedRegister { reg, shift, .. } => {
+                    *shift <= 4
+                        && *reg != Register::SP
+                        && *rd != Register::SP
+                        && *rn != Register::SP
+                }
             },
 
             // AND/ORR/EOR: register operand or shifted-register (all 4 kinds, ROR allowed).
@@ -504,7 +509,11 @@ impl Instruction {
                         && *reg != Register::SP
                         && *rn != Register::SP
                 }
-                Operand::ExtendedRegister { .. } => false,
+                // Issue #60: extended-register form for CMP/CMN — same shift
+                // bound and SP rejection policy as ADD/SUB above, without rd.
+                Operand::ExtendedRegister { reg, shift, .. } => {
+                    *shift <= 4 && *reg != Register::SP && *rn != Register::SP
+                }
             },
 
             // TST: register operand or shifted-register (all 4 kinds, ROR allowed).
@@ -1707,6 +1716,148 @@ mod tests {
         assert!(!umulh.modifies_flags());
         assert!(!umulh.reads_flags());
         assert!(umulh.is_encodable_aarch64());
+    }
+
+    #[test]
+    fn test_extended_register_arith_encodability() {
+        use crate::ir::ExtendKind;
+        // ADD x0, x1, x2, UXTB #2 — within shift range, not SP, accepted.
+        let ok = Instruction::Add {
+            rd: Register::X0,
+            rn: Register::X1,
+            rm: Operand::ExtendedRegister {
+                reg: Register::X2,
+                kind: ExtendKind::Uxtb,
+                shift: 2,
+            },
+        };
+        assert!(ok.is_encodable_aarch64());
+
+        // Shift = 4 is the boundary; still encodable.
+        let max_shift = Instruction::Sub {
+            rd: Register::X0,
+            rn: Register::X1,
+            rm: Operand::ExtendedRegister {
+                reg: Register::X2,
+                kind: ExtendKind::Sxtw,
+                shift: 4,
+            },
+        };
+        assert!(max_shift.is_encodable_aarch64());
+
+        // Shift = 5 is out of range and must be rejected.
+        let bad_shift = Instruction::Add {
+            rd: Register::X0,
+            rn: Register::X1,
+            rm: Operand::ExtendedRegister {
+                reg: Register::X2,
+                kind: ExtendKind::Uxtb,
+                shift: 5,
+            },
+        };
+        assert!(!bad_shift.is_encodable_aarch64());
+
+        // SP rejected as rd, rn, and as the inner register.
+        for victim in [Register::SP] {
+            assert!(
+                !Instruction::Add {
+                    rd: victim,
+                    rn: Register::X1,
+                    rm: Operand::ExtendedRegister {
+                        reg: Register::X2,
+                        kind: ExtendKind::Uxtb,
+                        shift: 0,
+                    },
+                }
+                .is_encodable_aarch64()
+            );
+            assert!(
+                !Instruction::Add {
+                    rd: Register::X0,
+                    rn: victim,
+                    rm: Operand::ExtendedRegister {
+                        reg: Register::X2,
+                        kind: ExtendKind::Uxtb,
+                        shift: 0,
+                    },
+                }
+                .is_encodable_aarch64()
+            );
+            assert!(
+                !Instruction::Add {
+                    rd: Register::X0,
+                    rn: Register::X1,
+                    rm: Operand::ExtendedRegister {
+                        reg: victim,
+                        kind: ExtendKind::Uxtb,
+                        shift: 0,
+                    },
+                }
+                .is_encodable_aarch64()
+            );
+        }
+
+        // CMP/CMN: rn is allowed to be non-SP; rd doesn't apply.
+        let cmp_ok = Instruction::Cmp {
+            rn: Register::X1,
+            rm: Operand::ExtendedRegister {
+                reg: Register::X2,
+                kind: ExtendKind::Sxtb,
+                shift: 1,
+            },
+        };
+        assert!(cmp_ok.is_encodable_aarch64());
+        let cmn_ok = Instruction::Cmn {
+            rn: Register::X1,
+            rm: Operand::ExtendedRegister {
+                reg: Register::X2,
+                kind: ExtendKind::Uxth,
+                shift: 3,
+            },
+        };
+        assert!(cmn_ok.is_encodable_aarch64());
+    }
+
+    #[test]
+    fn test_extended_register_logical_rejected() {
+        use crate::ir::ExtendKind;
+        // AND/ORR/EOR/TST/Adds/Subs/Ands/Ror: ExtendedRegister rejected.
+        let er = Operand::ExtendedRegister {
+            reg: Register::X2,
+            kind: ExtendKind::Uxtb,
+            shift: 0,
+        };
+        assert!(
+            !Instruction::And {
+                rd: Register::X0,
+                rn: Register::X1,
+                rm: er,
+            }
+            .is_encodable_aarch64()
+        );
+        assert!(
+            !Instruction::Orr {
+                rd: Register::X0,
+                rn: Register::X1,
+                rm: er,
+            }
+            .is_encodable_aarch64()
+        );
+        assert!(
+            !Instruction::Eor {
+                rd: Register::X0,
+                rn: Register::X1,
+                rm: er,
+            }
+            .is_encodable_aarch64()
+        );
+        assert!(
+            !Instruction::Tst {
+                rn: Register::X1,
+                rm: er,
+            }
+            .is_encodable_aarch64()
+        );
     }
 
     #[test]
