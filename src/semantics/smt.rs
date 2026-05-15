@@ -220,7 +220,7 @@ impl MachineState {
                 if *shift == 0 {
                     extended
                 } else {
-                    extended.bvshl(&BV::from_u64(*shift as u64, 64))
+                    extended.bvshl(BV::from_u64(*shift as u64, 64))
                 }
             }
         }
@@ -1165,7 +1165,7 @@ mod tests {
         let final_state = apply_sequence(initial, &seq);
         let final_x0 = final_state.get_register(Register::X0);
         let solver = Solver::new();
-        solver.assert(&final_x0.eq(&BV::from_u64(0x78, 64)).not());
+        solver.assert(&final_x0.eq(BV::from_u64(0x78, 64)).not());
         assert_eq!(
             solver.check(),
             SatResult::Unsat,
