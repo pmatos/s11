@@ -1290,20 +1290,21 @@ impl InstructionGenerator<Instruction> for AArch64InstructionGenerator {
 
     /// Total number of distinct opcode *families* (the upper bound on
     /// `opcode_id()`). Not the same as `generate_random`'s slot count —
-    /// `generate_random` samples 29 top-level slots and folds ANDS, CSET,
-    /// CSETM, and ROR into a sub-multiplexer on slot 23, the six single-
-    /// source bit-manipulation ops into a sub-multiplexer on slot 26, the
-    /// five multiply-accumulate ops into one on slot 27, and the two
-    /// conditional-compare ops into one on slot 28 — keeping the slot
-    /// table small. So `opcode_id < opcode_count` always holds, but the
-    /// random-generation distribution is not uniform across all 49 IDs.
+    /// `generate_random` samples 29 top-level slots and folds several
+    /// families into sub-multiplexers (e.g. CLZ/CLS/RBIT/REV*/REV16 on
+    /// slot 26, the five multiply-accumulate ops on slot 27, the two
+    /// conditional-compare ops on slot 28, and the six bit-field aliases
+    /// on slot 29) — keeping the slot table small. So
+    /// `opcode_id < opcode_count` always holds, but the random-generation
+    /// distribution is not uniform across all 55 IDs.
     fn opcode_count(&self) -> u8 {
-        49 // 20 original + 14 Tier 1 (MVN, NEG, NEGS, MovN, BIC, BICS, ORN,
+        55 // 20 original + 14 Tier 1 (MVN, NEG, NEGS, MovN, BIC, BICS, ORN,
         //  EON, ADDS, SUBS, ANDS, CSET, CSETM, ROR) + 2 MOVK/MOVZ (issue
         //  #55) + 6 single-source bit-manipulation (CLZ, CLS, RBIT, REV,
         //  REV32, REV16) + 5 multiply-accumulate family (issue #56:
-        //  MADD, MSUB, MNEG, SMULH, UMULH) + 2 conditional-compare
-        //  family (issue #57: CCMP, CCMN).
+        //  MADD, MSUB, MNEG, SMULH, UMULH) + 2 conditional-compare family
+        //  (issue #57: CCMP, CCMN) + 6 bit-field aliases (UBFX, SBFX, BFI,
+        //  BFXIL, UBFIZ, SBFIZ, issue #61).
     }
 }
 
@@ -1604,6 +1605,42 @@ mod tests {
                 rm: Operand::Immediate(5),
                 nzcv: 0,
                 cond: Condition::EQ,
+            },
+            Instruction::Ubfx {
+                rd: Register::X0,
+                rn: Register::X1,
+                lsb: 8,
+                width: 16,
+            },
+            Instruction::Sbfx {
+                rd: Register::X0,
+                rn: Register::X1,
+                lsb: 8,
+                width: 16,
+            },
+            Instruction::Bfi {
+                rd: Register::X0,
+                rn: Register::X1,
+                lsb: 4,
+                width: 8,
+            },
+            Instruction::Bfxil {
+                rd: Register::X0,
+                rn: Register::X1,
+                lsb: 4,
+                width: 8,
+            },
+            Instruction::Ubfiz {
+                rd: Register::X0,
+                rn: Register::X1,
+                lsb: 4,
+                width: 8,
+            },
+            Instruction::Sbfiz {
+                rd: Register::X0,
+                rn: Register::X1,
+                lsb: 4,
+                width: 8,
             },
         ]
     }
