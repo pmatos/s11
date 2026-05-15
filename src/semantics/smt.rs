@@ -304,10 +304,13 @@ pub fn condition_to_smt(cond: crate::ir::types::Condition, n: &BV, z: &BV, c: &B
         Condition::LT => n_eq_v.bvxor(&one), // N != V
         Condition::GT => not_z.bvand(&n_eq_v),
         Condition::LE => z.bvor(&n_eq_v.bvxor(&one)),
-        Condition::AL => one,
-        // NV is reserved in AArch64 and treated as "never" by
-        // `ConditionFlags::evaluate`; mirror that here.
-        Condition::NV => zero,
+        Condition::AL => one.clone(),
+        // NV (0b1111) is reserved but per ARM ARM still satisfies
+        // condition_holds = true — equivalent to AL. Concrete execution
+        // selects rn for `csel/csinc/csinv/csneg ..., nv`; SMT must agree
+        // or the equivalence checker can certify unsound rewrites for any
+        // CSEL-family instruction encoded with the NV suffix.
+        Condition::NV => one,
     }
 }
 
@@ -1176,6 +1179,38 @@ mod tests {
         let solver = Solver::new();
         solver.assert(&states_not_equal(&s1, &s2));
         assert_eq!(solver.check(), SatResult::Sat);
+    }
+
+    #[test]
+    fn test_csel_nv_evaluates_as_always_true() {
+        // Regression for the soundness gap caught by review on PR #128:
+        // `condition_holds(NV)` is true per ARM ARM (NV is the reserved
+        // encoding, not a real "never"). is_encodable_aarch64 permits NV
+        // for the CSEL family, so the SMT predicate must agree with the
+        // concrete interpreter (which already returns true for NV).
+        //
+        // `CSINC x0, x1, x2, NV` must select rn=x1 in both interpreters.
+        let mut state = MachineState::new_symbolic("pre");
+        // Force flags to a state where ConditionFlags::evaluate would
+        // disagree if NV were treated as false somewhere.
+        force_flags(&mut state, 0, 0, 0, 0);
+        state.set_register(Register::X1, BV::from_u64(7, 64));
+        state.set_register(Register::X2, BV::from_u64(2, 64));
+        let after = apply_instruction(
+            state,
+            &Instruction::Csinc {
+                rd: Register::X0,
+                rn: Register::X1,
+                rm: Register::X2,
+                cond: crate::ir::types::Condition::NV,
+            },
+        );
+        assert_register_eq(
+            &after,
+            Register::X0,
+            &BV::from_u64(7, 64),
+            "CSINC NV must select rn (always-true predicate)",
+        );
     }
 
     #[test]

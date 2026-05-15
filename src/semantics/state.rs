@@ -81,7 +81,10 @@ impl ConditionFlags {
             Condition::GT => !self.z && (self.n == self.v), // Z==0 && N==V (signed >)
             Condition::LE => self.z || (self.n != self.v),  // Z==1 || N!=V (signed <=)
             Condition::AL => true,                          // Always
-            Condition::NV => false,                         // Never (reserved, treat as false)
+            // NV (0b1111) is reserved in AArch64; per ARM ARM the encoding
+            // still satisfies "condition holds = true" (it does NOT mean
+            // "never"). Concrete and SMT both treat it as always-true.
+            Condition::NV => true,
         }
     }
 }
@@ -510,7 +513,9 @@ mod tests {
         assert!(!flags.evaluate(Condition::GT));
         assert!(flags.evaluate(Condition::LE));
         assert!(flags.evaluate(Condition::AL));
-        assert!(!flags.evaluate(Condition::NV));
+        // NV is reserved but ARM ARM specifies condition_holds = true, so it
+        // is equivalent to AL — never the opposite of AL.
+        assert!(flags.evaluate(Condition::NV));
     }
 
     #[test]
