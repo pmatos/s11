@@ -88,7 +88,7 @@ pub fn generate_all_instructions(registers: &[Register], immediates: &[i64]) -> 
             use crate::ir::ShiftKind;
             for &rm in registers {
                 for &amount in SHIFTED_OP_AMOUNTS {
-                    for kind in [ShiftKind::LSL, ShiftKind::LSR, ShiftKind::ASR] {
+                    for kind in [ShiftKind::Lsl, ShiftKind::Lsr, ShiftKind::Asr] {
                         let sr = Operand::ShiftedRegister {
                             reg: rm,
                             kind,
@@ -103,7 +103,7 @@ pub fn generate_all_instructions(registers: &[Register], immediates: &[i64]) -> 
                     // ROR — logical only.
                     let sr_ror = Operand::ShiftedRegister {
                         reg: rm,
-                        kind: ShiftKind::ROR,
+                        kind: ShiftKind::Ror,
                         amount,
                     };
                     instrs.push(Instruction::And { rd, rn, rm: sr_ror });
@@ -638,10 +638,10 @@ mod tests {
     fn test_generate_all_instructions_includes_all_shifted_kinds_for_logical() {
         let instrs = generate_all_instructions(&default_registers(), &default_immediates());
         for kind in [
-            crate::ir::ShiftKind::LSL,
-            crate::ir::ShiftKind::LSR,
-            crate::ir::ShiftKind::ASR,
-            crate::ir::ShiftKind::ROR,
+            crate::ir::ShiftKind::Lsl,
+            crate::ir::ShiftKind::Lsr,
+            crate::ir::ShiftKind::Asr,
+            crate::ir::ShiftKind::Ror,
         ] {
             let has = instrs.iter().any(|i| {
                 matches!(
@@ -667,13 +667,13 @@ mod tests {
                 i,
                 Instruction::Add {
                     rm: Operand::ShiftedRegister {
-                        kind: crate::ir::ShiftKind::ROR,
+                        kind: crate::ir::ShiftKind::Ror,
                         ..
                     },
                     ..
                 } | Instruction::Sub {
                     rm: Operand::ShiftedRegister {
-                        kind: crate::ir::ShiftKind::ROR,
+                        kind: crate::ir::ShiftKind::Ror,
                         ..
                     },
                     ..

@@ -387,7 +387,7 @@ impl Instruction {
                 Operand::Register(_) => true,
                 Operand::Immediate(imm) => *imm >= 0 && *imm <= 0xFFF,
                 Operand::ShiftedRegister { reg, kind, amount } => {
-                    *kind != ShiftKind::ROR
+                    *kind != ShiftKind::Ror
                         && *amount <= 63
                         && *reg != Register::SP
                         && *rd != Register::SP
@@ -437,7 +437,7 @@ impl Instruction {
                 Operand::Register(_) => true,
                 Operand::Immediate(imm) => *imm >= 0 && *imm <= 0xFFF,
                 Operand::ShiftedRegister { reg, kind, amount } => {
-                    *kind != ShiftKind::ROR
+                    *kind != ShiftKind::Ror
                         && *amount <= 63
                         && *reg != Register::SP
                         && *rn != Register::SP
@@ -776,7 +776,7 @@ mod tests {
         // drops it.
         let shifted = Operand::ShiftedRegister {
             reg: Register::X3,
-            kind: ShiftKind::LSL,
+            kind: ShiftKind::Lsl,
             amount: 4,
         };
         for instr in [
@@ -887,10 +887,10 @@ mod tests {
                 amount: 3,
             },
         };
-        assert!(mk_add(ShiftKind::LSL).is_encodable_aarch64());
-        assert!(mk_add(ShiftKind::LSR).is_encodable_aarch64());
-        assert!(mk_add(ShiftKind::ASR).is_encodable_aarch64());
-        assert!(!mk_add(ShiftKind::ROR).is_encodable_aarch64());
+        assert!(mk_add(ShiftKind::Lsl).is_encodable_aarch64());
+        assert!(mk_add(ShiftKind::Lsr).is_encodable_aarch64());
+        assert!(mk_add(ShiftKind::Asr).is_encodable_aarch64());
+        assert!(!mk_add(ShiftKind::Ror).is_encodable_aarch64());
 
         let mk_cmp = |kind| Instruction::Cmp {
             rn: Register::X1,
@@ -900,18 +900,18 @@ mod tests {
                 amount: 3,
             },
         };
-        assert!(mk_cmp(ShiftKind::LSL).is_encodable_aarch64());
-        assert!(!mk_cmp(ShiftKind::ROR).is_encodable_aarch64());
+        assert!(mk_cmp(ShiftKind::Lsl).is_encodable_aarch64());
+        assert!(!mk_cmp(ShiftKind::Ror).is_encodable_aarch64());
     }
 
     #[test]
     fn test_is_encodable_shifted_register_logical_allows_ror() {
         // And/Orr/Eor/Tst accept ROR.
         for kind in [
-            ShiftKind::LSL,
-            ShiftKind::LSR,
-            ShiftKind::ASR,
-            ShiftKind::ROR,
+            ShiftKind::Lsl,
+            ShiftKind::Lsr,
+            ShiftKind::Asr,
+            ShiftKind::Ror,
         ] {
             assert!(
                 Instruction::Orr {
@@ -946,7 +946,7 @@ mod tests {
     #[test]
     fn test_is_encodable_shifted_register_rejects_sp() {
         // Shifted-register form forbids SP for any operand (rd, rn, rm).
-        let lsl = ShiftKind::LSL;
+        let lsl = ShiftKind::Lsl;
         let make = |rd, rn, reg| Instruction::Add {
             rd,
             rn,
@@ -970,7 +970,7 @@ mod tests {
             rn: Register::X1,
             rm: Operand::ShiftedRegister {
                 reg: Register::X2,
-                kind: ShiftKind::LSL,
+                kind: ShiftKind::Lsl,
                 amount,
             },
         };
@@ -985,7 +985,7 @@ mod tests {
         // Lsl/Lsr/Asr/Ror's shift field cannot be a ShiftedRegister.
         let nonsense = Operand::ShiftedRegister {
             reg: Register::X2,
-            kind: ShiftKind::LSL,
+            kind: ShiftKind::Lsl,
             amount: 1,
         };
         for instr in [

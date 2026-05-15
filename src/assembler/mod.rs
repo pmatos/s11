@@ -41,19 +41,19 @@ macro_rules! emit_shifted_reg_3op_arith {
         let rm_n: u8 = $rm;
         let amt_n: u32 = ($amt) as u32;
         match $kind {
-            ShiftKind::LSL => {
+            ShiftKind::Lsl => {
                 dynasm!($ops ; .arch aarch64 ; $mnem X(rd_n), X(rn_n), X(rm_n), LSL amt_n);
                 Ok(())
             }
-            ShiftKind::LSR => {
+            ShiftKind::Lsr => {
                 dynasm!($ops ; .arch aarch64 ; $mnem X(rd_n), X(rn_n), X(rm_n), LSR amt_n);
                 Ok(())
             }
-            ShiftKind::ASR => {
+            ShiftKind::Asr => {
                 dynasm!($ops ; .arch aarch64 ; $mnem X(rd_n), X(rn_n), X(rm_n), ASR amt_n);
                 Ok(())
             }
-            ShiftKind::ROR => Err(format!(
+            ShiftKind::Ror => Err(format!(
                 "{} cannot use ROR shift (rejected by is_encodable_aarch64)",
                 stringify!($mnem)
             )),
@@ -70,19 +70,19 @@ macro_rules! emit_shifted_reg_3op_logical {
         let rm_n: u8 = $rm;
         let amt_n: u32 = ($amt) as u32;
         match $kind {
-            ShiftKind::LSL => {
+            ShiftKind::Lsl => {
                 dynasm!($ops ; .arch aarch64 ; $mnem X(rd_n), X(rn_n), X(rm_n), LSL amt_n);
                 Ok::<(), String>(())
             }
-            ShiftKind::LSR => {
+            ShiftKind::Lsr => {
                 dynasm!($ops ; .arch aarch64 ; $mnem X(rd_n), X(rn_n), X(rm_n), LSR amt_n);
                 Ok::<(), String>(())
             }
-            ShiftKind::ASR => {
+            ShiftKind::Asr => {
                 dynasm!($ops ; .arch aarch64 ; $mnem X(rd_n), X(rn_n), X(rm_n), ASR amt_n);
                 Ok::<(), String>(())
             }
-            ShiftKind::ROR => {
+            ShiftKind::Ror => {
                 dynasm!($ops ; .arch aarch64 ; $mnem X(rd_n), X(rn_n), X(rm_n), ROR amt_n);
                 Ok::<(), String>(())
             }
@@ -97,19 +97,19 @@ macro_rules! emit_shifted_reg_2op_arith {
         let rm_n: u8 = $rm;
         let amt_n: u32 = ($amt) as u32;
         match $kind {
-            ShiftKind::LSL => {
+            ShiftKind::Lsl => {
                 dynasm!($ops ; .arch aarch64 ; $mnem X(rn_n), X(rm_n), LSL amt_n);
                 Ok(())
             }
-            ShiftKind::LSR => {
+            ShiftKind::Lsr => {
                 dynasm!($ops ; .arch aarch64 ; $mnem X(rn_n), X(rm_n), LSR amt_n);
                 Ok(())
             }
-            ShiftKind::ASR => {
+            ShiftKind::Asr => {
                 dynasm!($ops ; .arch aarch64 ; $mnem X(rn_n), X(rm_n), ASR amt_n);
                 Ok(())
             }
-            ShiftKind::ROR => Err(format!(
+            ShiftKind::Ror => Err(format!(
                 "{} cannot use ROR shift (rejected by is_encodable_aarch64)",
                 stringify!($mnem)
             )),
@@ -124,19 +124,19 @@ macro_rules! emit_shifted_reg_2op_logical {
         let rm_n: u8 = $rm;
         let amt_n: u32 = ($amt) as u32;
         match $kind {
-            ShiftKind::LSL => {
+            ShiftKind::Lsl => {
                 dynasm!($ops ; .arch aarch64 ; $mnem X(rn_n), X(rm_n), LSL amt_n);
                 Ok::<(), String>(())
             }
-            ShiftKind::LSR => {
+            ShiftKind::Lsr => {
                 dynasm!($ops ; .arch aarch64 ; $mnem X(rn_n), X(rm_n), LSR amt_n);
                 Ok::<(), String>(())
             }
-            ShiftKind::ASR => {
+            ShiftKind::Asr => {
                 dynasm!($ops ; .arch aarch64 ; $mnem X(rn_n), X(rm_n), ASR amt_n);
                 Ok::<(), String>(())
             }
-            ShiftKind::ROR => {
+            ShiftKind::Ror => {
                 dynasm!($ops ; .arch aarch64 ; $mnem X(rn_n), X(rm_n), ROR amt_n);
                 Ok::<(), String>(())
             }
@@ -2161,7 +2161,7 @@ mod tests {
                     rn: Register::X1,
                     rm: Operand::ShiftedRegister {
                         reg: Register::X2,
-                        kind: ShiftKind::LSL,
+                        kind: ShiftKind::Lsl,
                         amount: 3,
                     },
                 },
@@ -2174,7 +2174,7 @@ mod tests {
                     rn: Register::X4,
                     rm: Operand::ShiftedRegister {
                         reg: Register::X5,
-                        kind: ShiftKind::LSR,
+                        kind: ShiftKind::Lsr,
                         amount: 5,
                     },
                 },
@@ -2187,7 +2187,7 @@ mod tests {
                     rn: Register::X7,
                     rm: Operand::ShiftedRegister {
                         reg: Register::X8,
-                        kind: ShiftKind::ASR,
+                        kind: ShiftKind::Asr,
                         amount: 7,
                     },
                 },
@@ -2200,7 +2200,7 @@ mod tests {
                     rn: Register::X10,
                     rm: Operand::ShiftedRegister {
                         reg: Register::X11,
-                        kind: ShiftKind::ROR,
+                        kind: ShiftKind::Ror,
                         amount: 1,
                     },
                 },
@@ -2213,7 +2213,7 @@ mod tests {
                     rn: Register::X13,
                     rm: Operand::ShiftedRegister {
                         reg: Register::X14,
-                        kind: ShiftKind::LSL,
+                        kind: ShiftKind::Lsl,
                         amount: 2,
                     },
                 },
@@ -2225,7 +2225,7 @@ mod tests {
                     rn: Register::X15,
                     rm: Operand::ShiftedRegister {
                         reg: Register::X16,
-                        kind: ShiftKind::LSL,
+                        kind: ShiftKind::Lsl,
                         amount: 4,
                     },
                 },
@@ -2237,7 +2237,7 @@ mod tests {
                     rn: Register::X17,
                     rm: Operand::ShiftedRegister {
                         reg: Register::X18,
-                        kind: ShiftKind::ASR,
+                        kind: ShiftKind::Asr,
                         amount: 8,
                     },
                 },
@@ -2249,7 +2249,7 @@ mod tests {
                     rn: Register::X19,
                     rm: Operand::ShiftedRegister {
                         reg: Register::X20,
-                        kind: ShiftKind::ROR,
+                        kind: ShiftKind::Ror,
                         amount: 16,
                     },
                 },
@@ -2278,7 +2278,7 @@ mod tests {
             rn: Register::X1,
             rm: Operand::ShiftedRegister {
                 reg: Register::X2,
-                kind: ShiftKind::ROR,
+                kind: ShiftKind::Ror,
                 amount: 1,
             },
         };

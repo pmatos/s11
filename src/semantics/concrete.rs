@@ -12,10 +12,10 @@ fn eval_operand(state: &ConcreteMachineState, operand: &Operand) -> ConcreteValu
         Operand::ShiftedRegister { reg, kind, amount } => {
             let value = state.get_register(*reg).as_u64();
             let shifted = match kind {
-                ShiftKind::LSL => value << amount,
-                ShiftKind::LSR => value >> amount,
-                ShiftKind::ASR => ((value as i64) >> amount) as u64,
-                ShiftKind::ROR => value.rotate_right(*amount as u32),
+                ShiftKind::Lsl => value << amount,
+                ShiftKind::Lsr => value >> amount,
+                ShiftKind::Asr => ((value as i64) >> amount) as u64,
+                ShiftKind::Ror => value.rotate_right(*amount as u32),
             };
             ConcreteValue::new(shifted)
         }
@@ -506,7 +506,7 @@ mod tests {
             rn: Register::X1,
             rm: Operand::ShiftedRegister {
                 reg: Register::X2,
-                kind: ShiftKind::LSR,
+                kind: ShiftKind::Lsr,
                 amount: 4,
             },
         };
@@ -524,7 +524,7 @@ mod tests {
             rn: Register::X1,
             rm: Operand::ShiftedRegister {
                 reg: Register::X2,
-                kind: ShiftKind::ASR,
+                kind: ShiftKind::Asr,
                 amount: 1,
             },
         };
@@ -544,7 +544,7 @@ mod tests {
             rn: Register::X1,
             rm: Operand::ShiftedRegister {
                 reg: Register::X2,
-                kind: ShiftKind::ROR,
+                kind: ShiftKind::Ror,
                 amount: 4,
             },
         };
@@ -564,7 +564,7 @@ mod tests {
             rn: Register::X1,
             rm: Operand::ShiftedRegister {
                 reg: Register::X2,
-                kind: ShiftKind::LSL,
+                kind: ShiftKind::Lsl,
                 amount: 3,
             },
         };

@@ -168,19 +168,19 @@ impl fmt::Display for Register {
 /// (`add x0, x1, x2, lsl #3` etc.). Issue #59.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ShiftKind {
-    LSL,
-    LSR,
-    ASR,
-    ROR,
+    Lsl,
+    Lsr,
+    Asr,
+    Ror,
 }
 
 impl fmt::Display for ShiftKind {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            ShiftKind::LSL => write!(f, "lsl"),
-            ShiftKind::LSR => write!(f, "lsr"),
-            ShiftKind::ASR => write!(f, "asr"),
-            ShiftKind::ROR => write!(f, "ror"),
+            ShiftKind::Lsl => write!(f, "lsl"),
+            ShiftKind::Lsr => write!(f, "lsr"),
+            ShiftKind::Asr => write!(f, "asr"),
+            ShiftKind::Ror => write!(f, "ror"),
         }
     }
 }

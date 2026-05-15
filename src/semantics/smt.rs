@@ -179,10 +179,10 @@ impl MachineState {
                 let value = self.get_register(*reg).clone();
                 let amt = BV::from_u64(*amount as u64, 64);
                 match kind {
-                    crate::ir::ShiftKind::LSL => value.bvshl(&amt),
-                    crate::ir::ShiftKind::LSR => value.bvlshr(&amt),
-                    crate::ir::ShiftKind::ASR => value.bvashr(&amt),
-                    crate::ir::ShiftKind::ROR => bv_ror_64(&value, &amt),
+                    crate::ir::ShiftKind::Lsl => value.bvshl(&amt),
+                    crate::ir::ShiftKind::Lsr => value.bvlshr(&amt),
+                    crate::ir::ShiftKind::Asr => value.bvashr(&amt),
+                    crate::ir::ShiftKind::Ror => bv_ror_64(&value, &amt),
                 }
             }
         }
@@ -588,7 +588,7 @@ mod tests {
             rn: Register::X1,
             rm: Operand::ShiftedRegister {
                 reg: Register::X2,
-                kind: crate::ir::ShiftKind::LSL,
+                kind: crate::ir::ShiftKind::Lsl,
                 amount: 3,
             },
         }];
@@ -599,7 +599,7 @@ mod tests {
         // Live-out is just X0; the split sequence clobbers X10 but X0 must match.
         let solver = Solver::new();
         solver.assert(
-            &s1.get_register(Register::X0)
+            s1.get_register(Register::X0)
                 .eq(s2.get_register(Register::X0))
                 .not(),
         );
@@ -629,7 +629,7 @@ mod tests {
             rn: Register::X1,
             rm: Operand::ShiftedRegister {
                 reg: Register::X2,
-                kind: crate::ir::ShiftKind::ROR,
+                kind: crate::ir::ShiftKind::Ror,
                 amount: 4,
             },
         }];
@@ -639,7 +639,7 @@ mod tests {
 
         let solver = Solver::new();
         solver.assert(
-            &s1.get_register(Register::X0)
+            s1.get_register(Register::X0)
                 .eq(s2.get_register(Register::X0))
                 .not(),
         );
