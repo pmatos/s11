@@ -687,6 +687,33 @@ pub fn apply_instruction(mut state: MachineState, instruction: &Instruction) -> 
             let result = h3.concat(&h2).concat(&h1).concat(&h0);
             state.set_register(*rd, result);
         }
+        // SXTB/SXTH/SXTW: extract low N bits, sign-extend to 64. Issue #60.
+        // UXTB/UXTH: extract low N bits, zero-extend to 64. Issue #60.
+        Instruction::Sxtb { rd, rn } => {
+            let value = state.get_register(*rn).clone();
+            let result = value.extract(7, 0).sign_ext(56);
+            state.set_register(*rd, result);
+        }
+        Instruction::Sxth { rd, rn } => {
+            let value = state.get_register(*rn).clone();
+            let result = value.extract(15, 0).sign_ext(48);
+            state.set_register(*rd, result);
+        }
+        Instruction::Sxtw { rd, rn } => {
+            let value = state.get_register(*rn).clone();
+            let result = value.extract(31, 0).sign_ext(32);
+            state.set_register(*rd, result);
+        }
+        Instruction::Uxtb { rd, rn } => {
+            let value = state.get_register(*rn).clone();
+            let result = value.extract(7, 0).zero_ext(56);
+            state.set_register(*rd, result);
+        }
+        Instruction::Uxth { rd, rn } => {
+            let value = state.get_register(*rn).clone();
+            let result = value.extract(15, 0).zero_ext(48);
+            state.set_register(*rd, result);
+        }
     }
     state
 }
@@ -1007,6 +1034,28 @@ mod tests {
     #[test]
     fn test_rev16_smt_is_involution() {
         assert_involution(|rd, rn| Instruction::Rev16 { rd, rn }, "REV16");
+    }
+
+    #[test]
+    fn test_uxtb_extracts_low_byte() {
+        // UXTB extracts the low 8 bits of the source and zero-extends to 64.
+        // MOV x1, #0x5678; UXTB x0, x1  ≡  MOV x0, #0x78.
+        let initial = MachineState::new_symbolic("pre");
+        let seq = vec![
+            Instruction::MovImm {
+                rd: Register::X1,
+                imm: 0x5678,
+            },
+            Instruction::Uxtb {
+                rd: Register::X0,
+                rn: Register::X1,
+            },
+        ];
+        let final_state = apply_sequence(initial, &seq);
+        let final_x0 = final_state.get_register(Register::X0);
+        let solver = Solver::new();
+        solver.assert(&final_x0.eq(&BV::from_u64(0x78, 64)).not());
+        assert_eq!(solver.check(), SatResult::Unsat, "UXTB(0x5678) must be 0x78");
     }
 
     #[test]

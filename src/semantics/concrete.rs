@@ -387,6 +387,31 @@ pub fn apply_instruction_concrete(
                 ((value & 0xFF00_FF00_FF00_FF00) >> 8) | ((value & 0x00FF_00FF_00FF_00FF) << 8);
             state.set_register(*rd, ConcreteValue::new(result));
         }
+        // SXTB/SXTH/SXTW: extract low N bits, sign-extend to 64. Issue #60.
+        Instruction::Sxtb { rd, rn } => {
+            let value = state.get_register(*rn).as_u64();
+            let result = (value as i8) as i64 as u64;
+            state.set_register(*rd, ConcreteValue::new(result));
+        }
+        Instruction::Sxth { rd, rn } => {
+            let value = state.get_register(*rn).as_u64();
+            let result = (value as i16) as i64 as u64;
+            state.set_register(*rd, ConcreteValue::new(result));
+        }
+        Instruction::Sxtw { rd, rn } => {
+            let value = state.get_register(*rn).as_u64();
+            let result = (value as i32) as i64 as u64;
+            state.set_register(*rd, ConcreteValue::new(result));
+        }
+        // UXTB/UXTH: extract low N bits, zero-extend to 64. Issue #60.
+        Instruction::Uxtb { rd, rn } => {
+            let value = state.get_register(*rn).as_u64();
+            state.set_register(*rd, ConcreteValue::new(value & 0xFF));
+        }
+        Instruction::Uxth { rd, rn } => {
+            let value = state.get_register(*rn).as_u64();
+            state.set_register(*rd, ConcreteValue::new(value & 0xFFFF));
+        }
     }
     state
 }

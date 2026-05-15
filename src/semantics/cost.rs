@@ -73,7 +73,12 @@ fn instruction_latency(instr: &Instruction) -> u64 {
         | Instruction::Rbit { .. }
         | Instruction::Rev { .. }
         | Instruction::Rev32 { .. }
-        | Instruction::Rev16 { .. } => 1,
+        | Instruction::Rev16 { .. }
+        | Instruction::Sxtb { .. }
+        | Instruction::Sxth { .. }
+        | Instruction::Sxtw { .. }
+        | Instruction::Uxtb { .. }
+        | Instruction::Uxth { .. } => 1,
     }
 }
 
