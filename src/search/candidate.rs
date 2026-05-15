@@ -174,7 +174,8 @@ pub fn generate_all_instructions(registers: &[Register], immediates: &[i64]) -> 
             instrs.push(Instruction::Negs { rd, rm });
         }
 
-        // Single-source bit-manipulation: CLZ / CLS / RBIT / REV / REV32 / REV16.
+        // Single-source bit-manipulation: CLZ / CLS / RBIT / REV / REV32 /
+        // REV16, plus the standalone extends UXTB (#60 — siblings follow).
         for &rn in registers {
             instrs.push(Instruction::Clz { rd, rn });
             instrs.push(Instruction::Cls { rd, rn });
@@ -182,6 +183,7 @@ pub fn generate_all_instructions(registers: &[Register], immediates: &[i64]) -> 
             instrs.push(Instruction::Rev { rd, rn });
             instrs.push(Instruction::Rev32 { rd, rn });
             instrs.push(Instruction::Rev16 { rd, rn });
+            instrs.push(Instruction::Uxtb { rd, rn });
         }
 
         // Multiply-accumulate family. MADD/MSUB take a 4th register slot
@@ -908,5 +910,25 @@ mod tests {
             rn: Register::X1,
             rm: Operand::Immediate(0),
         }));
+    }
+
+    #[test]
+    fn enumerate_emits_uxtb_for_each_register_pair() {
+        // Issue #60: every (rd, rn) pair in the pool must produce a
+        // candidate Instruction::Uxtb { rd, rn }, mirroring the existing
+        // single-source bit-manipulation enumeration block.
+        let regs = vec![Register::X0, Register::X1, Register::X2];
+        let imms = vec![];
+        let candidates = generate_all_instructions(&regs, &imms);
+        for &rd in &regs {
+            for &rn in &regs {
+                let expected = Instruction::Uxtb { rd, rn };
+                assert!(
+                    candidates.contains(&expected),
+                    "enumeration missing {}",
+                    expected
+                );
+            }
+        }
     }
 }
