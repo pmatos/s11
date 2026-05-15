@@ -334,13 +334,15 @@ where
 }
 
 /// Parse the standalone sign/zero-extend mnemonics SXTB/SXTH/SXTW/UXTB/UXTH.
+///
 /// ARM ARM / Capstone canonical syntax:
-///   - `UXTB Wd, Wn` / `UXTH Wd, Wn` — both operands W-form.
-///   - `SXTB Xd, Wn` / `SXTH Xd, Wn` / `SXTW Xd, Wn` — X-dest, W-src.
-/// The IR stores everything as 64-bit X-registers; the semantics layer
-/// masks to the architectural width. Issue #60 follow-up after the codex
-/// P2 / claude-review note that the ELF round-trip path was rejecting
-/// Capstone's W-form output.
+///
+/// - `UXTB Wd, Wn` / `UXTH Wd, Wn` — both operands W-form.
+/// - `SXTB Xd, Wn` / `SXTH Xd, Wn` / `SXTW Xd, Wn` — X-dest, W-src.
+///
+/// The IR stores everything as 64-bit X-registers; the semantics layer masks
+/// to the architectural width. The W-form acceptance is scoped to this
+/// helper so non-extend opcodes keep rejecting bare W-form names.
 fn parse_unary_extend<F>(mnemonic: &str, operands: &[&str], build: F) -> Result<Instruction, String>
 where
     F: FnOnce(Register, Register) -> Instruction,
