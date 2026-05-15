@@ -4,6 +4,7 @@
 
 #![allow(dead_code)]
 
+use crate::ir::instructions::MOVW_LEGAL_SHIFTS;
 use crate::ir::types::Condition;
 use crate::ir::{Instruction, Operand, Register};
 use crate::isa::traits::{ISA, InstructionGenerator, InstructionType, OperandType, RegisterType};
@@ -337,7 +338,7 @@ impl InstructionGenerator<Instruction> for AArch64InstructionGenerator {
             // MOVZ/MOVK — the full u16 × 4-shift space would balloon
             // candidate counts.
             for imm in [0u16, 1, 0xFF, 0xFFFF] {
-                for shift in [0u8, 16, 32, 48] {
+                for shift in MOVW_LEGAL_SHIFTS {
                     instructions.push(Instruction::MovN { rd, imm, shift });
                     instructions.push(Instruction::MovZ { rd, imm, shift });
                     instructions.push(Instruction::MovK { rd, imm, shift });
@@ -430,7 +431,7 @@ impl InstructionGenerator<Instruction> for AArch64InstructionGenerator {
             },
             16 => {
                 let imm = (rng.random::<u32>() & 0xFFFF) as u16;
-                let shifts = [0u8, 16, 32, 48];
+                let shifts = MOVW_LEGAL_SHIFTS;
                 Instruction::MovN {
                     rd,
                     imm,
@@ -507,7 +508,7 @@ impl InstructionGenerator<Instruction> for AArch64InstructionGenerator {
             }
             24 => {
                 let imm = (rng.random::<u32>() & 0xFFFF) as u16;
-                let shifts = [0u8, 16, 32, 48];
+                let shifts = MOVW_LEGAL_SHIFTS;
                 Instruction::MovZ {
                     rd,
                     imm,
@@ -516,7 +517,7 @@ impl InstructionGenerator<Instruction> for AArch64InstructionGenerator {
             }
             25 => {
                 let imm = (rng.random::<u32>() & 0xFFFF) as u16;
-                let shifts = [0u8, 16, 32, 48];
+                let shifts = MOVW_LEGAL_SHIFTS;
                 Instruction::MovK {
                     rd,
                     imm,

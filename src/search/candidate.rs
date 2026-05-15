@@ -1,5 +1,6 @@
 //! Instruction generation utilities for search algorithms
 
+use crate::ir::instructions::MOVW_LEGAL_SHIFTS;
 use crate::ir::{Instruction, Operand, Register};
 
 /// Check if all instructions in a sequence can be encoded in AArch64 machine code.
@@ -141,7 +142,7 @@ pub fn generate_all_instructions(registers: &[Register], immediates: &[i64]) -> 
         // balloon the candidate count. The same parsimony rationale applies
         // as the immediate-table choice above.
         for imm in [0u16, 1, 0xFF, 0xFFFF] {
-            for shift in [0u8, 16, 32, 48] {
+            for shift in MOVW_LEGAL_SHIFTS {
                 instrs.push(Instruction::MovN { rd, imm, shift });
                 instrs.push(Instruction::MovZ { rd, imm, shift });
                 instrs.push(Instruction::MovK { rd, imm, shift });
@@ -254,7 +255,7 @@ pub fn generate_random_instruction<R: rand::RngExt>(
         },
         13 => {
             let imm = (rng.random::<u32>() & 0xFFFF) as u16;
-            let shifts = [0u8, 16, 32, 48];
+            let shifts = MOVW_LEGAL_SHIFTS;
             let shift = shifts[rng.random_range(0..shifts.len())];
             Instruction::MovN { rd, imm, shift }
         }
@@ -308,13 +309,13 @@ pub fn generate_random_instruction<R: rand::RngExt>(
         }
         24 => {
             let imm = (rng.random::<u32>() & 0xFFFF) as u16;
-            let shifts = [0u8, 16, 32, 48];
+            let shifts = MOVW_LEGAL_SHIFTS;
             let shift = shifts[rng.random_range(0..shifts.len())];
             Instruction::MovZ { rd, imm, shift }
         }
         _ => {
             let imm = (rng.random::<u32>() & 0xFFFF) as u16;
-            let shifts = [0u8, 16, 32, 48];
+            let shifts = MOVW_LEGAL_SHIFTS;
             let shift = shifts[rng.random_range(0..shifts.len())];
             Instruction::MovK { rd, imm, shift }
         }

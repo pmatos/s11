@@ -8,6 +8,7 @@
 
 #![allow(dead_code)]
 
+use crate::ir::instructions::MOVW_LEGAL_SHIFTS;
 use crate::ir::types::Condition;
 use crate::ir::{Instruction, Operand, Register};
 use crate::search::candidate::generate_random_instruction;
@@ -197,8 +198,7 @@ impl Mutator {
                 0 => *rd = self.random_register(rng),
                 1 => *imm = (rng.random::<u32>() & 0xFFFF) as u16,
                 _ => {
-                    let shifts = [0u8, 16, 32, 48];
-                    *shift = shifts[rng.random_range(0..shifts.len())];
+                    *shift = MOVW_LEGAL_SHIFTS[rng.random_range(0..MOVW_LEGAL_SHIFTS.len())];
                 }
             },
             // Inverted-logical: BIC / BICS / ORN / EON — register-only rm

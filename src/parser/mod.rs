@@ -5,6 +5,7 @@
 use std::fmt;
 use std::path::Path;
 
+use crate::ir::instructions::MOVW_LEGAL_SHIFTS;
 use crate::ir::{Condition, Instruction, Operand, Register};
 
 /// Parse error with location information
@@ -433,10 +434,11 @@ fn parse_movw_operands(mnem: &str, operands: &[&str]) -> Result<(Register, u16, 
             Operand::Immediate(v) => v,
             Operand::Register(_) => return Err(format!("{} shift must be an immediate", mnem)),
         };
-        if !matches!(s, 0 | 16 | 32 | 48) {
+        let s_u8 = u8::try_from(s).ok();
+        if !s_u8.is_some_and(|v| MOVW_LEGAL_SHIFTS.contains(&v)) {
             return Err(format!("{} shift {} must be one of 0/16/32/48", mnem, s));
         }
-        s as u8
+        s_u8.unwrap()
     };
 
     Ok((rd, imm, shift))
