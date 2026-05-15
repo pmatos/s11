@@ -282,7 +282,6 @@ pub fn compute_flags_logical(result: &BV) -> Nzcv {
 pub fn condition_to_smt(cond: crate::ir::types::Condition, n: &BV, z: &BV, c: &BV, v: &BV) -> BV {
     use crate::ir::types::Condition;
     let one = bv_one();
-    let zero = bv_zero();
     let not_n = n.bvxor(&one);
     let not_z = z.bvxor(&one);
     let not_c = c.bvxor(&one);
