@@ -1930,4 +1930,32 @@ mod tests {
         let after = apply_instruction_concrete(state, &ccmp);
         assert!(after.get_flags().z);
     }
+
+    #[test]
+    fn test_uxtb_extracts_low_byte() {
+        // UXTB X0, X1 with X1 = 0xDEAD_BEEF_CAFE_5678 → X0 = 0x78.
+        let state = state_with(vec![(Register::X1, 0xDEAD_BEEF_CAFE_5678)]);
+        let after = apply_instruction_concrete(
+            state,
+            &Instruction::Uxtb {
+                rd: Register::X0,
+                rn: Register::X1,
+            },
+        );
+        assert_eq!(after.get_register(Register::X0).as_u64(), 0x78);
+    }
+
+    #[test]
+    fn test_uxtb_zero_extends() {
+        // The high bits of X1 must NOT bleed into X0 — UXTB zero-extends.
+        let state = state_with(vec![(Register::X1, 0xFFFF_FFFF_FFFF_FFFF)]);
+        let after = apply_instruction_concrete(
+            state,
+            &Instruction::Uxtb {
+                rd: Register::X0,
+                rn: Register::X1,
+            },
+        );
+        assert_eq!(after.get_register(Register::X0).as_u64(), 0xFF);
+    }
 }
