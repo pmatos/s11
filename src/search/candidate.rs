@@ -110,10 +110,12 @@ pub fn generate_all_instructions(registers: &[Register], immediates: &[i64]) -> 
                     instrs.push(Instruction::Orr { rd, rn, rm: sr_ror });
                     instrs.push(Instruction::Eor { rd, rn, rm: sr_ror });
                 }
-                // Issue #60: extended-register form for ADD/SUB/CMP/CMN.
-                // Shift in 0..=4 (the imm3 field). Eight kinds × five shifts
-                // produces 40 extra candidates per (rd, rn, rm) triple, which
-                // is comparable to the shifted-register pool above.
+                // Issue #60: extended-register form for ADD/SUB. Cmp/Cmn
+                // are produced once-per-(rn,rm,kind,shift) further below
+                // (outside the `rd` loop), since they have no destination
+                // register — duplicating them by rd just inflates the
+                // candidate pool with identical instructions (codex P2 on
+                // #144).
                 use crate::ir::ExtendKind;
                 for kind in [
                     ExtendKind::Uxtb,
@@ -133,8 +135,6 @@ pub fn generate_all_instructions(registers: &[Register], immediates: &[i64]) -> 
                         };
                         instrs.push(Instruction::Add { rd, rn, rm: er });
                         instrs.push(Instruction::Sub { rd, rn, rm: er });
-                        instrs.push(Instruction::Cmp { rn, rm: er });
-                        instrs.push(Instruction::Cmn { rn, rm: er });
                     }
                 }
             }
@@ -299,6 +299,39 @@ pub fn generate_all_instructions(registers: &[Register], immediates: &[i64]) -> 
                         nzcv,
                         cond,
                     });
+                }
+            }
+        }
+    }
+
+    // Issue #60: ExtendedRegister CMP/CMN candidates. These instructions
+    // have no destination register, so emitting them per-rd (as the
+    // shifted-register block above does) produced N identical copies per
+    // (rn, rm, kind, shift) tuple (codex P2 on #144). Generate once per
+    // unique (rn, rm, kind, shift) instead.
+    {
+        use crate::ir::ExtendKind;
+        for &rn in registers {
+            for &rm in registers {
+                for kind in [
+                    ExtendKind::Uxtb,
+                    ExtendKind::Uxth,
+                    ExtendKind::Uxtw,
+                    ExtendKind::Uxtx,
+                    ExtendKind::Sxtb,
+                    ExtendKind::Sxth,
+                    ExtendKind::Sxtw,
+                    ExtendKind::Sxtx,
+                ] {
+                    for shift in 0u8..=4 {
+                        let er = Operand::ExtendedRegister {
+                            reg: rm,
+                            kind,
+                            shift,
+                        };
+                        instrs.push(Instruction::Cmp { rn, rm: er });
+                        instrs.push(Instruction::Cmn { rn, rm: er });
+                    }
                 }
             }
         }
@@ -1008,6 +1041,39 @@ mod tests {
             )
         });
         assert!(has_sxth, "enumeration missing CMP with SXTH extended-reg");
+    }
+
+    #[test]
+    fn enumerate_does_not_duplicate_extended_register_cmp_cmn() {
+        // Issue #60 follow-up (codex P2 on #144): CMP/CMN have no destination
+        // register, so the per-rd loop used to emit each
+        // `cmp rn, rm, <extend> #shift` candidate N times for an N-register
+        // pool. The fix moves CMP/CMN out of the rd loop; each unique
+        // (rn, rm, kind, shift) tuple now appears exactly once.
+        let regs = vec![Register::X0, Register::X1, Register::X2];
+        let imms = vec![];
+        let candidates = generate_all_instructions(&regs, &imms);
+        let count_cmp_uxtb_x1_x2_shift0 = candidates
+            .iter()
+            .filter(|c| {
+                matches!(
+                    c,
+                    Instruction::Cmp {
+                        rn: Register::X1,
+                        rm: Operand::ExtendedRegister {
+                            reg: Register::X2,
+                            kind: crate::ir::ExtendKind::Uxtb,
+                            shift: 0,
+                        },
+                    }
+                )
+            })
+            .count();
+        assert_eq!(
+            count_cmp_uxtb_x1_x2_shift0, 1,
+            "CMP X1, X2, UXTB #0 must appear exactly once (got {})",
+            count_cmp_uxtb_x1_x2_shift0
+        );
     }
 
     #[test]

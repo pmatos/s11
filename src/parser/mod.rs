@@ -337,13 +337,24 @@ where
 ///
 /// ARM ARM / Capstone canonical syntax:
 ///
-/// - `UXTB Wd, Wn` / `UXTH Wd, Wn` — both operands W-form.
-/// - `SXTB Xd, Wn` / `SXTH Xd, Wn` / `SXTW Xd, Wn` — X-dest, W-src.
+/// - `UXTB Wd, Wn` / `UXTH Wd, Wn` — both operands W-form. The IR models
+///   these as 64-bit ops with the upper 32 bits zeroed (which is the W-form
+///   semantics on AArch64), so X-spelling for rd is also accepted.
+/// - `SXTB Xd, Wn` / `SXTH Xd, Wn` / `SXTW Xd, Wn` — X-dest, W-src. There is
+///   also a 32-bit `SXTB Wd, Wn` architectural form which writes only Wd and
+///   zeroes the upper half of Xd — that is *not* what the IR models, so
+///   `sxtb w0, w1` is rejected by this parser to avoid silent semantic
+///   erasure (codex P1 on #144).
 ///
 /// The IR stores everything as 64-bit X-registers; the semantics layer masks
 /// to the architectural width. The W-form acceptance is scoped to this
 /// helper so non-extend opcodes keep rejecting bare W-form names.
-fn parse_unary_extend<F>(mnemonic: &str, operands: &[&str], build: F) -> Result<Instruction, String>
+fn parse_unary_extend<F>(
+    mnemonic: &str,
+    operands: &[&str],
+    allow_w_dest: bool,
+    build: F,
+) -> Result<Instruction, String>
 where
     F: FnOnce(Register, Register) -> Instruction,
 {
@@ -354,8 +365,21 @@ where
             operands.len()
         ));
     }
-    let rd = parse_w_or_x_register(operands[0])?;
+    // Rn is W-form (or X for the IR's X-spelling fallback) for every kind.
     let rn = parse_w_or_x_register(operands[1])?;
+    let rd = if allow_w_dest {
+        parse_w_or_x_register(operands[0])?
+    } else {
+        let rd_str = operands[0].trim();
+        if rd_str.to_ascii_lowercase().starts_with('w') && rd_str.to_ascii_lowercase() != "wzr" {
+            return Err(format!(
+                "{} destination must be X-form (the W-form `{} {}, ...` is a different 32-bit \
+                 architectural instruction that this IR does not model)",
+                mnemonic, mnemonic, rd_str
+            ));
+        }
+        parse_register(rd_str)?
+    };
     Ok(build(rd, rn))
 }
 
@@ -1118,16 +1142,35 @@ pub fn parse_line(line: &str) -> Result<LineResult, ParseLineError> {
             .map_err(ParseLineError::Other)?,
         "rev16" => parse_unary_rd_rn("rev16", &operands, |rd, rn| Instruction::Rev16 { rd, rn })
             .map_err(ParseLineError::Other)?,
-        "uxtb" => parse_unary_extend("uxtb", &operands, |rd, rn| Instruction::Uxtb { rd, rn })
-            .map_err(ParseLineError::Other)?,
-        "sxtb" => parse_unary_extend("sxtb", &operands, |rd, rn| Instruction::Sxtb { rd, rn })
-            .map_err(ParseLineError::Other)?,
-        "uxth" => parse_unary_extend("uxth", &operands, |rd, rn| Instruction::Uxth { rd, rn })
-            .map_err(ParseLineError::Other)?,
-        "sxth" => parse_unary_extend("sxth", &operands, |rd, rn| Instruction::Sxth { rd, rn })
-            .map_err(ParseLineError::Other)?,
-        "sxtw" => parse_unary_extend("sxtw", &operands, |rd, rn| Instruction::Sxtw { rd, rn })
-            .map_err(ParseLineError::Other)?,
+        // UXTB/UXTH: Wd-write form is the only architectural form; accepting
+        // X-spelling for rd is just the IR's naming convention.
+        "uxtb" => parse_unary_extend("uxtb", &operands, true, |rd, rn| Instruction::Uxtb {
+            rd,
+            rn,
+        })
+        .map_err(ParseLineError::Other)?,
+        "uxth" => parse_unary_extend("uxth", &operands, true, |rd, rn| Instruction::Uxth {
+            rd,
+            rn,
+        })
+        .map_err(ParseLineError::Other)?,
+        // SXTB/SXTH/SXTW: X-dest only. The 32-bit `Wd` form is a distinct
+        // architectural instruction that this IR does not model.
+        "sxtb" => parse_unary_extend("sxtb", &operands, false, |rd, rn| Instruction::Sxtb {
+            rd,
+            rn,
+        })
+        .map_err(ParseLineError::Other)?,
+        "sxth" => parse_unary_extend("sxth", &operands, false, |rd, rn| Instruction::Sxth {
+            rd,
+            rn,
+        })
+        .map_err(ParseLineError::Other)?,
+        "sxtw" => parse_unary_extend("sxtw", &operands, false, |rd, rn| Instruction::Sxtw {
+            rd,
+            rn,
+        })
+        .map_err(ParseLineError::Other)?,
         _ => return Err(ParseLineError::UnknownInstruction(opcode)),
     };
 
@@ -1876,6 +1919,30 @@ mod tests {
         // parses correctly (e.g. `uxtb x0, x1` from older tests).
         assert!(parse_line("uxtb x0, x1").is_ok());
         assert!(parse_line("sxtw x0, x1").is_ok());
+    }
+
+    #[test]
+    fn parse_sxt_rejects_w_destination() {
+        // Issue #60 follow-up (Codex P1 on the rebased branch): `sxtb w0, w1`
+        // is the 32-bit-Wd-write form architecturally — distinct from the
+        // X-dest SXTB the IR models. Accepting it would silently erase the
+        // width and let the optimizer emit Xd-write bytes against W-dest
+        // input. The parser must refuse.
+        for line in ["sxtb w0, w1", "sxth w0, w1", "sxtw w0, w1"] {
+            assert!(
+                parse_line(line).is_err(),
+                "{} should reject W-form destination",
+                line
+            );
+        }
+        // The X-form destination is the correct spelling for the IR's model.
+        assert!(parse_line("sxtb x0, w1").is_ok());
+        assert!(parse_line("sxth x0, w1").is_ok());
+        assert!(parse_line("sxtw x0, w1").is_ok());
+        // UXTB/UXTH accept both W- and X-form rd (they are not architecturally
+        // distinct — Xd is just the IR's spelling convention).
+        assert!(parse_line("uxtb w0, w1").is_ok());
+        assert!(parse_line("uxtb x0, w1").is_ok());
     }
 
     #[test]
