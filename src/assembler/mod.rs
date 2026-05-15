@@ -1,6 +1,6 @@
 pub mod x86;
 
-use crate::ir::types::Condition;
+use crate::ir::types::{Condition, ShiftKind};
 use crate::ir::{Instruction, Operand, Register};
 use dynasmrt::{DynasmApi, dynasm};
 
@@ -26,6 +26,120 @@ macro_rules! emit_csel {
             Condition::LE => dynasm!($ops ; .arch aarch64 ; $mnem X($rd), X($rn), X($rm), le),
             Condition::AL => dynasm!($ops ; .arch aarch64 ; $mnem X($rd), X($rn), X($rm), al),
             Condition::NV => dynasm!($ops ; .arch aarch64 ; $mnem X($rd), X($rn), X($rm), nv),
+        }
+    }};
+}
+
+/// Emit a 3-operand arithmetic shifted-register instruction (Add/Sub) of the
+/// form `<mnem> X(rd), X(rn), X(rm), <kind> #amt`. ROR is rejected here because
+/// the AArch64 ADD/SUB shifted-register encoding does not accept ROR — see ARM
+/// ARM. `is_encodable_aarch64` already screens this out; the Err is defensive.
+macro_rules! emit_shifted_reg_3op_arith {
+    ($ops:expr, $mnem:ident, $rd:expr, $rn:expr, $rm:expr, $kind:expr, $amt:expr) => {{
+        let rd_n: u8 = $rd;
+        let rn_n: u8 = $rn;
+        let rm_n: u8 = $rm;
+        let amt_n: u32 = ($amt) as u32;
+        match $kind {
+            ShiftKind::LSL => {
+                dynasm!($ops ; .arch aarch64 ; $mnem X(rd_n), X(rn_n), X(rm_n), LSL amt_n);
+                Ok(())
+            }
+            ShiftKind::LSR => {
+                dynasm!($ops ; .arch aarch64 ; $mnem X(rd_n), X(rn_n), X(rm_n), LSR amt_n);
+                Ok(())
+            }
+            ShiftKind::ASR => {
+                dynasm!($ops ; .arch aarch64 ; $mnem X(rd_n), X(rn_n), X(rm_n), ASR amt_n);
+                Ok(())
+            }
+            ShiftKind::ROR => Err(format!(
+                "{} cannot use ROR shift (rejected by is_encodable_aarch64)",
+                stringify!($mnem)
+            )),
+        }
+    }};
+}
+
+/// 3-operand logical shifted-register instruction (And/Orr/Eor) — accepts all
+/// four ShiftKinds including ROR.
+macro_rules! emit_shifted_reg_3op_logical {
+    ($ops:expr, $mnem:ident, $rd:expr, $rn:expr, $rm:expr, $kind:expr, $amt:expr) => {{
+        let rd_n: u8 = $rd;
+        let rn_n: u8 = $rn;
+        let rm_n: u8 = $rm;
+        let amt_n: u32 = ($amt) as u32;
+        match $kind {
+            ShiftKind::LSL => {
+                dynasm!($ops ; .arch aarch64 ; $mnem X(rd_n), X(rn_n), X(rm_n), LSL amt_n);
+                Ok::<(), String>(())
+            }
+            ShiftKind::LSR => {
+                dynasm!($ops ; .arch aarch64 ; $mnem X(rd_n), X(rn_n), X(rm_n), LSR amt_n);
+                Ok::<(), String>(())
+            }
+            ShiftKind::ASR => {
+                dynasm!($ops ; .arch aarch64 ; $mnem X(rd_n), X(rn_n), X(rm_n), ASR amt_n);
+                Ok::<(), String>(())
+            }
+            ShiftKind::ROR => {
+                dynasm!($ops ; .arch aarch64 ; $mnem X(rd_n), X(rn_n), X(rm_n), ROR amt_n);
+                Ok::<(), String>(())
+            }
+        }
+    }};
+}
+
+/// 2-operand arithmetic shifted-register form (Cmp/Cmn) — no ROR.
+macro_rules! emit_shifted_reg_2op_arith {
+    ($ops:expr, $mnem:ident, $rn:expr, $rm:expr, $kind:expr, $amt:expr) => {{
+        let rn_n: u8 = $rn;
+        let rm_n: u8 = $rm;
+        let amt_n: u32 = ($amt) as u32;
+        match $kind {
+            ShiftKind::LSL => {
+                dynasm!($ops ; .arch aarch64 ; $mnem X(rn_n), X(rm_n), LSL amt_n);
+                Ok(())
+            }
+            ShiftKind::LSR => {
+                dynasm!($ops ; .arch aarch64 ; $mnem X(rn_n), X(rm_n), LSR amt_n);
+                Ok(())
+            }
+            ShiftKind::ASR => {
+                dynasm!($ops ; .arch aarch64 ; $mnem X(rn_n), X(rm_n), ASR amt_n);
+                Ok(())
+            }
+            ShiftKind::ROR => Err(format!(
+                "{} cannot use ROR shift (rejected by is_encodable_aarch64)",
+                stringify!($mnem)
+            )),
+        }
+    }};
+}
+
+/// 2-operand logical shifted-register form (Tst) — accepts all four kinds.
+macro_rules! emit_shifted_reg_2op_logical {
+    ($ops:expr, $mnem:ident, $rn:expr, $rm:expr, $kind:expr, $amt:expr) => {{
+        let rn_n: u8 = $rn;
+        let rm_n: u8 = $rm;
+        let amt_n: u32 = ($amt) as u32;
+        match $kind {
+            ShiftKind::LSL => {
+                dynasm!($ops ; .arch aarch64 ; $mnem X(rn_n), X(rm_n), LSL amt_n);
+                Ok::<(), String>(())
+            }
+            ShiftKind::LSR => {
+                dynasm!($ops ; .arch aarch64 ; $mnem X(rn_n), X(rm_n), LSR amt_n);
+                Ok::<(), String>(())
+            }
+            ShiftKind::ASR => {
+                dynasm!($ops ; .arch aarch64 ; $mnem X(rn_n), X(rm_n), ASR amt_n);
+                Ok::<(), String>(())
+            }
+            ShiftKind::ROR => {
+                dynasm!($ops ; .arch aarch64 ; $mnem X(rn_n), X(rm_n), ROR amt_n);
+                Ok::<(), String>(())
+            }
         }
     }};
 }
@@ -110,6 +224,12 @@ impl AArch64Assembler {
                         );
                         Ok(())
                     }
+                    Operand::ShiftedRegister { reg, kind, amount } => {
+                        let rm_reg_num = register_to_dynasm(*reg)?;
+                        emit_shifted_reg_3op_arith!(
+                            ops, add, rd_reg, rn_reg, rm_reg_num, kind, *amount
+                        )
+                    }
                 }
             }
             Instruction::Sub { rd, rn, rm } => {
@@ -136,6 +256,12 @@ impl AArch64Assembler {
                         );
                         Ok(())
                     }
+                    Operand::ShiftedRegister { reg, kind, amount } => {
+                        let rm_reg_num = register_to_dynasm(*reg)?;
+                        emit_shifted_reg_3op_arith!(
+                            ops, sub, rd_reg, rn_reg, rm_reg_num, kind, *amount
+                        )
+                    }
                 }
             }
             Instruction::And { rd, rn, rm } => {
@@ -155,6 +281,12 @@ impl AArch64Assembler {
                         // AND with immediate uses logical immediate encoding which is complex.
                         // For now, only support register operands.
                         Err("AND immediate encoding not yet supported".to_string())
+                    }
+                    Operand::ShiftedRegister { reg, kind, amount } => {
+                        let rm_reg_num = register_to_dynasm(*reg)?;
+                        emit_shifted_reg_3op_logical!(
+                            ops, and, rd_reg, rn_reg, rm_reg_num, kind, *amount
+                        )
                     }
                 }
             }
@@ -176,6 +308,12 @@ impl AArch64Assembler {
                         // For now, only support register operands.
                         Err("ORR immediate encoding not yet supported".to_string())
                     }
+                    Operand::ShiftedRegister { reg, kind, amount } => {
+                        let rm_reg_num = register_to_dynasm(*reg)?;
+                        emit_shifted_reg_3op_logical!(
+                            ops, orr, rd_reg, rn_reg, rm_reg_num, kind, *amount
+                        )
+                    }
                 }
             }
             Instruction::Eor { rd, rn, rm } => {
@@ -195,6 +333,12 @@ impl AArch64Assembler {
                         // EOR with immediate uses logical immediate encoding which is complex.
                         // For now, only support register operands.
                         Err("EOR immediate encoding not yet supported".to_string())
+                    }
+                    Operand::ShiftedRegister { reg, kind, amount } => {
+                        let rm_reg_num = register_to_dynasm(*reg)?;
+                        emit_shifted_reg_3op_logical!(
+                            ops, eor, rd_reg, rn_reg, rm_reg_num, kind, *amount
+                        )
                     }
                 }
             }
@@ -224,6 +368,11 @@ impl AArch64Assembler {
                         );
                         Ok(())
                     }
+                    // Rejected by is_encodable_aarch64; shift slot is not a
+                    // shifted-register form.
+                    Operand::ShiftedRegister { .. } => {
+                        Err("LSL shift amount cannot be a ShiftedRegister".to_string())
+                    }
                 }
             }
             Instruction::Lsr { rd, rn, shift } => {
@@ -252,6 +401,9 @@ impl AArch64Assembler {
                         );
                         Ok(())
                     }
+                    Operand::ShiftedRegister { .. } => {
+                        Err("LSR shift amount cannot be a ShiftedRegister".to_string())
+                    }
                 }
             }
             Instruction::Asr { rd, rn, shift } => {
@@ -279,6 +431,9 @@ impl AArch64Assembler {
                             ; asr X(rd_reg), X(rn_reg), *shift_amt as u32
                         );
                         Ok(())
+                    }
+                    Operand::ShiftedRegister { .. } => {
+                        Err("ASR shift amount cannot be a ShiftedRegister".to_string())
                     }
                 }
             }
@@ -394,6 +549,10 @@ impl AArch64Assembler {
                         );
                         Ok(())
                     }
+                    Operand::ShiftedRegister { reg, kind, amount } => {
+                        let rm_reg_num = register_to_dynasm(*reg)?;
+                        emit_shifted_reg_2op_arith!(ops, cmp, rn_reg, rm_reg_num, kind, *amount)
+                    }
                 }
             }
             Instruction::Cmn { rn, rm } => {
@@ -418,6 +577,10 @@ impl AArch64Assembler {
                         );
                         Ok(())
                     }
+                    Operand::ShiftedRegister { reg, kind, amount } => {
+                        let rm_reg_num = register_to_dynasm(*reg)?;
+                        emit_shifted_reg_2op_arith!(ops, cmn, rn_reg, rm_reg_num, kind, *amount)
+                    }
                 }
             }
             Instruction::Tst { rn, rm } => {
@@ -434,6 +597,10 @@ impl AArch64Assembler {
                     }
                     Operand::Immediate(_imm) => {
                         Err("TST immediate encoding not yet supported".to_string())
+                    }
+                    Operand::ShiftedRegister { reg, kind, amount } => {
+                        let rm_reg_num = register_to_dynasm(*reg)?;
+                        emit_shifted_reg_2op_logical!(ops, tst, rn_reg, rm_reg_num, kind, *amount)
                     }
                 }
             }
@@ -567,6 +734,9 @@ impl AArch64Assembler {
                     Operand::Immediate(_) => {
                         Err("BIC immediate encoding not supported".to_string())
                     }
+                    Operand::ShiftedRegister { .. } => {
+                        Err("BIC shifted-register form not yet supported (issue #59 covers AND/ORR/EOR/TST only)".to_string())
+                    }
                 }
             }
             Instruction::Bics { rd, rn, rm } => {
@@ -580,6 +750,9 @@ impl AArch64Assembler {
                     }
                     Operand::Immediate(_) => {
                         Err("BICS immediate encoding not supported".to_string())
+                    }
+                    Operand::ShiftedRegister { .. } => {
+                        Err("BICS shifted-register form not yet supported".to_string())
                     }
                 }
             }
@@ -595,6 +768,9 @@ impl AArch64Assembler {
                     Operand::Immediate(_) => {
                         Err("ORN immediate encoding not supported".to_string())
                     }
+                    Operand::ShiftedRegister { .. } => {
+                        Err("ORN shifted-register form not yet supported".to_string())
+                    }
                 }
             }
             Instruction::Eon { rd, rn, rm } => {
@@ -608,6 +784,9 @@ impl AArch64Assembler {
                     }
                     Operand::Immediate(_) => {
                         Err("EON immediate encoding not supported".to_string())
+                    }
+                    Operand::ShiftedRegister { .. } => {
+                        Err("EON shifted-register form not yet supported".to_string())
                     }
                 }
             }
@@ -636,6 +815,9 @@ impl AArch64Assembler {
                         dynasm!(ops ; .arch aarch64 ; adds X(rd_reg), XSP(rn_reg), imm);
                         Ok(())
                     }
+                    Operand::ShiftedRegister { .. } => {
+                        Err("ADDS shifted-register form not yet supported (issue #59 covers ADD without flags)".to_string())
+                    }
                 }
             }
             Instruction::Subs { rd, rn, rm } => {
@@ -660,6 +842,9 @@ impl AArch64Assembler {
                         dynasm!(ops ; .arch aarch64 ; subs X(rd_reg), XSP(rn_reg), imm);
                         Ok(())
                     }
+                    Operand::ShiftedRegister { .. } => {
+                        Err("SUBS shifted-register form not yet supported".to_string())
+                    }
                 }
             }
             Instruction::Ands { rd, rn, rm } => {
@@ -673,6 +858,9 @@ impl AArch64Assembler {
                     }
                     Operand::Immediate(_) => {
                         Err("ANDS immediate encoding not supported".to_string())
+                    }
+                    Operand::ShiftedRegister { .. } => {
+                        Err("ANDS shifted-register form not yet supported".to_string())
                     }
                 }
             }
@@ -728,6 +916,9 @@ impl AArch64Assembler {
                         let imm = *imm as u32;
                         dynasm!(ops ; .arch aarch64 ; ror X(rd_reg), X(rn_reg), imm);
                         Ok(())
+                    }
+                    Operand::ShiftedRegister { .. } => {
+                        Err("ROR shift amount cannot be a ShiftedRegister".to_string())
                     }
                 }
             }
@@ -1955,5 +2146,142 @@ mod tests {
             let rn = instr.source_registers()[0].to_string();
             disassemble_and_verify(&bytes, mnemonic, &[&rd, &rn]);
         }
+    }
+
+    /// Issue #59: shifted-register forms round-trip through Capstone with the
+    /// expected `<mnem> <rd>, <rn>, <rm>, <kind> #amt` text.
+    #[test]
+    fn test_assemble_shifted_register_round_trip() {
+        // (instruction, expected mnemonic, expected operand fragments).
+        // Capstone prints the shift kind lowercase: "lsl #3" etc.
+        let cases: Vec<(Instruction, &str, Vec<String>)> = vec![
+            (
+                Instruction::Add {
+                    rd: Register::X0,
+                    rn: Register::X1,
+                    rm: Operand::ShiftedRegister {
+                        reg: Register::X2,
+                        kind: ShiftKind::LSL,
+                        amount: 3,
+                    },
+                },
+                "add",
+                vec!["x0".into(), "x1".into(), "x2".into(), "lsl #3".into()],
+            ),
+            (
+                Instruction::Sub {
+                    rd: Register::X3,
+                    rn: Register::X4,
+                    rm: Operand::ShiftedRegister {
+                        reg: Register::X5,
+                        kind: ShiftKind::LSR,
+                        amount: 5,
+                    },
+                },
+                "sub",
+                vec!["x3".into(), "x4".into(), "x5".into(), "lsr #5".into()],
+            ),
+            (
+                Instruction::And {
+                    rd: Register::X6,
+                    rn: Register::X7,
+                    rm: Operand::ShiftedRegister {
+                        reg: Register::X8,
+                        kind: ShiftKind::ASR,
+                        amount: 7,
+                    },
+                },
+                "and",
+                vec!["x6".into(), "x7".into(), "x8".into(), "asr #7".into()],
+            ),
+            (
+                Instruction::Orr {
+                    rd: Register::X9,
+                    rn: Register::X10,
+                    rm: Operand::ShiftedRegister {
+                        reg: Register::X11,
+                        kind: ShiftKind::ROR,
+                        amount: 1,
+                    },
+                },
+                "orr",
+                vec!["x9".into(), "x10".into(), "x11".into(), "ror #1".into()],
+            ),
+            (
+                Instruction::Eor {
+                    rd: Register::X12,
+                    rn: Register::X13,
+                    rm: Operand::ShiftedRegister {
+                        reg: Register::X14,
+                        kind: ShiftKind::LSL,
+                        amount: 2,
+                    },
+                },
+                "eor",
+                vec!["x12".into(), "x13".into(), "x14".into(), "lsl #2".into()],
+            ),
+            (
+                Instruction::Cmp {
+                    rn: Register::X15,
+                    rm: Operand::ShiftedRegister {
+                        reg: Register::X16,
+                        kind: ShiftKind::LSL,
+                        amount: 4,
+                    },
+                },
+                "cmp",
+                vec!["x15".into(), "x16".into(), "lsl #4".into()],
+            ),
+            (
+                Instruction::Cmn {
+                    rn: Register::X17,
+                    rm: Operand::ShiftedRegister {
+                        reg: Register::X18,
+                        kind: ShiftKind::ASR,
+                        amount: 8,
+                    },
+                },
+                "cmn",
+                vec!["x17".into(), "x18".into(), "asr #8".into()],
+            ),
+            (
+                Instruction::Tst {
+                    rn: Register::X19,
+                    rm: Operand::ShiftedRegister {
+                        reg: Register::X20,
+                        kind: ShiftKind::ROR,
+                        amount: 16,
+                    },
+                },
+                "tst",
+                vec!["x19".into(), "x20".into(), "ror #16".into()],
+            ),
+        ];
+
+        for (instr, mnemonic, expected_ops) in cases {
+            let mut assembler = AArch64Assembler::new();
+            let bytes = assembler
+                .assemble_instructions(&[instr])
+                .unwrap_or_else(|e| panic!("{} encoding should succeed: {}", mnemonic, e));
+            let refs: Vec<&str> = expected_ops.iter().map(|s| s.as_str()).collect();
+            disassemble_and_verify(&bytes, mnemonic, &refs);
+        }
+    }
+
+    /// ROR with arithmetic ops (Add/Sub/Cmp/Cmn) is rejected by the encoder
+    /// even if a caller bypasses `is_encodable_aarch64`.
+    #[test]
+    fn test_assemble_shifted_arith_rejects_ror() {
+        let mut assembler = AArch64Assembler::new();
+        let instr = Instruction::Add {
+            rd: Register::X0,
+            rn: Register::X1,
+            rm: Operand::ShiftedRegister {
+                reg: Register::X2,
+                kind: ShiftKind::ROR,
+                amount: 1,
+            },
+        };
+        assert!(assembler.assemble_instructions(&[instr]).is_err());
     }
 }

@@ -656,6 +656,65 @@ mod tests {
         );
     }
 
+    /// Issue #59 end-to-end discovery test: the enumerator's candidate set
+    /// contains a length-1 instruction equivalent to the 2-instruction
+    /// `LSL t, X2, #3 ; ADD X0, X1, t` target sequence — namely the
+    /// shifted-register form `ADD X0, X1, X2, LSL #3`.
+    #[test]
+    fn test_optimizer_discovers_shifted_register_collapse() {
+        use crate::ir::ShiftKind;
+        use crate::search::candidate::generate_all_instructions;
+
+        // Target sequence: LSL X10, X2, #3 ; ADD X0, X1, X10.
+        let target = vec![
+            Instruction::Lsl {
+                rd: Register::X10,
+                rn: Register::X2,
+                shift: Operand::Immediate(3),
+            },
+            Instruction::Add {
+                rd: Register::X0,
+                rn: Register::X1,
+                rm: Operand::Register(Register::X10),
+            },
+        ];
+
+        // Live-out is just X0; the temp X10 is dead after the sequence.
+        let config = EquivalenceConfig {
+            live_out: LiveOut::from_registers(vec![Register::X0]),
+            ..Default::default()
+        };
+
+        // Use a small register/immediate pool so enumeration is fast.
+        let regs = vec![Register::X0, Register::X1, Register::X2, Register::X10];
+        let imms = vec![0i64];
+        let candidates = generate_all_instructions(&regs, &imms);
+
+        // Find a single-instruction candidate equivalent to the 2-instruction
+        // target, restricted to ADD with a ShiftedRegister rm — that's the
+        // collapse the optimizer is supposed to discover.
+        let discovered = candidates.iter().find(|c| {
+            matches!(
+                c,
+                Instruction::Add {
+                    rd: Register::X0,
+                    rn: Register::X1,
+                    rm: Operand::ShiftedRegister {
+                        reg: Register::X2,
+                        kind: ShiftKind::LSL,
+                        amount: 3,
+                    },
+                }
+            ) && check_equivalence_with_config(&target, std::slice::from_ref(*c), &config)
+                == EquivalenceResult::Equivalent
+        });
+
+        assert!(
+            discovered.is_some(),
+            "enumerative search must discover `ADD X0, X1, X2, LSL #3` as equivalent to LSL+ADD"
+        );
+    }
+
     #[test]
     fn test_mov_zero_eor_equivalence() {
         let seq1 = vec![Instruction::MovImm {

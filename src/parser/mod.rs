@@ -6,7 +6,7 @@ use std::fmt;
 use std::path::Path;
 
 use crate::ir::instructions::MOVW_LEGAL_SHIFTS;
-use crate::ir::{Condition, Instruction, Operand, Register};
+use crate::ir::{Condition, Instruction, Operand, Register, ShiftKind};
 
 /// Parse error with location information
 #[derive(Debug, Clone)]
@@ -250,6 +250,9 @@ fn parse_mov(operands: &[&str]) -> Result<Instruction, String> {
     match src {
         Operand::Register(rn) => Ok(Instruction::MovReg { rd, rn }),
         Operand::Immediate(imm) => Ok(Instruction::MovImm { rd, imm }),
+        Operand::ShiftedRegister { .. } => {
+            Err("mov second operand must be a register or immediate".to_string())
+        }
     }
 }
 
@@ -424,7 +427,7 @@ fn parse_movw_operands(mnem: &str, operands: &[&str]) -> Result<(Register, u16, 
     let rd = parse_register(operands[0])?;
     let imm_val = match parse_operand(operands[1])? {
         Operand::Immediate(v) => v,
-        Operand::Register(_) => {
+        Operand::Register(_) | Operand::ShiftedRegister { .. } => {
             return Err(format!("{} second operand must be an immediate", mnem));
         }
     };
@@ -449,7 +452,9 @@ fn parse_movw_operands(mnem: &str, operands: &[&str]) -> Result<(Register, u16, 
         }
         let s = match parse_operand(rest)? {
             Operand::Immediate(v) => v,
-            Operand::Register(_) => return Err(format!("{} shift must be an immediate", mnem)),
+            Operand::Register(_) | Operand::ShiftedRegister { .. } => {
+                return Err(format!("{} shift must be an immediate", mnem));
+            }
         };
         let s_u8 = u8::try_from(s).ok();
         if !s_u8.is_some_and(|v| MOVW_LEGAL_SHIFTS.contains(&v)) {
@@ -481,68 +486,101 @@ fn parse_movk(operands: &[&str]) -> Result<Instruction, String> {
     Ok(Instruction::MovK { rd, imm, shift })
 }
 
+/// Parse the trailing shift modifier (`"<kind> #<amount>"`) attached to a
+/// shifted-register operand. Returns the assembled `Operand::ShiftedRegister`.
+/// `tail` is the single comma-separated trailing token after the rm register
+/// (already trimmed by `split_operands`); do NOT re-split on commas here.
+fn parse_shifted_register_tail(mnem: &str, reg: Register, tail: &str) -> Result<Operand, String> {
+    let tail = tail.trim();
+    let mut parts = tail.splitn(2, char::is_whitespace);
+    let kw = parts.next().unwrap_or("").trim();
+    let rest = parts.next().unwrap_or("").trim();
+    let kind = match kw.to_ascii_lowercase().as_str() {
+        "lsl" => ShiftKind::LSL,
+        "lsr" => ShiftKind::LSR,
+        "asr" => ShiftKind::ASR,
+        "ror" => ShiftKind::ROR,
+        _ => {
+            return Err(format!(
+                "{} shift kind must be one of lsl/lsr/asr/ror, got `{}`",
+                mnem, kw
+            ));
+        }
+    };
+    let amt = match parse_operand(rest)? {
+        Operand::Immediate(v) => v,
+        Operand::Register(_) | Operand::ShiftedRegister { .. } => {
+            return Err(format!("{} shift amount must be an immediate", mnem));
+        }
+    };
+    if !(0..=63).contains(&amt) {
+        return Err(format!(
+            "{} shift amount {} out of range (0..=63)",
+            mnem, amt
+        ));
+    }
+    Ok(Operand::ShiftedRegister {
+        reg,
+        kind,
+        amount: amt as u8,
+    })
+}
+
+/// Parse the rm slot for the 3-operand arith/logical instructions
+/// (Add/Sub/And/Orr/Eor). Returns either the existing register/immediate form
+/// or a new shifted-register operand if a 4th comma-separated token is present.
+fn parse_rm_3op(mnem: &str, operands: &[&str]) -> Result<Operand, String> {
+    if operands.len() == 3 {
+        parse_operand(operands[2])
+    } else if operands.len() == 4 {
+        let reg = parse_register(operands[2])?;
+        parse_shifted_register_tail(mnem, reg, operands[3])
+    } else {
+        Err(format!(
+            "{} requires 3 or 4 operands, got {}",
+            mnem,
+            operands.len()
+        ))
+    }
+}
+
 /// Parse ADD instruction
 fn parse_add(operands: &[&str]) -> Result<Instruction, String> {
-    if operands.len() != 3 {
-        return Err(format!("add requires 3 operands, got {}", operands.len()));
-    }
-
+    let rm = parse_rm_3op("add", operands)?;
     let rd = parse_register(operands[0])?;
     let rn = parse_register(operands[1])?;
-    let rm = parse_operand(operands[2])?;
-
     Ok(Instruction::Add { rd, rn, rm })
 }
 
 /// Parse SUB instruction
 fn parse_sub(operands: &[&str]) -> Result<Instruction, String> {
-    if operands.len() != 3 {
-        return Err(format!("sub requires 3 operands, got {}", operands.len()));
-    }
-
+    let rm = parse_rm_3op("sub", operands)?;
     let rd = parse_register(operands[0])?;
     let rn = parse_register(operands[1])?;
-    let rm = parse_operand(operands[2])?;
-
     Ok(Instruction::Sub { rd, rn, rm })
 }
 
 /// Parse AND instruction
 fn parse_and(operands: &[&str]) -> Result<Instruction, String> {
-    if operands.len() != 3 {
-        return Err(format!("and requires 3 operands, got {}", operands.len()));
-    }
-
+    let rm = parse_rm_3op("and", operands)?;
     let rd = parse_register(operands[0])?;
     let rn = parse_register(operands[1])?;
-    let rm = parse_operand(operands[2])?;
-
     Ok(Instruction::And { rd, rn, rm })
 }
 
 /// Parse ORR instruction
 fn parse_orr(operands: &[&str]) -> Result<Instruction, String> {
-    if operands.len() != 3 {
-        return Err(format!("orr requires 3 operands, got {}", operands.len()));
-    }
-
+    let rm = parse_rm_3op("orr", operands)?;
     let rd = parse_register(operands[0])?;
     let rn = parse_register(operands[1])?;
-    let rm = parse_operand(operands[2])?;
-
     Ok(Instruction::Orr { rd, rn, rm })
 }
 
 /// Parse EOR instruction
 fn parse_eor(operands: &[&str]) -> Result<Instruction, String> {
-    if operands.len() != 3 {
-        return Err(format!("eor requires 3 operands, got {}", operands.len()));
-    }
-
+    let rm = parse_rm_3op("eor", operands)?;
     let rd = parse_register(operands[0])?;
     let rn = parse_register(operands[1])?;
-    let rm = parse_operand(operands[2])?;
-
     Ok(Instruction::Eor { rd, rn, rm })
 }
 
@@ -691,39 +729,42 @@ fn parse_udiv(operands: &[&str]) -> Result<Instruction, String> {
     Ok(Instruction::Udiv { rd, rn, rm })
 }
 
+/// Parse the rm slot for the 2-operand comparison instructions
+/// (Cmp/Cmn/Tst). Returns either the existing register/immediate form or a new
+/// shifted-register operand if a 3rd comma-separated token is present.
+fn parse_rm_2op(mnem: &str, operands: &[&str]) -> Result<Operand, String> {
+    if operands.len() == 2 {
+        parse_operand(operands[1])
+    } else if operands.len() == 3 {
+        let reg = parse_register(operands[1])?;
+        parse_shifted_register_tail(mnem, reg, operands[2])
+    } else {
+        Err(format!(
+            "{} requires 2 or 3 operands, got {}",
+            mnem,
+            operands.len()
+        ))
+    }
+}
+
 /// Parse CMP instruction
 fn parse_cmp(operands: &[&str]) -> Result<Instruction, String> {
-    if operands.len() != 2 {
-        return Err(format!("cmp requires 2 operands, got {}", operands.len()));
-    }
-
+    let rm = parse_rm_2op("cmp", operands)?;
     let rn = parse_register(operands[0])?;
-    let rm = parse_operand(operands[1])?;
-
     Ok(Instruction::Cmp { rn, rm })
 }
 
 /// Parse CMN instruction
 fn parse_cmn(operands: &[&str]) -> Result<Instruction, String> {
-    if operands.len() != 2 {
-        return Err(format!("cmn requires 2 operands, got {}", operands.len()));
-    }
-
+    let rm = parse_rm_2op("cmn", operands)?;
     let rn = parse_register(operands[0])?;
-    let rm = parse_operand(operands[1])?;
-
     Ok(Instruction::Cmn { rn, rm })
 }
 
 /// Parse TST instruction
 fn parse_tst(operands: &[&str]) -> Result<Instruction, String> {
-    if operands.len() != 2 {
-        return Err(format!("tst requires 2 operands, got {}", operands.len()));
-    }
-
+    let rm = parse_rm_2op("tst", operands)?;
     let rn = parse_register(operands[0])?;
-    let rm = parse_operand(operands[1])?;
-
     Ok(Instruction::Tst { rn, rm })
 }
 
@@ -936,6 +977,7 @@ pub fn parse_assembly_string(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ir::ShiftKind;
     use crate::test_utils::TempFile;
 
     // Register parsing tests
@@ -950,6 +992,102 @@ mod tests {
         assert_eq!(parse_register("SP").unwrap(), Register::SP);
         assert_eq!(parse_register("fp").unwrap(), Register::X29);
         assert_eq!(parse_register("lr").unwrap(), Register::X30);
+    }
+
+    fn parse_one(line: &str) -> Instruction {
+        match parse_line(line).expect("parse_line failed") {
+            LineResult::Instruction(i) => i,
+            other => panic!("expected Instruction, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_parse_shifted_register_three_operand_arith() {
+        // add x0, x1, x2, lsl #3
+        let instr = parse_one("add x0, x1, x2, lsl #3");
+        assert_eq!(
+            instr,
+            Instruction::Add {
+                rd: Register::X0,
+                rn: Register::X1,
+                rm: Operand::ShiftedRegister {
+                    reg: Register::X2,
+                    kind: ShiftKind::LSL,
+                    amount: 3,
+                },
+            }
+        );
+        // round-trip via Display
+        assert_eq!(format!("{}", instr), "add x0, x1, x2, lsl #3");
+    }
+
+    #[test]
+    fn test_parse_shifted_register_all_kinds_case_insensitive() {
+        // Case-insensitive shift keyword (matches MOVW precedent).
+        for (text, kind, amount) in [
+            ("sub x0, x1, x2, LSL #5", ShiftKind::LSL, 5),
+            ("and x0, x1, x2, lsr #7", ShiftKind::LSR, 7),
+            ("orr x0, x1, x2, ASR #1", ShiftKind::ASR, 1),
+            ("eor x0, x1, x2, ror #16", ShiftKind::ROR, 16),
+        ] {
+            let instr = parse_one(text);
+            let rm = match instr {
+                Instruction::Sub { rm, .. }
+                | Instruction::And { rm, .. }
+                | Instruction::Orr { rm, .. }
+                | Instruction::Eor { rm, .. } => rm,
+                _ => panic!("expected an arithmetic/logical instr"),
+            };
+            assert_eq!(
+                rm,
+                Operand::ShiftedRegister {
+                    reg: Register::X2,
+                    kind,
+                    amount
+                }
+            );
+        }
+    }
+
+    #[test]
+    fn test_parse_shifted_register_two_operand_cmp() {
+        // cmp/cmn/tst use 3 comma tokens: rn, rm, "<kind> #amt"
+        let instr = parse_one("cmp x1, x2, lsl #4");
+        assert_eq!(
+            instr,
+            Instruction::Cmp {
+                rn: Register::X1,
+                rm: Operand::ShiftedRegister {
+                    reg: Register::X2,
+                    kind: ShiftKind::LSL,
+                    amount: 4,
+                },
+            }
+        );
+
+        let instr = parse_one("tst x3, x4, ror #8");
+        assert_eq!(
+            instr,
+            Instruction::Tst {
+                rn: Register::X3,
+                rm: Operand::ShiftedRegister {
+                    reg: Register::X4,
+                    kind: ShiftKind::ROR,
+                    amount: 8,
+                },
+            }
+        );
+    }
+
+    #[test]
+    fn test_parse_shifted_register_amount_out_of_range() {
+        // amount > 63 must be rejected.
+        assert!(parse_line("add x0, x1, x2, lsl #64").is_err());
+    }
+
+    #[test]
+    fn test_parse_shifted_register_invalid_kind() {
+        assert!(parse_line("add x0, x1, x2, foo #3").is_err());
     }
 
     #[test]

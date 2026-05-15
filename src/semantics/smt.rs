@@ -34,6 +34,23 @@ fn bv_swap_bytes_64(value: &BV) -> BV {
     result
 }
 
+/// 64-bit ROR composed as `(value lshr n) | (value shl (64 - n))`.
+/// Caller is responsible for masking `n` to 6 bits when needed (immediate
+/// callers with `n` already in 0..=63 may skip the mask).
+///
+/// Edge case at n == 0: `complement` evaluates to 64, and SMTLIB2 bit-vector
+/// semantics define `bvshl(x, 64) = 0` (any shift ≥ the bit-width zeroes the
+/// value). So `hi = 0` and the result is just `value lshr 0 = value`.
+fn bv_ror_64(value: &BV, n: &BV) -> BV {
+    let mask = BV::from_u64(63, 64);
+    let n_masked = n.bvand(&mask);
+    let sixty_four = BV::from_u64(64, 64);
+    let complement = sixty_four.bvsub(&n_masked);
+    let lo = value.bvlshr(&n_masked);
+    let hi = value.bvshl(&complement);
+    lo.bvor(&hi)
+}
+
 /// Reverse the bit order of a 64-bit BV via 64 single-bit extracts.
 fn bv_reverse_bits_64(value: &BV) -> BV {
     // Bit 0 of `value` becomes the new MSB; bit 63 becomes the new LSB.
@@ -158,6 +175,16 @@ impl MachineState {
         match operand {
             Operand::Register(reg) => self.get_register(*reg).clone(),
             Operand::Immediate(imm) => BV::from_i64(*imm, 64),
+            Operand::ShiftedRegister { reg, kind, amount } => {
+                let value = self.get_register(*reg).clone();
+                let amt = BV::from_u64(*amount as u64, 64);
+                match kind {
+                    crate::ir::ShiftKind::LSL => value.bvshl(&amt),
+                    crate::ir::ShiftKind::LSR => value.bvlshr(&amt),
+                    crate::ir::ShiftKind::ASR => value.bvashr(&amt),
+                    crate::ir::ShiftKind::ROR => bv_ror_64(&value, &amt),
+                }
+            }
         }
     }
 }
@@ -378,24 +405,12 @@ pub fn apply_instruction(mut state: MachineState, instruction: &Instruction) -> 
         Instruction::Cset { rd, .. } | Instruction::Csetm { rd, .. } => {
             state.set_register(*rd, fresh_bv("cset_result"));
         }
-        // ROR: no native bvror in z3-rust; compose
-        // `(x lshr n) | (x shl (64 - n))`. For reg form, mask shift to 6 bits.
-        //
-        // Edge case at n == 0: `complement` evaluates to 64, and SMTLIB2
-        // bit-vector semantics define `bvshl(x, 64) = 0` (any shift ≥ the
-        // bit-width zeroes the value). So `hi = 0` and the result is just
-        // `value lshr 0 = value`. Do **not** add a guard for n == 0 — it
-        // would mis-handle the symbolic case where n is unknown.
+        // ROR: composed via bv_ror_64 (see helper at top of file for the
+        // edge-case discussion at n == 0).
         Instruction::Ror { rd, rn, shift } => {
             let value = state.get_register(*rn).clone();
             let n = state.eval_operand(shift);
-            let mask = BV::from_u64(63, 64);
-            let n_masked = n.bvand(&mask);
-            let sixty_four = BV::from_u64(64, 64);
-            let complement = sixty_four.bvsub(&n_masked);
-            let lo = value.bvlshr(&n_masked);
-            let hi = value.bvshl(&complement);
-            state.set_register(*rd, lo.bvor(&hi));
+            state.set_register(*rd, bv_ror_64(&value, &n));
         }
         // CLZ: count leading zero bits; returns 64 when the value is zero.
         Instruction::Clz { rd, rn } => {
@@ -545,6 +560,89 @@ mod tests {
         solver.assert(&states_not_equal(&state1, &state2));
 
         // If UNSAT, states are always equal
+        assert_eq!(solver.check(), SatResult::Unsat);
+    }
+
+    #[test]
+    fn test_shifted_register_acceptance_lsl() {
+        // Issue #59 acceptance: SMT proves
+        //   LSL x10, x2, #3 ; ADD x0, x1, x10
+        // ≡ ADD x0, x1, x2, LSL #3
+        // (modulo the temp x10 — restrict the equivalence to the live-out x0).
+        let initial = MachineState::new_symbolic("pre");
+
+        let seq_split = vec![
+            Instruction::Lsl {
+                rd: Register::X10,
+                rn: Register::X2,
+                shift: Operand::Immediate(3),
+            },
+            Instruction::Add {
+                rd: Register::X0,
+                rn: Register::X1,
+                rm: Operand::Register(Register::X10),
+            },
+        ];
+        let seq_fused = vec![Instruction::Add {
+            rd: Register::X0,
+            rn: Register::X1,
+            rm: Operand::ShiftedRegister {
+                reg: Register::X2,
+                kind: crate::ir::ShiftKind::LSL,
+                amount: 3,
+            },
+        }];
+
+        let s1 = apply_sequence(initial.clone(), &seq_split);
+        let s2 = apply_sequence(initial, &seq_fused);
+
+        // Live-out is just X0; the split sequence clobbers X10 but X0 must match.
+        let solver = Solver::new();
+        solver.assert(
+            &s1.get_register(Register::X0)
+                .eq(s2.get_register(Register::X0))
+                .not(),
+        );
+        assert_eq!(solver.check(), SatResult::Unsat);
+    }
+
+    #[test]
+    fn test_shifted_register_acceptance_ror_logical() {
+        // ROR-on-logical case: AND x0, x1, x2, ROR #4
+        // ≡ ROR x10, x2, #4 ; AND x0, x1, x10  (modulo temp x10).
+        let initial = MachineState::new_symbolic("pre");
+
+        let seq_split = vec![
+            Instruction::Ror {
+                rd: Register::X10,
+                rn: Register::X2,
+                shift: Operand::Immediate(4),
+            },
+            Instruction::And {
+                rd: Register::X0,
+                rn: Register::X1,
+                rm: Operand::Register(Register::X10),
+            },
+        ];
+        let seq_fused = vec![Instruction::And {
+            rd: Register::X0,
+            rn: Register::X1,
+            rm: Operand::ShiftedRegister {
+                reg: Register::X2,
+                kind: crate::ir::ShiftKind::ROR,
+                amount: 4,
+            },
+        }];
+
+        let s1 = apply_sequence(initial.clone(), &seq_split);
+        let s2 = apply_sequence(initial, &seq_fused);
+
+        let solver = Solver::new();
+        solver.assert(
+            &s1.get_register(Register::X0)
+                .eq(s2.get_register(Register::X0))
+                .not(),
+        );
         assert_eq!(solver.check(), SatResult::Unsat);
     }
 
