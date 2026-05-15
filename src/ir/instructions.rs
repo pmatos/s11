@@ -315,6 +315,46 @@ pub enum Instruction {
         rd: Register,
         rn: Register,
     },
+    // Bit-field manipulation (64-bit, aliases of UBFM/SBFM/BFM per ARM ARM C6.2).
+    // `lsb` is the bit position of the least-significant bit of the field in the
+    // source; `width` is the field width. Constraint: lsb ∈ [0..=63],
+    // width ∈ [1..=64-lsb]. Enforced in `is_encodable_aarch64`.
+    Ubfx {
+        rd: Register,
+        rn: Register,
+        lsb: u8,
+        width: u8,
+    },
+    Sbfx {
+        rd: Register,
+        rn: Register,
+        lsb: u8,
+        width: u8,
+    },
+    Bfi {
+        rd: Register,
+        rn: Register,
+        lsb: u8,
+        width: u8,
+    },
+    Bfxil {
+        rd: Register,
+        rn: Register,
+        lsb: u8,
+        width: u8,
+    },
+    Ubfiz {
+        rd: Register,
+        rn: Register,
+        lsb: u8,
+        width: u8,
+    },
+    Sbfiz {
+        rd: Register,
+        rn: Register,
+        lsb: u8,
+        width: u8,
+    },
 }
 
 impl Instruction {
@@ -370,7 +410,13 @@ impl Instruction {
             | Instruction::Sxth { rd, .. }
             | Instruction::Sxtw { rd, .. }
             | Instruction::Uxtb { rd, .. }
-            | Instruction::Uxth { rd, .. } => Some(*rd),
+            | Instruction::Uxth { rd, .. }
+            | Instruction::Ubfx { rd, .. }
+            | Instruction::Sbfx { rd, .. }
+            | Instruction::Bfi { rd, .. }
+            | Instruction::Bfxil { rd, .. }
+            | Instruction::Ubfiz { rd, .. }
+            | Instruction::Sbfiz { rd, .. } => Some(*rd),
             // Comparison instructions only set flags, no destination register
             Instruction::Cmp { .. }
             | Instruction::Cmn { .. }
@@ -624,6 +670,20 @@ impl Instruction {
             | Instruction::Sxtw { rd, rn }
             | Instruction::Uxtb { rd, rn }
             | Instruction::Uxth { rd, rn } => *rd != Register::SP && *rn != Register::SP,
+            // Bit-field aliases of UBFM/SBFM/BFM. Constraint: lsb ∈ [0..=63],
+            // width ∈ [1..=64-lsb]. SP rejected in rd and rn.
+            Instruction::Ubfx { rd, rn, lsb, width }
+            | Instruction::Sbfx { rd, rn, lsb, width }
+            | Instruction::Bfi { rd, rn, lsb, width }
+            | Instruction::Bfxil { rd, rn, lsb, width }
+            | Instruction::Ubfiz { rd, rn, lsb, width }
+            | Instruction::Sbfiz { rd, rn, lsb, width } => {
+                *rd != Register::SP
+                    && *rn != Register::SP
+                    && *lsb <= 63
+                    && *width >= 1
+                    && (*lsb as u16 + *width as u16) <= 64
+            }
         }
     }
 
@@ -738,6 +798,15 @@ impl Instruction {
             | Instruction::Sxtw { rn, .. }
             | Instruction::Uxtb { rn, .. }
             | Instruction::Uxth { rn, .. } => vec![*rn],
+            // Bit-field extracts: only `rn` is read.
+            Instruction::Ubfx { rn, .. }
+            | Instruction::Sbfx { rn, .. }
+            | Instruction::Ubfiz { rn, .. }
+            | Instruction::Sbfiz { rn, .. } => vec![*rn],
+            // BFI / BFXIL preserve unmodified bits of `rd`, so they also read `rd`.
+            Instruction::Bfi { rd, rn, .. } | Instruction::Bfxil { rd, rn, .. } => {
+                vec![*rd, *rn]
+            }
         }
     }
 }
@@ -835,6 +904,24 @@ impl fmt::Display for Instruction {
             Instruction::Sxtw { rd, rn } => write!(f, "sxtw {}, {}", rd, rn),
             Instruction::Uxtb { rd, rn } => write!(f, "uxtb {}, {}", rd, rn),
             Instruction::Uxth { rd, rn } => write!(f, "uxth {}, {}", rd, rn),
+            Instruction::Ubfx { rd, rn, lsb, width } => {
+                write!(f, "ubfx {}, {}, #{}, #{}", rd, rn, lsb, width)
+            }
+            Instruction::Sbfx { rd, rn, lsb, width } => {
+                write!(f, "sbfx {}, {}, #{}, #{}", rd, rn, lsb, width)
+            }
+            Instruction::Bfi { rd, rn, lsb, width } => {
+                write!(f, "bfi {}, {}, #{}, #{}", rd, rn, lsb, width)
+            }
+            Instruction::Bfxil { rd, rn, lsb, width } => {
+                write!(f, "bfxil {}, {}, #{}, #{}", rd, rn, lsb, width)
+            }
+            Instruction::Ubfiz { rd, rn, lsb, width } => {
+                write!(f, "ubfiz {}, {}, #{}, #{}", rd, rn, lsb, width)
+            }
+            Instruction::Sbfiz { rd, rn, lsb, width } => {
+                write!(f, "sbfiz {}, {}, #{}, #{}", rd, rn, lsb, width)
+            }
         }
     }
 }
@@ -870,6 +957,17 @@ mod tests {
             rm: Operand::Register(Register::X0),
         };
         assert_eq!(format!("{}", eor), "eor x0, x0, x0");
+    }
+
+    #[test]
+    fn test_ubfx_display() {
+        let ubfx = Instruction::Ubfx {
+            rd: Register::X0,
+            rn: Register::X1,
+            lsb: 5,
+            width: 10,
+        };
+        assert_eq!(format!("{}", ubfx), "ubfx x0, x1, #5, #10");
     }
 
     #[test]
@@ -1295,6 +1393,91 @@ mod tests {
             Instruction::Rev {
                 rd: Register::X0,
                 rn: Register::XZR
+            }
+            .is_encodable_aarch64()
+        );
+    }
+
+    #[test]
+    fn test_is_encodable_bitfield() {
+        // Valid combinations.
+        for (lsb, width) in [(0u8, 1u8), (0, 64), (5, 10), (32, 16), (63, 1)] {
+            let instr = Instruction::Ubfx {
+                rd: Register::X0,
+                rn: Register::X1,
+                lsb,
+                width,
+            };
+            assert!(
+                instr.is_encodable_aarch64(),
+                "valid (lsb={}, width={}) must be encodable",
+                lsb,
+                width
+            );
+        }
+
+        // SP rejection in rd.
+        assert!(
+            !Instruction::Ubfx {
+                rd: Register::SP,
+                rn: Register::X1,
+                lsb: 0,
+                width: 8,
+            }
+            .is_encodable_aarch64()
+        );
+
+        // SP rejection in rn.
+        assert!(
+            !Instruction::Sbfx {
+                rd: Register::X0,
+                rn: Register::SP,
+                lsb: 0,
+                width: 8,
+            }
+            .is_encodable_aarch64()
+        );
+
+        // XZR is OK.
+        assert!(
+            Instruction::Ubfx {
+                rd: Register::XZR,
+                rn: Register::X1,
+                lsb: 0,
+                width: 8,
+            }
+            .is_encodable_aarch64()
+        );
+
+        // width=0 rejected.
+        assert!(
+            !Instruction::Bfi {
+                rd: Register::X0,
+                rn: Register::X1,
+                lsb: 0,
+                width: 0,
+            }
+            .is_encodable_aarch64()
+        );
+
+        // lsb+width > 64 rejected.
+        assert!(
+            !Instruction::Bfxil {
+                rd: Register::X0,
+                rn: Register::X1,
+                lsb: 60,
+                width: 10,
+            }
+            .is_encodable_aarch64()
+        );
+
+        // The (lsb=63, width=1) boundary stays valid: lsb<=63 and lsb+width==64.
+        assert!(
+            Instruction::Ubfiz {
+                rd: Register::X0,
+                rn: Register::X1,
+                lsb: 63,
+                width: 1,
             }
             .is_encodable_aarch64()
         );

@@ -977,6 +977,37 @@ fn parse_ccmn(operands: &[&str]) -> Result<Instruction, String> {
     })
 }
 
+/// Parse a bit-field-manipulation instruction operand list:
+/// `rd, rn, #lsb, #width`. Used by UBFX/SBFX/BFI/BFXIL/UBFIZ/SBFIZ.
+fn parse_bfm_like(operands: &[&str], mnem: &str) -> Result<(Register, Register, u8, u8), String> {
+    if operands.len() != 4 {
+        return Err(format!(
+            "{} requires 4 operands, got {}",
+            mnem,
+            operands.len()
+        ));
+    }
+    let rd = parse_register(operands[0])?;
+    let rn = parse_register(operands[1])?;
+    let lsb_raw = parse_immediate(operands[2])?;
+    if !(0..=63).contains(&lsb_raw) {
+        return Err(format!("{} lsb {} out of range (0..=63)", mnem, lsb_raw));
+    }
+    let width_raw = parse_immediate(operands[3])?;
+    if !(1..=64).contains(&width_raw) {
+        return Err(format!(
+            "{} width {} out of range (1..=64)",
+            mnem, width_raw
+        ));
+    }
+    let lsb = lsb_raw as u8;
+    let width = width_raw as u8;
+    if (lsb as u16 + width as u16) > 64 {
+        return Err(format!("{} lsb {} + width {} exceeds 64", mnem, lsb, width));
+    }
+    Ok((rd, rn, lsb, width))
+}
+
 fn parse_ccmp_like(
     operands: &[&str],
     mnem: &str,
@@ -1118,6 +1149,24 @@ pub fn parse_line(line: &str) -> Result<LineResult, ParseLineError> {
         "tst" => parse_tst(&operands).map_err(ParseLineError::Other)?,
         "ccmp" => parse_ccmp(&operands).map_err(ParseLineError::Other)?,
         "ccmn" => parse_ccmn(&operands).map_err(ParseLineError::Other)?,
+        "ubfx" => parse_bfm_like(&operands, "ubfx")
+            .map(|(rd, rn, lsb, width)| Instruction::Ubfx { rd, rn, lsb, width })
+            .map_err(ParseLineError::Other)?,
+        "sbfx" => parse_bfm_like(&operands, "sbfx")
+            .map(|(rd, rn, lsb, width)| Instruction::Sbfx { rd, rn, lsb, width })
+            .map_err(ParseLineError::Other)?,
+        "bfi" => parse_bfm_like(&operands, "bfi")
+            .map(|(rd, rn, lsb, width)| Instruction::Bfi { rd, rn, lsb, width })
+            .map_err(ParseLineError::Other)?,
+        "bfxil" => parse_bfm_like(&operands, "bfxil")
+            .map(|(rd, rn, lsb, width)| Instruction::Bfxil { rd, rn, lsb, width })
+            .map_err(ParseLineError::Other)?,
+        "ubfiz" => parse_bfm_like(&operands, "ubfiz")
+            .map(|(rd, rn, lsb, width)| Instruction::Ubfiz { rd, rn, lsb, width })
+            .map_err(ParseLineError::Other)?,
+        "sbfiz" => parse_bfm_like(&operands, "sbfiz")
+            .map(|(rd, rn, lsb, width)| Instruction::Sbfiz { rd, rn, lsb, width })
+            .map_err(ParseLineError::Other)?,
         "csel" => parse_csel(&operands).map_err(ParseLineError::Other)?,
         "csinc" => parse_csinc(&operands).map_err(ParseLineError::Other)?,
         "csinv" => parse_csinv(&operands).map_err(ParseLineError::Other)?,
@@ -1675,6 +1724,43 @@ mod tests {
         let line = "ccmp x1, #32, #0, eq";
         let result = parse_line(line);
         assert!(result.is_err(), "imm5 > 31 must be rejected");
+    }
+
+    #[test]
+    fn parse_ubfx_roundtrip() {
+        let parsed = match parse_line("ubfx x0, x1, #5, #10").unwrap() {
+            LineResult::Instruction(instr) => instr,
+            LineResult::Skip => panic!("unexpected skip"),
+        };
+        assert_eq!(
+            parsed,
+            Instruction::Ubfx {
+                rd: Register::X0,
+                rn: Register::X1,
+                lsb: 5,
+                width: 10,
+            }
+        );
+        assert_eq!(format!("{}", parsed), "ubfx x0, x1, #5, #10");
+    }
+
+    #[test]
+    fn parse_ubfx_rejects_out_of_range_lsb() {
+        let result = parse_line("ubfx x0, x1, #64, #1");
+        assert!(result.is_err(), "lsb >= 64 must be rejected");
+    }
+
+    #[test]
+    fn parse_ubfx_rejects_zero_width() {
+        let result = parse_line("ubfx x0, x1, #0, #0");
+        assert!(result.is_err(), "width == 0 must be rejected");
+    }
+
+    #[test]
+    fn parse_ubfx_rejects_overlap() {
+        // lsb + width > 64
+        let result = parse_line("ubfx x0, x1, #60, #10");
+        assert!(result.is_err(), "lsb + width > 64 must be rejected");
     }
 
     #[test]

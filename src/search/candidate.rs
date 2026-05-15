@@ -337,6 +337,36 @@ pub fn generate_all_instructions(registers: &[Register], immediates: &[i64]) -> 
         }
     }
 
+    // Bit-field manipulation (UBFX/SBFX/BFI/BFXIL/UBFIZ/SBFIZ): sparse
+    // (lsb, width) samples to keep the enumerative budget bounded. With
+    // 31 non-SP registers × 31 rn × ~24 valid (lsb,width) pairs × 6 variants
+    // ≈ 138k additional candidates, comparable to the CCMP/CCMN budget.
+    const BITFIELD_LSB_SAMPLES: [u8; 5] = [0, 1, 16, 32, 63];
+    const BITFIELD_WIDTH_SAMPLES: [u8; 6] = [1, 4, 8, 16, 32, 64];
+    for &rd in registers {
+        if rd == Register::SP {
+            continue;
+        }
+        for &rn in registers {
+            if rn == Register::SP {
+                continue;
+            }
+            for &lsb in &BITFIELD_LSB_SAMPLES {
+                for &width in &BITFIELD_WIDTH_SAMPLES {
+                    if (lsb as u16 + width as u16) > 64 {
+                        continue;
+                    }
+                    instrs.push(Instruction::Ubfx { rd, rn, lsb, width });
+                    instrs.push(Instruction::Sbfx { rd, rn, lsb, width });
+                    instrs.push(Instruction::Bfi { rd, rn, lsb, width });
+                    instrs.push(Instruction::Bfxil { rd, rn, lsb, width });
+                    instrs.push(Instruction::Ubfiz { rd, rn, lsb, width });
+                    instrs.push(Instruction::Sbfiz { rd, rn, lsb, width });
+                }
+            }
+        }
+    }
+
     instrs
 }
 
@@ -356,7 +386,7 @@ pub fn generate_random_instruction<R: rand::RngExt>(
     let rd = registers[rng.random_range(0..registers.len())];
     let pick_reg = |rng: &mut R| registers[rng.random_range(0..registers.len())];
 
-    match rng.random_range(0..30) {
+    match rng.random_range(0..31) {
         0 => {
             let imm = if immediates.is_empty() {
                 0
@@ -551,6 +581,65 @@ pub fn generate_random_instruction<R: rand::RngExt>(
                 Instruction::Ccmn { rn, rm, nzcv, cond }
             }
         }
+        // Bit-field manipulation (UBFX/SBFX/BFI/BFXIL/UBFIZ/SBFIZ).
+        // SP rejected in rd and rn (matches `generate_all_instructions` and
+        // `is_encodable_aarch64`); 2D constraint on (lsb, width) enforced by
+        // sampling width AFTER lsb so width is bounded by `64-lsb`.
+        28 => {
+            debug_assert!(
+                registers.iter().any(|r| *r != Register::SP),
+                "bit-field random generator requires at least one non-SP register",
+            );
+            let pick_non_sp = |rng: &mut R| loop {
+                let r = pick_reg(rng);
+                if r != Register::SP {
+                    break r;
+                }
+            };
+            let rd_local = pick_non_sp(rng);
+            let rn = pick_non_sp(rng);
+            let lsb = (rng.random::<u32>() & 0x3F) as u8;
+            let max_w = 64 - lsb as u32;
+            let width = ((rng.random::<u32>() % max_w) + 1) as u8;
+            match rng.random_range(0..6) {
+                0 => Instruction::Ubfx {
+                    rd: rd_local,
+                    rn,
+                    lsb,
+                    width,
+                },
+                1 => Instruction::Sbfx {
+                    rd: rd_local,
+                    rn,
+                    lsb,
+                    width,
+                },
+                2 => Instruction::Bfi {
+                    rd: rd_local,
+                    rn,
+                    lsb,
+                    width,
+                },
+                3 => Instruction::Bfxil {
+                    rd: rd_local,
+                    rn,
+                    lsb,
+                    width,
+                },
+                4 => Instruction::Ubfiz {
+                    rd: rd_local,
+                    rn,
+                    lsb,
+                    width,
+                },
+                _ => Instruction::Sbfiz {
+                    rd: rd_local,
+                    rn,
+                    lsb,
+                    width,
+                },
+            }
+        }
         // Multiply-accumulate family: MADD/MSUB (4-operand) and MNEG/SMULH/UMULH (3-operand).
         _ => {
             let rn = pick_reg(rng);
@@ -670,6 +759,12 @@ pub fn opcode_id(instr: &Instruction) -> u8 {
         Instruction::Sxtw { .. } => 51,
         Instruction::Uxtb { .. } => 52,
         Instruction::Uxth { .. } => 53,
+        Instruction::Ubfx { .. } => 49,
+        Instruction::Sbfx { .. } => 50,
+        Instruction::Bfi { .. } => 51,
+        Instruction::Bfxil { .. } => 52,
+        Instruction::Ubfiz { .. } => 53,
+        Instruction::Sbfiz { .. } => 54,
     }
 }
 
@@ -867,6 +962,41 @@ mod tests {
     }
 
     #[test]
+    fn test_generate_random_instruction_emits_bitfield_eventually() {
+        let mut rng = rand::rng();
+        let regs = default_registers();
+        let imms = default_immediates();
+
+        // Random generator picks among many cases; over 5000 trials it must
+        // produce at least one bit-field instruction. Also: every random
+        // bit-field must be encodable.
+        let mut seen_bitfield = false;
+        for _ in 0..5000 {
+            let instr = generate_random_instruction(&mut rng, &regs, &imms);
+            if matches!(
+                &instr,
+                Instruction::Ubfx { .. }
+                    | Instruction::Sbfx { .. }
+                    | Instruction::Bfi { .. }
+                    | Instruction::Bfxil { .. }
+                    | Instruction::Ubfiz { .. }
+                    | Instruction::Sbfiz { .. }
+            ) {
+                seen_bitfield = true;
+                assert!(
+                    instr.is_encodable_aarch64(),
+                    "random bit-field must be encodable: {}",
+                    instr
+                );
+            }
+        }
+        assert!(
+            seen_bitfield,
+            "random generator must emit at least one bit-field instruction in 5000 trials"
+        );
+    }
+
+    #[test]
     fn test_generate_random_sequence() {
         let mut rng = rand::rng();
         let regs = default_registers();
@@ -932,6 +1062,110 @@ mod tests {
         let ids: Vec<_> = instrs.iter().map(opcode_id).collect();
         let unique: std::collections::HashSet<_> = ids.iter().collect();
         assert_eq!(ids.len(), unique.len());
+    }
+
+    /// Sync test: opcode_id in candidate.rs must agree with
+    /// AArch64InstructionInfo::opcode_id in isa/aarch64.rs for every bitfield
+    /// variant. Catches drift between the two definitions.
+    #[test]
+    fn test_bitfield_opcode_id_matches_isa_backend() {
+        use crate::isa::InstructionType;
+        let instrs = vec![
+            Instruction::Ubfx {
+                rd: Register::X0,
+                rn: Register::X1,
+                lsb: 0,
+                width: 1,
+            },
+            Instruction::Sbfx {
+                rd: Register::X0,
+                rn: Register::X1,
+                lsb: 0,
+                width: 1,
+            },
+            Instruction::Bfi {
+                rd: Register::X0,
+                rn: Register::X1,
+                lsb: 0,
+                width: 1,
+            },
+            Instruction::Bfxil {
+                rd: Register::X0,
+                rn: Register::X1,
+                lsb: 0,
+                width: 1,
+            },
+            Instruction::Ubfiz {
+                rd: Register::X0,
+                rn: Register::X1,
+                lsb: 0,
+                width: 1,
+            },
+            Instruction::Sbfiz {
+                rd: Register::X0,
+                rn: Register::X1,
+                lsb: 0,
+                width: 1,
+            },
+        ];
+        for instr in &instrs {
+            assert_eq!(
+                opcode_id(instr),
+                instr.opcode_id(),
+                "opcode_id drift for {}",
+                instr
+            );
+        }
+    }
+
+    #[test]
+    fn test_generate_all_instructions_includes_bitfield() {
+        let registers = vec![Register::X0, Register::X1];
+        let immediates = vec![0];
+        let all = generate_all_instructions(&registers, &immediates);
+        assert!(
+            all.iter().any(|i| matches!(i, Instruction::Ubfx { .. })),
+            "enumerative output must contain at least one Ubfx"
+        );
+        assert!(
+            all.iter().any(|i| matches!(i, Instruction::Sbfx { .. })),
+            "enumerative output must contain at least one Sbfx"
+        );
+        assert!(
+            all.iter().any(|i| matches!(i, Instruction::Bfi { .. })),
+            "enumerative output must contain at least one Bfi"
+        );
+        assert!(
+            all.iter().any(|i| matches!(i, Instruction::Bfxil { .. })),
+            "enumerative output must contain at least one Bfxil"
+        );
+        assert!(
+            all.iter().any(|i| matches!(i, Instruction::Ubfiz { .. })),
+            "enumerative output must contain at least one Ubfiz"
+        );
+        assert!(
+            all.iter().any(|i| matches!(i, Instruction::Sbfiz { .. })),
+            "enumerative output must contain at least one Sbfiz"
+        );
+
+        // Every generated bitfield instruction must satisfy is_encodable_aarch64.
+        for instr in all.iter().filter(|i| {
+            matches!(
+                i,
+                Instruction::Ubfx { .. }
+                    | Instruction::Sbfx { .. }
+                    | Instruction::Bfi { .. }
+                    | Instruction::Bfxil { .. }
+                    | Instruction::Ubfiz { .. }
+                    | Instruction::Sbfiz { .. }
+            )
+        }) {
+            assert!(
+                instr.is_encodable_aarch64(),
+                "enumerative produced un-encodable: {}",
+                instr
+            );
+        }
     }
 
     #[test]

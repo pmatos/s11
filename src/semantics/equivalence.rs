@@ -1808,4 +1808,97 @@ mod tests {
             EquivalenceResult::Equivalent
         );
     }
+
+    /// Acceptance criterion #2 from issue #61:
+    /// SMT proves `BFI rd,rn,#lsb,#width` ≡ {
+    ///   AND tmp_field, rn, #low_mask;       // isolate low `width` bits of rn
+    ///   LSL tmp_shift, tmp_field, #lsb;     // shift them into position
+    ///   AND tmp_clear, rd, #!shifted_mask;  // clear destination window in rd
+    ///   ORR rd, tmp_clear, tmp_shift;       // merge
+    /// }
+    /// The issue's wording was "AND clear; AND mask; ORR" — this is the
+    /// formal expansion. Verified for one representative (lsb, width).
+    #[test]
+    fn test_bfi_equivalent_to_and_and_or() {
+        let lsb = 4u8;
+        let width = 8u8;
+        let low_mask = (1i64 << width) - 1;
+        let shifted_mask = low_mask << lsb;
+        let clear_mask = !shifted_mask;
+
+        let bfi = vec![Instruction::Bfi {
+            rd: Register::X0,
+            rn: Register::X1,
+            lsb,
+            width,
+        }];
+
+        let expanded = vec![
+            // tmp_field (X2) = rn & low_mask
+            Instruction::And {
+                rd: Register::X2,
+                rn: Register::X1,
+                rm: Operand::Immediate(low_mask),
+            },
+            // tmp_shift (X2) = tmp_field << lsb
+            Instruction::Lsl {
+                rd: Register::X2,
+                rn: Register::X2,
+                shift: Operand::Immediate(lsb as i64),
+            },
+            // tmp_clear (X3) = rd & !shifted_mask
+            Instruction::And {
+                rd: Register::X3,
+                rn: Register::X0,
+                rm: Operand::Immediate(clear_mask),
+            },
+            // rd = tmp_clear | tmp_shift
+            Instruction::Orr {
+                rd: Register::X0,
+                rn: Register::X3,
+                rm: Operand::Register(Register::X2),
+            },
+        ];
+
+        let config = EquivalenceConfig::with_live_out(LiveOut::from_registers(vec![Register::X0]));
+        assert_eq!(
+            check_equivalence_with_config(&bfi, &expanded, &config),
+            EquivalenceResult::Equivalent
+        );
+    }
+
+    /// Acceptance criterion #1 from issue #61:
+    /// SMT proves `UBFX rd,rn,#lsb,#width` ≡ `LSR t,rn,#lsb; AND rd,t,#((1<<width)-1)`.
+    #[test]
+    fn test_ubfx_equivalent_to_lsr_and_mask() {
+        let lsb = 8i64;
+        let width = 16u8;
+        let mask = (1i64 << width) - 1;
+
+        let ubfx = vec![Instruction::Ubfx {
+            rd: Register::X0,
+            rn: Register::X1,
+            lsb: lsb as u8,
+            width,
+        }];
+
+        let lsr_and = vec![
+            Instruction::Lsr {
+                rd: Register::X2,
+                rn: Register::X1,
+                shift: Operand::Immediate(lsb),
+            },
+            Instruction::And {
+                rd: Register::X0,
+                rn: Register::X2,
+                rm: Operand::Immediate(mask),
+            },
+        ];
+
+        let config = EquivalenceConfig::with_live_out(LiveOut::from_registers(vec![Register::X0]));
+        assert_eq!(
+            check_equivalence_with_config(&ubfx, &lsr_and, &config),
+            EquivalenceResult::Equivalent
+        );
+    }
 }
