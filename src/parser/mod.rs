@@ -1206,6 +1206,12 @@ mod tests {
             ("csinc x0, x1, x2, ne", "csinc x0, x1, x2, ne"),
             ("csinv x0, x1, x2, lt", "csinv x0, x1, x2, lt"),
             ("csneg x0, x1, x2, ge", "csneg x0, x1, x2, ge"),
+            ("clz x0, x1", "clz x0, x1"),
+            ("cls x0, x1", "cls x0, x1"),
+            ("rbit x0, x1", "rbit x0, x1"),
+            ("rev x0, x1", "rev x0, x1"),
+            ("rev32 x0, x1", "rev32 x0, x1"),
+            ("rev16 x0, x1", "rev16 x0, x1"),
         ];
 
         for (line, display) in cases {
