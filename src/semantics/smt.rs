@@ -1057,6 +1057,97 @@ mod tests {
     }
 
     #[test]
+    fn test_extended_register_acceptance_uxtb() {
+        // Issue #60 acceptance: SMT proves
+        //   UXTB x10, x2 ; ADD x0, x1, x10
+        // ≡ ADD x0, x1, x2, UXTB #0
+        // (modulo the temp x10 — restrict the equivalence to the live-out
+        // x0). The split sequence relies on the standalone UXTB
+        // instruction added in earlier slices; the fused sequence uses
+        // the new Operand::ExtendedRegister form.
+        let initial = MachineState::new_symbolic("pre");
+
+        let seq_split = vec![
+            Instruction::Uxtb {
+                rd: Register::X10,
+                rn: Register::X2,
+            },
+            Instruction::Add {
+                rd: Register::X0,
+                rn: Register::X1,
+                rm: Operand::Register(Register::X10),
+            },
+        ];
+        let seq_fused = vec![Instruction::Add {
+            rd: Register::X0,
+            rn: Register::X1,
+            rm: Operand::ExtendedRegister {
+                reg: Register::X2,
+                kind: crate::ir::ExtendKind::Uxtb,
+                shift: 0,
+            },
+        }];
+
+        let s1 = apply_sequence(initial.clone(), &seq_split);
+        let s2 = apply_sequence(initial, &seq_fused);
+
+        let solver = Solver::new();
+        solver.assert(
+            s1.get_register(Register::X0)
+                .eq(s2.get_register(Register::X0))
+                .not(),
+        );
+        assert_eq!(solver.check(), SatResult::Unsat);
+    }
+
+    #[test]
+    fn test_extended_register_acceptance_sxth_with_shift() {
+        // Issue #60: signed halfword extend with non-zero shift.
+        //   SXTH x10, x2 ; LSL x10, x10, #3 ; ADD x0, x1, x10
+        // ≡ ADD x0, x1, x2, SXTH #3
+        // The split form needs an extra LSL because the standalone SXTH
+        // doesn't carry a shift; the fused form folds both into one arith.
+        let initial = MachineState::new_symbolic("pre");
+
+        let seq_split = vec![
+            Instruction::Sxth {
+                rd: Register::X10,
+                rn: Register::X2,
+            },
+            Instruction::Lsl {
+                rd: Register::X10,
+                rn: Register::X10,
+                shift: Operand::Immediate(3),
+            },
+            Instruction::Add {
+                rd: Register::X0,
+                rn: Register::X1,
+                rm: Operand::Register(Register::X10),
+            },
+        ];
+        let seq_fused = vec![Instruction::Add {
+            rd: Register::X0,
+            rn: Register::X1,
+            rm: Operand::ExtendedRegister {
+                reg: Register::X2,
+                kind: crate::ir::ExtendKind::Sxth,
+                shift: 3,
+            },
+        }];
+
+        let s1 = apply_sequence(initial.clone(), &seq_split);
+        let s2 = apply_sequence(initial, &seq_fused);
+
+        let solver = Solver::new();
+        solver.assert(
+            s1.get_register(Register::X0)
+                .eq(s2.get_register(Register::X0))
+                .not(),
+        );
+        assert_eq!(solver.check(), SatResult::Unsat);
+    }
+
+    #[test]
     fn test_uxtb_extracts_low_byte() {
         // UXTB extracts the low 8 bits of the source and zero-extends to 64.
         // MOV x1, #0x5678; UXTB x0, x1  ≡  MOV x0, #0x78.
