@@ -775,12 +775,19 @@ impl AArch64Assembler {
                 dynasm!(ops ; .arch aarch64 ; rev16 X(rd_reg), X(rn_reg));
                 Ok(())
             }
-            // SXTB/SXTH/SXTW/UXTB/UXTH standalone extends. Issue #60.
-            // Encoder bodies land in a follow-up slice.
+            // UXTB Wd, Wn — alias of UBFM Wd, Wn, #0, #7. Issue #60.
+            // dynasm-rs emits the 32-bit (W) form; the upper 32 bits of Xd
+            // are zeroed by the AArch64 architectural rule for 32-bit ops.
+            Instruction::Uxtb { rd, rn } => {
+                let rd_reg = register_to_dynasm(*rd)?;
+                let rn_reg = register_to_dynasm(*rn)?;
+                dynasm!(ops ; .arch aarch64 ; uxtb W(rd_reg), W(rn_reg));
+                Ok(())
+            }
+            // SXTB/SXTH/SXTW/UXTH encoder bodies land in follow-up slices.
             Instruction::Sxtb { .. }
             | Instruction::Sxth { .. }
             | Instruction::Sxtw { .. }
-            | Instruction::Uxtb { .. }
             | Instruction::Uxth { .. } => {
                 Err("standalone extend encoding not yet implemented".to_string())
             }
@@ -2316,6 +2323,21 @@ mod tests {
             let rn = instr.source_registers()[0].to_string();
             disassemble_and_verify(&bytes, mnemonic, &[&rd, &rn]);
         }
+    }
+
+    /// Issue #60: the standalone UXTB instruction round-trips through
+    /// Capstone as `uxtb w<rd>, w<rn>` (the architectural W-form per the
+    /// ARM ARM UBFM alias).
+    #[test]
+    fn test_uxtb_encoder_round_trip() {
+        let mut assembler = AArch64Assembler::new();
+        let bytes = assembler
+            .assemble_instructions(&[Instruction::Uxtb {
+                rd: Register::X0,
+                rn: Register::X1,
+            }])
+            .expect("UXTB encoding should succeed");
+        disassemble_and_verify(&bytes, "uxtb", &["w0", "w1"]);
     }
 
     /// Issue #59: shifted-register forms round-trip through Capstone with the
