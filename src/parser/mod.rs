@@ -333,6 +333,30 @@ where
     Ok(build(rd, rn))
 }
 
+/// Parse the standalone sign/zero-extend mnemonics SXTB/SXTH/SXTW/UXTB/UXTH.
+/// ARM ARM / Capstone canonical syntax:
+///   - `UXTB Wd, Wn` / `UXTH Wd, Wn` — both operands W-form.
+///   - `SXTB Xd, Wn` / `SXTH Xd, Wn` / `SXTW Xd, Wn` — X-dest, W-src.
+/// The IR stores everything as 64-bit X-registers; the semantics layer
+/// masks to the architectural width. Issue #60 follow-up after the codex
+/// P2 / claude-review note that the ELF round-trip path was rejecting
+/// Capstone's W-form output.
+fn parse_unary_extend<F>(mnemonic: &str, operands: &[&str], build: F) -> Result<Instruction, String>
+where
+    F: FnOnce(Register, Register) -> Instruction,
+{
+    if operands.len() != 2 {
+        return Err(format!(
+            "{} requires 2 operands, got {}",
+            mnemonic,
+            operands.len()
+        ));
+    }
+    let rd = parse_w_or_x_register(operands[0])?;
+    let rn = parse_w_or_x_register(operands[1])?;
+    Ok(build(rd, rn))
+}
+
 /// Parse NEG instruction
 fn parse_neg(operands: &[&str]) -> Result<Instruction, String> {
     if operands.len() != 2 {
@@ -1092,15 +1116,15 @@ pub fn parse_line(line: &str) -> Result<LineResult, ParseLineError> {
             .map_err(ParseLineError::Other)?,
         "rev16" => parse_unary_rd_rn("rev16", &operands, |rd, rn| Instruction::Rev16 { rd, rn })
             .map_err(ParseLineError::Other)?,
-        "uxtb" => parse_unary_rd_rn("uxtb", &operands, |rd, rn| Instruction::Uxtb { rd, rn })
+        "uxtb" => parse_unary_extend("uxtb", &operands, |rd, rn| Instruction::Uxtb { rd, rn })
             .map_err(ParseLineError::Other)?,
-        "sxtb" => parse_unary_rd_rn("sxtb", &operands, |rd, rn| Instruction::Sxtb { rd, rn })
+        "sxtb" => parse_unary_extend("sxtb", &operands, |rd, rn| Instruction::Sxtb { rd, rn })
             .map_err(ParseLineError::Other)?,
-        "uxth" => parse_unary_rd_rn("uxth", &operands, |rd, rn| Instruction::Uxth { rd, rn })
+        "uxth" => parse_unary_extend("uxth", &operands, |rd, rn| Instruction::Uxth { rd, rn })
             .map_err(ParseLineError::Other)?,
-        "sxth" => parse_unary_rd_rn("sxth", &operands, |rd, rn| Instruction::Sxth { rd, rn })
+        "sxth" => parse_unary_extend("sxth", &operands, |rd, rn| Instruction::Sxth { rd, rn })
             .map_err(ParseLineError::Other)?,
-        "sxtw" => parse_unary_rd_rn("sxtw", &operands, |rd, rn| Instruction::Sxtw { rd, rn })
+        "sxtw" => parse_unary_extend("sxtw", &operands, |rd, rn| Instruction::Sxtw { rd, rn })
             .map_err(ParseLineError::Other)?,
         _ => return Err(ParseLineError::UnknownInstruction(opcode)),
     };
@@ -1780,19 +1804,76 @@ mod tests {
 
     #[test]
     fn parse_w_form_arithmetic_rejected() {
-        // Issue #60 follow-up (Codex review): the IR does not model 32-bit
-        // W-form arithmetic. Accepting `w0..w30` only inside the extended-
-        // register tail keeps `add w0, w1, w2` (which would otherwise alias
-        // to a 64-bit ADD with the wrong semantics) a parse error.
+        // Issue #60 follow-up (Codex P1): the IR does not model 32-bit
+        // W-form arithmetic. `parse_register` rejects W-form globally so
+        // `add w0, w1, w2` (which would otherwise alias to a 64-bit ADD
+        // with the wrong semantics) remains a parse error.
         assert!(parse_line("add w0, w1, w2").is_err());
         assert!(parse_line("sub w3, w4, w5").is_err());
-        assert!(parse_line("uxtb w0, w1").is_err());
-        // The extended-register inner register still accepts W-form.
+        // The extended-register inner register accepts W-form.
         assert!(parse_line("add x0, x1, w2, uxtb #0").is_ok());
         assert!(parse_line("cmp x1, w2, sxth #1").is_ok());
         // UXTX/SXTX accept X-form inner register (still works through the
         // parse_w_or_x_register fallback to parse_register).
         assert!(parse_line("add x0, x1, x2, uxtx #2").is_ok());
+    }
+
+    #[test]
+    fn parse_standalone_extend_accepts_capstone_w_form() {
+        // Issue #60 follow-up (Codex P2 / claude-review): Capstone disassembles
+        // the standalone extends with W-form operands:
+        //   UXTB / UXTH:           `uxtb w0, w1` (both W)
+        //   SXTB / SXTH / SXTW:    `sxtb x0, w1` (X-dest, W-src)
+        // The parser must accept those exact forms so the ELF round-trip
+        // path (Capstone disasm → parser → IR) doesn't break.
+        let cases = [
+            (
+                "uxtb w0, w1",
+                Instruction::Uxtb {
+                    rd: Register::X0,
+                    rn: Register::X1,
+                },
+            ),
+            (
+                "uxth w2, w3",
+                Instruction::Uxth {
+                    rd: Register::X2,
+                    rn: Register::X3,
+                },
+            ),
+            (
+                "sxtb x4, w5",
+                Instruction::Sxtb {
+                    rd: Register::X4,
+                    rn: Register::X5,
+                },
+            ),
+            (
+                "sxth x6, w7",
+                Instruction::Sxth {
+                    rd: Register::X6,
+                    rn: Register::X7,
+                },
+            ),
+            (
+                "sxtw x8, w9",
+                Instruction::Sxtw {
+                    rd: Register::X8,
+                    rn: Register::X9,
+                },
+            ),
+        ];
+        for (line, expected) in cases {
+            let parsed = match parse_line(line).unwrap_or_else(|e| panic!("{}: {:?}", line, e)) {
+                LineResult::Instruction(instr) => instr,
+                LineResult::Skip => panic!("unexpected skip for {}", line),
+            };
+            assert_eq!(parsed, expected, "round-trip failed for {}", line);
+        }
+        // The legacy X-form spelling we use internally for Display still
+        // parses correctly (e.g. `uxtb x0, x1` from older tests).
+        assert!(parse_line("uxtb x0, x1").is_ok());
+        assert!(parse_line("sxtw x0, x1").is_ok());
     }
 
     #[test]
