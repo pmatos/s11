@@ -448,9 +448,22 @@ pub fn generate_random_instruction<R: rand::RngExt>(
         // clamped/coerced to a valid 5-bit immediate if it lands on the
         // immediate side. nzcv is a 4-bit literal; cond from NORMAL_CONDITIONS.
         27 => {
-            let rn = pick_reg(rng);
-            let rm_raw = random_operand(rng, registers, immediates);
-            let rm = match rm_raw {
+            // CCMP/CCMN forbid SP in `rn` and in the register form of `rm`
+            // (encoded in the Xn slot, not XSP). `generate_all_instructions`
+            // filters SP at enumeration time; mirror that here so the
+            // mutator does not bleed avoidable is_encodable_aarch64
+            // rejections.
+            let pick_non_sp = |rng: &mut R| loop {
+                let r = pick_reg(rng);
+                if r != Register::SP {
+                    break r;
+                }
+            };
+            let rn = pick_non_sp(rng);
+            let rm = match random_operand(rng, registers, immediates) {
+                Operand::Register(r) if r == Register::SP => {
+                    Operand::Register(pick_non_sp(rng))
+                }
                 Operand::Register(r) => Operand::Register(r),
                 Operand::Immediate(v) => Operand::Immediate(v.rem_euclid(32)),
                 // random_operand only returns Register/Immediate, but the
