@@ -810,12 +810,14 @@ mod tests {
     #[test]
     fn csinc_wraps_on_max_input() {
         // CSINC x0, x1, x2, EQ with EQ=false sets x0 = x2 + 1 (wrapping).
-        // Build a target with x2 forced to u64::MAX and EQ forced false;
-        // candidate `MOV x0, #0` matches by 2's-complement wraparound.
+        // Pin x1 = 0 and x2 = u64::MAX, then CMP x1, #1 leaves Z=0 so the
+        // EQ predicate is false in both interpreters. CSINC's false branch
+        // then writes x2 + 1 = 0 (wrap), matching the MovImm #0 candidate.
         let target = vec![
-            // Force EQ false: CMP x1, x1+1 always sets Z=0 — easier path:
-            // pin x2 to u64::MAX via MOVN (which writes !((imm)<<shift)),
-            // and use MovN with imm=0 to get all-ones (0xFFFF_FFFF_FFFF_FFFF).
+            Instruction::MovImm {
+                rd: Register::X1,
+                imm: 0,
+            },
             Instruction::MovN {
                 rd: Register::X2,
                 imm: 0,
@@ -825,17 +827,18 @@ mod tests {
                 rn: Register::X1,
                 rm: Operand::Immediate(1),
             },
-            // After CMP x1, #1 the condition NE is data-dependent on x1.
-            // Use unconditional fall-through by picking CSINC with NV
-            // (always-false on AArch64, treated as `never`).
             Instruction::Csinc {
                 rd: Register::X0,
                 rn: Register::X1,
                 rm: Register::X2,
-                cond: crate::ir::types::Condition::NV,
+                cond: crate::ir::types::Condition::EQ,
             },
         ];
         let candidate = vec![
+            Instruction::MovImm {
+                rd: Register::X1,
+                imm: 0,
+            },
             Instruction::MovN {
                 rd: Register::X2,
                 imm: 0,
