@@ -1,6 +1,6 @@
 pub mod x86;
 
-use crate::ir::types::{Condition, ShiftKind};
+use crate::ir::types::{Condition, ExtendKind, ShiftKind};
 use crate::ir::{Instruction, Operand, Register};
 use dynasmrt::{DynasmApi, dynasm};
 
@@ -139,6 +139,97 @@ macro_rules! emit_shifted_reg_2op_logical {
             ShiftKind::Ror => {
                 dynasm!($ops ; .arch aarch64 ; $mnem X(rn_n), X(rm_n), ROR amt_n);
                 Ok::<(), String>(())
+            }
+        }
+    }};
+}
+
+/// 3-operand extended-register form (ADD/SUB only — logical opcodes do not
+/// accept ExtendedRegister per ARM ARM). The Rd/Rn slot is `Xn|SP` (XSP in
+/// dynasm-rs); the Rm slot is W-form for byte/half/word extends and X-form
+/// for the 64-bit extends (UXTX/SXTX). Issue #60.
+macro_rules! emit_extended_reg_3op_arith {
+    ($ops:expr, $mnem:ident, $rd:expr, $rn:expr, $rm:expr, $kind:expr, $shift:expr) => {{
+        let rd_n: u8 = $rd;
+        let rn_n: u8 = $rn;
+        let rm_n: u8 = $rm;
+        let shift_n: u32 = ($shift) as u32;
+        match $kind {
+            ExtendKind::Uxtb => {
+                dynasm!($ops ; .arch aarch64 ; $mnem XSP(rd_n), XSP(rn_n), W(rm_n), UXTB shift_n);
+                Ok(())
+            }
+            ExtendKind::Uxth => {
+                dynasm!($ops ; .arch aarch64 ; $mnem XSP(rd_n), XSP(rn_n), W(rm_n), UXTH shift_n);
+                Ok(())
+            }
+            ExtendKind::Uxtw => {
+                dynasm!($ops ; .arch aarch64 ; $mnem XSP(rd_n), XSP(rn_n), W(rm_n), UXTW shift_n);
+                Ok(())
+            }
+            ExtendKind::Uxtx => {
+                dynasm!($ops ; .arch aarch64 ; $mnem XSP(rd_n), XSP(rn_n), X(rm_n), UXTX shift_n);
+                Ok(())
+            }
+            ExtendKind::Sxtb => {
+                dynasm!($ops ; .arch aarch64 ; $mnem XSP(rd_n), XSP(rn_n), W(rm_n), SXTB shift_n);
+                Ok(())
+            }
+            ExtendKind::Sxth => {
+                dynasm!($ops ; .arch aarch64 ; $mnem XSP(rd_n), XSP(rn_n), W(rm_n), SXTH shift_n);
+                Ok(())
+            }
+            ExtendKind::Sxtw => {
+                dynasm!($ops ; .arch aarch64 ; $mnem XSP(rd_n), XSP(rn_n), W(rm_n), SXTW shift_n);
+                Ok(())
+            }
+            ExtendKind::Sxtx => {
+                dynasm!($ops ; .arch aarch64 ; $mnem XSP(rd_n), XSP(rn_n), X(rm_n), SXTX shift_n);
+                Ok(())
+            }
+        }
+    }};
+}
+
+/// 2-operand extended-register form (CMP/CMN). The Rn slot is `Xn|SP` (XSP).
+/// Issue #60.
+macro_rules! emit_extended_reg_2op_arith {
+    ($ops:expr, $mnem:ident, $rn:expr, $rm:expr, $kind:expr, $shift:expr) => {{
+        let rn_n: u8 = $rn;
+        let rm_n: u8 = $rm;
+        let shift_n: u32 = ($shift) as u32;
+        match $kind {
+            ExtendKind::Uxtb => {
+                dynasm!($ops ; .arch aarch64 ; $mnem XSP(rn_n), W(rm_n), UXTB shift_n);
+                Ok(())
+            }
+            ExtendKind::Uxth => {
+                dynasm!($ops ; .arch aarch64 ; $mnem XSP(rn_n), W(rm_n), UXTH shift_n);
+                Ok(())
+            }
+            ExtendKind::Uxtw => {
+                dynasm!($ops ; .arch aarch64 ; $mnem XSP(rn_n), W(rm_n), UXTW shift_n);
+                Ok(())
+            }
+            ExtendKind::Uxtx => {
+                dynasm!($ops ; .arch aarch64 ; $mnem XSP(rn_n), X(rm_n), UXTX shift_n);
+                Ok(())
+            }
+            ExtendKind::Sxtb => {
+                dynasm!($ops ; .arch aarch64 ; $mnem XSP(rn_n), W(rm_n), SXTB shift_n);
+                Ok(())
+            }
+            ExtendKind::Sxth => {
+                dynasm!($ops ; .arch aarch64 ; $mnem XSP(rn_n), W(rm_n), SXTH shift_n);
+                Ok(())
+            }
+            ExtendKind::Sxtw => {
+                dynasm!($ops ; .arch aarch64 ; $mnem XSP(rn_n), W(rm_n), SXTW shift_n);
+                Ok(())
+            }
+            ExtendKind::Sxtx => {
+                dynasm!($ops ; .arch aarch64 ; $mnem XSP(rn_n), X(rm_n), SXTX shift_n);
+                Ok(())
             }
         }
     }};
@@ -287,7 +378,12 @@ impl AArch64Assembler {
                             ops, add, rd_reg, rn_reg, rm_reg_num, kind, *amount
                         )
                     }
-                    Operand::ExtendedRegister { .. } => Err("ExtendedRegister encoding not yet implemented".to_string()),
+                    Operand::ExtendedRegister { reg, kind, shift } => {
+                        let rm_reg_num = register_to_dynasm(*reg)?;
+                        emit_extended_reg_3op_arith!(
+                            ops, add, rd_reg, rn_reg, rm_reg_num, kind, *shift
+                        )
+                    }
                 }
             }
             Instruction::Sub { rd, rn, rm } => {
@@ -320,7 +416,12 @@ impl AArch64Assembler {
                             ops, sub, rd_reg, rn_reg, rm_reg_num, kind, *amount
                         )
                     }
-                    Operand::ExtendedRegister { .. } => Err("ExtendedRegister encoding not yet implemented".to_string()),
+                    Operand::ExtendedRegister { reg, kind, shift } => {
+                        let rm_reg_num = register_to_dynasm(*reg)?;
+                        emit_extended_reg_3op_arith!(
+                            ops, sub, rd_reg, rn_reg, rm_reg_num, kind, *shift
+                        )
+                    }
                 }
             }
             Instruction::And { rd, rn, rm } => {
@@ -618,7 +719,10 @@ impl AArch64Assembler {
                         let rm_reg_num = register_to_dynasm(*reg)?;
                         emit_shifted_reg_2op_arith!(ops, cmp, rn_reg, rm_reg_num, kind, *amount)
                     }
-                    Operand::ExtendedRegister { .. } => Err("ExtendedRegister encoding not yet implemented".to_string()),
+                    Operand::ExtendedRegister { reg, kind, shift } => {
+                        let rm_reg_num = register_to_dynasm(*reg)?;
+                        emit_extended_reg_2op_arith!(ops, cmp, rn_reg, rm_reg_num, kind, *shift)
+                    }
                 }
             }
             Instruction::Cmn { rn, rm } => {
@@ -647,7 +751,10 @@ impl AArch64Assembler {
                         let rm_reg_num = register_to_dynasm(*reg)?;
                         emit_shifted_reg_2op_arith!(ops, cmn, rn_reg, rm_reg_num, kind, *amount)
                     }
-                    Operand::ExtendedRegister { .. } => Err("ExtendedRegister encoding not yet implemented".to_string()),
+                    Operand::ExtendedRegister { reg, kind, shift } => {
+                        let rm_reg_num = register_to_dynasm(*reg)?;
+                        emit_extended_reg_2op_arith!(ops, cmn, rn_reg, rm_reg_num, kind, *shift)
+                    }
                 }
             }
             Instruction::Tst { rn, rm } => {
@@ -2380,6 +2487,74 @@ mod tests {
             }])
             .expect("UXTB encoding should succeed");
         disassemble_and_verify(&bytes, "uxtb", &["w0", "w1"]);
+    }
+
+    /// Issue #60: the ExtendedRegister operand form for ADD/SUB/CMP/CMN.
+    /// Capstone disassembles as `<mnem> <rd>, <rn>, <wm-or-xm>, <kind> #<shift>`.
+    #[test]
+    fn test_extended_register_encoder_round_trip() {
+        use crate::ir::ExtendKind;
+        let cases: Vec<(Instruction, &str, Vec<String>)> = vec![
+            (
+                Instruction::Add {
+                    rd: Register::X0,
+                    rn: Register::X1,
+                    rm: Operand::ExtendedRegister {
+                        reg: Register::X2,
+                        kind: ExtendKind::Uxtb,
+                        shift: 2,
+                    },
+                },
+                "add",
+                vec!["x0".into(), "x1".into(), "w2".into(), "uxtb #2".into()],
+            ),
+            (
+                Instruction::Sub {
+                    rd: Register::X3,
+                    rn: Register::X4,
+                    rm: Operand::ExtendedRegister {
+                        reg: Register::X5,
+                        kind: ExtendKind::Sxth,
+                        shift: 1,
+                    },
+                },
+                "sub",
+                vec!["x3".into(), "x4".into(), "w5".into(), "sxth #1".into()],
+            ),
+            (
+                Instruction::Cmp {
+                    rn: Register::X6,
+                    rm: Operand::ExtendedRegister {
+                        reg: Register::X7,
+                        kind: ExtendKind::Uxtw,
+                        shift: 3,
+                    },
+                },
+                "cmp",
+                vec!["x6".into(), "w7".into(), "uxtw #3".into()],
+            ),
+            (
+                Instruction::Add {
+                    rd: Register::X8,
+                    rn: Register::X9,
+                    rm: Operand::ExtendedRegister {
+                        reg: Register::X10,
+                        kind: ExtendKind::Uxtx,
+                        shift: 4,
+                    },
+                },
+                "add",
+                vec!["x8".into(), "x9".into(), "x10".into(), "uxtx #4".into()],
+            ),
+        ];
+        for (instr, mnemonic, expected_fragments) in &cases {
+            let mut assembler = AArch64Assembler::new();
+            let bytes = assembler
+                .assemble_instructions(std::slice::from_ref(instr))
+                .unwrap_or_else(|e| panic!("{:?} encoding should succeed: {}", instr, e));
+            let frag_refs: Vec<&str> = expected_fragments.iter().map(|s| s.as_str()).collect();
+            disassemble_and_verify(&bytes, mnemonic, &frag_refs);
+        }
     }
 
     /// Issue #60: SXTW sign-extends the low word of Wn into 64-bit Xd.
