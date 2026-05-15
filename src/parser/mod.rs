@@ -969,6 +969,8 @@ pub fn parse_line(line: &str) -> Result<LineResult, ParseLineError> {
             .map_err(ParseLineError::Other)?,
         "sxth" => parse_unary_rd_rn("sxth", &operands, |rd, rn| Instruction::Sxth { rd, rn })
             .map_err(ParseLineError::Other)?,
+        "sxtw" => parse_unary_rd_rn("sxtw", &operands, |rd, rn| Instruction::Sxtw { rd, rn })
+            .map_err(ParseLineError::Other)?,
         _ => return Err(ParseLineError::UnknownInstruction(opcode)),
     };
 
@@ -1600,6 +1602,22 @@ mod tests {
         let missing = file.path().with_extension("missing");
         let err = parse_assembly_file(&missing).unwrap_err();
         assert!(err.to_string().contains("failed to read file"));
+    }
+
+    #[test]
+    fn parse_sxtw_standalone() {
+        let parsed = match parse_line("sxtw x0, x1").unwrap() {
+            LineResult::Instruction(instr) => instr,
+            LineResult::Skip => panic!("unexpected skip"),
+        };
+        assert_eq!(
+            parsed,
+            Instruction::Sxtw {
+                rd: Register::X0,
+                rn: Register::X1,
+            }
+        );
+        assert_eq!(format!("{}", parsed), "sxtw x0, x1");
     }
 
     #[test]

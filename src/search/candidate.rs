@@ -187,6 +187,7 @@ pub fn generate_all_instructions(registers: &[Register], immediates: &[i64]) -> 
             instrs.push(Instruction::Sxtb { rd, rn });
             instrs.push(Instruction::Uxth { rd, rn });
             instrs.push(Instruction::Sxth { rd, rn });
+            instrs.push(Instruction::Sxtw { rd, rn });
         }
 
         // Multiply-accumulate family. MADD/MSUB take a 4th register slot
@@ -926,6 +927,23 @@ mod tests {
         for &rd in &regs {
             for &rn in &regs {
                 let expected = Instruction::Uxtb { rd, rn };
+                assert!(
+                    candidates.contains(&expected),
+                    "enumeration missing {}",
+                    expected
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn enumerate_emits_sxtw_for_each_register_pair() {
+        let regs = vec![Register::X0, Register::X1, Register::X2];
+        let imms = vec![];
+        let candidates = generate_all_instructions(&regs, &imms);
+        for &rd in &regs {
+            for &rn in &regs {
+                let expected = Instruction::Sxtw { rd, rn };
                 assert!(
                     candidates.contains(&expected),
                     "enumeration missing {}",

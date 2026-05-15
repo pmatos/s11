@@ -1696,6 +1696,33 @@ mod tests {
     }
 
     #[test]
+    fn test_sxtw_metadata_and_encodability() {
+        let ok = Instruction::Sxtw {
+            rd: Register::X0,
+            rn: Register::X1,
+        };
+        assert_eq!(ok.to_string(), "sxtw x0, x1");
+        assert_eq!(ok.destination(), Some(Register::X0));
+        assert_eq!(ok.source_registers(), vec![Register::X1]);
+        assert!(!ok.modifies_flags());
+        assert!(ok.is_encodable_aarch64());
+        assert!(
+            !Instruction::Sxtw {
+                rd: Register::SP,
+                rn: Register::X1,
+            }
+            .is_encodable_aarch64()
+        );
+        assert!(
+            !Instruction::Sxtw {
+                rd: Register::X0,
+                rn: Register::SP,
+            }
+            .is_encodable_aarch64()
+        );
+    }
+
+    #[test]
     fn test_sxth_metadata_and_encodability() {
         let ok = Instruction::Sxth {
             rd: Register::X0,
