@@ -784,9 +784,15 @@ impl AArch64Assembler {
                 dynasm!(ops ; .arch aarch64 ; uxtb W(rd_reg), W(rn_reg));
                 Ok(())
             }
-            // SXTB/SXTH/SXTW/UXTH encoder bodies land in follow-up slices.
-            Instruction::Sxtb { .. }
-            | Instruction::Sxth { .. }
+            // SXTB Xd, Wn — alias of SBFM Xd, Xn, #0, #7. Issue #60.
+            Instruction::Sxtb { rd, rn } => {
+                let rd_reg = register_to_dynasm(*rd)?;
+                let rn_reg = register_to_dynasm(*rn)?;
+                dynasm!(ops ; .arch aarch64 ; sxtb X(rd_reg), W(rn_reg));
+                Ok(())
+            }
+            // SXTH/SXTW/UXTH encoder bodies land in follow-up slices.
+            Instruction::Sxth { .. }
             | Instruction::Sxtw { .. }
             | Instruction::Uxth { .. } => {
                 Err("standalone extend encoding not yet implemented".to_string())
@@ -2338,6 +2344,20 @@ mod tests {
             }])
             .expect("UXTB encoding should succeed");
         disassemble_and_verify(&bytes, "uxtb", &["w0", "w1"]);
+    }
+
+    /// Issue #60: SXTB sign-extends the low byte of Wn into the full 64-bit
+    /// Xd, so Capstone disassembles as `sxtb x<rd>, w<rn>`.
+    #[test]
+    fn test_sxtb_encoder_round_trip() {
+        let mut assembler = AArch64Assembler::new();
+        let bytes = assembler
+            .assemble_instructions(&[Instruction::Sxtb {
+                rd: Register::X0,
+                rn: Register::X1,
+            }])
+            .expect("SXTB encoding should succeed");
+        disassemble_and_verify(&bytes, "sxtb", &["x0", "w1"]);
     }
 
     /// Issue #59: shifted-register forms round-trip through Capstone with the
