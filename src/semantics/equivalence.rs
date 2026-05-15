@@ -1549,7 +1549,9 @@ mod tests {
     /// Completeness regression for the gated guard: dropping a flag-writer
     /// must NOT be rejected when the caller has marked flags dead. The
     /// pre-PR structural guard rejected this unconditionally, blocking a
-    /// real class of sound rewrites.
+    /// real class of sound rewrites. Covers both the non-metrics and
+    /// metrics entry points since `pre_smt_guard` is now plumbed through
+    /// both.
     #[test]
     fn test_dropping_flag_writer_allowed_when_flags_dead() {
         let target = vec![
@@ -1566,12 +1568,25 @@ mod tests {
             rd: Register::X1,
             imm: 7,
         }];
+        // Explicit `.with_flags(false)` for parity with `cfg_flags_live`
+        // elsewhere in this module — makes the intent self-documenting
+        // even though `EquivalenceConfig::default()` already sets it.
         let cfg_flags_dead =
-            EquivalenceConfig::with_live_out(LiveOut::from_registers(vec![Register::X1]));
+            EquivalenceConfig::with_live_out(LiveOut::from_registers(vec![Register::X1]))
+                .with_flags(false);
         assert_eq!(
             check_equivalence_with_config(&target, &candidate, &cfg_flags_dead),
             EquivalenceResult::Equivalent,
             "With flags marked dead, dropping a flag-only instruction is sound"
+        );
+        // Mirror the assertion for the metrics-returning entry point, which
+        // shares the same pre_smt_guard plumbing.
+        let (metrics_result, _metrics) =
+            check_equivalence_with_config_metrics(&target, &candidate, &cfg_flags_dead);
+        assert_eq!(
+            metrics_result,
+            EquivalenceResult::Equivalent,
+            "Metrics entry point also accepts flag-only divergence when flags are dead"
         );
     }
 
