@@ -1166,7 +1166,11 @@ mod tests {
         let final_x0 = final_state.get_register(Register::X0);
         let solver = Solver::new();
         solver.assert(&final_x0.eq(&BV::from_u64(0x78, 64)).not());
-        assert_eq!(solver.check(), SatResult::Unsat, "UXTB(0x5678) must be 0x78");
+        assert_eq!(
+            solver.check(),
+            SatResult::Unsat,
+            "UXTB(0x5678) must be 0x78"
+        );
     }
 
     #[test]

@@ -1976,10 +1976,7 @@ mod tests {
         // ADD/SUB with SXTB must sign-extend the low byte. If X2's low byte
         // is 0xFF (i.e. -1 as i8), then SUB X0, X1, X2, SXTB #0 computes
         // X1 - (-1) = X1 + 1.
-        let state = state_with(vec![
-            (Register::X1, 100),
-            (Register::X2, 0xFF),
-        ]);
+        let state = state_with(vec![(Register::X1, 100), (Register::X2, 0xFF)]);
         let after = apply_instruction_concrete(
             state,
             &Instruction::Sub {
