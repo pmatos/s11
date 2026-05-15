@@ -235,9 +235,13 @@ impl SymbolicSearch {
             .solver_timeout
             .unwrap_or(Duration::from_secs(5));
 
+        // Treat NZCV as live-out so the solver cannot certify a
+        // flag-divergent rewrite (see the equivalent note in
+        // `mcmc.rs::run_search`).
         let equiv_config = EquivalenceConfig::with_live_out(live_out.clone())
             .random_tests(5) // Quick pre-filter with tests
-            .timeout(timeout);
+            .timeout(timeout)
+            .with_flags(true);
 
         self.statistics.smt_queries += 1;
 

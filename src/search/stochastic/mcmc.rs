@@ -203,9 +203,15 @@ impl SearchAlgorithm for StochasticSearch {
                 // Verify with SMT solver
                 self.statistics.smt_queries += 1;
 
+                // Treat NZCV as live-out so the solver cannot certify a
+                // flag-divergent rewrite (e.g. ADD;CMP vs ADDS). The
+                // softened pre-SMT guard relies on flags being part of the
+                // comparison; without `with_flags(true)` here the search
+                // could accept rewrites that disturb post-window NZCV.
                 let equiv_config = EquivalenceConfig::with_live_out(live_out.clone())
                     .random_tests(0) // Already tested
-                    .timeout(std::time::Duration::from_secs(5));
+                    .timeout(std::time::Duration::from_secs(5))
+                    .with_flags(true);
 
                 match check_equivalence_with_config(target, &proposal, &equiv_config) {
                     EquivalenceResult::Equivalent => {
