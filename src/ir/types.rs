@@ -185,8 +185,51 @@ impl fmt::Display for ShiftKind {
     }
 }
 
-/// Operand for instructions: a register, an immediate, or a shifted-register
-/// (`reg, kind #amount` where amount is 0..=63 enforced by `is_encodable_aarch64`).
+/// AArch64 extend kind for the extended-register operand form
+/// (`add x0, x1, w2, uxtb #2` etc.). Issue #60.
+///
+/// The inner register is architecturally a W-register for byte/half/word
+/// extends (UXTB/UXTH/UXTW, SXTB/SXTH/SXTW) and an X-register for the
+/// 64-bit extends (UXTX/SXTX). The IR models the inner register as
+/// 64-bit X and Display/encoder selectively project to the W form.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum ExtendKind {
+    Uxtb,
+    Uxth,
+    Uxtw,
+    Uxtx,
+    Sxtb,
+    Sxth,
+    Sxtw,
+    Sxtx,
+}
+
+impl ExtendKind {
+    /// Returns true if this extend kind operates on a 64-bit (X-form)
+    /// source register. UXTX/SXTX are the only such kinds.
+    pub fn is_x_form(&self) -> bool {
+        matches!(self, ExtendKind::Uxtx | ExtendKind::Sxtx)
+    }
+}
+
+impl fmt::Display for ExtendKind {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            ExtendKind::Uxtb => write!(f, "uxtb"),
+            ExtendKind::Uxth => write!(f, "uxth"),
+            ExtendKind::Uxtw => write!(f, "uxtw"),
+            ExtendKind::Uxtx => write!(f, "uxtx"),
+            ExtendKind::Sxtb => write!(f, "sxtb"),
+            ExtendKind::Sxth => write!(f, "sxth"),
+            ExtendKind::Sxtw => write!(f, "sxtw"),
+            ExtendKind::Sxtx => write!(f, "sxtx"),
+        }
+    }
+}
+
+/// Operand for instructions: a register, an immediate, a shifted-register
+/// (`reg, kind #amount` where amount is 0..=63 enforced by `is_encodable_aarch64`),
+/// or an extended-register (`reg, extend-kind #shift` where shift is 0..=4).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Operand {
     Register(Register),
@@ -195,6 +238,11 @@ pub enum Operand {
         reg: Register,
         kind: ShiftKind,
         amount: u8,
+    },
+    ExtendedRegister {
+        reg: Register,
+        kind: ExtendKind,
+        shift: u8,
     },
 }
 
@@ -205,6 +253,22 @@ impl fmt::Display for Operand {
             Operand::Immediate(imm) => write!(f, "#{}", imm),
             Operand::ShiftedRegister { reg, kind, amount } => {
                 write!(f, "{}, {} #{}", reg, kind, amount)
+            }
+            Operand::ExtendedRegister { reg, kind, shift } => {
+                // Byte/half/word extends print the inner register as W-form;
+                // the 64-bit extends UXTX/SXTX print as X-form. The Display
+                // matches what Capstone emits after a roundtrip.
+                let inner = if kind.is_x_form() {
+                    format!("{}", reg)
+                } else {
+                    match reg.index() {
+                        Some(idx) => format!("w{}", idx),
+                        // SP has no W-form; fall back to its canonical name
+                        // (encodability gates SP out before any caller sees it).
+                        None => format!("{}", reg),
+                    }
+                };
+                write!(f, "{}, {} #{}", inner, kind, shift)
             }
         }
     }
@@ -342,6 +406,57 @@ mod tests {
         assert_eq!(format!("{}", Operand::Register(Register::X5)), "x5");
         assert_eq!(format!("{}", Operand::Immediate(42)), "#42");
         assert_eq!(format!("{}", Operand::Immediate(-1)), "#-1");
+    }
+
+    #[test]
+    fn test_extended_register_display_widths() {
+        // Issue #60: byte/half/word extend kinds print the inner register as
+        // a W-form; UXTX/SXTX print it as X-form. The shift always uses a
+        // `#<amount>` immediate.
+        assert_eq!(
+            format!(
+                "{}",
+                Operand::ExtendedRegister {
+                    reg: Register::X2,
+                    kind: ExtendKind::Uxtb,
+                    shift: 2,
+                }
+            ),
+            "w2, uxtb #2"
+        );
+        assert_eq!(
+            format!(
+                "{}",
+                Operand::ExtendedRegister {
+                    reg: Register::X5,
+                    kind: ExtendKind::Sxth,
+                    shift: 0,
+                }
+            ),
+            "w5, sxth #0"
+        );
+        assert_eq!(
+            format!(
+                "{}",
+                Operand::ExtendedRegister {
+                    reg: Register::X10,
+                    kind: ExtendKind::Sxtx,
+                    shift: 3,
+                }
+            ),
+            "x10, sxtx #3"
+        );
+        assert_eq!(
+            format!(
+                "{}",
+                Operand::ExtendedRegister {
+                    reg: Register::X1,
+                    kind: ExtendKind::Uxtx,
+                    shift: 4,
+                }
+            ),
+            "x1, uxtx #4"
+        );
     }
 
     #[test]

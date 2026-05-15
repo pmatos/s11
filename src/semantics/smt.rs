@@ -203,6 +203,26 @@ impl MachineState {
                     crate::ir::ShiftKind::Ror => bv_ror_64(&value, &amt),
                 }
             }
+            // Issue #60: ExtendedRegister extracts the low N bits, then
+            // sign/zero-extends to 64 and finally shifts left by `shift`.
+            Operand::ExtendedRegister { reg, kind, shift } => {
+                let value = self.get_register(*reg).clone();
+                let extended = match kind {
+                    crate::ir::ExtendKind::Uxtb => value.extract(7, 0).zero_ext(56),
+                    crate::ir::ExtendKind::Uxth => value.extract(15, 0).zero_ext(48),
+                    crate::ir::ExtendKind::Uxtw => value.extract(31, 0).zero_ext(32),
+                    crate::ir::ExtendKind::Uxtx => value,
+                    crate::ir::ExtendKind::Sxtb => value.extract(7, 0).sign_ext(56),
+                    crate::ir::ExtendKind::Sxth => value.extract(15, 0).sign_ext(48),
+                    crate::ir::ExtendKind::Sxtw => value.extract(31, 0).sign_ext(32),
+                    crate::ir::ExtendKind::Sxtx => value,
+                };
+                if *shift == 0 {
+                    extended
+                } else {
+                    extended.bvshl(&BV::from_u64(*shift as u64, 64))
+                }
+            }
         }
     }
 }
