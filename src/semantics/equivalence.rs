@@ -19,13 +19,16 @@ use crate::validation::random::{
 use std::time::Duration;
 use z3::SatResult;
 
-/// Cheap pre-SMT fast-path: rejects when only one sequence has flag-writers.
-/// Issue #92 closed the structural-equality version of this guard — now that
-/// SMT models symbolic NZCV (see `compute_flags_*` and `condition_to_smt` in
-/// `smt.rs`), any finer divergence is settled by the solver. We keep the
-/// asymmetric writes-vs-no-writes check because it short-circuits in O(n)
-/// without invoking Z3 and remains sound: if one sequence writes flags and
-/// the other does not, their flags cannot agree once flags become live.
+/// Cheap pre-SMT fast-path: rejects when only one sequence has flag-writers
+/// AND flags are part of the comparison. Issue #92 closed the structural-
+/// equality version of this guard — now that SMT models symbolic NZCV (see
+/// `compute_flags_*` and `condition_to_smt` in `smt.rs`), any finer divergence
+/// is settled by the solver. We keep the asymmetric writes-vs-no-writes check
+/// because it short-circuits in O(n) without invoking Z3 and remains sound
+/// *as long as flags are observable*. When the caller marks NZCV dead
+/// (`flags_live = false`), the guard would otherwise reject sound rewrites
+/// such as `cmp x0, #0` ≡ `<empty>` under a register-only live-out mask, so
+/// the call site gates this check on flag liveness.
 fn flag_writers_diverge(target: &[Instruction], candidate: &[Instruction]) -> bool {
     let tw = flags_live_out(target);
     let cw = flags_live_out(candidate);
@@ -37,11 +40,19 @@ fn flag_writers_diverge(target: &[Instruction], candidate: &[Instruction]) -> bo
 /// here means callers must return `r` (or the metrics-wrapped equivalent)
 /// before invoking the solver. Returning `None` means proceed to SMT.
 ///
+/// `flags_live` is the caller's declaration that NZCV participates in the
+/// comparison. When false, the flag-writer trace check is suppressed because
+/// flag divergence is by definition unobservable.
+///
 /// Today this is just the flag-writer trace check, but the shape leaves
 /// room to add more pre-SMT guards (e.g. memory ops, control flow) without
 /// touching every call site.
-fn pre_smt_guard(target: &[Instruction], candidate: &[Instruction]) -> Option<EquivalenceResult> {
-    if flag_writers_diverge(target, candidate) {
+fn pre_smt_guard(
+    target: &[Instruction],
+    candidate: &[Instruction],
+    flags_live: bool,
+) -> Option<EquivalenceResult> {
+    if flags_live && flag_writers_diverge(target, candidate) {
         return Some(EquivalenceResult::NotEquivalent);
     }
     None
@@ -149,7 +160,9 @@ impl EquivalenceConfig {
 /// Returns true if for all possible initial states, both sequences
 /// produce the same final state.
 pub fn check_equivalence(seq1: &[Instruction], seq2: &[Instruction]) -> EquivalenceResult {
-    if let Some(early) = pre_smt_guard(seq1, seq2) {
+    // Unmasked entry point compares full state including NZCV (see
+    // `states_not_equal`); flags are always observable here.
+    if let Some(early) = pre_smt_guard(seq1, seq2, true) {
         return early;
     }
 
@@ -232,7 +245,7 @@ pub fn check_equivalence_with_config(
     seq2: &[Instruction],
     config: &EquivalenceConfig,
 ) -> EquivalenceResult {
-    if let Some(early) = pre_smt_guard(seq1, seq2) {
+    if let Some(early) = pre_smt_guard(seq1, seq2, config.flags_live) {
         return early;
     }
 
@@ -260,7 +273,7 @@ pub fn check_equivalence_with_config_metrics(
 ) -> (EquivalenceResult, EquivalenceMetrics) {
     let metrics = EquivalenceMetrics::default();
 
-    if let Some(early) = pre_smt_guard(seq1, seq2) {
+    if let Some(early) = pre_smt_guard(seq1, seq2, config.flags_live) {
         return (early, metrics);
     }
 
@@ -1471,13 +1484,14 @@ mod tests {
         );
     }
 
-    /// Soundness regression for the flag-drop guard: ADDS x0, x1, #1 ≡ ADD
-    /// x0, x1, #1 is unsound because the flag side-effect is silently
-    /// dropped. SMT alone cannot rule this out (it models registers only).
-    /// `check_equivalence_with_config` and `check_equivalence` must reject
-    /// such rewrites before reaching the solver.
+    /// Soundness regression for the flag-drop guard: `ADDS x0, x1, #1` ≡
+    /// `ADD x0, x1, #1` is only sound when NZCV is dead after the window.
+    /// When the caller marks flags live (`with_flags(true)` or the unmasked
+    /// `check_equivalence` path which always includes flags) the rewrite
+    /// must be rejected. With flags dead, registers alone match and the
+    /// rewrite is genuinely sound.
     #[test]
-    fn test_adds_to_add_rewrite_rejected_even_with_register_live_out() {
+    fn test_adds_to_add_rewrite_rejected_when_flags_live() {
         let adds = vec![Instruction::Adds {
             rd: Register::X0,
             rn: Register::X1,
@@ -1488,23 +1502,27 @@ mod tests {
             rn: Register::X1,
             rm: Operand::Immediate(1),
         }];
-        let config = EquivalenceConfig::with_live_out(LiveOut::from_registers(vec![Register::X0]));
+        let cfg_flags_live =
+            EquivalenceConfig::with_live_out(LiveOut::from_registers(vec![Register::X0]))
+                .with_flags(true);
         assert_eq!(
-            check_equivalence_with_config(&adds, &add, &config),
+            check_equivalence_with_config(&adds, &add, &cfg_flags_live),
             EquivalenceResult::NotEquivalent,
-            "Dropping a flag-writer must not be certified as equivalent"
+            "Dropping a flag-writer must not be certified as equivalent when flags are live"
         );
+        // The unmasked path always treats NZCV as part of full state, so it
+        // also rejects.
         assert_eq!(
             check_equivalence(&adds, &add),
             EquivalenceResult::NotEquivalent,
-            "Same guard must apply to the simple entry point"
+            "Unmasked entry point includes NZCV in comparison"
         );
     }
 
     /// Soundness regression: `BICS x0, x1, x2` → `BIC x0, x1, x2` drops the
-    /// NZCV side-effect. Must be rejected by the flag-writer guard.
+    /// NZCV side-effect. Rejected when flags are observable.
     #[test]
-    fn test_bics_to_bic_rewrite_rejected() {
+    fn test_bics_to_bic_rewrite_rejected_when_flags_live() {
         let bics = vec![Instruction::Bics {
             rd: Register::X0,
             rn: Register::X1,
@@ -1515,9 +1533,11 @@ mod tests {
             rn: Register::X1,
             rm: Operand::Register(Register::X2),
         }];
-        let config = EquivalenceConfig::with_live_out(LiveOut::from_registers(vec![Register::X0]));
+        let cfg_flags_live =
+            EquivalenceConfig::with_live_out(LiveOut::from_registers(vec![Register::X0]))
+                .with_flags(true);
         assert_eq!(
-            check_equivalence_with_config(&bics, &bic, &config),
+            check_equivalence_with_config(&bics, &bic, &cfg_flags_live),
             EquivalenceResult::NotEquivalent
         );
         assert_eq!(
@@ -1526,9 +1546,39 @@ mod tests {
         );
     }
 
-    /// Soundness regression: `NEGS x0, x1` → `NEG x0, x1` drops NZCV.
+    /// Completeness regression for the gated guard: dropping a flag-writer
+    /// must NOT be rejected when the caller has marked flags dead. The
+    /// pre-PR structural guard rejected this unconditionally, blocking a
+    /// real class of sound rewrites.
     #[test]
-    fn test_negs_to_neg_rewrite_rejected() {
+    fn test_dropping_flag_writer_allowed_when_flags_dead() {
+        let target = vec![
+            Instruction::Cmp {
+                rn: Register::X0,
+                rm: Operand::Immediate(0),
+            },
+            Instruction::MovImm {
+                rd: Register::X1,
+                imm: 7,
+            },
+        ];
+        let candidate = vec![Instruction::MovImm {
+            rd: Register::X1,
+            imm: 7,
+        }];
+        let cfg_flags_dead =
+            EquivalenceConfig::with_live_out(LiveOut::from_registers(vec![Register::X1]));
+        assert_eq!(
+            check_equivalence_with_config(&target, &candidate, &cfg_flags_dead),
+            EquivalenceResult::Equivalent,
+            "With flags marked dead, dropping a flag-only instruction is sound"
+        );
+    }
+
+    /// Soundness regression: `NEGS x0, x1` → `NEG x0, x1` drops NZCV.
+    /// Rejected when flags are observable.
+    #[test]
+    fn test_negs_to_neg_rewrite_rejected_when_flags_live() {
         let negs = vec![Instruction::Negs {
             rd: Register::X0,
             rm: Register::X1,
@@ -1537,9 +1587,11 @@ mod tests {
             rd: Register::X0,
             rm: Register::X1,
         }];
-        let config = EquivalenceConfig::with_live_out(LiveOut::from_registers(vec![Register::X0]));
+        let cfg_flags_live =
+            EquivalenceConfig::with_live_out(LiveOut::from_registers(vec![Register::X0]))
+                .with_flags(true);
         assert_eq!(
-            check_equivalence_with_config(&negs, &neg, &config),
+            check_equivalence_with_config(&negs, &neg, &cfg_flags_live),
             EquivalenceResult::NotEquivalent
         );
         assert_eq!(
