@@ -461,9 +461,7 @@ pub fn generate_random_instruction<R: rand::RngExt>(
             };
             let rn = pick_non_sp(rng);
             let rm = match random_operand(rng, registers, immediates) {
-                Operand::Register(r) if r == Register::SP => {
-                    Operand::Register(pick_non_sp(rng))
-                }
+                Operand::Register(r) if r == Register::SP => Operand::Register(pick_non_sp(rng)),
                 Operand::Register(r) => Operand::Register(r),
                 Operand::Immediate(v) => Operand::Immediate(v.rem_euclid(32)),
                 // random_operand only returns Register/Immediate, but the
