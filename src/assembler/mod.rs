@@ -805,9 +805,12 @@ impl AArch64Assembler {
                 dynasm!(ops ; .arch aarch64 ; sxth X(rd_reg), W(rn_reg));
                 Ok(())
             }
-            // SXTW encoder body lands in the next slice.
-            Instruction::Sxtw { .. } => {
-                Err("standalone extend encoding not yet implemented".to_string())
+            // SXTW Xd, Wn — alias of SBFM Xd, Xn, #0, #31. Issue #60.
+            Instruction::Sxtw { rd, rn } => {
+                let rd_reg = register_to_dynasm(*rd)?;
+                let rn_reg = register_to_dynasm(*rn)?;
+                dynasm!(ops ; .arch aarch64 ; sxtw X(rd_reg), W(rn_reg));
+                Ok(())
             }
             Instruction::Neg { rd, rm } => {
                 let rd_reg = register_to_dynasm(*rd)?;
@@ -2356,6 +2359,19 @@ mod tests {
             }])
             .expect("UXTB encoding should succeed");
         disassemble_and_verify(&bytes, "uxtb", &["w0", "w1"]);
+    }
+
+    /// Issue #60: SXTW sign-extends the low word of Wn into 64-bit Xd.
+    #[test]
+    fn test_sxtw_encoder_round_trip() {
+        let mut assembler = AArch64Assembler::new();
+        let bytes = assembler
+            .assemble_instructions(&[Instruction::Sxtw {
+                rd: Register::X0,
+                rn: Register::X1,
+            }])
+            .expect("SXTW encoding should succeed");
+        disassemble_and_verify(&bytes, "sxtw", &["x0", "w1"]);
     }
 
     /// Issue #60: SXTH sign-extends the low halfword of Wn into 64-bit Xd.
