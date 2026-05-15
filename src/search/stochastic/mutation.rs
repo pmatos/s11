@@ -152,6 +152,27 @@ impl Mutator {
                     _ => *rm = self.random_register(rng),
                 }
             }
+            // Multiply-accumulate: 4 register slots so 4-way pick.
+            Instruction::Madd { rd, rn, rm, ra } | Instruction::Msub { rd, rn, rm, ra } => {
+                let choice = rng.random_range(0..4);
+                match choice {
+                    0 => *rd = self.random_register(rng),
+                    1 => *rn = self.random_register(rng),
+                    2 => *rm = self.random_register(rng),
+                    _ => *ra = self.random_register(rng),
+                }
+            }
+            // MNEG / SMULH / UMULH: 3 register slots like MUL.
+            Instruction::Mneg { rd, rn, rm }
+            | Instruction::Smulh { rd, rn, rm }
+            | Instruction::Umulh { rd, rn, rm } => {
+                let choice = rng.random_range(0..3);
+                match choice {
+                    0 => *rd = self.random_register(rng),
+                    1 => *rn = self.random_register(rng),
+                    _ => *rm = self.random_register(rng),
+                }
+            }
             // Comparison instructions (no destination)
             Instruction::Cmp { rn, rm } | Instruction::Cmn { rn, rm } => {
                 if rng.random_bool(0.5) {
@@ -593,6 +614,27 @@ impl Mutator {
                 1 => Instruction::Lsr { rd, rn, shift },
                 2 => Instruction::Asr { rd, rn, shift },
                 _ => Instruction::Ror { rd, rn, shift },
+            },
+            // Multiply-accumulate cluster — widens as SMULH/UMULH land.
+            Instruction::Madd { rd, rn, rm, ra } => match rng.random_range(0..3) {
+                0 => Instruction::Msub { rd, rn, rm, ra },
+                1 => Instruction::Mneg { rd, rn, rm },
+                _ => Instruction::Madd { rd, rn, rm, ra },
+            },
+            Instruction::Msub { rd, rn, rm, ra } => match rng.random_range(0..3) {
+                0 => Instruction::Madd { rd, rn, rm, ra },
+                1 => Instruction::Mneg { rd, rn, rm },
+                _ => Instruction::Msub { rd, rn, rm, ra },
+            },
+            Instruction::Mneg { rd, rn, rm } => Instruction::Mneg { rd, rn, rm },
+            // High-half multiply cluster (signed ↔ unsigned).
+            Instruction::Smulh { rd, rn, rm } => match rng.random_range(0..2) {
+                0 => Instruction::Umulh { rd, rn, rm },
+                _ => Instruction::Smulh { rd, rn, rm },
+            },
+            Instruction::Umulh { rd, rn, rm } => match rng.random_range(0..2) {
+                0 => Instruction::Smulh { rd, rn, rm },
+                _ => Instruction::Umulh { rd, rn, rm },
             },
         };
     }

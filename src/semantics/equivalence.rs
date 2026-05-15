@@ -1321,4 +1321,89 @@ mod tests {
         let s2 = s1.clone();
         assert_eq!(check_equivalence(&s1, &s2), EquivalenceResult::Equivalent);
     }
+
+    /// Issue #56 acceptance: `MUL t,a,b; NEG r,t` ≡ `MNEG r,a,b`
+    /// (MNEG is `rd = -(rn*rm)`, the alias of `MSUB rd,rn,rm,XZR`).
+    #[test]
+    fn test_mneg_equivalent_to_neg_mul() {
+        let seq1 = vec![
+            Instruction::Mul {
+                rd: Register::X3,
+                rn: Register::X1,
+                rm: Register::X2,
+            },
+            Instruction::Neg {
+                rd: Register::X0,
+                rm: Register::X3,
+            },
+        ];
+        let seq2 = vec![Instruction::Mneg {
+            rd: Register::X0,
+            rn: Register::X1,
+            rm: Register::X2,
+        }];
+        let config = EquivalenceConfig::with_live_out(LiveOut::from_registers(vec![Register::X0]));
+        assert_eq!(
+            check_equivalence_with_config(&seq1, &seq2, &config),
+            EquivalenceResult::Equivalent
+        );
+    }
+
+    /// Issue #56 acceptance: `MUL t,a,b; SUB r,c,t` ≡ `MSUB r,a,b,c`
+    /// when only `r` is live-out.
+    #[test]
+    fn test_msub_equivalent_to_sub_mul() {
+        let seq1 = vec![
+            Instruction::Mul {
+                rd: Register::X3,
+                rn: Register::X1,
+                rm: Register::X2,
+            },
+            Instruction::Sub {
+                rd: Register::X0,
+                rn: Register::X4,
+                rm: Operand::Register(Register::X3),
+            },
+        ];
+        let seq2 = vec![Instruction::Msub {
+            rd: Register::X0,
+            rn: Register::X1,
+            rm: Register::X2,
+            ra: Register::X4,
+        }];
+        let config = EquivalenceConfig::with_live_out(LiveOut::from_registers(vec![Register::X0]));
+        assert_eq!(
+            check_equivalence_with_config(&seq1, &seq2, &config),
+            EquivalenceResult::Equivalent
+        );
+    }
+
+    /// Issue #56 acceptance: `MUL t,a,b; ADD r,c,t` ≡ `MADD r,a,b,c`
+    /// when only `r` is live-out (the temporary `t` is dead).
+    #[test]
+    fn test_madd_equivalent_to_mul_then_add() {
+        let seq1 = vec![
+            Instruction::Mul {
+                rd: Register::X3,
+                rn: Register::X1,
+                rm: Register::X2,
+            },
+            Instruction::Add {
+                rd: Register::X0,
+                rn: Register::X4,
+                rm: Operand::Register(Register::X3),
+            },
+        ];
+        let seq2 = vec![Instruction::Madd {
+            rd: Register::X0,
+            rn: Register::X1,
+            rm: Register::X2,
+            ra: Register::X4,
+        }];
+        let config = EquivalenceConfig::with_live_out(LiveOut::from_registers(vec![Register::X0]));
+        assert_eq!(
+            check_equivalence_with_config(&seq1, &seq2, &config),
+            EquivalenceResult::Equivalent
+        );
+    }
 }

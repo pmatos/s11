@@ -315,6 +315,63 @@ impl AArch64Assembler {
                 );
                 Ok(())
             }
+            Instruction::Madd { rd, rn, rm, ra } => {
+                let rd_reg = register_to_dynasm(*rd)?;
+                let rn_reg = register_to_dynasm(*rn)?;
+                let rm_reg = register_to_dynasm(*rm)?;
+                let ra_reg = register_to_dynasm(*ra)?;
+
+                dynasm!(ops
+                    ; .arch aarch64
+                    ; madd X(rd_reg), X(rn_reg), X(rm_reg), X(ra_reg)
+                );
+                Ok(())
+            }
+            Instruction::Msub { rd, rn, rm, ra } => {
+                let rd_reg = register_to_dynasm(*rd)?;
+                let rn_reg = register_to_dynasm(*rn)?;
+                let rm_reg = register_to_dynasm(*rm)?;
+                let ra_reg = register_to_dynasm(*ra)?;
+
+                dynasm!(ops
+                    ; .arch aarch64
+                    ; msub X(rd_reg), X(rn_reg), X(rm_reg), X(ra_reg)
+                );
+                Ok(())
+            }
+            Instruction::Mneg { rd, rn, rm } => {
+                let rd_reg = register_to_dynasm(*rd)?;
+                let rn_reg = register_to_dynasm(*rn)?;
+                let rm_reg = register_to_dynasm(*rm)?;
+
+                dynasm!(ops
+                    ; .arch aarch64
+                    ; mneg X(rd_reg), X(rn_reg), X(rm_reg)
+                );
+                Ok(())
+            }
+            Instruction::Smulh { rd, rn, rm } => {
+                let rd_reg = register_to_dynasm(*rd)?;
+                let rn_reg = register_to_dynasm(*rn)?;
+                let rm_reg = register_to_dynasm(*rm)?;
+
+                dynasm!(ops
+                    ; .arch aarch64
+                    ; smulh X(rd_reg), X(rn_reg), X(rm_reg)
+                );
+                Ok(())
+            }
+            Instruction::Umulh { rd, rn, rm } => {
+                let rd_reg = register_to_dynasm(*rd)?;
+                let rn_reg = register_to_dynasm(*rn)?;
+                let rm_reg = register_to_dynasm(*rm)?;
+
+                dynasm!(ops
+                    ; .arch aarch64
+                    ; umulh X(rd_reg), X(rn_reg), X(rm_reg)
+                );
+                Ok(())
+            }
             Instruction::Cmp { rn, rm } => {
                 let rn_reg = register_to_dynasm(*rn)?;
 
@@ -1096,6 +1153,78 @@ mod tests {
             .assemble_instructions(&instructions)
             .expect("CSNEG encoding should succeed");
         disassemble_and_verify(&bytes, "csneg", &["x20", "x21", "x22", "ge"]);
+    }
+
+    #[test]
+    fn test_madd_correctness() {
+        let mut assembler = AArch64Assembler::new();
+        let instructions = vec![Instruction::Madd {
+            rd: Register::X0,
+            rn: Register::X1,
+            rm: Register::X2,
+            ra: Register::X3,
+        }];
+        let bytes = assembler
+            .assemble_instructions(&instructions)
+            .expect("MADD encoding should succeed");
+        disassemble_and_verify(&bytes, "madd", &["x0", "x1", "x2", "x3"]);
+    }
+
+    #[test]
+    fn test_msub_correctness() {
+        let mut assembler = AArch64Assembler::new();
+        let instructions = vec![Instruction::Msub {
+            rd: Register::X4,
+            rn: Register::X5,
+            rm: Register::X6,
+            ra: Register::X7,
+        }];
+        let bytes = assembler
+            .assemble_instructions(&instructions)
+            .expect("MSUB encoding should succeed");
+        disassemble_and_verify(&bytes, "msub", &["x4", "x5", "x6", "x7"]);
+    }
+
+    #[test]
+    fn test_mneg_correctness() {
+        let mut assembler = AArch64Assembler::new();
+        let instructions = vec![Instruction::Mneg {
+            rd: Register::X10,
+            rn: Register::X11,
+            rm: Register::X12,
+        }];
+        let bytes = assembler
+            .assemble_instructions(&instructions)
+            .expect("MNEG encoding should succeed");
+        disassemble_and_verify(&bytes, "mneg", &["x10", "x11", "x12"]);
+    }
+
+    #[test]
+    fn test_smulh_correctness() {
+        let mut assembler = AArch64Assembler::new();
+        let instructions = vec![Instruction::Smulh {
+            rd: Register::X13,
+            rn: Register::X14,
+            rm: Register::X15,
+        }];
+        let bytes = assembler
+            .assemble_instructions(&instructions)
+            .expect("SMULH encoding should succeed");
+        disassemble_and_verify(&bytes, "smulh", &["x13", "x14", "x15"]);
+    }
+
+    #[test]
+    fn test_umulh_correctness() {
+        let mut assembler = AArch64Assembler::new();
+        let instructions = vec![Instruction::Umulh {
+            rd: Register::X16,
+            rn: Register::X17,
+            rm: Register::X18,
+        }];
+        let bytes = assembler
+            .assemble_instructions(&instructions)
+            .expect("UMULH encoding should succeed");
+        disassemble_and_verify(&bytes, "umulh", &["x16", "x17", "x18"]);
     }
 
     #[test]

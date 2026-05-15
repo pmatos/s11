@@ -34,6 +34,10 @@ fn instruction_latency(instr: &Instruction) -> u64 {
         Instruction::Lsl { .. } | Instruction::Lsr { .. } | Instruction::Asr { .. } => 1,
         // Multiply has higher latency than simple ALU ops
         Instruction::Mul { .. } => 3,
+        // Multiply-accumulate fuses with the multiply pipeline
+        Instruction::Madd { .. } | Instruction::Msub { .. } | Instruction::Mneg { .. } => 3,
+        // High-half multiply: one extra cycle vs MUL on Cortex-A72/A76.
+        Instruction::Smulh { .. } | Instruction::Umulh { .. } => 4,
         // Division has the highest latency
         Instruction::Sdiv { .. } | Instruction::Udiv { .. } => 12,
         // Comparison instructions (just set flags)

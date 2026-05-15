@@ -86,6 +86,35 @@ pub enum Instruction {
         rm: Register,
     },
 
+    // Multiply-accumulate (rd = ra ± rn*rm) and high-half multiplies
+    Madd {
+        rd: Register,
+        rn: Register,
+        rm: Register,
+        ra: Register,
+    },
+    Msub {
+        rd: Register,
+        rn: Register,
+        rm: Register,
+        ra: Register,
+    },
+    Mneg {
+        rd: Register,
+        rn: Register,
+        rm: Register,
+    },
+    Smulh {
+        rd: Register,
+        rn: Register,
+        rm: Register,
+    },
+    Umulh {
+        rd: Register,
+        rn: Register,
+        rm: Register,
+    },
+
     // Comparison (set NZCV flags, no destination register)
     Cmp {
         rn: Register,
@@ -264,6 +293,11 @@ impl Instruction {
             | Instruction::Mul { rd, .. }
             | Instruction::Sdiv { rd, .. }
             | Instruction::Udiv { rd, .. }
+            | Instruction::Madd { rd, .. }
+            | Instruction::Msub { rd, .. }
+            | Instruction::Mneg { rd, .. }
+            | Instruction::Smulh { rd, .. }
+            | Instruction::Umulh { rd, .. }
             | Instruction::Csel { rd, .. }
             | Instruction::Csinc { rd, .. }
             | Instruction::Csinv { rd, .. }
@@ -368,6 +402,13 @@ impl Instruction {
             // MUL/SDIV/UDIV: always register operands, always encodable
             Instruction::Mul { .. } | Instruction::Sdiv { .. } | Instruction::Udiv { .. } => true,
 
+            // Multiply-accumulate family: always register operands, always encodable
+            Instruction::Madd { .. }
+            | Instruction::Msub { .. }
+            | Instruction::Mneg { .. }
+            | Instruction::Smulh { .. }
+            | Instruction::Umulh { .. } => true,
+
             // CMP/CMN immediate: 12-bit unsigned range
             Instruction::Cmp { rm, .. } | Instruction::Cmn { rm, .. } => match rm {
                 Operand::Register(_) => true,
@@ -460,6 +501,12 @@ impl Instruction {
             Instruction::Mul { rn, rm, .. }
             | Instruction::Sdiv { rn, rm, .. }
             | Instruction::Udiv { rn, rm, .. } => vec![*rn, *rm],
+            Instruction::Madd { rn, rm, ra, .. } | Instruction::Msub { rn, rm, ra, .. } => {
+                vec![*rn, *rm, *ra]
+            }
+            Instruction::Mneg { rn, rm, .. }
+            | Instruction::Smulh { rn, rm, .. }
+            | Instruction::Umulh { rn, rm, .. } => vec![*rn, *rm],
             // Comparison instructions read rn and rm (if register)
             Instruction::Cmp { rn, rm }
             | Instruction::Cmn { rn, rm }
@@ -534,6 +581,15 @@ impl fmt::Display for Instruction {
             Instruction::Mul { rd, rn, rm } => write!(f, "mul {}, {}, {}", rd, rn, rm),
             Instruction::Sdiv { rd, rn, rm } => write!(f, "sdiv {}, {}, {}", rd, rn, rm),
             Instruction::Udiv { rd, rn, rm } => write!(f, "udiv {}, {}, {}", rd, rn, rm),
+            Instruction::Madd { rd, rn, rm, ra } => {
+                write!(f, "madd {}, {}, {}, {}", rd, rn, rm, ra)
+            }
+            Instruction::Msub { rd, rn, rm, ra } => {
+                write!(f, "msub {}, {}, {}, {}", rd, rn, rm, ra)
+            }
+            Instruction::Mneg { rd, rn, rm } => write!(f, "mneg {}, {}, {}", rd, rn, rm),
+            Instruction::Smulh { rd, rn, rm } => write!(f, "smulh {}, {}, {}", rd, rn, rm),
+            Instruction::Umulh { rd, rn, rm } => write!(f, "umulh {}, {}, {}", rd, rn, rm),
             // Comparison instructions
             Instruction::Cmp { rn, rm } => write!(f, "cmp {}, {}", rn, rm),
             Instruction::Cmn { rn, rm } => write!(f, "cmn {}, {}", rn, rm),
@@ -1032,6 +1088,33 @@ mod tests {
                 rn: Register::X1,
                 rm: Register::X2,
             },
+            Instruction::Madd {
+                rd: Register::X0,
+                rn: Register::X1,
+                rm: Register::X2,
+                ra: Register::X3,
+            },
+            Instruction::Msub {
+                rd: Register::X0,
+                rn: Register::X1,
+                rm: Register::X2,
+                ra: Register::X3,
+            },
+            Instruction::Mneg {
+                rd: Register::X0,
+                rn: Register::X1,
+                rm: Register::X2,
+            },
+            Instruction::Smulh {
+                rd: Register::X0,
+                rn: Register::X1,
+                rm: Register::X2,
+            },
+            Instruction::Umulh {
+                rd: Register::X0,
+                rn: Register::X1,
+                rm: Register::X2,
+            },
             Instruction::Cmp {
                 rn: Register::X1,
                 rm: Operand::Immediate(1),
@@ -1187,5 +1270,21 @@ mod tests {
         assert_eq!(adds.source_registers(), vec![Register::X1, Register::X2]);
         assert!(adds.modifies_flags());
         assert!(!adds.reads_flags());
+
+        let madd = Instruction::Madd {
+            rd: Register::X0,
+            rn: Register::X1,
+            rm: Register::X2,
+            ra: Register::X3,
+        };
+        assert_eq!(madd.to_string(), "madd x0, x1, x2, x3");
+        assert_eq!(madd.destination(), Some(Register::X0));
+        assert_eq!(
+            madd.source_registers(),
+            vec![Register::X1, Register::X2, Register::X3]
+        );
+        assert!(!madd.modifies_flags());
+        assert!(!madd.reads_flags());
+        assert!(madd.is_encodable_aarch64());
     }
 }

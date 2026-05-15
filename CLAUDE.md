@@ -8,7 +8,7 @@ s11 is a superoptimizer written in Rust. It finds shorter or faster equivalent i
 
 **Key Features:**
 - ELF binary reading and disassembly using Capstone engine (auto-detects e_machine)
-- **AArch64** (20 instructions): MOV, ADD, SUB, AND, ORR, EOR, LSL, LSR, ASR, MUL, SDIV, UDIV, CMP, CMN, TST, CSEL, CSINC, CSINV, CSNEG — full pipeline including stochastic/symbolic/hybrid/LLM search
+- **AArch64** (25 instructions): MOV, ADD, SUB, AND, ORR, EOR, LSL, LSR, ASR, MUL, SDIV, UDIV, CMP, CMN, TST, CSEL, CSINC, CSINV, CSNEG, MADD, MSUB, MNEG, SMULH, UMULH — full pipeline including stochastic/symbolic/hybrid/LLM search
 - **x86-64 + x86-32** (14 variants, 7 mnemonics): MOV, ADD, SUB, AND, OR, XOR, CMP (each with reg/imm forms) — enumerative search only in v1
 - SMT-based equivalence checking using Z3 (width-parameterised for x86-32 vs x86-64)
 - Multi-threaded parallel search with worker coordination

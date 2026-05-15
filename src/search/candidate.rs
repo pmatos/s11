@@ -430,6 +430,11 @@ pub fn opcode_id(instr: &Instruction) -> u8 {
         Instruction::Rev { .. } => 39,
         Instruction::Rev32 { .. } => 40,
         Instruction::Rev16 { .. } => 41,
+        Instruction::Madd { .. } => 42,
+        Instruction::Msub { .. } => 43,
+        Instruction::Mneg { .. } => 44,
+        Instruction::Smulh { .. } => 45,
+        Instruction::Umulh { .. } => 46,
     }
 }
 
