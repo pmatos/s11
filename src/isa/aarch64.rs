@@ -489,14 +489,15 @@ impl InstructionGenerator<Instruction> for AArch64InstructionGenerator {
         registers: &[Register],
         immediates: &[i64],
     ) -> Instruction {
-        // 29 opcode slots: 0..13 original, 13..23 Tier 1 (slot 23 is a
+        // 30 opcode slots: 0..13 original, 13..23 Tier 1 (slot 23 is a
         // 4-way sub-multiplexer for ANDS/CSET/CSETM/ROR), 24 = MOVZ,
         // 25 = MOVK, 26 = single-source bit-manipulation (CLZ/CLS/RBIT/REV*)
         // 6-way sub-multiplexer, 27 = multiply-accumulate family (issue
         // #56: 5-way sub-multiplexer for MADD/MSUB/MNEG/SMULH/UMULH),
         // 28 = conditional-compare family (issue #57: 2-way
-        // sub-multiplexer for CCMP/CCMN).
-        let opcode = rng.random_range(0..29);
+        // sub-multiplexer for CCMP/CCMN), 29 = bit-field aliases (issue
+        // #61: 6-way sub-multiplexer for UBFX/SBFX/BFI/BFXIL/UBFIZ/SBFIZ).
+        let opcode = rng.random_range(0..30);
         let rd = registers[rng.random_range(0..registers.len())];
         let rn = registers[rng.random_range(0..registers.len())];
         let pick_reg = |rng: &mut R| registers[rng.random_range(0..registers.len())];
@@ -728,6 +729,68 @@ impl InstructionGenerator<Instruction> for AArch64InstructionGenerator {
                         nzcv,
                         cond,
                     }
+                }
+            }
+            // Bit-field aliases (issue #61: UBFX/SBFX/BFI/BFXIL/UBFIZ/SBFIZ).
+            // SP is illegal in both rd and rn; we pre-filter rather than retry
+            // so the release build has no infinite-spin path on a degenerate
+            // `[SP]`-only pool — that case falls back to the multiply-accumulate
+            // family (which tolerates any register). The 2D constraint
+            // `lsb + width <= 64` is enforced by sampling width AFTER lsb so
+            // width is bounded by `64 - lsb`.
+            29 => {
+                let non_sp: Vec<Register> = registers
+                    .iter()
+                    .copied()
+                    .filter(|r| *r != Register::SP)
+                    .collect();
+                if non_sp.is_empty() {
+                    let rm = pick_reg(rng);
+                    return Instruction::Mneg { rd, rn, rm };
+                }
+                let pick_non_sp = |rng: &mut R| non_sp[rng.random_range(0..non_sp.len())];
+                let bf_rd = pick_non_sp(rng);
+                let bf_rn = pick_non_sp(rng);
+                let lsb = (rng.random::<u32>() & 0x3F) as u8;
+                let max_w = 64 - lsb as u32;
+                let width = ((rng.random::<u32>() % max_w) + 1) as u8;
+                match rng.random_range(0..6) {
+                    0 => Instruction::Ubfx {
+                        rd: bf_rd,
+                        rn: bf_rn,
+                        lsb,
+                        width,
+                    },
+                    1 => Instruction::Sbfx {
+                        rd: bf_rd,
+                        rn: bf_rn,
+                        lsb,
+                        width,
+                    },
+                    2 => Instruction::Bfi {
+                        rd: bf_rd,
+                        rn: bf_rn,
+                        lsb,
+                        width,
+                    },
+                    3 => Instruction::Bfxil {
+                        rd: bf_rd,
+                        rn: bf_rn,
+                        lsb,
+                        width,
+                    },
+                    4 => Instruction::Ubfiz {
+                        rd: bf_rd,
+                        rn: bf_rn,
+                        lsb,
+                        width,
+                    },
+                    _ => Instruction::Sbfiz {
+                        rd: bf_rd,
+                        rn: bf_rn,
+                        lsb,
+                        width,
+                    },
                 }
             }
             _ => unreachable!(),
