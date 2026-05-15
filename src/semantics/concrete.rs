@@ -1869,12 +1869,22 @@ mod tests {
 
     #[test]
     fn test_ccmp_immediate_rm() {
-        let state = state_with(vec![(Register::X1, 31)]);
+        // Pre-condition Z=1 so EQ holds. The true branch computes
+        // 31 - 31 = 0, so the resulting Z must again be 1. Use EQ (not AL,
+        // which is_encodable_aarch64 rejects for CCMP) to keep the test
+        // consistent with the encoder contract.
+        let mut state = state_with(vec![(Register::X1, 31)]);
+        state.set_flags(ConditionFlags {
+            n: false,
+            z: true,
+            c: false,
+            v: false,
+        });
         let ccmp = Instruction::Ccmp {
             rn: Register::X1,
             rm: Operand::Immediate(31),
             nzcv: 0,
-            cond: Condition::AL,
+            cond: Condition::EQ,
         };
         let after = apply_instruction_concrete(state, &ccmp);
         assert!(after.get_flags().z);
