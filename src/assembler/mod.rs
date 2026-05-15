@@ -201,7 +201,6 @@ macro_rules! emit_ccmp_imm {
     }};
 }
 
-
 pub struct AArch64Assembler;
 
 impl AArch64Assembler {
@@ -707,9 +706,7 @@ impl AArch64Assembler {
                         emit_ccmp_imm!(ops, ccmp, rn_reg, *imm, *nzcv, *cond);
                     }
                     Operand::ShiftedRegister { .. } => {
-                        return Err(
-                            "CCMP does not support shifted-register operand".to_string()
-                        );
+                        return Err("CCMP does not support shifted-register operand".to_string());
                     }
                 }
                 Ok(())
@@ -731,9 +728,7 @@ impl AArch64Assembler {
                         emit_ccmp_imm!(ops, ccmn, rn_reg, *imm, *nzcv, *cond);
                     }
                     Operand::ShiftedRegister { .. } => {
-                        return Err(
-                            "CCMN does not support shifted-register operand".to_string()
-                        );
+                        return Err("CCMN does not support shifted-register operand".to_string());
                     }
                 }
                 Ok(())
