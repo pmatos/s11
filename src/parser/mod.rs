@@ -961,6 +961,8 @@ pub fn parse_line(line: &str) -> Result<LineResult, ParseLineError> {
             .map_err(ParseLineError::Other)?,
         "rev16" => parse_unary_rd_rn("rev16", &operands, |rd, rn| Instruction::Rev16 { rd, rn })
             .map_err(ParseLineError::Other)?,
+        "uxtb" => parse_unary_rd_rn("uxtb", &operands, |rd, rn| Instruction::Uxtb { rd, rn })
+            .map_err(ParseLineError::Other)?,
         _ => return Err(ParseLineError::UnknownInstruction(opcode)),
     };
 
@@ -1592,5 +1594,22 @@ mod tests {
         let missing = file.path().with_extension("missing");
         let err = parse_assembly_file(&missing).unwrap_err();
         assert!(err.to_string().contains("failed to read file"));
+    }
+
+    #[test]
+    fn parse_uxtb_standalone() {
+        // Issue #60: the standalone UXTB mnemonic produces Instruction::Uxtb.
+        let parsed = match parse_line("uxtb x0, x1").unwrap() {
+            LineResult::Instruction(instr) => instr,
+            LineResult::Skip => panic!("unexpected skip"),
+        };
+        assert_eq!(
+            parsed,
+            Instruction::Uxtb {
+                rd: Register::X0,
+                rn: Register::X1,
+            }
+        );
+        assert_eq!(format!("{}", parsed), "uxtb x0, x1");
     }
 }
