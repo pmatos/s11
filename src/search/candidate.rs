@@ -126,7 +126,11 @@ pub fn generate_all_instructions(registers: &[Register], immediates: &[i64]) -> 
                     ExtendKind::Sxtx,
                 ] {
                     for shift in 0u8..=4 {
-                        let er = Operand::ExtendedRegister { reg: rm, kind, shift };
+                        let er = Operand::ExtendedRegister {
+                            reg: rm,
+                            kind,
+                            shift,
+                        };
                         instrs.push(Instruction::Add { rd, rn, rm: er });
                         instrs.push(Instruction::Sub { rd, rn, rm: er });
                         instrs.push(Instruction::Cmp { rn, rm: er });
@@ -502,8 +506,9 @@ pub fn generate_random_instruction<R: rand::RngExt>(
                 // random_operand only returns Register/Immediate, but the
                 // compiler can't prove that — drop ShiftedRegister/Extended-
                 // Register to a plain register (CCMP rejects both forms).
-                Operand::ShiftedRegister { reg, .. }
-                | Operand::ExtendedRegister { reg, .. } => Operand::Register(reg),
+                Operand::ShiftedRegister { reg, .. } | Operand::ExtendedRegister { reg, .. } => {
+                    Operand::Register(reg)
+                }
             };
             let nzcv = (rng.random::<u32>() & 0x0F) as u8;
             let cond = crate::ir::types::Condition::random_normal(rng);

@@ -489,8 +489,8 @@ fn parse_movw_operands(mnem: &str, operands: &[&str]) -> Result<(Register, u16, 
         let s = match parse_operand(rest)? {
             Operand::Immediate(v) => v,
             Operand::Register(_)
-        | Operand::ShiftedRegister { .. }
-        | Operand::ExtendedRegister { .. } => {
+            | Operand::ShiftedRegister { .. }
+            | Operand::ExtendedRegister { .. } => {
                 return Err(format!("{} shift must be an immediate", mnem));
             }
         };
@@ -569,11 +569,7 @@ fn parse_shifted_register_tail(mnem: &str, reg: Register, tail: &str) -> Result<
 /// Parse the trailing extend modifier (`"<kind> #<shift>"`) attached to an
 /// extended-register operand. Returns the assembled `Operand::ExtendedRegister`.
 /// Shift is 0..=4 (the ARM ARM imm3 field). Issue #60.
-fn parse_extended_register_tail(
-    mnem: &str,
-    reg: Register,
-    tail: &str,
-) -> Result<Operand, String> {
+fn parse_extended_register_tail(mnem: &str, reg: Register, tail: &str) -> Result<Operand, String> {
     let tail = tail.trim();
     let mut parts = tail.splitn(2, char::is_whitespace);
     let kw = parts.next().unwrap_or("").trim();
