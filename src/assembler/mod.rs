@@ -379,9 +379,17 @@ impl AArch64Assembler {
                         )
                     }
                     Operand::ExtendedRegister { reg, kind, shift } => {
+                        // Use the XSP-flavoured register encoders for rd/rn:
+                        // the extended-register encoding's Rd/Rn slot is
+                        // `Xn|SP`, and XZR (also reg 31) would otherwise
+                        // silently alias to SP. The encodability gate also
+                        // rejects XZR/SP for ExtendedRegister, so this is
+                        // belt-and-braces. Issue #60 (codex review on #144).
+                        let rd_xsp = register_to_dynasm_xsp(*rd)?;
+                        let rn_xsp = register_to_dynasm_xsp(*rn)?;
                         let rm_reg_num = register_to_dynasm(*reg)?;
                         emit_extended_reg_3op_arith!(
-                            ops, add, rd_reg, rn_reg, rm_reg_num, kind, *shift
+                            ops, add, rd_xsp, rn_xsp, rm_reg_num, kind, *shift
                         )
                     }
                 }
@@ -417,9 +425,13 @@ impl AArch64Assembler {
                         )
                     }
                     Operand::ExtendedRegister { reg, kind, shift } => {
+                        // See the ADD arm for why we re-fetch rd/rn via
+                        // register_to_dynasm_xsp. Issue #60.
+                        let rd_xsp = register_to_dynasm_xsp(*rd)?;
+                        let rn_xsp = register_to_dynasm_xsp(*rn)?;
                         let rm_reg_num = register_to_dynasm(*reg)?;
                         emit_extended_reg_3op_arith!(
-                            ops, sub, rd_reg, rn_reg, rm_reg_num, kind, *shift
+                            ops, sub, rd_xsp, rn_xsp, rm_reg_num, kind, *shift
                         )
                     }
                 }
@@ -732,8 +744,12 @@ impl AArch64Assembler {
                         emit_shifted_reg_2op_arith!(ops, cmp, rn_reg, rm_reg_num, kind, *amount)
                     }
                     Operand::ExtendedRegister { reg, kind, shift } => {
+                        // See the ADD ExtendedRegister arm — XSP-flavoured
+                        // rn encoder rejects XZR (which would alias to SP).
+                        // Issue #60 (codex review on #144).
+                        let rn_xsp = register_to_dynasm_xsp(*rn)?;
                         let rm_reg_num = register_to_dynasm(*reg)?;
-                        emit_extended_reg_2op_arith!(ops, cmp, rn_reg, rm_reg_num, kind, *shift)
+                        emit_extended_reg_2op_arith!(ops, cmp, rn_xsp, rm_reg_num, kind, *shift)
                     }
                 }
             }
@@ -764,8 +780,11 @@ impl AArch64Assembler {
                         emit_shifted_reg_2op_arith!(ops, cmn, rn_reg, rm_reg_num, kind, *amount)
                     }
                     Operand::ExtendedRegister { reg, kind, shift } => {
+                        // XSP-flavoured rn encoder rejects XZR. See ADD.
+                        // Issue #60 (codex review on #144).
+                        let rn_xsp = register_to_dynasm_xsp(*rn)?;
                         let rm_reg_num = register_to_dynasm(*reg)?;
-                        emit_extended_reg_2op_arith!(ops, cmn, rn_reg, rm_reg_num, kind, *shift)
+                        emit_extended_reg_2op_arith!(ops, cmn, rn_xsp, rm_reg_num, kind, *shift)
                     }
                 }
             }
