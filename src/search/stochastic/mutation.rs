@@ -418,6 +418,13 @@ impl Mutator {
             Instruction::MovZ { rd, imm, shift } => match rng.random_range(0..4) {
                 0 => Instruction::MovN { rd, imm, shift },
                 1 => Instruction::MovK { rd, imm, shift },
+                // MovZ → MovImm uses the raw u16 `imm`, NOT `imm << shift`. We
+                // deliberately discard the shift here: MCMC is exploring the
+                // value space, and binding the new MovImm to the shifted bit
+                // pattern would only widen `MovImm`'s effective range beyond
+                // its 0..=0xFFFF encoding window. The neighbouring MovImm has
+                // its own per-field mutator that will refine `imm` on later
+                // steps.
                 2 => Instruction::MovImm {
                     rd,
                     imm: imm as i64,
