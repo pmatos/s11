@@ -419,12 +419,14 @@ impl InstructionGenerator<Instruction> for AArch64InstructionGenerator {
         registers: &[Register],
         immediates: &[i64],
     ) -> Instruction {
-        // 28 opcode slots: 0..13 original, 13..23 Tier 1 (slot 23 is a
+        // 29 opcode slots: 0..13 original, 13..23 Tier 1 (slot 23 is a
         // 4-way sub-multiplexer for ANDS/CSET/CSETM/ROR), 24 = MOVZ,
         // 25 = MOVK, 26 = single-source bit-manipulation (CLZ/CLS/RBIT/REV*)
         // 6-way sub-multiplexer, 27 = multiply-accumulate family (issue
-        // #56: 5-way sub-multiplexer for MADD/MSUB/MNEG/SMULH/UMULH).
-        let opcode = rng.random_range(0..28);
+        // #56: 5-way sub-multiplexer for MADD/MSUB/MNEG/SMULH/UMULH),
+        // 28 = conditional-compare family (issue #57: 2-way
+        // sub-multiplexer for CCMP/CCMN).
+        let opcode = rng.random_range(0..29);
         let rd = registers[rng.random_range(0..registers.len())];
         let rn = registers[rng.random_range(0..registers.len())];
         let pick_reg = |rng: &mut R| registers[rng.random_range(0..registers.len())];
@@ -611,6 +613,44 @@ impl InstructionGenerator<Instruction> for AArch64InstructionGenerator {
                     2 => Instruction::Mneg { rd, rn, rm },
                     3 => Instruction::Smulh { rd, rn, rm },
                     _ => Instruction::Umulh { rd, rn, rm },
+                }
+            }
+            // Conditional-compare family (CCMP/CCMN). `is_encodable_aarch64`
+            // forbids SP in `rn` and forbids AL/NV; mirror those in the
+            // sampler to keep the emitted candidates encodable.
+            28 => {
+                debug_assert!(
+                    registers.iter().any(|r| *r != Register::SP),
+                    "CCMP/CCMN random generator requires at least one non-SP register",
+                );
+                let pick_non_sp = |rng: &mut R| loop {
+                    let r = pick_reg(rng);
+                    if r != Register::SP {
+                        break r;
+                    }
+                };
+                let ccmp_rn = pick_non_sp(rng);
+                let rm = if rng.random_bool(0.5) {
+                    Operand::Register(pick_non_sp(rng))
+                } else {
+                    Operand::Immediate(pick_imm(rng).rem_euclid(32))
+                };
+                let nzcv = (rng.random::<u32>() & 0x0F) as u8;
+                let cond = Condition::random_normal(rng);
+                if rng.random_bool(0.5) {
+                    Instruction::Ccmp {
+                        rn: ccmp_rn,
+                        rm,
+                        nzcv,
+                        cond,
+                    }
+                } else {
+                    Instruction::Ccmn {
+                        rn: ccmp_rn,
+                        rm,
+                        nzcv,
+                        cond,
+                    }
                 }
             }
             _ => unreachable!(),
@@ -1083,11 +1123,12 @@ impl InstructionGenerator<Instruction> for AArch64InstructionGenerator {
     /// holds, but the random-generation distribution is not uniform across
     /// all 42 IDs.
     fn opcode_count(&self) -> u8 {
-        47 // 20 original + 14 Tier 1 (MVN, NEG, NEGS, MovN, BIC, BICS, ORN,
+        49 // 20 original + 14 Tier 1 (MVN, NEG, NEGS, MovN, BIC, BICS, ORN,
         //  EON, ADDS, SUBS, ANDS, CSET, CSETM, ROR) + 2 MOVK/MOVZ (issue
         //  #55) + 6 single-source bit-manipulation (CLZ, CLS, RBIT, REV,
         //  REV32, REV16) + 5 multiply-accumulate family (issue #56:
-        //  MADD, MSUB, MNEG, SMULH, UMULH).
+        //  MADD, MSUB, MNEG, SMULH, UMULH) + 2 conditional-compare
+        //  family (issue #57: CCMP, CCMN).
     }
 }
 
@@ -1373,6 +1414,18 @@ mod tests {
                 rn: Register::X1,
                 rm: Register::X2,
             },
+            Instruction::Ccmp {
+                rn: Register::X1,
+                rm: Operand::Register(Register::X2),
+                nzcv: 0,
+                cond: Condition::EQ,
+            },
+            Instruction::Ccmn {
+                rn: Register::X1,
+                rm: Operand::Immediate(5),
+                nzcv: 0,
+                cond: Condition::EQ,
+            },
         ]
     }
 
@@ -1528,6 +1581,8 @@ mod tests {
                         | Instruction::Adds { .. }
                         | Instruction::Subs { .. }
                         | Instruction::Ands { .. }
+                        | Instruction::Ccmp { .. }
+                        | Instruction::Ccmn { .. }
                 );
                 assert_eq!(instr.has_side_effects(), should_update_flags);
                 id
