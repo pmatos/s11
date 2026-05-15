@@ -1286,5 +1286,57 @@ mod tests {
         assert!(!madd.modifies_flags());
         assert!(!madd.reads_flags());
         assert!(madd.is_encodable_aarch64());
+
+        let msub = Instruction::Msub {
+            rd: Register::X0,
+            rn: Register::X1,
+            rm: Register::X2,
+            ra: Register::X3,
+        };
+        assert_eq!(msub.to_string(), "msub x0, x1, x2, x3");
+        assert_eq!(msub.destination(), Some(Register::X0));
+        assert_eq!(
+            msub.source_registers(),
+            vec![Register::X1, Register::X2, Register::X3]
+        );
+        assert!(!msub.modifies_flags());
+        assert!(!msub.reads_flags());
+        assert!(msub.is_encodable_aarch64());
+
+        let mneg = Instruction::Mneg {
+            rd: Register::X0,
+            rn: Register::X1,
+            rm: Register::X2,
+        };
+        assert_eq!(mneg.to_string(), "mneg x0, x1, x2");
+        assert_eq!(mneg.destination(), Some(Register::X0));
+        assert_eq!(mneg.source_registers(), vec![Register::X1, Register::X2]);
+        assert!(!mneg.modifies_flags());
+        assert!(!mneg.reads_flags());
+        assert!(mneg.is_encodable_aarch64());
+
+        let smulh = Instruction::Smulh {
+            rd: Register::X0,
+            rn: Register::X1,
+            rm: Register::X2,
+        };
+        assert_eq!(smulh.to_string(), "smulh x0, x1, x2");
+        assert_eq!(smulh.destination(), Some(Register::X0));
+        assert_eq!(smulh.source_registers(), vec![Register::X1, Register::X2]);
+        assert!(!smulh.modifies_flags());
+        assert!(!smulh.reads_flags());
+        assert!(smulh.is_encodable_aarch64());
+
+        let umulh = Instruction::Umulh {
+            rd: Register::X0,
+            rn: Register::X1,
+            rm: Register::X2,
+        };
+        assert_eq!(umulh.to_string(), "umulh x0, x1, x2");
+        assert_eq!(umulh.destination(), Some(Register::X0));
+        assert_eq!(umulh.source_registers(), vec![Register::X1, Register::X2]);
+        assert!(!umulh.modifies_flags());
+        assert!(!umulh.reads_flags());
+        assert!(umulh.is_encodable_aarch64());
     }
 }
