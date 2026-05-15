@@ -220,6 +220,57 @@ pub fn generate_all_instructions(registers: &[Register], immediates: &[i64]) -> 
         }
     }
 
+    // CCMP / CCMN: nested loops over register pairs × NORMAL_CONDITIONS ×
+    // a representative nzcv subset × {register, imm5} for `rm`. Keep the
+    // nzcv and imm5 samples bounded so the combined space stays around
+    // ~120k candidates total — already inside the enumerative budget.
+    const CCMP_NZCV_SAMPLES: [u8; 4] = [0, 1, 7, 15];
+    const CCMP_IMM5_SAMPLES: [i64; 4] = [0, 1, 16, 31];
+    for &rn in registers {
+        if rn == Register::SP {
+            continue;
+        }
+        for &rm_reg in registers {
+            if rm_reg == Register::SP {
+                continue;
+            }
+            for cond in crate::ir::types::NORMAL_CONDITIONS {
+                for &nzcv in &CCMP_NZCV_SAMPLES {
+                    instrs.push(Instruction::Ccmp {
+                        rn,
+                        rm: Operand::Register(rm_reg),
+                        nzcv,
+                        cond,
+                    });
+                    instrs.push(Instruction::Ccmn {
+                        rn,
+                        rm: Operand::Register(rm_reg),
+                        nzcv,
+                        cond,
+                    });
+                }
+            }
+        }
+        for &imm in &CCMP_IMM5_SAMPLES {
+            for cond in crate::ir::types::NORMAL_CONDITIONS {
+                for &nzcv in &CCMP_NZCV_SAMPLES {
+                    instrs.push(Instruction::Ccmp {
+                        rn,
+                        rm: Operand::Immediate(imm),
+                        nzcv,
+                        cond,
+                    });
+                    instrs.push(Instruction::Ccmn {
+                        rn,
+                        rm: Operand::Immediate(imm),
+                        nzcv,
+                        cond,
+                    });
+                }
+            }
+        }
+    }
+
     instrs
 }
 
@@ -239,7 +290,7 @@ pub fn generate_random_instruction<R: rand::RngExt>(
     let rd = registers[rng.random_range(0..registers.len())];
     let pick_reg = |rng: &mut R| registers[rng.random_range(0..registers.len())];
 
-    match rng.random_range(0..28) {
+    match rng.random_range(0..30) {
         0 => {
             let imm = if immediates.is_empty() {
                 0
@@ -392,6 +443,29 @@ pub fn generate_random_instruction<R: rand::RngExt>(
                 _ => Instruction::Rev16 { rd, rn },
             }
         }
+        // CCMP / CCMN: conditional compare. The dispatch picks Ccmp or Ccmn
+        // uniformly; the rm operand is sampled via random_operand and then
+        // clamped/coerced to a valid 5-bit immediate if it lands on the
+        // immediate side. nzcv is a 4-bit literal; cond from NORMAL_CONDITIONS.
+        27 => {
+            let rn = pick_reg(rng);
+            let rm_raw = random_operand(rng, registers, immediates);
+            let rm = match rm_raw {
+                Operand::Register(r) => Operand::Register(r),
+                Operand::Immediate(v) => Operand::Immediate(v.rem_euclid(32)),
+                // random_operand only returns Register/Immediate, but the
+                // compiler can't prove that — drop ShiftedRegister to a plain
+                // register (CCMP rejects shifted form anyway).
+                Operand::ShiftedRegister { reg, .. } => Operand::Register(reg),
+            };
+            let nzcv = (rng.random::<u32>() & 0x0F) as u8;
+            let cond = crate::ir::types::Condition::random_normal(rng);
+            if rng.random_bool(0.5) {
+                Instruction::Ccmp { rn, rm, nzcv, cond }
+            } else {
+                Instruction::Ccmn { rn, rm, nzcv, cond }
+            }
+        }
         // Multiply-accumulate family: MADD/MSUB (4-operand) and MNEG/SMULH/UMULH (3-operand).
         _ => {
             let rn = pick_reg(rng);
@@ -504,6 +578,8 @@ pub fn opcode_id(instr: &Instruction) -> u8 {
         Instruction::Mneg { .. } => 44,
         Instruction::Smulh { .. } => 45,
         Instruction::Umulh { .. } => 46,
+        Instruction::Ccmp { .. } => 47,
+        Instruction::Ccmn { .. } => 48,
     }
 }
 

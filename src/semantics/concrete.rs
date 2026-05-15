@@ -169,6 +169,31 @@ pub fn apply_instruction_concrete(
             };
             state.set_flags(flags);
         }
+        // CCMP: conditional compare (subtract). If `cond` holds at runtime,
+        // set NZCV from `rn - operand(rm)` exactly like CMP; otherwise force
+        // NZCV to the 4-bit immediate.
+        Instruction::Ccmp { rn, rm, nzcv, cond } => {
+            let flags = if evaluate_condition(&state, *cond) {
+                let lhs = state.get_register(*rn).as_u64();
+                let rhs = eval_operand(&state, rm).as_u64();
+                ConditionFlags::from_sub(lhs, rhs, lhs.wrapping_sub(rhs))
+            } else {
+                unpack_nzcv(*nzcv)
+            };
+            state.set_flags(flags);
+        }
+        // CCMN: conditional compare negative (add). Same as CCMP but with
+        // addition for the true branch.
+        Instruction::Ccmn { rn, rm, nzcv, cond } => {
+            let flags = if evaluate_condition(&state, *cond) {
+                let lhs = state.get_register(*rn).as_u64();
+                let rhs = eval_operand(&state, rm).as_u64();
+                ConditionFlags::from_add(lhs, rhs, lhs.wrapping_add(rhs))
+            } else {
+                unpack_nzcv(*nzcv)
+            };
+            state.set_flags(flags);
+        }
         // CSEL: Conditional select
         Instruction::Csel { rd, rn, rm, cond } => {
             let cond_true = evaluate_condition(&state, *cond);
@@ -367,6 +392,18 @@ pub fn apply_instruction_concrete(
 }
 
 /// Evaluate a condition code against the current flags
+/// Unpack a 4-bit NZCV literal (CCMP/CCMN false-branch flag value) into the
+/// `ConditionFlags` struct. Layout per ARM ARM: bit3 = N, bit2 = Z, bit1 = C,
+/// bit0 = V.
+fn unpack_nzcv(byte: u8) -> ConditionFlags {
+    ConditionFlags {
+        n: (byte >> 3) & 1 == 1,
+        z: (byte >> 2) & 1 == 1,
+        c: (byte >> 1) & 1 == 1,
+        v: byte & 1 == 1,
+    }
+}
+
 fn evaluate_condition(state: &ConcreteMachineState, cond: Condition) -> bool {
     let flags = state.get_flags();
     match cond {
@@ -400,31 +437,54 @@ pub fn apply_sequence_concrete(
     state
 }
 
-/// Check if two concrete states are equal for the specified live-out registers
+/// Check if two concrete states are equal for the specified live-out registers,
+/// optionally including the NZCV condition flags.
 pub fn states_equal_for_live_out(
     state1: &ConcreteMachineState,
     state2: &ConcreteMachineState,
     live_out: &LiveOutRegisters,
+    flags_live: bool,
 ) -> bool {
     for reg in live_out.iter() {
         if state1.get_register(*reg) != state2.get_register(*reg) {
             return false;
         }
     }
+    if flags_live && state1.get_flags() != state2.get_flags() {
+        return false;
+    }
     true
 }
 
-/// Find the first differing register between two states for live-out registers
+/// Find the first differing register between two states for live-out registers.
+/// Flag divergence (when `flags_live` is set) is reported via the `XZR`
+/// sentinel since the function signature is register-typed.
 pub fn find_first_difference(
     state1: &ConcreteMachineState,
     state2: &ConcreteMachineState,
     live_out: &LiveOutRegisters,
+    flags_live: bool,
 ) -> Option<(Register, ConcreteValue, ConcreteValue)> {
     for reg in live_out.iter() {
         let v1 = state1.get_register(*reg);
         let v2 = state2.get_register(*reg);
         if v1 != v2 {
             return Some((*reg, v1, v2));
+        }
+    }
+    if flags_live {
+        let f1 = state1.get_flags();
+        let f2 = state2.get_flags();
+        if f1 != f2 {
+            // Pack each flag set into a ConcreteValue so the return type stays
+            // (Register, ConcreteValue, ConcreteValue). Layout: N<<3 | Z<<2 | C<<1 | V.
+            // The XZR register slot signals "this difference is a flag, not a register."
+            let pack = |f: crate::semantics::state::ConditionFlags| -> ConcreteValue {
+                ConcreteValue(
+                    ((f.n as u64) << 3) | ((f.z as u64) << 2) | ((f.c as u64) << 1) | (f.v as u64),
+                )
+            };
+            return Some((Register::XZR, pack(f1), pack(f2)));
         }
     }
     None
@@ -768,7 +828,9 @@ mod tests {
         let state2 = state_with(vec![(Register::X0, 42), (Register::X1, 999)]);
 
         let live_out = LiveOutRegisters::from_registers(vec![Register::X0]);
-        assert!(states_equal_for_live_out(&state1, &state2, &live_out));
+        assert!(states_equal_for_live_out(
+            &state1, &state2, &live_out, false
+        ));
     }
 
     #[test]
@@ -777,7 +839,9 @@ mod tests {
         let state2 = state_with(vec![(Register::X0, 43)]);
 
         let live_out = LiveOutRegisters::from_registers(vec![Register::X0]);
-        assert!(!states_equal_for_live_out(&state1, &state2, &live_out));
+        assert!(!states_equal_for_live_out(
+            &state1, &state2, &live_out, false
+        ));
     }
 
     #[test]
@@ -786,7 +850,7 @@ mod tests {
         let state2 = state_with(vec![(Register::X0, 42), (Register::X1, 200)]);
 
         let live_out = LiveOutRegisters::from_registers(vec![Register::X0, Register::X1]);
-        let diff = find_first_difference(&state1, &state2, &live_out);
+        let diff = find_first_difference(&state1, &state2, &live_out, false);
         assert!(diff.is_some());
         let (reg, v1, v2) = diff.unwrap();
         assert_eq!(reg, Register::X1);
@@ -800,7 +864,7 @@ mod tests {
         let state2 = state_with(vec![(Register::X0, 42)]);
 
         let live_out = LiveOutRegisters::from_registers(vec![Register::X0]);
-        let diff = find_first_difference(&state1, &state2, &live_out);
+        let diff = find_first_difference(&state1, &state2, &live_out, false);
         assert!(diff.is_none());
     }
 
@@ -822,7 +886,9 @@ mod tests {
         let state2 = apply_sequence_concrete(state, &seq2);
 
         let live_out = LiveOutRegisters::from_registers(vec![Register::X0]);
-        assert!(states_equal_for_live_out(&state1, &state2, &live_out));
+        assert!(states_equal_for_live_out(
+            &state1, &state2, &live_out, false
+        ));
     }
 
     #[test]
@@ -1696,5 +1762,121 @@ mod tests {
                 input
             );
         }
+    }
+
+    #[test]
+    fn test_unpack_nzcv_bit_packing() {
+        // bit3 = N, bit2 = Z, bit1 = C, bit0 = V.
+        assert_eq!(
+            unpack_nzcv(0b1010),
+            ConditionFlags {
+                n: true,
+                z: false,
+                c: true,
+                v: false
+            }
+        );
+        assert_eq!(unpack_nzcv(0), ConditionFlags::default());
+        assert_eq!(
+            unpack_nzcv(0b1111),
+            ConditionFlags {
+                n: true,
+                z: true,
+                c: true,
+                v: true
+            }
+        );
+    }
+
+    #[test]
+    fn test_ccmp_true_branch_matches_cmp() {
+        // Pre-condition: Z=1 (so EQ holds). CCMP X1, X2, #0, EQ must then
+        // behave like CMP X1, X2.
+        let mut state = state_with(vec![(Register::X1, 7), (Register::X2, 3)]);
+        state.set_flags(ConditionFlags {
+            n: false,
+            z: true,
+            c: false,
+            v: false,
+        });
+        let ccmp = Instruction::Ccmp {
+            rn: Register::X1,
+            rm: Operand::Register(Register::X2),
+            nzcv: 0,
+            cond: Condition::EQ,
+        };
+        let after = apply_instruction_concrete(state.clone(), &ccmp);
+        let cmp = Instruction::Cmp {
+            rn: Register::X1,
+            rm: Operand::Register(Register::X2),
+        };
+        let after_cmp = apply_instruction_concrete(state, &cmp);
+        assert_eq!(after.get_flags(), after_cmp.get_flags());
+    }
+
+    #[test]
+    fn test_ccmp_false_branch_uses_nzcv_literal() {
+        // Pre-condition: Z=0 (so EQ does NOT hold). CCMP must install the
+        // 4-bit nzcv immediate as the new flag set.
+        let mut state = state_with(vec![(Register::X1, 7), (Register::X2, 3)]);
+        state.set_flags(ConditionFlags {
+            n: false,
+            z: false,
+            c: false,
+            v: false,
+        });
+        let ccmp = Instruction::Ccmp {
+            rn: Register::X1,
+            rm: Operand::Register(Register::X2),
+            nzcv: 0b1010, // N=1, Z=0, C=1, V=0
+            cond: Condition::EQ,
+        };
+        let after = apply_instruction_concrete(state, &ccmp);
+        assert_eq!(
+            after.get_flags(),
+            ConditionFlags {
+                n: true,
+                z: false,
+                c: true,
+                v: false
+            }
+        );
+    }
+
+    #[test]
+    fn test_ccmn_true_branch_matches_cmn() {
+        let mut state = state_with(vec![(Register::X1, 5), (Register::X2, 0)]);
+        state.set_flags(ConditionFlags {
+            n: false,
+            z: true,
+            c: false,
+            v: false,
+        });
+        let ccmn = Instruction::Ccmn {
+            rn: Register::X1,
+            rm: Operand::Register(Register::X2),
+            nzcv: 0,
+            cond: Condition::EQ,
+        };
+        let after = apply_instruction_concrete(state.clone(), &ccmn);
+        let cmn = Instruction::Cmn {
+            rn: Register::X1,
+            rm: Operand::Register(Register::X2),
+        };
+        let after_cmn = apply_instruction_concrete(state, &cmn);
+        assert_eq!(after.get_flags(), after_cmn.get_flags());
+    }
+
+    #[test]
+    fn test_ccmp_immediate_rm() {
+        let state = state_with(vec![(Register::X1, 31)]);
+        let ccmp = Instruction::Ccmp {
+            rn: Register::X1,
+            rm: Operand::Immediate(31),
+            nzcv: 0,
+            cond: Condition::AL,
+        };
+        let after = apply_instruction_concrete(state, &ccmp);
+        assert!(after.get_flags().z);
     }
 }

@@ -42,6 +42,8 @@ fn instruction_latency(instr: &Instruction) -> u64 {
         Instruction::Sdiv { .. } | Instruction::Udiv { .. } => 12,
         // Comparison instructions (just set flags)
         Instruction::Cmp { .. } | Instruction::Cmn { .. } | Instruction::Tst { .. } => 1,
+        // Conditional comparisons (read NZCV, write NZCV)
+        Instruction::Ccmp { .. } | Instruction::Ccmn { .. } => 1,
         // Conditional selects
         Instruction::Csel { .. }
         | Instruction::Csinc { .. }

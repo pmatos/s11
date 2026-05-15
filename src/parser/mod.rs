@@ -768,6 +768,52 @@ fn parse_tst(operands: &[&str]) -> Result<Instruction, String> {
     Ok(Instruction::Tst { rn, rm })
 }
 
+/// Parse CCMP instruction: `ccmp Xn, <Xm | #imm5>, #nzcv, cond`.
+fn parse_ccmp(operands: &[&str]) -> Result<Instruction, String> {
+    parse_ccmp_like(operands, "ccmp").map(|(rn, rm, nzcv, cond)| Instruction::Ccmp {
+        rn,
+        rm,
+        nzcv,
+        cond,
+    })
+}
+
+/// Parse CCMN instruction: `ccmn Xn, <Xm | #imm5>, #nzcv, cond`.
+fn parse_ccmn(operands: &[&str]) -> Result<Instruction, String> {
+    parse_ccmp_like(operands, "ccmn").map(|(rn, rm, nzcv, cond)| Instruction::Ccmn {
+        rn,
+        rm,
+        nzcv,
+        cond,
+    })
+}
+
+fn parse_ccmp_like(
+    operands: &[&str],
+    mnem: &str,
+) -> Result<(Register, Operand, u8, Condition), String> {
+    if operands.len() != 4 {
+        return Err(format!(
+            "{} requires 4 operands, got {}",
+            mnem,
+            operands.len()
+        ));
+    }
+    let rn = parse_register(operands[0])?;
+    let rm = parse_operand(operands[1])?;
+    if let Operand::Immediate(imm) = rm {
+        if !(0..=31).contains(&imm) {
+            return Err(format!("{} imm5 {} out of range (0..=31)", mnem, imm));
+        }
+    }
+    let nzcv_raw = parse_immediate(operands[2])?;
+    if !(0..=15).contains(&nzcv_raw) {
+        return Err(format!("{} nzcv {} out of range (0..=15)", mnem, nzcv_raw));
+    }
+    let cond = parse_condition(operands[3])?;
+    Ok((rn, rm, nzcv_raw as u8, cond))
+}
+
 /// Parse CSEL instruction
 fn parse_csel(operands: &[&str]) -> Result<Instruction, String> {
     if operands.len() != 4 {
@@ -881,6 +927,8 @@ pub fn parse_line(line: &str) -> Result<LineResult, ParseLineError> {
         "cmp" => parse_cmp(&operands).map_err(ParseLineError::Other)?,
         "cmn" => parse_cmn(&operands).map_err(ParseLineError::Other)?,
         "tst" => parse_tst(&operands).map_err(ParseLineError::Other)?,
+        "ccmp" => parse_ccmp(&operands).map_err(ParseLineError::Other)?,
+        "ccmn" => parse_ccmn(&operands).map_err(ParseLineError::Other)?,
         "csel" => parse_csel(&operands).map_err(ParseLineError::Other)?,
         "csinc" => parse_csinc(&operands).map_err(ParseLineError::Other)?,
         "csinv" => parse_csinv(&operands).map_err(ParseLineError::Other)?,
@@ -1398,6 +1446,20 @@ mod tests {
     }
 
     #[test]
+    fn parse_ccmp_rejects_out_of_range_nzcv() {
+        let line = "ccmp x1, x2, #16, eq";
+        let result = parse_line(line);
+        assert!(result.is_err(), "nzcv > 15 must be rejected");
+    }
+
+    #[test]
+    fn parse_ccmp_rejects_out_of_range_imm5() {
+        let line = "ccmp x1, #32, #0, eq";
+        let result = parse_line(line);
+        assert!(result.is_err(), "imm5 > 31 must be rejected");
+    }
+
+    #[test]
     fn parse_line_covers_all_core_mnemonics() {
         let cases = [
             ("sub x0, x1, #3", "sub x0, x1, #3"),
@@ -1418,6 +1480,9 @@ mod tests {
             ("cmp x1, #5", "cmp x1, #5"),
             ("cmn x1, x2", "cmn x1, x2"),
             ("tst x1, x2", "tst x1, x2"),
+            ("ccmp x1, x2, #5, eq", "ccmp x1, x2, #5, eq"),
+            ("ccmp x1, #15, #3, ne", "ccmp x1, #15, #3, ne"),
+            ("ccmn x1, x2, #0, lt", "ccmn x1, x2, #0, lt"),
             ("csinc x0, x1, x2, ne", "csinc x0, x1, x2, ne"),
             ("csinv x0, x1, x2, lt", "csinv x0, x1, x2, lt"),
             ("csneg x0, x1, x2, ge", "csneg x0, x1, x2, ge"),

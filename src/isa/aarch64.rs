@@ -155,6 +155,8 @@ impl InstructionType for Instruction {
             Instruction::Mneg { .. } => 44,
             Instruction::Smulh { .. } => 45,
             Instruction::Umulh { .. } => 46,
+            Instruction::Ccmp { .. } => 47,
+            Instruction::Ccmn { .. } => 48,
         }
     }
 
@@ -206,6 +208,8 @@ impl InstructionType for Instruction {
             Instruction::Mneg { .. } => "mneg",
             Instruction::Smulh { .. } => "smulh",
             Instruction::Umulh { .. } => "umulh",
+            Instruction::Ccmp { .. } => "ccmp",
+            Instruction::Ccmn { .. } => "ccmn",
         }
     }
 
@@ -673,9 +677,11 @@ impl InstructionGenerator<Instruction> for AArch64InstructionGenerator {
                     Instruction::Smulh { rn, rm, .. } => Instruction::Smulh { rd: new_rd, rn, rm },
                     Instruction::Umulh { rn, rm, .. } => Instruction::Umulh { rd: new_rd, rn, rm },
                     // Comparison instructions have no destination - generate random instead
-                    Instruction::Cmp { .. } | Instruction::Cmn { .. } | Instruction::Tst { .. } => {
-                        self.generate_random(rng, registers, immediates)
-                    }
+                    Instruction::Cmp { .. }
+                    | Instruction::Cmn { .. }
+                    | Instruction::Tst { .. }
+                    | Instruction::Ccmp { .. }
+                    | Instruction::Ccmn { .. } => self.generate_random(rng, registers, immediates),
                     // Conditional select instructions
                     Instruction::Csel { rn, rm, cond, .. } => Instruction::Csel {
                         rd: new_rd,
@@ -877,6 +883,27 @@ impl InstructionGenerator<Instruction> for AArch64InstructionGenerator {
                         let new_rm =
                             Operand::Register(registers[rng.random_range(0..registers.len())]);
                         Instruction::Tst { rn, rm: new_rm }
+                    }
+                    // CCMP / CCMN: pick a new rm (register or imm5). The
+                    // dedicated mutate_operand path in
+                    // `search/stochastic/mutation.rs` covers nzcv and cond.
+                    Instruction::Ccmp { rn, rm, nzcv, cond } => {
+                        let new_rm = mutate_operand(rng, rm, registers, immediates);
+                        Instruction::Ccmp {
+                            rn,
+                            rm: new_rm,
+                            nzcv,
+                            cond,
+                        }
+                    }
+                    Instruction::Ccmn { rn, rm, nzcv, cond } => {
+                        let new_rm = mutate_operand(rng, rm, registers, immediates);
+                        Instruction::Ccmn {
+                            rn,
+                            rm: new_rm,
+                            nzcv,
+                            cond,
+                        }
                     }
                     // Conditional select - change operands
                     Instruction::Csel { rd, rn, cond, .. } => {

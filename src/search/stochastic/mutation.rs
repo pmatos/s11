@@ -224,6 +224,16 @@ impl Mutator {
                     }
                 }
             }
+            // CCMP / CCMN: rn (register), rm (operand), nzcv (0..=15), cond.
+            // Uniform pick among the four mutable fields.
+            Instruction::Ccmp { rn, rm, nzcv, cond } | Instruction::Ccmn { rn, rm, nzcv, cond } => {
+                match rng.random_range(0..4) {
+                    0 => *rn = self.random_register(rng),
+                    1 => *rm = self.random_operand(rng),
+                    2 => *nzcv = (rng.random::<u32>() & 0x0F) as u8,
+                    _ => *cond = Condition::random_normal(rng),
+                }
+            }
             // Conditional select instructions
             Instruction::Csel { rd, rn, rm, .. }
             | Instruction::Csinc { rd, rn, rm, .. }
@@ -468,6 +478,9 @@ impl Mutator {
                 },
                 _ => Instruction::Tst { rn, rm },
             },
+            // CCMP ↔ CCMN swap (both share (rn, rm, nzcv, cond)).
+            Instruction::Ccmp { rn, rm, nzcv, cond } => Instruction::Ccmn { rn, rm, nzcv, cond },
+            Instruction::Ccmn { rn, rm, nzcv, cond } => Instruction::Ccmp { rn, rm, nzcv, cond },
             // Conditional select instructions can mutate between each other
             Instruction::Csel { rd, rn, rm, cond } => match rng.random_range(0..4) {
                 0 => Instruction::Csinc { rd, rn, rm, cond },
