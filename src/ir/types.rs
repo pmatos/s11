@@ -164,11 +164,38 @@ impl fmt::Display for Register {
     }
 }
 
-/// Operand for instructions - either a register or immediate value
+/// AArch64 shift kind for the shifted-register operand form
+/// (`add x0, x1, x2, lsl #3` etc.). Issue #59.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum ShiftKind {
+    LSL,
+    LSR,
+    ASR,
+    ROR,
+}
+
+impl fmt::Display for ShiftKind {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            ShiftKind::LSL => write!(f, "lsl"),
+            ShiftKind::LSR => write!(f, "lsr"),
+            ShiftKind::ASR => write!(f, "asr"),
+            ShiftKind::ROR => write!(f, "ror"),
+        }
+    }
+}
+
+/// Operand for instructions: a register, an immediate, or a shifted-register
+/// (`reg, kind #amount` where amount is 0..=63 enforced by `is_encodable_aarch64`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Operand {
     Register(Register),
     Immediate(i64),
+    ShiftedRegister {
+        reg: Register,
+        kind: ShiftKind,
+        amount: u8,
+    },
 }
 
 impl fmt::Display for Operand {
@@ -176,6 +203,9 @@ impl fmt::Display for Operand {
         match self {
             Operand::Register(reg) => write!(f, "{}", reg),
             Operand::Immediate(imm) => write!(f, "#{}", imm),
+            Operand::ShiftedRegister { reg, kind, amount } => {
+                write!(f, "{}, {} #{}", reg, kind, amount)
+            }
         }
     }
 }

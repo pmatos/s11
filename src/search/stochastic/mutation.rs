@@ -15,6 +15,23 @@ use crate::search::candidate::generate_random_instruction;
 use crate::search::config::MutationWeights;
 use rand::RngExt;
 
+/// Drop ROR from a shifted-register operand when bridging from a logical
+/// opcode (AND/ORR/EOR/TST — ROR allowed) to an arithmetic opcode
+/// (ADD/SUB/CMP/CMN — ROR rejected by `is_encodable_aarch64`). Other shift
+/// kinds and operand shapes pass through unchanged.
+fn strip_ror_for_arith(rm: Operand) -> Operand {
+    if let Operand::ShiftedRegister {
+        reg,
+        kind: crate::ir::ShiftKind::ROR,
+        ..
+    } = rm
+    {
+        Operand::Register(reg)
+    } else {
+        rm
+    }
+}
+
 /// If `rm` is already a register, keep it; if it's an immediate, replace it
 /// with a random register from `registers`. Used when mutating an
 /// immediate-accepting opcode (ADDS/SUBS) into a register-only opcode
@@ -22,6 +39,9 @@ use rand::RngExt;
 fn clamp_to_register<R: RngExt>(rm: Operand, registers: &[Register], rng: &mut R) -> Operand {
     match rm {
         Operand::Register(_) => rm,
+        // ShiftedRegister carries a real register; preserve it as a plain
+        // register (drop the shift) when the destination opcode is register-only.
+        Operand::ShiftedRegister { reg, .. } => Operand::Register(reg),
         Operand::Immediate(_) => {
             if registers.is_empty() {
                 rm
@@ -120,16 +140,24 @@ impl Mutator {
                     *imm = self.random_immediate(rng);
                 }
             }
-            Instruction::Add { rd, rn, rm }
-            | Instruction::Sub { rd, rn, rm }
-            | Instruction::And { rd, rn, rm }
+            Instruction::Add { rd, rn, rm } | Instruction::Sub { rd, rn, rm } => {
+                let choice = rng.random_range(0..3);
+                match choice {
+                    0 => *rd = self.random_register(rng),
+                    1 => *rn = self.random_register(rng),
+                    // Add/Sub do not allow ROR in the shifted-register form.
+                    _ => *rm = self.random_operand_3op(rng, false),
+                }
+            }
+            Instruction::And { rd, rn, rm }
             | Instruction::Orr { rd, rn, rm }
             | Instruction::Eor { rd, rn, rm } => {
                 let choice = rng.random_range(0..3);
                 match choice {
                     0 => *rd = self.random_register(rng),
                     1 => *rn = self.random_register(rng),
-                    _ => *rm = self.random_operand(rng),
+                    // Logical ops accept ROR in the shifted-register form.
+                    _ => *rm = self.random_operand_3op(rng, true),
                 }
             }
             Instruction::Lsl { rd, rn, shift }
@@ -173,19 +201,27 @@ impl Mutator {
                     _ => *rm = self.random_register(rng),
                 }
             }
-            // Comparison instructions (no destination)
+            // Comparison instructions (no destination). Cmp/Cmn forbid ROR;
+            // Tst allows it.
             Instruction::Cmp { rn, rm } | Instruction::Cmn { rn, rm } => {
                 if rng.random_bool(0.5) {
                     *rn = self.random_register(rng);
                 } else {
-                    *rm = self.random_operand(rng);
+                    *rm = self.random_operand_3op(rng, false);
                 }
             }
             Instruction::Tst { rn, rm } => {
                 if rng.random_bool(0.5) {
                     *rn = self.random_register(rng);
                 } else {
-                    *rm = Operand::Register(self.random_register(rng));
+                    // Tst is register-only for non-shifted form. Use the 3op
+                    // helper but force the non-shifted fallback to a Register
+                    // (immediates aren't encodable for TST).
+                    if rng.random_bool(0.15) && !self.registers.is_empty() {
+                        *rm = self.random_shifted_register(rng, true);
+                    } else {
+                        *rm = Operand::Register(self.random_register(rng));
+                    }
                 }
             }
             // Conditional select instructions
@@ -333,22 +369,47 @@ impl Mutator {
                 _ => Instruction::Sub { rd, rn, rm },
             },
             Instruction::And { rd, rn, rm } => match rng.random_range(0..5) {
-                0 => Instruction::Add { rd, rn, rm },
-                1 => Instruction::Sub { rd, rn, rm },
+                // Logical -> arithmetic: drop ROR from the shifted-register form.
+                0 => Instruction::Add {
+                    rd,
+                    rn,
+                    rm: strip_ror_for_arith(rm),
+                },
+                1 => Instruction::Sub {
+                    rd,
+                    rn,
+                    rm: strip_ror_for_arith(rm),
+                },
                 2 => Instruction::Orr { rd, rn, rm },
                 3 => Instruction::Eor { rd, rn, rm },
                 _ => Instruction::And { rd, rn, rm },
             },
             Instruction::Orr { rd, rn, rm } => match rng.random_range(0..5) {
-                0 => Instruction::Add { rd, rn, rm },
-                1 => Instruction::Sub { rd, rn, rm },
+                0 => Instruction::Add {
+                    rd,
+                    rn,
+                    rm: strip_ror_for_arith(rm),
+                },
+                1 => Instruction::Sub {
+                    rd,
+                    rn,
+                    rm: strip_ror_for_arith(rm),
+                },
                 2 => Instruction::And { rd, rn, rm },
                 3 => Instruction::Eor { rd, rn, rm },
                 _ => Instruction::Orr { rd, rn, rm },
             },
             Instruction::Eor { rd, rn, rm } => match rng.random_range(0..5) {
-                0 => Instruction::Add { rd, rn, rm },
-                1 => Instruction::Sub { rd, rn, rm },
+                0 => Instruction::Add {
+                    rd,
+                    rn,
+                    rm: strip_ror_for_arith(rm),
+                },
+                1 => Instruction::Sub {
+                    rd,
+                    rn,
+                    rm: strip_ror_for_arith(rm),
+                },
                 2 => Instruction::And { rd, rn, rm },
                 3 => Instruction::Orr { rd, rn, rm },
                 _ => Instruction::Eor { rd, rn, rm },
@@ -396,8 +457,15 @@ impl Mutator {
                 _ => Instruction::Cmn { rn, rm },
             },
             Instruction::Tst { rn, rm } => match rng.random_range(0..3) {
-                0 => Instruction::Cmp { rn, rm },
-                1 => Instruction::Cmn { rn, rm },
+                // Tst (logical) -> Cmp/Cmn (arithmetic): drop ROR.
+                0 => Instruction::Cmp {
+                    rn,
+                    rm: strip_ror_for_arith(rm),
+                },
+                1 => Instruction::Cmn {
+                    rn,
+                    rm: strip_ror_for_arith(rm),
+                },
                 _ => Instruction::Tst { rn, rm },
             },
             // Conditional select instructions can mutate between each other
@@ -691,6 +759,41 @@ impl Mutator {
         }
     }
 
+    /// Random rm operand for the in-scope arithmetic/logical/comparison
+    /// shifted-register opcodes (issue #59). With low probability returns a
+    /// `ShiftedRegister`; otherwise falls back to the plain register/immediate
+    /// distribution. `allow_ror` toggles whether ROR is in the kind pool —
+    /// callers in arith bridges must pass false.
+    fn random_operand_3op<R: RngExt>(&self, rng: &mut R, allow_ror: bool) -> Operand {
+        if rng.random_bool(0.15) && !self.registers.is_empty() {
+            self.random_shifted_register(rng, allow_ror)
+        } else {
+            self.random_operand(rng)
+        }
+    }
+
+    fn random_shifted_register<R: RngExt>(&self, rng: &mut R, allow_ror: bool) -> Operand {
+        let reg = self.random_register(rng);
+        let kinds: &[crate::ir::ShiftKind] = if allow_ror {
+            &[
+                crate::ir::ShiftKind::LSL,
+                crate::ir::ShiftKind::LSR,
+                crate::ir::ShiftKind::ASR,
+                crate::ir::ShiftKind::ROR,
+            ]
+        } else {
+            &[
+                crate::ir::ShiftKind::LSL,
+                crate::ir::ShiftKind::LSR,
+                crate::ir::ShiftKind::ASR,
+            ]
+        };
+        let kind = kinds[rng.random_range(0..kinds.len())];
+        let amounts = [1u8, 2, 3, 4, 8, 16, 32];
+        let amount = amounts[rng.random_range(0..amounts.len())];
+        Operand::ShiftedRegister { reg, kind, amount }
+    }
+
     fn random_shift_operand<R: RngExt>(&self, rng: &mut R) -> Operand {
         if rng.random_bool(0.7) {
             let shifts = [0, 1, 2, 4, 8, 16, 32];
@@ -742,6 +845,77 @@ mod tests {
             vec![-1, 0, 1, 2],
             MutationWeights::default(),
         )
+    }
+
+    #[test]
+    fn test_mutate_operand_can_produce_shifted_register() {
+        // With many trials, mutate_operand on an Add must sometimes pick a
+        // ShiftedRegister rm. Issue #59.
+        let mutator = default_mutator();
+        let mut rng = rand::rng();
+        let mut produced_shifted = false;
+        for _ in 0..1000 {
+            let mut seq = vec![Instruction::Add {
+                rd: Register::X0,
+                rn: Register::X1,
+                rm: Operand::Register(Register::X2),
+            }];
+            mutator.mutate_operand(&mut rng, &mut seq);
+            if let Instruction::Add {
+                rm: Operand::ShiftedRegister { .. },
+                ..
+            } = seq[0]
+            {
+                produced_shifted = true;
+                break;
+            }
+        }
+        assert!(
+            produced_shifted,
+            "mutate_operand on Add must occasionally produce ShiftedRegister rm"
+        );
+    }
+
+    #[test]
+    fn test_mutate_opcode_bridge_drops_ror_for_arith() {
+        // If we start with `And { rm: ShiftedRegister { kind: ROR } }` and the
+        // bridge selects Add/Sub/Cmp/Cmn as the new opcode, the result must
+        // not carry ROR (since it's invalid for those). Encodability gates it
+        // anyway, but the bridge should produce a candidate that *is*
+        // encodable.
+        let mutator = default_mutator();
+        let mut rng = rand::rng();
+        let original = Instruction::And {
+            rd: Register::X0,
+            rn: Register::X1,
+            rm: Operand::ShiftedRegister {
+                reg: Register::X2,
+                kind: crate::ir::ShiftKind::ROR,
+                amount: 4,
+            },
+        };
+        let mut saw_arith_after_bridge = false;
+        for _ in 0..2000 {
+            let mut seq = vec![original];
+            mutator.mutate_opcode(&mut rng, &mut seq);
+            match seq[0] {
+                Instruction::Add { rm, .. } | Instruction::Sub { rm, .. } => {
+                    saw_arith_after_bridge = true;
+                    if let Operand::ShiftedRegister {
+                        kind: crate::ir::ShiftKind::ROR,
+                        ..
+                    } = rm
+                    {
+                        panic!("bridge produced Add/Sub with ROR shifted-register: not encodable");
+                    }
+                }
+                _ => {}
+            }
+        }
+        assert!(
+            saw_arith_after_bridge,
+            "expected the bridge to occasionally produce Add/Sub from And"
+        );
     }
 
     #[test]

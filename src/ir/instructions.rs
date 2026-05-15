@@ -1,6 +1,6 @@
 //! AArch64 instruction definitions for the IR
 
-use crate::ir::types::{Condition, Operand, Register};
+use crate::ir::types::{Condition, Operand, Register, ShiftKind};
 use std::fmt;
 
 /// Legal `lsl` amounts for the move-wide immediate family (MOVN / MOVZ / MOVK).
@@ -380,23 +380,45 @@ impl Instruction {
             // MOV immediate: 16-bit range
             Instruction::MovImm { imm, .. } => *imm >= 0 && *imm <= 0xFFFF,
 
-            // ADD/SUB immediate: 12-bit unsigned range
-            Instruction::Add { rm, .. } | Instruction::Sub { rm, .. } => match rm {
+            // ADD/SUB: register or immediate (12-bit unsigned), or shifted-register
+            // (LSL/LSR/ASR only — ROR not encodable for arithmetic shifted-register form).
+            // Shifted-register form forbids SP for any operand (ARM v8 spec).
+            Instruction::Add { rd, rn, rm } | Instruction::Sub { rd, rn, rm } => match rm {
                 Operand::Register(_) => true,
                 Operand::Immediate(imm) => *imm >= 0 && *imm <= 0xFFF,
+                Operand::ShiftedRegister { reg, kind, amount } => {
+                    *kind != ShiftKind::ROR
+                        && *amount <= 63
+                        && *reg != Register::SP
+                        && *rd != Register::SP
+                        && *rn != Register::SP
+                }
             },
 
-            // AND/ORR/EOR: only register operands supported (bitmask immediates are complex)
-            Instruction::And { rm, .. }
-            | Instruction::Orr { rm, .. }
-            | Instruction::Eor { rm, .. } => matches!(rm, Operand::Register(_)),
+            // AND/ORR/EOR: register operand or shifted-register (all 4 kinds, ROR allowed).
+            // Shifted-register form forbids SP for any operand.
+            Instruction::And { rd, rn, rm }
+            | Instruction::Orr { rd, rn, rm }
+            | Instruction::Eor { rd, rn, rm } => match rm {
+                Operand::Register(_) => true,
+                Operand::Immediate(_) => false,
+                Operand::ShiftedRegister { reg, amount, .. } => {
+                    *amount <= 63
+                        && *reg != Register::SP
+                        && *rd != Register::SP
+                        && *rn != Register::SP
+                }
+            },
 
-            // Shift instructions: shift amount 0-63 for 64-bit registers
+            // Shift instructions: shift amount 0-63 for 64-bit registers.
+            // Reject Operand::ShiftedRegister in the shift slot (semantically nonsense:
+            // shifting by a shifted-register result is not part of issue #59 scope).
             Instruction::Lsl { shift, .. }
             | Instruction::Lsr { shift, .. }
             | Instruction::Asr { shift, .. } => match shift {
                 Operand::Register(_) => true,
                 Operand::Immediate(amt) => *amt >= 0 && *amt <= 63,
+                Operand::ShiftedRegister { .. } => false,
             },
 
             // MUL/SDIV/UDIV: always register operands, always encodable
@@ -409,14 +431,27 @@ impl Instruction {
             | Instruction::Smulh { .. }
             | Instruction::Umulh { .. } => true,
 
-            // CMP/CMN immediate: 12-bit unsigned range
-            Instruction::Cmp { rm, .. } | Instruction::Cmn { rm, .. } => match rm {
+            // CMP/CMN: register, immediate (12-bit unsigned), or shifted-register
+            // (LSL/LSR/ASR only — ROR not encodable for arithmetic shifted-register form).
+            Instruction::Cmp { rn, rm } | Instruction::Cmn { rn, rm } => match rm {
                 Operand::Register(_) => true,
                 Operand::Immediate(imm) => *imm >= 0 && *imm <= 0xFFF,
+                Operand::ShiftedRegister { reg, kind, amount } => {
+                    *kind != ShiftKind::ROR
+                        && *amount <= 63
+                        && *reg != Register::SP
+                        && *rn != Register::SP
+                }
             },
 
-            // TST: only register operands supported
-            Instruction::Tst { rm, .. } => matches!(rm, Operand::Register(_)),
+            // TST: register operand or shifted-register (all 4 kinds, ROR allowed).
+            Instruction::Tst { rn, rm } => match rm {
+                Operand::Register(_) => true,
+                Operand::Immediate(_) => false,
+                Operand::ShiftedRegister { reg, amount, .. } => {
+                    *amount <= 63 && *reg != Register::SP && *rn != Register::SP
+                }
+            },
 
             // Conditional select: always encodable (register-only)
             Instruction::Csel { .. }
@@ -439,12 +474,14 @@ impl Instruction {
             | Instruction::Orn { rm, .. }
             | Instruction::Eon { rm, .. } => matches!(rm, Operand::Register(_)),
 
-            // ADDS/SUBS: imm 0..=0xFFF (same as ADD/SUB).
+            // ADDS/SUBS: imm 0..=0xFFF (same as ADD/SUB). ShiftedRegister form is
+            // out of scope for issue #59 (flag-setting peers will be a follow-up).
             Instruction::Adds { rm, .. } | Instruction::Subs { rm, .. } => match rm {
                 Operand::Register(_) => true,
                 Operand::Immediate(imm) => *imm >= 0 && *imm <= 0xFFF,
+                Operand::ShiftedRegister { .. } => false,
             },
-            // ANDS: register-only (same as AND).
+            // ANDS: register-only (same as AND). ShiftedRegister out of scope (#59).
             Instruction::Ands { rm, .. } => matches!(rm, Operand::Register(_)),
 
             // CSET / CSETM: reject AL (always true ⇒ unconditional 1/-1) and
@@ -453,10 +490,13 @@ impl Instruction {
                 !matches!(cond, Condition::AL | Condition::NV)
             }
 
-            // ROR: shift amount 0..=63 (same as LSL/LSR/ASR).
+            // ROR: shift amount 0..=63 (same as LSL/LSR/ASR). ShiftedRegister
+            // in the shift slot is rejected (semantically nonsense; same as
+            // LSL/LSR/ASR above).
             Instruction::Ror { shift, .. } => match shift {
                 Operand::Register(_) => true,
                 Operand::Immediate(amt) => *amt >= 0 && *amt <= 63,
+                Operand::ShiftedRegister { .. } => false,
             },
 
             // Single-source bit-manipulation: register-only, Xn class (no SP).
@@ -484,8 +524,10 @@ impl Instruction {
             | Instruction::Orr { rn, rm, .. }
             | Instruction::Eor { rn, rm, .. } => {
                 let mut regs = vec![*rn];
-                if let Operand::Register(r) = rm {
-                    regs.push(*r);
+                match rm {
+                    Operand::Register(r) => regs.push(*r),
+                    Operand::ShiftedRegister { reg, .. } => regs.push(*reg),
+                    Operand::Immediate(_) => {}
                 }
                 regs
             }
@@ -507,13 +549,16 @@ impl Instruction {
             Instruction::Mneg { rn, rm, .. }
             | Instruction::Smulh { rn, rm, .. }
             | Instruction::Umulh { rn, rm, .. } => vec![*rn, *rm],
-            // Comparison instructions read rn and rm (if register)
+            // Comparison instructions read rn and rm (register form,
+            // including the shifted-register form's inner register).
             Instruction::Cmp { rn, rm }
             | Instruction::Cmn { rn, rm }
             | Instruction::Tst { rn, rm } => {
                 let mut regs = vec![*rn];
-                if let Operand::Register(r) = rm {
-                    regs.push(*r);
+                match rm {
+                    Operand::Register(r) => regs.push(*r),
+                    Operand::ShiftedRegister { reg, .. } => regs.push(*reg),
+                    Operand::Immediate(_) => {}
                 }
                 regs
             }
@@ -725,6 +770,68 @@ mod tests {
     }
 
     #[test]
+    fn test_source_registers_shifted_register() {
+        // Add/Sub/And/Orr/Eor and Cmp/Cmn/Tst must extract the inner register
+        // from a ShiftedRegister rm — otherwise live-out tracking silently
+        // drops it.
+        let shifted = Operand::ShiftedRegister {
+            reg: Register::X3,
+            kind: ShiftKind::LSL,
+            amount: 4,
+        };
+        for instr in [
+            Instruction::Add {
+                rd: Register::X0,
+                rn: Register::X1,
+                rm: shifted,
+            },
+            Instruction::Sub {
+                rd: Register::X0,
+                rn: Register::X1,
+                rm: shifted,
+            },
+            Instruction::And {
+                rd: Register::X0,
+                rn: Register::X1,
+                rm: shifted,
+            },
+            Instruction::Orr {
+                rd: Register::X0,
+                rn: Register::X1,
+                rm: shifted,
+            },
+            Instruction::Eor {
+                rd: Register::X0,
+                rn: Register::X1,
+                rm: shifted,
+            },
+        ] {
+            assert_eq!(
+                instr.source_registers(),
+                vec![Register::X1, Register::X3],
+                "instr {} must report X1 and X3 as sources",
+                instr
+            );
+        }
+        for instr in [
+            Instruction::Cmp {
+                rn: Register::X1,
+                rm: shifted,
+            },
+            Instruction::Cmn {
+                rn: Register::X1,
+                rm: shifted,
+            },
+            Instruction::Tst {
+                rn: Register::X1,
+                rm: shifted,
+            },
+        ] {
+            assert_eq!(instr.source_registers(), vec![Register::X1, Register::X3]);
+        }
+    }
+
+    #[test]
     fn test_is_encodable_mov() {
         // MovReg is always encodable
         assert!(
@@ -766,6 +873,145 @@ mod tests {
             }
             .is_encodable_aarch64()
         );
+    }
+
+    #[test]
+    fn test_is_encodable_shifted_register_arith_rejects_ror() {
+        // Add/Sub/Cmp/Cmn: LSL/LSR/ASR allowed; ROR rejected.
+        let mk_add = |kind| Instruction::Add {
+            rd: Register::X0,
+            rn: Register::X1,
+            rm: Operand::ShiftedRegister {
+                reg: Register::X2,
+                kind,
+                amount: 3,
+            },
+        };
+        assert!(mk_add(ShiftKind::LSL).is_encodable_aarch64());
+        assert!(mk_add(ShiftKind::LSR).is_encodable_aarch64());
+        assert!(mk_add(ShiftKind::ASR).is_encodable_aarch64());
+        assert!(!mk_add(ShiftKind::ROR).is_encodable_aarch64());
+
+        let mk_cmp = |kind| Instruction::Cmp {
+            rn: Register::X1,
+            rm: Operand::ShiftedRegister {
+                reg: Register::X2,
+                kind,
+                amount: 3,
+            },
+        };
+        assert!(mk_cmp(ShiftKind::LSL).is_encodable_aarch64());
+        assert!(!mk_cmp(ShiftKind::ROR).is_encodable_aarch64());
+    }
+
+    #[test]
+    fn test_is_encodable_shifted_register_logical_allows_ror() {
+        // And/Orr/Eor/Tst accept ROR.
+        for kind in [
+            ShiftKind::LSL,
+            ShiftKind::LSR,
+            ShiftKind::ASR,
+            ShiftKind::ROR,
+        ] {
+            assert!(
+                Instruction::Orr {
+                    rd: Register::X0,
+                    rn: Register::X1,
+                    rm: Operand::ShiftedRegister {
+                        reg: Register::X2,
+                        kind,
+                        amount: 5
+                    },
+                }
+                .is_encodable_aarch64(),
+                "ORR with {:?} must be encodable",
+                kind
+            );
+            assert!(
+                Instruction::Tst {
+                    rn: Register::X1,
+                    rm: Operand::ShiftedRegister {
+                        reg: Register::X2,
+                        kind,
+                        amount: 5
+                    },
+                }
+                .is_encodable_aarch64(),
+                "TST with {:?} must be encodable",
+                kind
+            );
+        }
+    }
+
+    #[test]
+    fn test_is_encodable_shifted_register_rejects_sp() {
+        // Shifted-register form forbids SP for any operand (rd, rn, rm).
+        let lsl = ShiftKind::LSL;
+        let make = |rd, rn, reg| Instruction::Add {
+            rd,
+            rn,
+            rm: Operand::ShiftedRegister {
+                reg,
+                kind: lsl,
+                amount: 1,
+            },
+        };
+        assert!(!make(Register::SP, Register::X1, Register::X2).is_encodable_aarch64());
+        assert!(!make(Register::X0, Register::SP, Register::X2).is_encodable_aarch64());
+        assert!(!make(Register::X0, Register::X1, Register::SP).is_encodable_aarch64());
+        // Valid: no SP anywhere
+        assert!(make(Register::X0, Register::X1, Register::X2).is_encodable_aarch64());
+    }
+
+    #[test]
+    fn test_is_encodable_shifted_register_amount_bounds() {
+        let mk = |amount| Instruction::Add {
+            rd: Register::X0,
+            rn: Register::X1,
+            rm: Operand::ShiftedRegister {
+                reg: Register::X2,
+                kind: ShiftKind::LSL,
+                amount,
+            },
+        };
+        assert!(mk(0).is_encodable_aarch64());
+        assert!(mk(63).is_encodable_aarch64());
+        assert!(!mk(64).is_encodable_aarch64());
+        assert!(!mk(255).is_encodable_aarch64());
+    }
+
+    #[test]
+    fn test_is_encodable_shift_slot_rejects_shifted_register() {
+        // Lsl/Lsr/Asr/Ror's shift field cannot be a ShiftedRegister.
+        let nonsense = Operand::ShiftedRegister {
+            reg: Register::X2,
+            kind: ShiftKind::LSL,
+            amount: 1,
+        };
+        for instr in [
+            Instruction::Lsl {
+                rd: Register::X0,
+                rn: Register::X1,
+                shift: nonsense,
+            },
+            Instruction::Lsr {
+                rd: Register::X0,
+                rn: Register::X1,
+                shift: nonsense,
+            },
+            Instruction::Asr {
+                rd: Register::X0,
+                rn: Register::X1,
+                shift: nonsense,
+            },
+            Instruction::Ror {
+                rd: Register::X0,
+                rn: Register::X1,
+                shift: nonsense,
+            },
+        ] {
+            assert!(!instr.is_encodable_aarch64());
+        }
     }
 
     #[test]

@@ -1,6 +1,6 @@
 //! Concrete interpreter for fast validation of instruction sequences
 
-use crate::ir::{Condition, Instruction, Operand, Register};
+use crate::ir::{Condition, Instruction, Operand, Register, ShiftKind};
 use crate::semantics::live_out::LiveOutRegisters;
 use crate::semantics::state::{ConcreteMachineState, ConcreteValue, ConditionFlags};
 
@@ -9,6 +9,16 @@ fn eval_operand(state: &ConcreteMachineState, operand: &Operand) -> ConcreteValu
     match operand {
         Operand::Register(reg) => state.get_register(*reg),
         Operand::Immediate(imm) => ConcreteValue::from_i64(*imm),
+        Operand::ShiftedRegister { reg, kind, amount } => {
+            let value = state.get_register(*reg).as_u64();
+            let shifted = match kind {
+                ShiftKind::LSL => value << amount,
+                ShiftKind::LSR => value >> amount,
+                ShiftKind::ASR => ((value as i64) >> amount) as u64,
+                ShiftKind::ROR => value.rotate_right(*amount as u32),
+            };
+            ConcreteValue::new(shifted)
+        }
     }
 }
 
@@ -485,6 +495,82 @@ mod tests {
         };
         let new_state = apply_instruction_concrete(state, &instr);
         assert_eq!(new_state.get_register(Register::X0).as_u64(), 15);
+    }
+
+    #[test]
+    fn test_sub_shifted_register_lsr() {
+        // x1 - (x2 >> 4) — LSR is logical shift right (zero-fill).
+        let state = state_with(vec![(Register::X1, 100), (Register::X2, 0xF0)]);
+        let instr = Instruction::Sub {
+            rd: Register::X0,
+            rn: Register::X1,
+            rm: Operand::ShiftedRegister {
+                reg: Register::X2,
+                kind: ShiftKind::LSR,
+                amount: 4,
+            },
+        };
+        let new_state = apply_instruction_concrete(state, &instr);
+        // 100 - (0xF0 >> 4) == 100 - 15 == 85
+        assert_eq!(new_state.get_register(Register::X0).as_u64(), 85);
+    }
+
+    #[test]
+    fn test_orr_shifted_register_asr() {
+        // ASR preserves sign — -8 (0xFFFFFFFFFFFFFFF8) >> 1 == -4.
+        let state = state_with(vec![(Register::X1, 0), (Register::X2, (-8i64) as u64)]);
+        let instr = Instruction::Orr {
+            rd: Register::X0,
+            rn: Register::X1,
+            rm: Operand::ShiftedRegister {
+                reg: Register::X2,
+                kind: ShiftKind::ASR,
+                amount: 1,
+            },
+        };
+        let new_state = apply_instruction_concrete(state, &instr);
+        assert_eq!(
+            new_state.get_register(Register::X0).as_u64(),
+            (-4i64) as u64
+        );
+    }
+
+    #[test]
+    fn test_and_shifted_register_ror() {
+        // ROR by 4 of 0x...0F brings the low nibble into the high nibble.
+        let state = state_with(vec![(Register::X1, u64::MAX), (Register::X2, 0x0F)]);
+        let instr = Instruction::And {
+            rd: Register::X0,
+            rn: Register::X1,
+            rm: Operand::ShiftedRegister {
+                reg: Register::X2,
+                kind: ShiftKind::ROR,
+                amount: 4,
+            },
+        };
+        let new_state = apply_instruction_concrete(state, &instr);
+        // 0xF rotated right by 4 in 64 bits == 0xF000_0000_0000_0000
+        assert_eq!(
+            new_state.get_register(Register::X0).as_u64(),
+            0xF000_0000_0000_0000u64
+        );
+    }
+
+    #[test]
+    fn test_add_shifted_register_lsl() {
+        let state = state_with(vec![(Register::X1, 10), (Register::X2, 4)]);
+        let instr = Instruction::Add {
+            rd: Register::X0,
+            rn: Register::X1,
+            rm: Operand::ShiftedRegister {
+                reg: Register::X2,
+                kind: ShiftKind::LSL,
+                amount: 3,
+            },
+        };
+        let new_state = apply_instruction_concrete(state, &instr);
+        // 10 + (4 << 3) == 10 + 32 == 42
+        assert_eq!(new_state.get_register(Register::X0).as_u64(), 42);
     }
 
     #[test]

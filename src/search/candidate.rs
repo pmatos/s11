@@ -23,6 +23,11 @@ pub fn generate_all_encodable_instructions(
 }
 
 /// Generate all possible instructions using the given registers and immediates
+/// Curated shift amounts enumerated for shifted-register operands (issue #59).
+/// 0 is intentionally excluded: `<op> rd, rn, rm, lsl #0` is identical to the
+/// plain `<op> rd, rn, rm` form which `generate_all_instructions` already emits.
+const SHIFTED_OP_AMOUNTS: &[u8] = &[1, 2, 3, 4, 8, 16, 32];
+
 pub fn generate_all_instructions(registers: &[Register], immediates: &[i64]) -> Vec<Instruction> {
     let mut instrs = Vec::new();
 
@@ -73,6 +78,38 @@ pub fn generate_all_instructions(registers: &[Register], immediates: &[i64]) -> 
                 instrs.push(Instruction::And { rd, rn, rm: imm_op });
                 instrs.push(Instruction::Orr { rd, rn, rm: imm_op });
                 instrs.push(Instruction::Eor { rd, rn, rm: imm_op });
+            }
+
+            // Shifted-register form (issue #59):
+            //   Add/Sub: LSL/LSR/ASR (no ROR)
+            //   And/Orr/Eor: LSL/LSR/ASR/ROR
+            // SP is filtered later by is_encodable_aarch64; we keep enumeration
+            // simple here.
+            use crate::ir::ShiftKind;
+            for &rm in registers {
+                for &amount in SHIFTED_OP_AMOUNTS {
+                    for kind in [ShiftKind::LSL, ShiftKind::LSR, ShiftKind::ASR] {
+                        let sr = Operand::ShiftedRegister {
+                            reg: rm,
+                            kind,
+                            amount,
+                        };
+                        instrs.push(Instruction::Add { rd, rn, rm: sr });
+                        instrs.push(Instruction::Sub { rd, rn, rm: sr });
+                        instrs.push(Instruction::And { rd, rn, rm: sr });
+                        instrs.push(Instruction::Orr { rd, rn, rm: sr });
+                        instrs.push(Instruction::Eor { rd, rn, rm: sr });
+                    }
+                    // ROR — logical only.
+                    let sr_ror = Operand::ShiftedRegister {
+                        reg: rm,
+                        kind: ShiftKind::ROR,
+                        amount,
+                    };
+                    instrs.push(Instruction::And { rd, rn, rm: sr_ror });
+                    instrs.push(Instruction::Orr { rd, rn, rm: sr_ror });
+                    instrs.push(Instruction::Eor { rd, rn, rm: sr_ror });
+                }
             }
 
             // Shift operations with immediate shift amount (0-63 is valid, but we use small values)
@@ -577,6 +614,76 @@ mod tests {
         let instrs = generate_all_instructions(&default_registers(), &default_immediates());
         let has_eor = instrs.iter().any(|i| matches!(i, Instruction::Eor { .. }));
         assert!(has_eor);
+    }
+
+    #[test]
+    fn test_generate_all_instructions_contains_shifted_register_add() {
+        let instrs = generate_all_instructions(&default_registers(), &default_immediates());
+        let has_shifted_add = instrs.iter().any(|i| {
+            matches!(
+                i,
+                Instruction::Add {
+                    rm: Operand::ShiftedRegister { .. },
+                    ..
+                }
+            )
+        });
+        assert!(
+            has_shifted_add,
+            "enumerate must include Add with ShiftedRegister rm"
+        );
+    }
+
+    #[test]
+    fn test_generate_all_instructions_includes_all_shifted_kinds_for_logical() {
+        let instrs = generate_all_instructions(&default_registers(), &default_immediates());
+        for kind in [
+            crate::ir::ShiftKind::LSL,
+            crate::ir::ShiftKind::LSR,
+            crate::ir::ShiftKind::ASR,
+            crate::ir::ShiftKind::ROR,
+        ] {
+            let has = instrs.iter().any(|i| {
+                matches!(
+                    i,
+                    Instruction::Orr {
+                        rm: Operand::ShiftedRegister { kind: k, .. }, ..
+                    } if *k == kind
+                )
+            });
+            assert!(
+                has,
+                "ORR must enumerate shifted-register form with {:?}",
+                kind
+            );
+        }
+    }
+
+    #[test]
+    fn test_generate_all_instructions_arith_excludes_ror() {
+        let instrs = generate_all_instructions(&default_registers(), &default_immediates());
+        let any_arith_ror = instrs.iter().any(|i| {
+            matches!(
+                i,
+                Instruction::Add {
+                    rm: Operand::ShiftedRegister {
+                        kind: crate::ir::ShiftKind::ROR,
+                        ..
+                    },
+                    ..
+                } | Instruction::Sub {
+                    rm: Operand::ShiftedRegister {
+                        kind: crate::ir::ShiftKind::ROR,
+                        ..
+                    },
+                    ..
+                }
+            )
+        });
+        assert!(
+            !any_arith_ror,
+            "Add/Sub must NOT enumerate ROR shifted form (ROR is logical-only)"
+        );
     }
 
     #[test]
