@@ -1780,37 +1780,27 @@ mod tests {
         }
     }
 
-    /// Coverage regression for the CCMP/CCMN random-generator arm's
-    /// fallback: when the register pool contains only SP — the
-    /// architectural slot CCMP/CCMN cannot encode — the generator must
-    /// return a valid alternative instruction in finite time, not spin
-    /// in a retry loop. The fallback path (Mneg with SP operands) is
-    /// not itself encodable, but the trait contract is "return an
-    /// Instruction"; encodability filtering is is_encodable_aarch64's job.
+    /// Termination guard for the CCMP/CCMN random-generator arm:
+    /// before the slot-28 rewrite this test would have hung in release
+    /// builds because `pick_non_sp` retried forever on a `[SP]`-only
+    /// pool. The current code collects the non-SP registers up front
+    /// and falls back to `Mneg` when the filter yields an empty slice,
+    /// so every call must return a valid `Instruction` in finite time.
+    /// Not asserting which opcode comes back — both slot 27 (the
+    /// multiply-accumulate sub-multiplexer) and slot 28's fallback can
+    /// emit Mneg, so any "did slot 28 fire?" proxy gives false
+    /// confidence. The 10000 samples + bounded loop is the contract:
+    /// completing the loop without panicking or hanging is the test.
     #[test]
     fn random_generator_handles_sp_only_register_pool() {
         let generator = AArch64InstructionGenerator;
         let regs = vec![Register::SP];
         let imms = vec![0, 1];
-        let mut rng = ChaCha8Rng::seed_from_u64(0xA64_5);
-        // Hit slot 28 deterministically: keep sampling until the
-        // ccmp/ccmn branch is reached. Bound the loop so a regression
-        // that breaks generate_random fails loudly instead of hanging.
-        let mut hit_slot_28 = false;
+        let mut rng = ChaCha8Rng::seed_from_u64(0xA645);
         for _ in 0..10_000 {
             let instr = generator.generate_random(&mut rng, &regs, &imms);
-            // Both the slot-28 fallback (Mneg) and any other slot are
-            // valid outcomes; we just need the call to terminate.
             assert!(instr.opcode_id() < generator.opcode_count());
-            if matches!(instr, Instruction::Mneg { .. }) {
-                hit_slot_28 = true;
-            }
         }
-        assert!(
-            hit_slot_28,
-            "slot 28 fallback (Mneg) should fire at least once in 10000 samples \
-             with a SP-only register pool"
-        );
     }
 
     #[test]
