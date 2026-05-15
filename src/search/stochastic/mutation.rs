@@ -22,7 +22,7 @@ use rand::RngExt;
 fn strip_ror_for_arith(rm: Operand) -> Operand {
     if let Operand::ShiftedRegister {
         reg,
-        kind: crate::ir::ShiftKind::ROR,
+        kind: crate::ir::ShiftKind::Ror,
         ..
     } = rm
     {
@@ -776,16 +776,16 @@ impl Mutator {
         let reg = self.random_register(rng);
         let kinds: &[crate::ir::ShiftKind] = if allow_ror {
             &[
-                crate::ir::ShiftKind::LSL,
-                crate::ir::ShiftKind::LSR,
-                crate::ir::ShiftKind::ASR,
-                crate::ir::ShiftKind::ROR,
+                crate::ir::ShiftKind::Lsl,
+                crate::ir::ShiftKind::Lsr,
+                crate::ir::ShiftKind::Asr,
+                crate::ir::ShiftKind::Ror,
             ]
         } else {
             &[
-                crate::ir::ShiftKind::LSL,
-                crate::ir::ShiftKind::LSR,
-                crate::ir::ShiftKind::ASR,
+                crate::ir::ShiftKind::Lsl,
+                crate::ir::ShiftKind::Lsr,
+                crate::ir::ShiftKind::Asr,
             ]
         };
         let kind = kinds[rng.random_range(0..kinds.len())];
@@ -890,7 +890,7 @@ mod tests {
             rn: Register::X1,
             rm: Operand::ShiftedRegister {
                 reg: Register::X2,
-                kind: crate::ir::ShiftKind::ROR,
+                kind: crate::ir::ShiftKind::Ror,
                 amount: 4,
             },
         };
@@ -902,7 +902,7 @@ mod tests {
                 Instruction::Add { rm, .. } | Instruction::Sub { rm, .. } => {
                     saw_arith_after_bridge = true;
                     if let Operand::ShiftedRegister {
-                        kind: crate::ir::ShiftKind::ROR,
+                        kind: crate::ir::ShiftKind::Ror,
                         ..
                     } = rm
                     {

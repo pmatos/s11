@@ -701,7 +701,7 @@ mod tests {
                     rn: Register::X1,
                     rm: Operand::ShiftedRegister {
                         reg: Register::X2,
-                        kind: ShiftKind::LSL,
+                        kind: ShiftKind::Lsl,
                         amount: 3,
                     },
                 }

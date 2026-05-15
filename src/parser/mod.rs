@@ -496,10 +496,10 @@ fn parse_shifted_register_tail(mnem: &str, reg: Register, tail: &str) -> Result<
     let kw = parts.next().unwrap_or("").trim();
     let rest = parts.next().unwrap_or("").trim();
     let kind = match kw.to_ascii_lowercase().as_str() {
-        "lsl" => ShiftKind::LSL,
-        "lsr" => ShiftKind::LSR,
-        "asr" => ShiftKind::ASR,
-        "ror" => ShiftKind::ROR,
+        "lsl" => ShiftKind::Lsl,
+        "lsr" => ShiftKind::Lsr,
+        "asr" => ShiftKind::Asr,
+        "ror" => ShiftKind::Ror,
         _ => {
             return Err(format!(
                 "{} shift kind must be one of lsl/lsr/asr/ror, got `{}`",
@@ -1012,7 +1012,7 @@ mod tests {
                 rn: Register::X1,
                 rm: Operand::ShiftedRegister {
                     reg: Register::X2,
-                    kind: ShiftKind::LSL,
+                    kind: ShiftKind::Lsl,
                     amount: 3,
                 },
             }
@@ -1025,10 +1025,10 @@ mod tests {
     fn test_parse_shifted_register_all_kinds_case_insensitive() {
         // Case-insensitive shift keyword (matches MOVW precedent).
         for (text, kind, amount) in [
-            ("sub x0, x1, x2, LSL #5", ShiftKind::LSL, 5),
-            ("and x0, x1, x2, lsr #7", ShiftKind::LSR, 7),
-            ("orr x0, x1, x2, ASR #1", ShiftKind::ASR, 1),
-            ("eor x0, x1, x2, ror #16", ShiftKind::ROR, 16),
+            ("sub x0, x1, x2, LSL #5", ShiftKind::Lsl, 5),
+            ("and x0, x1, x2, lsr #7", ShiftKind::Lsr, 7),
+            ("orr x0, x1, x2, ASR #1", ShiftKind::Asr, 1),
+            ("eor x0, x1, x2, ror #16", ShiftKind::Ror, 16),
         ] {
             let instr = parse_one(text);
             let rm = match instr {
@@ -1059,7 +1059,7 @@ mod tests {
                 rn: Register::X1,
                 rm: Operand::ShiftedRegister {
                     reg: Register::X2,
-                    kind: ShiftKind::LSL,
+                    kind: ShiftKind::Lsl,
                     amount: 4,
                 },
             }
@@ -1072,7 +1072,7 @@ mod tests {
                 rn: Register::X3,
                 rm: Operand::ShiftedRegister {
                     reg: Register::X4,
-                    kind: ShiftKind::ROR,
+                    kind: ShiftKind::Ror,
                     amount: 8,
                 },
             }
