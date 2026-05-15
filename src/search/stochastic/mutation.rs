@@ -351,6 +351,33 @@ impl Mutator {
                     _ => *shift = self.random_shift_operand(rng),
                 }
             }
+            // Bit-field manipulation: 4-way operand mutation (rd, rn, lsb, width)
+            // with 2D clamping so the (lsb + width <= 64) constraint is always
+            // preserved. When mutating lsb, clamp width if necessary.
+            Instruction::Ubfx { rd, rn, lsb, width }
+            | Instruction::Sbfx { rd, rn, lsb, width }
+            | Instruction::Bfi { rd, rn, lsb, width }
+            | Instruction::Bfxil { rd, rn, lsb, width }
+            | Instruction::Ubfiz { rd, rn, lsb, width }
+            | Instruction::Sbfiz { rd, rn, lsb, width } => {
+                match rng.random_range(0..4) {
+                    0 => *rd = self.random_register(rng),
+                    1 => *rn = self.random_register(rng),
+                    2 => {
+                        // Mutate width: bound by current lsb so the pair stays valid.
+                        let max_w = (64 - *lsb).max(1);
+                        *width = ((rng.random::<u32>() % max_w as u32) + 1) as u8;
+                    }
+                    _ => {
+                        // Mutate lsb; clamp width down if the new lsb would
+                        // overflow the (lsb + width <= 64) constraint.
+                        *lsb = (rng.random::<u32>() & 0x3F) as u8;
+                        if (*lsb as u16 + *width as u16) > 64 {
+                            *width = 64 - *lsb;
+                        }
+                    }
+                }
+            }
         }
     }
 
@@ -754,6 +781,59 @@ impl Mutator {
                 0 => Instruction::Smulh { rd, rn, rm },
                 _ => Instruction::Umulh { rd, rn, rm },
             },
+            // Bit-field manipulation: 6-peer cluster. Each variant has 5
+            // peers + self-identity. Note: swapping between extract (UBFX/SBFX)
+            // and insert (BFI/BFXIL/UBFIZ/SBFIZ) variants changes whether rd
+            // is read; MCMC tolerates this because invalid proposals fail
+            // equivalence checking and are rejected by the acceptance step.
+            Instruction::Ubfx { rd, rn, lsb, width } => match rng.random_range(0..6) {
+                0 => Instruction::Sbfx { rd, rn, lsb, width },
+                1 => Instruction::Bfi { rd, rn, lsb, width },
+                2 => Instruction::Bfxil { rd, rn, lsb, width },
+                3 => Instruction::Ubfiz { rd, rn, lsb, width },
+                4 => Instruction::Sbfiz { rd, rn, lsb, width },
+                _ => Instruction::Ubfx { rd, rn, lsb, width },
+            },
+            Instruction::Sbfx { rd, rn, lsb, width } => match rng.random_range(0..6) {
+                0 => Instruction::Ubfx { rd, rn, lsb, width },
+                1 => Instruction::Bfi { rd, rn, lsb, width },
+                2 => Instruction::Bfxil { rd, rn, lsb, width },
+                3 => Instruction::Ubfiz { rd, rn, lsb, width },
+                4 => Instruction::Sbfiz { rd, rn, lsb, width },
+                _ => Instruction::Sbfx { rd, rn, lsb, width },
+            },
+            Instruction::Bfi { rd, rn, lsb, width } => match rng.random_range(0..6) {
+                0 => Instruction::Ubfx { rd, rn, lsb, width },
+                1 => Instruction::Sbfx { rd, rn, lsb, width },
+                2 => Instruction::Bfxil { rd, rn, lsb, width },
+                3 => Instruction::Ubfiz { rd, rn, lsb, width },
+                4 => Instruction::Sbfiz { rd, rn, lsb, width },
+                _ => Instruction::Bfi { rd, rn, lsb, width },
+            },
+            Instruction::Bfxil { rd, rn, lsb, width } => match rng.random_range(0..6) {
+                0 => Instruction::Ubfx { rd, rn, lsb, width },
+                1 => Instruction::Sbfx { rd, rn, lsb, width },
+                2 => Instruction::Bfi { rd, rn, lsb, width },
+                3 => Instruction::Ubfiz { rd, rn, lsb, width },
+                4 => Instruction::Sbfiz { rd, rn, lsb, width },
+                _ => Instruction::Bfxil { rd, rn, lsb, width },
+            },
+            Instruction::Ubfiz { rd, rn, lsb, width } => match rng.random_range(0..6) {
+                0 => Instruction::Ubfx { rd, rn, lsb, width },
+                1 => Instruction::Sbfx { rd, rn, lsb, width },
+                2 => Instruction::Bfi { rd, rn, lsb, width },
+                3 => Instruction::Bfxil { rd, rn, lsb, width },
+                4 => Instruction::Sbfiz { rd, rn, lsb, width },
+                _ => Instruction::Ubfiz { rd, rn, lsb, width },
+            },
+            Instruction::Sbfiz { rd, rn, lsb, width } => match rng.random_range(0..6) {
+                0 => Instruction::Ubfx { rd, rn, lsb, width },
+                1 => Instruction::Sbfx { rd, rn, lsb, width },
+                2 => Instruction::Bfi { rd, rn, lsb, width },
+                3 => Instruction::Bfxil { rd, rn, lsb, width },
+                4 => Instruction::Ubfiz { rd, rn, lsb, width },
+                _ => Instruction::Sbfiz { rd, rn, lsb, width },
+            },
         };
     }
 
@@ -1108,6 +1188,75 @@ mod tests {
         }
 
         assert!(changed_to_different_opcode);
+    }
+
+    #[test]
+    fn test_bitfield_operand_mutation_changes_fields_and_stays_encodable() {
+        let mutator = default_mutator();
+        let mut rng = rand::rng();
+
+        let original = Instruction::Ubfx {
+            rd: Register::X0,
+            rn: Register::X1,
+            lsb: 8,
+            width: 16,
+        };
+        let mut changed = false;
+        for _ in 0..200 {
+            let mut seq = vec![original];
+            mutator.mutate_operand(&mut rng, &mut seq);
+            assert!(
+                seq[0].is_encodable_aarch64(),
+                "mutated bit-field instruction must remain encodable: {}",
+                seq[0]
+            );
+            if seq[0] != original {
+                changed = true;
+            }
+        }
+        assert!(
+            changed,
+            "operand mutation must produce a different bit-field instruction within 200 trials"
+        );
+    }
+
+    #[test]
+    fn test_bitfield_opcode_mutation_swaps_to_peer() {
+        let mutator = default_mutator();
+        let mut rng = rand::rng();
+
+        let original = Instruction::Ubfx {
+            rd: Register::X0,
+            rn: Register::X1,
+            lsb: 8,
+            width: 16,
+        };
+        let mut swapped_to_peer = false;
+        for _ in 0..200 {
+            let mut seq = vec![original];
+            mutator.mutate_opcode(&mut rng, &mut seq);
+            assert!(
+                seq[0].is_encodable_aarch64(),
+                "opcode mutation must produce encodable bit-field: {}",
+                seq[0]
+            );
+            // A peer is any of the other 5 bit-field variants.
+            if matches!(
+                seq[0],
+                Instruction::Sbfx { .. }
+                    | Instruction::Bfi { .. }
+                    | Instruction::Bfxil { .. }
+                    | Instruction::Ubfiz { .. }
+                    | Instruction::Sbfiz { .. }
+            ) {
+                swapped_to_peer = true;
+                break;
+            }
+        }
+        assert!(
+            swapped_to_peer,
+            "opcode mutation must reach a peer bit-field variant within 200 trials"
+        );
     }
 
     #[test]

@@ -427,6 +427,83 @@ pub fn apply_instruction_concrete(
             let value = state.get_register(*rn).as_u64();
             state.set_register(*rd, ConcreteValue::new(value & 0xFFFF));
         }
+        // UBFX rd, rn, #lsb, #width: extract bits [lsb+width-1:lsb] of rn,
+        // zero-extend the result into rd. width=64 must use u64::MAX as the
+        // low-bits mask to avoid the `1u64 << 64` UB.
+        Instruction::Ubfx { rd, rn, lsb, width } => {
+            let value = state.get_register(*rn).as_u64();
+            let low_mask = if *width == 64 {
+                u64::MAX
+            } else {
+                (1u64 << *width) - 1
+            };
+            let extracted = (value >> *lsb) & low_mask;
+            state.set_register(*rd, ConcreteValue::new(extracted));
+        }
+        // SBFX rd, rn, #lsb, #width: extract bits [lsb+width-1:lsb] of rn,
+        // sign-extend the result into rd. width=64 is the no-op identity.
+        Instruction::Sbfx { rd, rn, lsb, width } => {
+            let value = state.get_register(*rn).as_u64();
+            // Shift left then arithmetic-right by the same amount, computed on
+            // i64, to sign-extend the field MSB across the upper bits.
+            let shift_left = 64 - (*lsb + *width) as u32;
+            let intermediate = (value << shift_left) as i64;
+            // Right shift by (64 - width) sign-extends from bit (width-1).
+            let result = (intermediate >> (64 - *width as u32)) as u64;
+            state.set_register(*rd, ConcreteValue::new(result));
+        }
+        // BFI rd, rn, #lsb, #width: insert low `width` bits of rn at position
+        // lsb of rd, preserving the other bits of rd.
+        Instruction::Bfi { rd, rn, lsb, width } => {
+            let dest = state.get_register(*rd).as_u64();
+            let src = state.get_register(*rn).as_u64();
+            let low_mask = if *width == 64 {
+                u64::MAX
+            } else {
+                (1u64 << *width) - 1
+            };
+            let shifted_mask = low_mask << *lsb;
+            let inserted = (src & low_mask) << *lsb;
+            let result = (dest & !shifted_mask) | inserted;
+            state.set_register(*rd, ConcreteValue::new(result));
+        }
+        // BFXIL rd, rn, #lsb, #width: extract bits [lsb+width-1:lsb] of rn,
+        // place at [width-1:0] of rd, preserve rd[63:width].
+        Instruction::Bfxil { rd, rn, lsb, width } => {
+            let dest = state.get_register(*rd).as_u64();
+            let src = state.get_register(*rn).as_u64();
+            let low_mask = if *width == 64 {
+                u64::MAX
+            } else {
+                (1u64 << *width) - 1
+            };
+            let extracted = (src >> *lsb) & low_mask;
+            let result = (dest & !low_mask) | extracted;
+            state.set_register(*rd, ConcreteValue::new(result));
+        }
+        // UBFIZ rd, rn, #lsb, #width: take low `width` bits of rn, zero-extend
+        // to 64, shift left by lsb → rd (other bits zero).
+        Instruction::Ubfiz { rd, rn, lsb, width } => {
+            let value = state.get_register(*rn).as_u64();
+            let low_mask = if *width == 64 {
+                u64::MAX
+            } else {
+                (1u64 << *width) - 1
+            };
+            let inserted = (value & low_mask) << *lsb;
+            state.set_register(*rd, ConcreteValue::new(inserted));
+        }
+        // SBFIZ rd, rn, #lsb, #width: low `width` bits of rn, sign-extended
+        // across bits [63:width], then shifted left by lsb → rd.
+        Instruction::Sbfiz { rd, rn, lsb, width } => {
+            let value = state.get_register(*rn).as_u64();
+            // Sign-extend the low `width` bits to 64.
+            let shift_left = 64 - *width as u32;
+            let sign_extended = ((value << shift_left) as i64 >> shift_left) as u64;
+            // Then shift left by lsb.
+            let result = sign_extended << *lsb;
+            state.set_register(*rd, ConcreteValue::new(result));
+        }
     }
     state
 }
@@ -2018,5 +2095,188 @@ mod tests {
             },
         );
         assert_eq!(after.get_register(Register::X0).as_u64(), 0xFF);
+    }
+
+    #[test]
+    fn test_ubfx_extracts_zero_extended_field() {
+        // UBFX X0, X1, #8, #16: take bits [23:8] of X1, zero-extend into X0.
+        let state = state_with(vec![(Register::X1, 0xDEAD_BEEF_CAFE_0123)]);
+        let instr = Instruction::Ubfx {
+            rd: Register::X0,
+            rn: Register::X1,
+            lsb: 8,
+            width: 16,
+        };
+        let after = apply_instruction_concrete(state, &instr);
+        // bits [23:8] of 0xDEAD_BEEF_CAFE_0123 = 0xFE01
+        assert_eq!(after.get_register(Register::X0).as_u64(), 0xFE01);
+    }
+
+    #[test]
+    fn test_ubfx_full_width_is_identity() {
+        // UBFX X0, X1, #0, #64 — extracts the whole word. Exercises the
+        // `1u64 << 64` UB guard documented in the plan.
+        let state = state_with(vec![(Register::X1, 0xFFFF_0000_5555_AAAA)]);
+        let instr = Instruction::Ubfx {
+            rd: Register::X0,
+            rn: Register::X1,
+            lsb: 0,
+            width: 64,
+        };
+        let after = apply_instruction_concrete(state, &instr);
+        assert_eq!(
+            after.get_register(Register::X0).as_u64(),
+            0xFFFF_0000_5555_AAAA
+        );
+    }
+
+    #[test]
+    fn test_sbfx_sign_extends_negative_field() {
+        // SBFX X0, X1, #4, #8: extract bits [11:4] of X1 (= 0xF0) and
+        // sign-extend. The MSB of the field is 1, so the upper 56 bits of X0
+        // become all-ones.
+        let state = state_with(vec![(Register::X1, 0xF00)]);
+        let instr = Instruction::Sbfx {
+            rd: Register::X0,
+            rn: Register::X1,
+            lsb: 4,
+            width: 8,
+        };
+        let after = apply_instruction_concrete(state, &instr);
+        // 0xF0 sign-extended from 8 bits = 0xFFFF_FFFF_FFFF_FFF0
+        assert_eq!(
+            after.get_register(Register::X0).as_u64(),
+            0xFFFF_FFFF_FFFF_FFF0
+        );
+    }
+
+    #[test]
+    fn test_sbfx_positive_field_no_extension() {
+        // SBFX with MSB of the extracted field = 0: result equals UBFX.
+        let state = state_with(vec![(Register::X1, 0x7F00)]);
+        let instr = Instruction::Sbfx {
+            rd: Register::X0,
+            rn: Register::X1,
+            lsb: 8,
+            width: 8,
+        };
+        let after = apply_instruction_concrete(state, &instr);
+        assert_eq!(after.get_register(Register::X0).as_u64(), 0x7F);
+    }
+
+    #[test]
+    fn test_sbfiz_sign_extends_field_above_lsb_plus_width() {
+        // SBFIZ X0, X1, #4, #8: low 8 bits of X1 = 0xAB (MSB set),
+        // sign-extend across bits [63:12], shift left by 4, zero bits [3:0].
+        let state = state_with(vec![(Register::X1, 0xAB)]);
+        let instr = Instruction::Sbfiz {
+            rd: Register::X0,
+            rn: Register::X1,
+            lsb: 4,
+            width: 8,
+        };
+        let after = apply_instruction_concrete(state, &instr);
+        // 0xAB sign-extended from 8 bits → 0xFFFF_FFFF_FFFF_FFAB
+        // <<4 → 0xFFFF_FFFF_FFFF_FAB0
+        assert_eq!(
+            after.get_register(Register::X0).as_u64(),
+            0xFFFF_FFFF_FFFF_FAB0
+        );
+    }
+
+    #[test]
+    fn test_sbfiz_positive_field() {
+        // MSB of field clear → result equals UBFIZ.
+        let state = state_with(vec![(Register::X1, 0x7F)]);
+        let instr = Instruction::Sbfiz {
+            rd: Register::X0,
+            rn: Register::X1,
+            lsb: 4,
+            width: 8,
+        };
+        let after = apply_instruction_concrete(state, &instr);
+        // 0x7F << 4 = 0x7F0; no sign extension.
+        assert_eq!(after.get_register(Register::X0).as_u64(), 0x7F0);
+    }
+
+    #[test]
+    fn test_ubfiz_zero_extends_field_shifted_into_position() {
+        // UBFIZ X0, X1, #4, #8: take low 8 bits of X1 (= 0xAB),
+        // shift left by 4, zero the rest. Existing X0 contents are discarded.
+        let state = state_with(vec![
+            (Register::X0, 0xFFFF_FFFF_FFFF_FFFF), // discarded
+            (Register::X1, 0x0000_0000_0000_00AB),
+        ]);
+        let instr = Instruction::Ubfiz {
+            rd: Register::X0,
+            rn: Register::X1,
+            lsb: 4,
+            width: 8,
+        };
+        let after = apply_instruction_concrete(state, &instr);
+        // 0xAB << 4 = 0xAB0; everything else zero.
+        assert_eq!(after.get_register(Register::X0).as_u64(), 0xAB0);
+    }
+
+    #[test]
+    fn test_bfxil_extracts_then_inserts_low() {
+        // BFXIL X0, X1, #8, #8: take bits [15:8] of X1 → 0xAB,
+        // place at bits [7:0] of X0, preserving X0's upper bits.
+        let state = state_with(vec![
+            (Register::X0, 0xFFFF_FFFF_FFFF_FFFF),
+            (Register::X1, 0x0000_0000_0000_AB00),
+        ]);
+        let instr = Instruction::Bfxil {
+            rd: Register::X0,
+            rn: Register::X1,
+            lsb: 8,
+            width: 8,
+        };
+        let after = apply_instruction_concrete(state, &instr);
+        // X0 upper 56 bits preserved (all ones), low 8 bits = 0xAB
+        assert_eq!(
+            after.get_register(Register::X0).as_u64(),
+            0xFFFF_FFFF_FFFF_FFAB
+        );
+    }
+
+    #[test]
+    fn test_bfi_preserves_other_bits_of_rd() {
+        // BFI X0, X1, #4, #8: insert low 8 bits of X1 at position 4 of X0,
+        // leaving the other bits of X0 unchanged.
+        let state = state_with(vec![
+            (Register::X0, 0xFFFF_FFFF_FFFF_0FFF),
+            (Register::X1, 0x000A_BEEF_DEAD_BEAA), // low 8 bits = 0xAA
+        ]);
+        let instr = Instruction::Bfi {
+            rd: Register::X0,
+            rn: Register::X1,
+            lsb: 4,
+            width: 8,
+        };
+        let after = apply_instruction_concrete(state, &instr);
+        // Bits [11:4] become 0xAA (from rn low 8 bits); other bits of X0 preserved.
+        // Original X0 = 0xFFFF_FFFF_FFFF_0FFF
+        //   bits [11:4] = 0xFF (within the 0x0FFF nibble pattern)
+        // After insert:
+        //   bits [11:4] = 0xAA → result = 0xFFFF_FFFF_FFFF_0AAF
+        assert_eq!(
+            after.get_register(Register::X0).as_u64(),
+            0xFFFF_FFFF_FFFF_0AAF
+        );
+    }
+
+    #[test]
+    fn test_ubfx_high_lsb_boundary() {
+        // UBFX X0, X1, #63, #1 — extracts the topmost bit.
+        let state = state_with(vec![(Register::X1, 0x8000_0000_0000_0000)]);
+        let instr = Instruction::Ubfx {
+            rd: Register::X0,
+            rn: Register::X1,
+            lsb: 63,
+            width: 1,
+        };
+        let after = apply_instruction_concrete(state, &instr);
+        assert_eq!(after.get_register(Register::X0).as_u64(), 1);
     }
 }

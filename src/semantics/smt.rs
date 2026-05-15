@@ -734,6 +734,97 @@ pub fn apply_instruction(mut state: MachineState, instruction: &Instruction) -> 
             let result = value.extract(15, 0).zero_ext(48);
             state.set_register(*rd, result);
         }
+        // UBFX rd, rn, #lsb, #width: extract bits [lsb+width-1:lsb] of rn,
+        // zero-extend the result into rd.
+        Instruction::Ubfx { rd, rn, lsb, width } => {
+            let value = state.get_register(*rn).clone();
+            let hi = (*lsb as u32) + (*width as u32) - 1;
+            let lo = *lsb as u32;
+            let extracted = value.extract(hi, lo);
+            // zero_extend by (64 - width); width=64 is a no-op.
+            let result = if *width == 64 {
+                extracted
+            } else {
+                extracted.zero_ext(64 - *width as u32)
+            };
+            state.set_register(*rd, result);
+        }
+        // SBFX rd, rn, #lsb, #width: extract bits [lsb+width-1:lsb] of rn,
+        // sign-extend into rd.
+        Instruction::Sbfx { rd, rn, lsb, width } => {
+            let value = state.get_register(*rn).clone();
+            let hi = (*lsb as u32) + (*width as u32) - 1;
+            let lo = *lsb as u32;
+            let extracted = value.extract(hi, lo);
+            let result = if *width == 64 {
+                extracted
+            } else {
+                extracted.sign_ext(64 - *width as u32)
+            };
+            state.set_register(*rd, result);
+        }
+        // BFI rd, rn, #lsb, #width: insert low `width` bits of rn at position
+        // lsb of rd, preserving the other bits of rd.
+        Instruction::Bfi { rd, rn, lsb, width } => {
+            let dest = state.get_register(*rd).clone();
+            let src = state.get_register(*rn).clone();
+            let low_mask_const = if *width == 64 {
+                u64::MAX
+            } else {
+                (1u64 << *width) - 1
+            };
+            let shifted_mask_const = low_mask_const << *lsb;
+            let low_mask = BV::from_u64(low_mask_const, 64);
+            let clear_mask = BV::from_u64(!shifted_mask_const, 64);
+            let shift = BV::from_u64(*lsb as u64, 64);
+            let inserted = src.bvand(&low_mask).bvshl(&shift);
+            let cleared = dest.bvand(&clear_mask);
+            state.set_register(*rd, cleared.bvor(&inserted));
+        }
+        // BFXIL rd, rn, #lsb, #width: extract bits [lsb+width-1:lsb] of rn,
+        // place at [width-1:0] of rd preserving rd[63:width].
+        Instruction::Bfxil { rd, rn, lsb, width } => {
+            let dest = state.get_register(*rd).clone();
+            let src = state.get_register(*rn).clone();
+            let low_mask_const = if *width == 64 {
+                u64::MAX
+            } else {
+                (1u64 << *width) - 1
+            };
+            let low_mask = BV::from_u64(low_mask_const, 64);
+            let clear_mask = BV::from_u64(!low_mask_const, 64);
+            let shift = BV::from_u64(*lsb as u64, 64);
+            // (rn >> lsb) & low_mask
+            let extracted = src.bvlshr(&shift).bvand(&low_mask);
+            let cleared = dest.bvand(&clear_mask);
+            state.set_register(*rd, cleared.bvor(&extracted));
+        }
+        // UBFIZ rd, rn, #lsb, #width: low `width` bits of rn, zero-extend,
+        // shift left by lsb → rd (other bits zero).
+        Instruction::Ubfiz { rd, rn, lsb, width } => {
+            let value = state.get_register(*rn).clone();
+            let field = value.extract(*width as u32 - 1, 0);
+            let widened = if *width == 64 {
+                field
+            } else {
+                field.zero_ext(64 - *width as u32)
+            };
+            let shift = BV::from_u64(*lsb as u64, 64);
+            state.set_register(*rd, widened.bvshl(&shift));
+        }
+        // SBFIZ rd, rn, #lsb, #width: low `width` bits of rn, sign-extended
+        // to 64, then shifted left by lsb → rd.
+        Instruction::Sbfiz { rd, rn, lsb, width } => {
+            let value = state.get_register(*rn).clone();
+            let field = value.extract(*width as u32 - 1, 0);
+            let widened = if *width == 64 {
+                field
+            } else {
+                field.sign_ext(64 - *width as u32)
+            };
+            let shift = BV::from_u64(*lsb as u64, 64);
+            state.set_register(*rd, widened.bvshl(&shift));
+        }
     }
     state
 }

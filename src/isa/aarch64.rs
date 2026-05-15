@@ -164,6 +164,12 @@ impl InstructionType for Instruction {
             Instruction::Sxtw { .. } => 51,
             Instruction::Uxtb { .. } => 52,
             Instruction::Uxth { .. } => 53,
+            Instruction::Ubfx { .. } => 49,
+            Instruction::Sbfx { .. } => 50,
+            Instruction::Bfi { .. } => 51,
+            Instruction::Bfxil { .. } => 52,
+            Instruction::Ubfiz { .. } => 53,
+            Instruction::Sbfiz { .. } => 54,
         }
     }
 
@@ -222,6 +228,12 @@ impl InstructionType for Instruction {
             Instruction::Sxtw { .. } => "sxtw",
             Instruction::Uxtb { .. } => "uxtb",
             Instruction::Uxth { .. } => "uxth",
+            Instruction::Ubfx { .. } => "ubfx",
+            Instruction::Sbfx { .. } => "sbfx",
+            Instruction::Bfi { .. } => "bfi",
+            Instruction::Bfxil { .. } => "bfxil",
+            Instruction::Ubfiz { .. } => "ubfiz",
+            Instruction::Sbfiz { .. } => "sbfiz",
         }
     }
 
@@ -855,6 +867,42 @@ impl InstructionGenerator<Instruction> for AArch64InstructionGenerator {
                     Instruction::Sxtw { rn, .. } => Instruction::Sxtw { rd: new_rd, rn },
                     Instruction::Uxtb { rn, .. } => Instruction::Uxtb { rd: new_rd, rn },
                     Instruction::Uxth { rn, .. } => Instruction::Uxth { rd: new_rd, rn },
+                    Instruction::Ubfx { rn, lsb, width, .. } => Instruction::Ubfx {
+                        rd: new_rd,
+                        rn,
+                        lsb,
+                        width,
+                    },
+                    Instruction::Sbfx { rn, lsb, width, .. } => Instruction::Sbfx {
+                        rd: new_rd,
+                        rn,
+                        lsb,
+                        width,
+                    },
+                    Instruction::Bfi { rn, lsb, width, .. } => Instruction::Bfi {
+                        rd: new_rd,
+                        rn,
+                        lsb,
+                        width,
+                    },
+                    Instruction::Bfxil { rn, lsb, width, .. } => Instruction::Bfxil {
+                        rd: new_rd,
+                        rn,
+                        lsb,
+                        width,
+                    },
+                    Instruction::Ubfiz { rn, lsb, width, .. } => Instruction::Ubfiz {
+                        rd: new_rd,
+                        rn,
+                        lsb,
+                        width,
+                    },
+                    Instruction::Sbfiz { rn, lsb, width, .. } => Instruction::Sbfiz {
+                        rd: new_rd,
+                        rn,
+                        lsb,
+                        width,
+                    },
                 }
             }
             2 => {
@@ -1197,6 +1245,42 @@ impl InstructionGenerator<Instruction> for AArch64InstructionGenerator {
                     Instruction::Uxth { rd, .. } => Instruction::Uxth {
                         rd,
                         rn: registers[rng.random_range(0..registers.len())],
+                    },
+                    Instruction::Ubfx { rd, lsb, width, .. } => Instruction::Ubfx {
+                        rd,
+                        rn: registers[rng.random_range(0..registers.len())],
+                        lsb,
+                        width,
+                    },
+                    Instruction::Sbfx { rd, lsb, width, .. } => Instruction::Sbfx {
+                        rd,
+                        rn: registers[rng.random_range(0..registers.len())],
+                        lsb,
+                        width,
+                    },
+                    Instruction::Bfi { rd, lsb, width, .. } => Instruction::Bfi {
+                        rd,
+                        rn: registers[rng.random_range(0..registers.len())],
+                        lsb,
+                        width,
+                    },
+                    Instruction::Bfxil { rd, lsb, width, .. } => Instruction::Bfxil {
+                        rd,
+                        rn: registers[rng.random_range(0..registers.len())],
+                        lsb,
+                        width,
+                    },
+                    Instruction::Ubfiz { rd, lsb, width, .. } => Instruction::Ubfiz {
+                        rd,
+                        rn: registers[rng.random_range(0..registers.len())],
+                        lsb,
+                        width,
+                    },
+                    Instruction::Sbfiz { rd, lsb, width, .. } => Instruction::Sbfiz {
+                        rd,
+                        rn: registers[rng.random_range(0..registers.len())],
+                        lsb,
+                        width,
                     },
                 }
             }

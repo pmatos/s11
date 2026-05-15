@@ -68,6 +68,7 @@ fn instruction_latency(instr: &Instruction) -> u64 {
         // Rotate right
         Instruction::Ror { .. } => 1,
         // Single-source bit-manipulation (CLZ/CLS/RBIT/REV*): single-cycle ALU.
+        // Extends to SXT*/UXT* extended-register instructions (issue #60).
         Instruction::Clz { .. }
         | Instruction::Cls { .. }
         | Instruction::Rbit { .. }
@@ -79,6 +80,13 @@ fn instruction_latency(instr: &Instruction) -> u64 {
         | Instruction::Sxtw { .. }
         | Instruction::Uxtb { .. }
         | Instruction::Uxth { .. } => 1,
+        // Bit-field manipulation (UBFX/SBFX/BFI/BFXIL/UBFIZ/SBFIZ): single-cycle ALU.
+        Instruction::Ubfx { .. }
+        | Instruction::Sbfx { .. }
+        | Instruction::Bfi { .. }
+        | Instruction::Bfxil { .. }
+        | Instruction::Ubfiz { .. }
+        | Instruction::Sbfiz { .. } => 1,
     }
 }
 
