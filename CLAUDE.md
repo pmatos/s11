@@ -127,6 +127,17 @@ src/
 └── elf_patcher/         # ELF read/patch with DetectedArch (AArch64/X86_64/X86_32)
 ```
 
+### Adding a new AArch64 instruction
+
+There are two text-to-IR entry points and they MUST cover the same mnemonic set:
+
+- `src/parser/mod.rs::parse_line` — GNU assembler syntax (drives `s11 equiv`, `.s` inputs, round-trip tests).
+- `src/main.rs::convert_to_ir` — Capstone disassembly of ELF binaries (drives `s11 opt <elf>`).
+
+To prevent drift, `convert_to_ir` does NOT maintain its own mnemonic switch — it formats `"{mnemonic} {op_str}"` and delegates to `parser::parse_line`. **Adding a new mnemonic means adding it to the parser only**; the binary path picks it up automatically. Do not reintroduce a parallel match-on-mnemonic in `convert_to_ir`.
+
+The regression test `convert_capstone_op_handles_all_supported_aarch64_mnemonics` in `src/main.rs` pins one canonical operand string per supported mnemonic — extend it whenever you add an opcode so a future Capstone-syntax regression on that mnemonic fails loudly.
+
 ### Search Algorithms
 
 1. **Enumerative**: Exhaustively enumerate candidate sequences

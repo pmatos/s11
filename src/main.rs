@@ -772,6 +772,43 @@ fn print_search_statistics(stats: &search::result::SearchStatistics) {
     }
 }
 
+/// Outcome of converting a single Capstone-disassembled instruction to IR.
+///
+/// Factored out so we can unit-test the dispatch without constructing a
+/// `capstone::Instructions` (which is not directly buildable).
+#[derive(Debug)]
+enum ConvertOutcome {
+    Instruction(Instruction),
+    Skip,
+    Unsupported(String),
+}
+
+/// Convert one Capstone (mnemonic, op_str) pair into an IR outcome by
+/// delegating to `parser::parse_line`. Keeping a single shared parser is what
+/// guarantees the asm-text path and the ELF/Capstone path support exactly the
+/// same mnemonic set (see CLAUDE.md "Adding a new AArch64 instruction").
+fn convert_capstone_op(mnemonic: &str, op_str: &str) -> ConvertOutcome {
+    if mnemonic.eq_ignore_ascii_case("nop") {
+        // NOPs are filtered here; the assembler re-emits any padding needed.
+        return ConvertOutcome::Skip;
+    }
+
+    let line = if op_str.is_empty() {
+        mnemonic.to_string()
+    } else {
+        format!("{} {}", mnemonic, op_str)
+    };
+
+    match parser::parse_line(&line) {
+        Ok(parser::LineResult::Instruction(instr)) => ConvertOutcome::Instruction(instr),
+        Ok(parser::LineResult::Skip) => ConvertOutcome::Skip,
+        Err(parser::ParseLineError::UnknownInstruction(_)) => ConvertOutcome::Unsupported(line),
+        Err(parser::ParseLineError::Other(err)) => {
+            ConvertOutcome::Unsupported(format!("{} ({})", line, err))
+        }
+    }
+}
+
 fn convert_to_ir(instructions: &capstone::Instructions) -> Result<Vec<Instruction>, String> {
     let mut ir_instructions = Vec::new();
 
@@ -779,131 +816,16 @@ fn convert_to_ir(instructions: &capstone::Instructions) -> Result<Vec<Instructio
         let mnemonic = instruction.mnemonic().unwrap_or("");
         let op_str = instruction.op_str().unwrap_or("");
 
-        // For MVP, only convert basic instructions we can handle
-        match mnemonic {
-            "mov" => {
-                if let Some(ir_instr) = parse_mov_instruction(op_str)? {
-                    ir_instructions.push(ir_instr);
-                }
-            }
-            "add" => {
-                if let Some(ir_instr) = parse_add_instruction(op_str)? {
-                    ir_instructions.push(ir_instr);
-                }
-            }
-            "nop" => {
-                // Skip NOPs for now, they'll be added back if needed during assembly
-            }
-            _ => {
-                println!(
-                    "Warning: Skipping unsupported instruction: {} {}",
-                    mnemonic, op_str
-                );
+        match convert_capstone_op(mnemonic, op_str) {
+            ConvertOutcome::Instruction(instr) => ir_instructions.push(instr),
+            ConvertOutcome::Skip => {}
+            ConvertOutcome::Unsupported(line) => {
+                println!("Warning: Skipping unsupported instruction: {}", line);
             }
         }
     }
 
     Ok(ir_instructions)
-}
-
-fn parse_mov_instruction(op_str: &str) -> Result<Option<Instruction>, String> {
-    let parts: Vec<&str> = op_str.split(',').map(|s| s.trim()).collect();
-    if parts.len() != 2 {
-        return Ok(None); // Skip complex MOV instructions for MVP
-    }
-
-    let dst = parse_register(parts[0])?;
-
-    // Check if source is register or immediate
-    if parts[1].starts_with('#') {
-        // Immediate
-        let imm_str = &parts[1][1..]; // Remove '#'
-        let imm = if let Some(hex_str) = imm_str.strip_prefix("0x") {
-            i64::from_str_radix(hex_str, 16)
-        } else {
-            imm_str.parse::<i64>()
-        }
-        .map_err(|_| format!("Invalid immediate: {}", imm_str))?;
-
-        Ok(Some(Instruction::MovImm { rd: dst, imm }))
-    } else {
-        // Register
-        let src = parse_register(parts[1])?;
-        Ok(Some(Instruction::MovReg { rd: dst, rn: src }))
-    }
-}
-
-fn parse_add_instruction(op_str: &str) -> Result<Option<Instruction>, String> {
-    let parts: Vec<&str> = op_str.split(',').map(|s| s.trim()).collect();
-    if parts.len() != 3 {
-        return Ok(None); // Skip complex ADD instructions for MVP
-    }
-
-    let dst = parse_register(parts[0])?;
-    let src1 = parse_register(parts[1])?;
-
-    // Check if third operand is register or immediate
-    let src2 = if parts[2].starts_with('#') {
-        // Immediate
-        let imm_str = &parts[2][1..]; // Remove '#'
-        let imm = if let Some(hex_str) = imm_str.strip_prefix("0x") {
-            i64::from_str_radix(hex_str, 16)
-        } else {
-            imm_str.parse::<i64>()
-        }
-        .map_err(|_| format!("Invalid immediate: {}", imm_str))?;
-
-        Operand::Immediate(imm)
-    } else {
-        // Register
-        let reg = parse_register(parts[2])?;
-        Operand::Register(reg)
-    };
-
-    Ok(Some(Instruction::Add {
-        rd: dst,
-        rn: src1,
-        rm: src2,
-    }))
-}
-
-fn parse_register(reg_str: &str) -> Result<Register, String> {
-    match reg_str.to_lowercase().as_str() {
-        "x0" => Ok(Register::X0),
-        "x1" => Ok(Register::X1),
-        "x2" => Ok(Register::X2),
-        "x3" => Ok(Register::X3),
-        "x4" => Ok(Register::X4),
-        "x5" => Ok(Register::X5),
-        "x6" => Ok(Register::X6),
-        "x7" => Ok(Register::X7),
-        "x8" => Ok(Register::X8),
-        "x9" => Ok(Register::X9),
-        "x10" => Ok(Register::X10),
-        "x11" => Ok(Register::X11),
-        "x12" => Ok(Register::X12),
-        "x13" => Ok(Register::X13),
-        "x14" => Ok(Register::X14),
-        "x15" => Ok(Register::X15),
-        "x16" => Ok(Register::X16),
-        "x17" => Ok(Register::X17),
-        "x18" => Ok(Register::X18),
-        "x19" => Ok(Register::X19),
-        "x20" => Ok(Register::X20),
-        "x21" => Ok(Register::X21),
-        "x22" => Ok(Register::X22),
-        "x23" => Ok(Register::X23),
-        "x24" => Ok(Register::X24),
-        "x25" => Ok(Register::X25),
-        "x26" => Ok(Register::X26),
-        "x27" => Ok(Register::X27),
-        "x28" => Ok(Register::X28),
-        "x29" => Ok(Register::X29),
-        "x30" => Ok(Register::X30),
-        "xzr" => Ok(Register::XZR),
-        "sp" => Ok(Register::SP),
-        _ => Err(format!("Unknown register: {}", reg_str)),
-    }
 }
 
 // ============================================================================
@@ -1947,54 +1869,113 @@ mod cli_helper_tests {
         assert_eq!(SearchMode::from(CliSearchMode::Binary), SearchMode::Binary);
     }
 
+    /// Locks in that the Capstone→IR converter covers every mnemonic the asm
+    /// parser supports. If a new mnemonic is added to `parser::parse_line`
+    /// without a sample here, this stays green (we only catch regressions in
+    /// the other direction). If a mnemonic in this list ever stops parsing,
+    /// the binary path has silently broken.
     #[test]
-    fn main_register_and_instruction_parsers_cover_core_forms() {
-        for idx in 0..=30 {
-            let text = format!("x{}", idx);
-            assert_eq!(
-                parse_register(&text).unwrap(),
-                Register::from_index(idx).unwrap()
-            );
+    fn convert_capstone_op_handles_all_supported_aarch64_mnemonics() {
+        let cases = [
+            ("mov", "x0, x1"),
+            ("mov", "x0, #5"),
+            ("mvn", "x0, x1"),
+            ("neg", "x0, x1"),
+            ("negs", "x0, x1"),
+            ("movn", "x0, #1"),
+            ("movz", "x0, #0xffff, lsl #48"),
+            ("movk", "x1, #0x1234, lsl #16"),
+            ("add", "x0, x1, x2"),
+            ("add", "x0, x1, #4"),
+            ("add", "x0, x1, x2, lsl #3"),
+            ("sub", "x0, x1, #3"),
+            ("adds", "x0, x1, #1"),
+            ("subs", "x0, x1, x2"),
+            ("and", "x0, x1, x2"),
+            ("ands", "x0, x1, x2"),
+            ("orr", "x0, x1, x2"),
+            ("eor", "x0, x1, x2"),
+            ("bic", "x0, x1, x2"),
+            ("bics", "x0, x1, x2"),
+            ("orn", "x0, x1, x2"),
+            ("eon", "x0, x1, x2"),
+            ("lsl", "x0, x1, #4"),
+            ("lsr", "x0, x1, x2"),
+            ("asr", "x0, x1, #8"),
+            ("ror", "x0, x1, #5"),
+            ("mul", "x0, x1, x2"),
+            ("madd", "x0, x1, x2, x3"),
+            ("msub", "x0, x1, x2, x3"),
+            ("mneg", "x0, x1, x2"),
+            ("smulh", "x0, x1, x2"),
+            ("umulh", "x0, x1, x2"),
+            ("sdiv", "x0, x1, x2"),
+            ("udiv", "x0, x1, x2"),
+            ("cmp", "x1, #5"),
+            ("cmp", "x1, x2, lsl #4"),
+            ("cmn", "x1, x2"),
+            ("tst", "x1, x2"),
+            ("ccmp", "x1, x2, #5, eq"),
+            ("ccmn", "x1, #15, #3, ne"),
+            ("csel", "x0, x1, x2, eq"),
+            ("csinc", "x0, x1, x2, ne"),
+            ("csinv", "x0, x1, x2, lt"),
+            ("csneg", "x0, x1, x2, ge"),
+            ("cset", "x0, eq"),
+            ("csetm", "x3, ne"),
+            ("clz", "x0, x1"),
+            ("cls", "x0, x1"),
+            ("rbit", "x0, x1"),
+            ("rev", "x0, x1"),
+            ("rev32", "x0, x1"),
+            ("rev16", "x0, x1"),
+        ];
+
+        for (mnem, ops) in cases {
+            match convert_capstone_op(mnem, ops) {
+                ConvertOutcome::Instruction(_) => {}
+                other => panic!(
+                    "expected Instruction for `{} {}`, got {:?}",
+                    mnem, ops, other
+                ),
+            }
         }
-        assert_eq!(parse_register("xzr").unwrap(), Register::XZR);
-        assert_eq!(parse_register("sp").unwrap(), Register::SP);
-        assert!(parse_register("x31").is_err());
+    }
 
-        assert_eq!(
-            parse_mov_instruction("x0, #0x10").unwrap(),
-            Some(Instruction::MovImm {
-                rd: Register::X0,
-                imm: 16,
-            })
-        );
-        assert_eq!(
-            parse_mov_instruction("x0, x1").unwrap(),
-            Some(Instruction::MovReg {
-                rd: Register::X0,
-                rn: Register::X1,
-            })
-        );
-        assert_eq!(parse_mov_instruction("x0").unwrap(), None);
-        assert!(parse_mov_instruction("x0, #wat").is_err());
+    #[test]
+    fn convert_capstone_op_skips_nop_silently() {
+        assert!(matches!(
+            convert_capstone_op("nop", ""),
+            ConvertOutcome::Skip
+        ));
+        assert!(matches!(
+            convert_capstone_op("NOP", ""),
+            ConvertOutcome::Skip
+        ));
+    }
 
-        assert_eq!(
-            parse_add_instruction("x0, x1, #0x20").unwrap(),
-            Some(Instruction::Add {
-                rd: Register::X0,
-                rn: Register::X1,
-                rm: Operand::Immediate(32),
-            })
-        );
-        assert_eq!(
-            parse_add_instruction("x0, x1, x2").unwrap(),
-            Some(Instruction::Add {
-                rd: Register::X0,
-                rn: Register::X1,
-                rm: Operand::Register(Register::X2),
-            })
-        );
-        assert_eq!(parse_add_instruction("x0, x1").unwrap(), None);
-        assert!(parse_add_instruction("x0, x1, #wat").is_err());
+    #[test]
+    fn convert_capstone_op_flags_unknown_mnemonic_as_unsupported() {
+        match convert_capstone_op("ldr", "x0, [x1]") {
+            ConvertOutcome::Unsupported(line) => {
+                assert!(line.contains("ldr"), "warning line should name mnemonic");
+            }
+            other => panic!("expected Unsupported, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn convert_capstone_op_reports_operand_errors_against_supported_mnemonic() {
+        // Mnemonic recognised, but operand fails to parse — should be reported
+        // as Unsupported (warn + skip) with the parser's error appended so the
+        // user can see why.
+        match convert_capstone_op("add", "x0, x1, #wat") {
+            ConvertOutcome::Unsupported(line) => {
+                assert!(line.contains("add"));
+                assert!(line.contains("wat"));
+            }
+            other => panic!("expected Unsupported, got {:?}", other),
+        }
     }
 
     #[test]
