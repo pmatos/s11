@@ -371,7 +371,15 @@ where
         parse_w_or_x_register(operands[0])?
     } else {
         let rd_str = operands[0].trim();
-        if rd_str.to_ascii_lowercase().starts_with('w') && rd_str.to_ascii_lowercase() != "wzr" {
+        // Reject W-form rd (e.g. `sxtb w0, w1`) before delegating to
+        // `parse_register`. WZR is also W-form but it's an alias for XZR
+        // that several callers still use, so allow it.
+        let is_w_form = rd_str
+            .as_bytes()
+            .first()
+            .is_some_and(|b| b.eq_ignore_ascii_case(&b'w'))
+            && !rd_str.eq_ignore_ascii_case("wzr");
+        if is_w_form {
             return Err(format!(
                 "{} destination must be X-form (the W-form `{} {}, ...` is a different 32-bit \
                  architectural instruction that this IR does not model)",
