@@ -763,6 +763,12 @@ mod tests {
                 rm: Operand::Register(Register::X4),
             },
         ];
+        // Deliberately omit `.with_flags(true)`: the two forms produce
+        // intentionally different post-window NZCV (the candidate has two
+        // CMPs vs the target's one CMP + CCMP), so the proof only holds
+        // when X3 is the sole observable. Search callers that need flag
+        // preservation set `with_flags(true)` themselves — see
+        // `mcmc.rs` / `synthesis.rs`.
         let cfg =
             EquivalenceConfig::default().live_out(LiveOut::from_registers(vec![Register::X3]));
         assert_eq!(
