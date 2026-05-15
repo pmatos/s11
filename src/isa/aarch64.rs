@@ -338,6 +338,52 @@ impl InstructionGenerator<Instruction> for AArch64InstructionGenerator {
             }
         }
 
+        // Conditional-compare family (CCMP/CCMN). Sample a small product of
+        // nzcv × cond × imm5 so the enumeration footprint stays bounded
+        // (mirrors candidate.rs::generate_all_instructions); is_encodable_aarch64
+        // filters SP at the encoder boundary, so we emit unconstrained `rn`
+        // and `rm`-register entries here.
+        const CCMP_NZCV_SAMPLES: [u8; 4] = [0, 1, 7, 15];
+        const CCMP_IMM5_SAMPLES: [i64; 4] = [0, 1, 16, 31];
+        for &rn in registers {
+            for &rm_reg in registers {
+                for cond in crate::ir::types::NORMAL_CONDITIONS {
+                    for &nzcv in &CCMP_NZCV_SAMPLES {
+                        instructions.push(Instruction::Ccmp {
+                            rn,
+                            rm: Operand::Register(rm_reg),
+                            nzcv,
+                            cond,
+                        });
+                        instructions.push(Instruction::Ccmn {
+                            rn,
+                            rm: Operand::Register(rm_reg),
+                            nzcv,
+                            cond,
+                        });
+                    }
+                }
+            }
+            for &imm in &CCMP_IMM5_SAMPLES {
+                for cond in crate::ir::types::NORMAL_CONDITIONS {
+                    for &nzcv in &CCMP_NZCV_SAMPLES {
+                        instructions.push(Instruction::Ccmp {
+                            rn,
+                            rm: Operand::Immediate(imm),
+                            nzcv,
+                            cond,
+                        });
+                        instructions.push(Instruction::Ccmn {
+                            rn,
+                            rm: Operand::Immediate(imm),
+                            nzcv,
+                            cond,
+                        });
+                    }
+                }
+            }
+        }
+
         // Tier 1 inverted-logical / flag-setting binary ops (register form).
         for &rd in registers {
             for &rn in registers {
@@ -617,18 +663,25 @@ impl InstructionGenerator<Instruction> for AArch64InstructionGenerator {
             }
             // Conditional-compare family (CCMP/CCMN). `is_encodable_aarch64`
             // forbids SP in `rn` and forbids AL/NV; mirror those in the
-            // sampler to keep the emitted candidates encodable.
+            // sampler to keep the emitted candidates encodable. Build a
+            // SP-filtered slice up front so the picker is a single
+            // bounded sample (no retry loop, no infinite-spin risk in
+            // release builds on a degenerate `[SP]`-only pool — that
+            // case falls back to the next opcode).
             28 => {
-                debug_assert!(
-                    registers.iter().any(|r| *r != Register::SP),
-                    "CCMP/CCMN random generator requires at least one non-SP register",
-                );
-                let pick_non_sp = |rng: &mut R| loop {
-                    let r = pick_reg(rng);
-                    if r != Register::SP {
-                        break r;
-                    }
-                };
+                let non_sp: Vec<Register> = registers
+                    .iter()
+                    .copied()
+                    .filter(|r| *r != Register::SP)
+                    .collect();
+                if non_sp.is_empty() {
+                    // No encodable CCMP/CCMN candidates with this pool —
+                    // fall back to the multiply-accumulate family which
+                    // tolerates any register.
+                    let rm = pick_reg(rng);
+                    return Instruction::Mneg { rd, rn, rm };
+                }
+                let pick_non_sp = |rng: &mut R| non_sp[rng.random_range(0..non_sp.len())];
                 let ccmp_rn = pick_non_sp(rng);
                 let rm = if rng.random_bool(0.5) {
                     Operand::Register(pick_non_sp(rng))
@@ -1116,12 +1169,13 @@ impl InstructionGenerator<Instruction> for AArch64InstructionGenerator {
 
     /// Total number of distinct opcode *families* (the upper bound on
     /// `opcode_id()`). Not the same as `generate_random`'s slot count —
-    /// `generate_random` samples 27 top-level slots and folds ANDS, CSET,
-    /// CSETM, and ROR into a sub-multiplexer on slot 23 (plus the six
-    /// single-source bit-manipulation ops into a sub-multiplexer on slot 26)
-    /// to keep the slot table small. So `opcode_id < opcode_count` always
-    /// holds, but the random-generation distribution is not uniform across
-    /// all 42 IDs.
+    /// `generate_random` samples 29 top-level slots and folds ANDS, CSET,
+    /// CSETM, and ROR into a sub-multiplexer on slot 23, the six single-
+    /// source bit-manipulation ops into a sub-multiplexer on slot 26, the
+    /// five multiply-accumulate ops into one on slot 27, and the two
+    /// conditional-compare ops into one on slot 28 — keeping the slot
+    /// table small. So `opcode_id < opcode_count` always holds, but the
+    /// random-generation distribution is not uniform across all 49 IDs.
     fn opcode_count(&self) -> u8 {
         49 // 20 original + 14 Tier 1 (MVN, NEG, NEGS, MovN, BIC, BICS, ORN,
         //  EON, ADDS, SUBS, ANDS, CSET, CSETM, ROR) + 2 MOVK/MOVZ (issue
@@ -1649,6 +1703,18 @@ mod tests {
                 rn: Register::X1,
                 shift: Operand::Register(Register::X0),
             },
+            Instruction::Ccmp {
+                rn: Register::X0,
+                rm: Operand::Register(Register::X1),
+                nzcv: 0,
+                cond: Condition::EQ,
+            },
+            Instruction::Ccmn {
+                rn: Register::X0,
+                rm: Operand::Immediate(1),
+                nzcv: 0,
+                cond: Condition::EQ,
+            },
         ] {
             assert!(ids.contains(&required.opcode_id()), "missing {}", required);
         }
@@ -1712,6 +1778,39 @@ mod tests {
                 instr
             );
         }
+    }
+
+    /// Coverage regression for the CCMP/CCMN random-generator arm's
+    /// fallback: when the register pool contains only SP — the
+    /// architectural slot CCMP/CCMN cannot encode — the generator must
+    /// return a valid alternative instruction in finite time, not spin
+    /// in a retry loop. The fallback path (Mneg with SP operands) is
+    /// not itself encodable, but the trait contract is "return an
+    /// Instruction"; encodability filtering is is_encodable_aarch64's job.
+    #[test]
+    fn random_generator_handles_sp_only_register_pool() {
+        let generator = AArch64InstructionGenerator;
+        let regs = vec![Register::SP];
+        let imms = vec![0, 1];
+        let mut rng = ChaCha8Rng::seed_from_u64(0xA64_5);
+        // Hit slot 28 deterministically: keep sampling until the
+        // ccmp/ccmn branch is reached. Bound the loop so a regression
+        // that breaks generate_random fails loudly instead of hanging.
+        let mut hit_slot_28 = false;
+        for _ in 0..10_000 {
+            let instr = generator.generate_random(&mut rng, &regs, &imms);
+            // Both the slot-28 fallback (Mneg) and any other slot are
+            // valid outcomes; we just need the call to terminate.
+            assert!(instr.opcode_id() < generator.opcode_count());
+            if matches!(instr, Instruction::Mneg { .. }) {
+                hit_slot_28 = true;
+            }
+        }
+        assert!(
+            hit_slot_28,
+            "slot 28 fallback (Mneg) should fire at least once in 10000 samples \
+             with a SP-only register pool"
+        );
     }
 
     #[test]
