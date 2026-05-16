@@ -1,4 +1,11 @@
 //! Prompt construction for the Codex-assisted search loop.
+//!
+//! AArch64-only by design (ADR-0003, reaffirmed by ADR-0004 decision 3, and
+//! restated by issue #77 stage 3 step 27): the prompt body names "AArch64
+//! superoptimizer" and renders AArch64 registers; the response parser
+//! delegates to `parser::parse_line` which only accepts AArch64 mnemonics.
+//! The LLM flow stays AArch64-only across all stages of #77 — no
+//! generification of this module is planned.
 
 use crate::ir::{Instruction, Register};
 use crate::semantics::live_out::LiveOutRegisters;
