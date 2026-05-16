@@ -1886,4 +1886,124 @@ mod tests {
         solver.assert(&neq);
         assert_eq!(solver.check(), SatResult::Unsat);
     }
+
+    // Issue #77 Stage 1 / Step 2 safety nets:
+    // per-opcode concrete-vs-SMT parity tests. Each test pins symbolic pre-state
+    // values to sampled concrete inputs, runs both interpreters, and asserts
+    // Z3 forces the symbolic post-state to agree with the concrete result.
+    // The width-aware refactor in Stage 1 Step 6 must keep these passing.
+
+    /// Pin every (register, value) in `pre_values` on both the concrete and
+    /// symbolic pre-state, run each interpreter on `instr`, and assert Z3 is
+    /// forced to agree with the concrete result for `dest`.
+    fn assert_concrete_smt_parity(
+        instr: &Instruction,
+        pre_values: &[(Register, u64)],
+        dest: Register,
+    ) {
+        use crate::semantics::concrete::apply_instruction_concrete;
+        use crate::semantics::state::{ConcreteMachineState, ConcreteValue};
+
+        let mut concrete_pre = ConcreteMachineState::new_zeroed();
+        for &(reg, val) in pre_values {
+            concrete_pre.set_register(reg, ConcreteValue::new(val));
+        }
+        let concrete_post = apply_instruction_concrete(concrete_pre, instr);
+        let concrete_dest = concrete_post.get_register(dest).as_u64();
+
+        let symbolic_pre = MachineState::new_symbolic("pre");
+        let solver = Solver::new();
+        for &(reg, val) in pre_values {
+            solver.assert(&symbolic_pre.get_register(reg).eq(&BV::from_u64(val, 64)));
+        }
+        let symbolic_post = apply_instruction(symbolic_pre, instr);
+        solver.assert(
+            &symbolic_post
+                .get_register(dest)
+                .eq(&BV::from_u64(concrete_dest, 64))
+                .not(),
+        );
+
+        assert_eq!(
+            solver.check(),
+            SatResult::Unsat,
+            "concrete/SMT parity violation: {:?} with pre={:x?} yields concrete \
+             {}={:#018x}, but SMT permits a different value",
+            instr,
+            pre_values,
+            dest,
+            concrete_dest,
+        );
+    }
+
+    #[test]
+    fn test_mov_reg_concrete_smt_parity() {
+        let instr = Instruction::MovReg {
+            rd: Register::X0,
+            rn: Register::X1,
+        };
+        let samples: &[u64] = &[
+            0,
+            1,
+            0xFFFF_FFFF_FFFF_FFFF,
+            0x8000_0000_0000_0000,
+            0x1234_5678_9ABC_DEF0,
+        ];
+        for &v1 in samples {
+            assert_concrete_smt_parity(&instr, &[(Register::X1, v1)], Register::X0);
+        }
+    }
+
+    #[test]
+    fn test_add_reg_concrete_smt_parity() {
+        let instr = Instruction::Add {
+            rd: Register::X0,
+            rn: Register::X1,
+            rm: Operand::Register(Register::X2),
+        };
+        // Pairs chosen to exercise: zero, wraparound across 2^64, sign-flip,
+        // and a generic non-canonical pair.
+        let samples: &[(u64, u64)] = &[
+            (0, 0),
+            (1, 0xFFFF_FFFF_FFFF_FFFF),
+            (0x8000_0000_0000_0000, 0x8000_0000_0000_0000),
+            (0xDEAD_BEEF_CAFE_BABE, 0x0123_4567_89AB_CDEF),
+        ];
+        for &(v1, v2) in samples {
+            assert_concrete_smt_parity(
+                &instr,
+                &[(Register::X1, v1), (Register::X2, v2)],
+                Register::X0,
+            );
+        }
+    }
+
+    #[test]
+    fn test_lsl_imm_concrete_smt_parity() {
+        // LSL is width-sensitive: concrete (concrete.rs:84-88) masks the shift
+        // amount with `& 63` before applying. SMT relies on Z3 bvshl with a
+        // 64-bit shift operand. For shift in [0, 63] the two paths agree; the
+        // width-aware refactor in Step 6 must preserve that. Shift values >= 64
+        // are a known latent divergence in the SMT lowering (Z3 bvshl returns 0
+        // while AArch64 architecturally shifts by `shift & 63`) and are NOT
+        // tested here; addressing it is out of scope for the NFC stage.
+        let values: &[u64] = &[
+            0,
+            1,
+            0xFFFF_FFFF_FFFF_FFFF,
+            0x8000_0000_0000_0000,
+            0x1234_5678_9ABC_DEF0,
+        ];
+        let shifts: &[i64] = &[0, 1, 5, 16, 32, 63];
+        for &v1 in values {
+            for &shift in shifts {
+                let instr = Instruction::Lsl {
+                    rd: Register::X0,
+                    rn: Register::X1,
+                    shift: Operand::Immediate(shift),
+                };
+                assert_concrete_smt_parity(&instr, &[(Register::X1, v1)], Register::X0);
+            }
+        }
+    }
 }
