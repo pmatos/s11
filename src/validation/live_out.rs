@@ -93,8 +93,16 @@ pub fn compute_written_registers(instructions: &[Instruction]) -> LiveOutRegiste
 /// flag-side-effect — SMT semantics for ADDS/SUBS/ANDS/NEGS/BICS/CMP/CMN/TST
 /// model the register write but not the flag effect. A tighter "flag-writer
 /// AND later read" form is tracked as a separate follow-up.
+///
+/// Issue #77 stage 1 step 14: routes through `FlagsAnalysis<I>` (ADR-0004
+/// decision 7) instead of the inherent `Instruction::modifies_flags`. The
+/// AArch64 impl delegates to the inherent method, so behaviour is identical;
+/// the same shape works unchanged for x86 in stage 2.
 pub fn flags_live_out(instructions: &[Instruction]) -> bool {
-    instructions.iter().any(|i| i.modifies_flags())
+    use crate::isa::{AArch64, FlagsAnalysis};
+    instructions
+        .iter()
+        .any(<AArch64 as FlagsAnalysis<Instruction>>::modifies_flags)
 }
 
 /// Returns true if any instruction reads NZCV flags before any instruction writes them.
@@ -103,13 +111,17 @@ pub fn flags_live_out(instructions: &[Instruction]) -> bool {
 /// Used by the prompt builder when flags-live-in support is added (ADR-0001
 /// defines the helper; ADR-0003 omits flags from the prompt for the MVP, so
 /// the function has no consumer yet).
+///
+/// Issue #77 stage 1 step 14: same FlagsAnalysis routing as `flags_live_out`
+/// above, for parity with the upcoming x86 wire-up.
 #[allow(dead_code)]
 pub fn reads_flags_before_writing(instructions: &[Instruction]) -> bool {
+    use crate::isa::{AArch64, FlagsAnalysis};
     for instr in instructions {
-        if instr.reads_flags() {
+        if <AArch64 as FlagsAnalysis<Instruction>>::reads_flags(instr) {
             return true;
         }
-        if instr.modifies_flags() {
+        if <AArch64 as FlagsAnalysis<Instruction>>::modifies_flags(instr) {
             return false;
         }
     }
