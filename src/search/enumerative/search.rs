@@ -243,13 +243,24 @@ impl SearchAlgorithm for EnumerativeSearch {
             // sized to that count. The `Some(1)` case in particular must
             // *not* fall through to the global rayon pool, or the user's
             // request for 1 thread would silently run on every logical core.
-            Some(n) => {
-                let pool = rayon::ThreadPoolBuilder::new()
-                    .num_threads(n.max(1))
-                    .build()
-                    .expect("rayon ThreadPoolBuilder::build failed");
-                pool.install(|| run_lengths(&shared));
-            }
+            Some(n) => match rayon::ThreadPoolBuilder::new()
+                .num_threads(n.max(1))
+                .build()
+            {
+                Ok(pool) => pool.install(|| run_lengths(&shared)),
+                Err(e) => {
+                    // Resource exhaustion (rare in practice): fall back to
+                    // the global rayon pool rather than unwinding through
+                    // `search()`'s non-`Result` return type. The user gets
+                    // unbounded parallelism instead of zero — better than a
+                    // panic for a CLI tool.
+                    eprintln!(
+                        "warning: failed to build private rayon pool with {} thread(s) ({}); falling back to global pool",
+                        n, e
+                    );
+                    run_lengths(&shared);
+                }
+            },
             // `None` → use the global pool (rayon's default = logical cores).
             None => run_lengths(&shared),
         }
