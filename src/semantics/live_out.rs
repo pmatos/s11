@@ -3,10 +3,87 @@
 //! `LiveOut` names the full observable architectural state contract. Today the
 //! only populated slice is `LiveOutRegisters`; condition state, memory, and PC
 //! can be added beside it without renaming the search/equivalence boundary.
+//!
+//! `LiveOutMask<R>` (added in #77 stage 1 step 7) is the per-ISA-register
+//! generic shape that stage 1 step 9 wires into `EquivalenceConfig<I>` and
+//! stage 2 step 16 lifts to subsume `X86LiveOutMask`. `flags_live` lives on
+//! the mask per ADR-0004 decision 5.
 
 use crate::ir::Register;
+use crate::isa::RegisterType;
 use std::collections::HashSet;
 use std::fmt;
+
+/// Generic live-out mask parameterised on register type.
+///
+/// Carries a `flags_live: bool` field so condition-state live-out is part of
+/// the same contract object. Stage 1 step 9 migrates `EquivalenceConfig` to
+/// `EquivalenceConfig<I>` and threads this type through every consumer; stage
+/// 2 step 16 replaces the parallel `X86LiveOutMask` with
+/// `LiveOutMask<X86Register>` and drops the duplicate type.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LiveOutMask<R: RegisterType> {
+    regs: HashSet<R>,
+    flags_live: bool,
+}
+
+impl<R: RegisterType> LiveOutMask<R> {
+    /// Empty mask, flags not live.
+    pub fn empty() -> Self {
+        Self {
+            regs: HashSet::new(),
+            flags_live: false,
+        }
+    }
+
+    /// Mask from a register slice, flags not live.
+    pub fn from_registers(regs: Vec<R>) -> Self {
+        Self {
+            regs: regs.into_iter().collect(),
+            flags_live: false,
+        }
+    }
+
+    /// Add a register to the live-out set (zero registers are silently dropped).
+    pub fn add(&mut self, reg: R) {
+        if !reg.is_zero_register() {
+            self.regs.insert(reg);
+        }
+    }
+
+    /// Returns true if `reg` is live-out.
+    pub fn contains(&self, reg: R) -> bool {
+        self.regs.contains(&reg)
+    }
+
+    /// Iterate over live-out registers.
+    pub fn iter(&self) -> impl Iterator<Item = &R> {
+        self.regs.iter()
+    }
+
+    /// Number of live-out registers.
+    pub fn len(&self) -> usize {
+        self.regs.len()
+    }
+
+    /// True if the mask contains no registers (flag-only liveness still
+    /// possible if `flags_live()` returns true).
+    pub fn is_empty(&self) -> bool {
+        self.regs.is_empty()
+    }
+
+    /// True if the condition flags are part of the live-out contract.
+    #[allow(dead_code)] // wired in #77 stage 1 step 9
+    pub fn flags_live(&self) -> bool {
+        self.flags_live
+    }
+
+    /// Set whether the condition flags are live-out.
+    #[allow(dead_code)] // wired in #77 stage 1 step 9
+    pub fn set_flags_live(&mut self, live: bool) {
+        self.flags_live = live;
+    }
+}
 
 /// Observable architectural state that must match after executing a sequence.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -188,5 +265,33 @@ mod tests {
         let live_out = LiveOut::from_registers(vec![Register::X0]);
         assert!(live_out.contains_register(Register::X0));
         assert_eq!(live_out.registers().len(), 1);
+    }
+
+    // Issue #77 stage 1 step 7: generic LiveOutMask coverage.
+    #[test]
+    fn test_live_out_mask_aarch64_basics() {
+        let mut mask: LiveOutMask<Register> = LiveOutMask::empty();
+        assert!(mask.is_empty());
+        assert!(!mask.flags_live());
+
+        mask.add(Register::X0);
+        mask.add(Register::X1);
+        mask.add(Register::XZR); // zero register is dropped
+        assert_eq!(mask.len(), 2);
+        assert!(mask.contains(Register::X0));
+        assert!(mask.contains(Register::X1));
+        assert!(!mask.contains(Register::XZR));
+
+        mask.set_flags_live(true);
+        assert!(mask.flags_live());
+    }
+
+    #[test]
+    fn test_live_out_mask_from_registers() {
+        let mask: LiveOutMask<Register> =
+            LiveOutMask::from_registers(vec![Register::X0, Register::X5, Register::X30]);
+        assert_eq!(mask.len(), 3);
+        assert!(mask.contains(Register::X5));
+        assert!(!mask.flags_live());
     }
 }
