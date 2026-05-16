@@ -27,6 +27,7 @@ pub struct LiveOutMask<R: RegisterType> {
     flags_live: bool,
 }
 
+#[allow(dead_code)] // public API, wired in #77 stage 1 step 9
 impl<R: RegisterType> LiveOutMask<R> {
     /// Empty mask, flags not live.
     pub fn empty() -> Self {

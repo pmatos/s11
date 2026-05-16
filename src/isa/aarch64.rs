@@ -53,6 +53,65 @@ impl crate::isa::traits::FlagsAnalysis<Instruction> for AArch64 {
     }
 }
 
+impl crate::isa::traits::ConcreteExecutor<Instruction> for AArch64 {
+    type Value = u64;
+    type State = crate::semantics::state::ConcreteMachineState;
+
+    fn execute_instruction(&self, state: Self::State, instruction: &Instruction) -> Self::State {
+        crate::semantics::concrete::apply_instruction_concrete(state, instruction)
+    }
+
+    fn new_zeroed_state(&self) -> Self::State {
+        crate::semantics::state::ConcreteMachineState::new_zeroed()
+    }
+
+    fn state_from_values(&self, values: std::collections::HashMap<Register, u64>) -> Self::State {
+        crate::semantics::state::ConcreteMachineState::from_values(values)
+    }
+
+    fn get_register(&self, state: &Self::State, reg: Register) -> u64 {
+        state.get_register(reg).as_u64()
+    }
+
+    fn set_register(&self, state: &mut Self::State, reg: Register, value: u64) {
+        state.set_register(reg, crate::semantics::state::ConcreteValue::new(value));
+    }
+}
+
+impl crate::isa::traits::SymbolicExecutor<Instruction> for AArch64 {
+    type State = crate::semantics::smt::MachineState;
+
+    fn execute_instruction(&self, state: Self::State, instruction: &Instruction) -> Self::State {
+        crate::semantics::smt::apply_instruction(state, instruction)
+    }
+
+    fn new_symbolic_state(&self, prefix: &str) -> Self::State {
+        crate::semantics::smt::MachineState::new_symbolic(prefix)
+    }
+}
+
+impl crate::isa::traits::CostModel<Instruction> for AArch64 {
+    fn instruction_cost(&self, instruction: &Instruction) -> u64 {
+        crate::semantics::cost::instruction_cost(
+            instruction,
+            &crate::semantics::cost::CostMetric::InstructionCount,
+        )
+    }
+}
+
+impl crate::isa::traits::Assembler<Instruction> for AArch64 {
+    fn assemble(&mut self, instructions: &[Instruction]) -> Result<Vec<u8>, String> {
+        crate::assembler::AArch64Assembler::new().assemble_instructions(instructions)
+    }
+
+    /// Bridges the inherent `Instruction::is_encodable_aarch64()` so step 11
+    /// can swap `is_sequence_encodable` for trait dispatch without losing
+    /// behaviour.
+    fn can_assemble(&self, instruction: &Instruction) -> bool {
+        instruction.is_encodable_aarch64()
+    }
+}
+
 impl RegisterType for Register {
     fn index(&self) -> Option<u8> {
         Register::index(self)
