@@ -495,4 +495,44 @@ mod tests {
             "padding should be the canonical 5-byte Intel NOP",
         );
     }
+
+    #[test]
+    fn create_patched_copy_pads_gap_larger_than_nine_bytes_with_two_nops() {
+        use crate::test_utils::TempFile;
+
+        let text_vaddr: u64 = 0x100000;
+        let text_bytes = [0xc3u8; 20];
+        let elf_bytes = build_minimal_x86_64_elf(&text_bytes, text_vaddr);
+
+        let input = TempFile::new_bytes("s11-elf-padding-big-in", "elf", &elf_bytes);
+        let output = TempFile::new_bytes("s11-elf-padding-big-out", "elf", &[]);
+
+        let patcher = ElfPatcher::new(input.path()).expect("patcher should accept minimal ELF");
+
+        let window = AddressWindow {
+            start: text_vaddr,
+            end: text_vaddr + 20,
+        };
+        let payload = [0x90u8, 0x90, 0x90];
+        patcher
+            .create_patched_copy(output.path(), &window, &payload)
+            .expect("patch should succeed");
+
+        let patched = std::fs::read(output.path()).expect("output should be readable");
+        let text_file_offset = 64usize;
+        let patched_window = &patched[text_file_offset..text_file_offset + 20];
+        assert_eq!(&patched_window[..3], &payload[..], "payload bytes mismatch");
+        // 17-byte gap should pack as the canonical 9-byte NOP followed by the
+        // canonical 8-byte NOP — proves the cursor loop iterates correctly.
+        assert_eq!(
+            &patched_window[3..12],
+            &[0x66, 0x0f, 0x1f, 0x84, 0x00, 0x00, 0x00, 0x00, 0x00][..],
+            "first pad should be the canonical 9-byte Intel NOP",
+        );
+        assert_eq!(
+            &patched_window[12..20],
+            &[0x0f, 0x1f, 0x84, 0x00, 0x00, 0x00, 0x00, 0x00][..],
+            "second pad should be the canonical 8-byte Intel NOP",
+        );
+    }
 }
