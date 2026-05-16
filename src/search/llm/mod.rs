@@ -79,6 +79,14 @@ impl LlmSearch {
     }
 }
 
+// ADR-0004 decision 3 (reaffirming ADR-0003): the LLM-assisted search path is
+// **AArch64-only by design**. The prompt body (src/search/llm/prompt.rs:20-46)
+// names "AArch64 superoptimizer" and renders AArch64 registers directly; the
+// response parser routes through `parser::parse_line` which is AArch64-only.
+// When stage 2 step 17 makes `SearchAlgorithm` generic over `<I: ISA>`, this
+// impl will be constrained to `SearchAlgorithm<AArch64>` so the LLM flow
+// cannot accidentally be invoked for x86 / RISC-V. Today the trait is
+// non-generic, so the constraint is implicit.
 impl SearchAlgorithm for LlmSearch {
     fn search(
         &mut self,
