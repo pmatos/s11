@@ -125,7 +125,11 @@ impl Mutator {
             return;
         }
 
-        let idx = rng.random_range(0..sequence.len());
+        let rewritable = rewritable_len(sequence);
+        if rewritable == 0 {
+            return; // terminator-only sequence — nothing to mutate
+        }
+        let idx = rng.random_range(0..rewritable);
         let instr = &mut sequence[idx];
 
         match instr {
@@ -378,6 +382,18 @@ impl Mutator {
                     }
                 }
             }
+            // Branches / terminators: never mutated. The rewritable_len()
+            // helper above excludes the terminator slot before this fires;
+            // arm is a no-op for defense in depth.
+            Instruction::B { .. }
+            | Instruction::BCond { .. }
+            | Instruction::Ret { .. }
+            | Instruction::Cbz { .. }
+            | Instruction::Cbnz { .. }
+            | Instruction::Tbz { .. }
+            | Instruction::Tbnz { .. }
+            | Instruction::Bl { .. }
+            | Instruction::Br { .. } => {}
         }
     }
 
@@ -387,7 +403,11 @@ impl Mutator {
             return;
         }
 
-        let idx = rng.random_range(0..sequence.len());
+        let rewritable = rewritable_len(sequence);
+        if rewritable == 0 {
+            return;
+        }
+        let idx = rng.random_range(0..rewritable);
         let instr = sequence[idx];
 
         sequence[idx] = match instr {
@@ -834,6 +854,18 @@ impl Mutator {
                 4 => Instruction::Ubfiz { rd, rn, lsb, width },
                 _ => Instruction::Sbfiz { rd, rn, lsb, width },
             },
+            // Branches / terminators: never opcode-mutated. rewritable_len()
+            // excludes the terminator slot before this fires; identity is
+            // safe if reached.
+            Instruction::B { target } => Instruction::B { target },
+            Instruction::BCond { target, cond } => Instruction::BCond { target, cond },
+            Instruction::Ret { rn } => Instruction::Ret { rn },
+            Instruction::Cbz { rn, target } => Instruction::Cbz { rn, target },
+            Instruction::Cbnz { rn, target } => Instruction::Cbnz { rn, target },
+            Instruction::Tbz { rt, bit, target } => Instruction::Tbz { rt, bit, target },
+            Instruction::Tbnz { rt, bit, target } => Instruction::Tbnz { rt, bit, target },
+            Instruction::Bl { target } => Instruction::Bl { target },
+            Instruction::Br { rn } => Instruction::Br { rn },
         };
     }
 
@@ -843,8 +875,12 @@ impl Mutator {
             return;
         }
 
-        let idx1 = rng.random_range(0..sequence.len());
-        let idx2 = rng.random_range(0..sequence.len());
+        let rewritable = rewritable_len(sequence);
+        if rewritable < 2 {
+            return; // not enough non-terminator slots to swap
+        }
+        let idx1 = rng.random_range(0..rewritable);
+        let idx2 = rng.random_range(0..rewritable);
         sequence.swap(idx1, idx2);
     }
 
@@ -854,7 +890,11 @@ impl Mutator {
             return;
         }
 
-        let idx = rng.random_range(0..sequence.len());
+        let rewritable = rewritable_len(sequence);
+        if rewritable == 0 {
+            return;
+        }
+        let idx = rng.random_range(0..rewritable);
         sequence[idx] = generate_random_instruction(rng, &self.registers, &self.immediates);
     }
 
@@ -930,6 +970,17 @@ impl Mutator {
 }
 
 /// Perform operand mutation on a specific instruction (for testing)
+/// Number of instructions a mutation operator may rewrite. Equals
+/// `sequence.len()` for terminator-free sequences and `sequence.len() - 1`
+/// when the last instruction is a basic-block terminator (issue #69 — the
+/// terminator is fixed live-out; search holds it bit-identical).
+fn rewritable_len(sequence: &[Instruction]) -> usize {
+    match sequence.last() {
+        Some(last) if last.is_terminator() => sequence.len() - 1,
+        _ => sequence.len(),
+    }
+}
+
 pub fn mutate_operand_in_place<R: RngExt>(
     rng: &mut R,
     instr: &mut Instruction,
@@ -1332,5 +1383,32 @@ mod tests {
         // Swap mutation should be a no-op on single instruction
         mutator.mutate_swap(&mut rng, &mut mutated);
         assert_eq!(mutated.len(), 1);
+    }
+
+    // ===== Issue #69: terminator-aware mutation =====
+
+    #[test]
+    fn mutation_preserves_terminator_across_1000_iterations() {
+        // Sequence ends in `ret` — every mutation must leave it intact.
+        let mutator = default_mutator();
+        let mut rng = rand::rng();
+        let terminator = Instruction::Ret { rn: Register::X30 };
+        let original = vec![
+            Instruction::MovImm {
+                rd: Register::X0,
+                imm: 42,
+            },
+            terminator,
+        ];
+
+        for _ in 0..1000 {
+            let mutated = mutator.mutate(&mut rng, &original);
+            assert_eq!(
+                mutated.last(),
+                Some(&terminator),
+                "mutation changed the terminator: got {:?}",
+                mutated
+            );
+        }
     }
 }

@@ -765,6 +765,16 @@ pub fn opcode_id(instr: &Instruction) -> u8 {
         Instruction::Bfxil { .. } => 52,
         Instruction::Ubfiz { .. } => 53,
         Instruction::Sbfiz { .. } => 54,
+        // Branches / terminators (issue #69)
+        Instruction::B { .. } => 55,
+        Instruction::BCond { .. } => 56,
+        Instruction::Ret { .. } => 57,
+        Instruction::Cbz { .. } => 58,
+        Instruction::Cbnz { .. } => 59,
+        Instruction::Tbz { .. } => 60,
+        Instruction::Tbnz { .. } => 61,
+        Instruction::Bl { .. } => 62,
+        Instruction::Br { .. } => 63,
     }
 }
 
@@ -994,6 +1004,31 @@ mod tests {
             seen_bitfield,
             "random generator must emit at least one bit-field instruction in 5000 trials"
         );
+    }
+
+    #[test]
+    fn candidate_pool_excludes_terminators() {
+        // Issue #69: branches are terminators and must NEVER appear in the
+        // rewritable candidate pool. The enumerative and random generators
+        // are the two pool sources for search; both must stay terminator-free.
+        let regs = default_registers();
+        let imms = default_immediates();
+
+        let pool = generate_all_instructions(&regs, &imms);
+        assert!(
+            pool.iter().all(|i| !i.is_terminator()),
+            "generate_all_instructions must not emit terminators"
+        );
+
+        let mut rng = rand::rng();
+        for _ in 0..1000 {
+            let instr = generate_random_instruction(&mut rng, &regs, &imms);
+            assert!(
+                !instr.is_terminator(),
+                "generate_random_instruction emitted a terminator: {:?}",
+                instr
+            );
+        }
     }
 
     #[test]

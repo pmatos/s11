@@ -825,6 +825,21 @@ pub fn apply_instruction(mut state: MachineState, instruction: &Instruction) -> 
             let shift = BV::from_u64(*lsb as u64, 64);
             state.set_register(*rd, widened.bvshl(&shift));
         }
+        // Branches / terminators: callers must strip terminators before
+        // apply_sequence. The equivalence layer handles them via
+        // identity-check, not by symbolic execution.
+        Instruction::B { .. }
+        | Instruction::BCond { .. }
+        | Instruction::Ret { .. }
+        | Instruction::Cbz { .. }
+        | Instruction::Cbnz { .. }
+        | Instruction::Tbz { .. }
+        | Instruction::Tbnz { .. }
+        | Instruction::Bl { .. }
+        | Instruction::Br { .. } => unreachable!(
+            "Branches are terminators; strip them before SMT apply_sequence. Reached: {:?}",
+            instruction
+        ),
     }
     state
 }

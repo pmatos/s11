@@ -507,6 +507,21 @@ pub fn apply_instruction_concrete(
             let result = sign_extended << *lsb;
             state.set_register(*rd, ConcreteValue::new(result));
         }
+        // Branches / terminators: callers must strip terminators before
+        // apply_sequence_concrete. The equivalence layer handles them via
+        // identity-check, not by execution.
+        Instruction::B { .. }
+        | Instruction::BCond { .. }
+        | Instruction::Ret { .. }
+        | Instruction::Cbz { .. }
+        | Instruction::Cbnz { .. }
+        | Instruction::Tbz { .. }
+        | Instruction::Tbnz { .. }
+        | Instruction::Bl { .. }
+        | Instruction::Br { .. } => unreachable!(
+            "Branches are terminators; strip them before apply_sequence_concrete. Reached: {:?}",
+            instruction
+        ),
     }
     state
 }

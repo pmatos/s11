@@ -274,6 +274,19 @@ impl fmt::Display for Operand {
     }
 }
 
+/// Symbolic branch destination. Carries the absolute target address; the
+/// assembler resolves it to a PC-relative immediate at encode time. For
+/// identifier-style labels in `.s` source, the parser hashes the name into
+/// the `u64`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct LabelId(pub u64);
+
+impl fmt::Display for LabelId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "0x{:x}", self.0)
+    }
+}
+
 /// Condition codes for AArch64
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[allow(dead_code)]
