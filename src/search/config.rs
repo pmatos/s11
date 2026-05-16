@@ -319,6 +319,7 @@ pub struct SearchConfig {
     pub timeout: Option<Duration>,
     /// Number of worker threads (rayon) for algorithms that parallelise.
     /// `None` lets rayon pick its default (typically logical-core count).
+    /// `Some(0)` is coerced to 1 thread (rayon rejects zero-thread pools).
     /// Currently consumed by `EnumerativeSearch`; ignored by single-threaded
     /// algorithms.
     pub cores: Option<usize>,
@@ -378,6 +379,11 @@ impl SearchConfig {
         self
     }
 
+    /// Set the rayon worker thread count for parallel search algorithms.
+    /// `None` uses the global rayon pool (typically logical-core count).
+    /// `Some(0)` is silently coerced to 1 thread (rayon rejects zero-thread
+    /// pools); callers expecting a no-parallelism behaviour should pass
+    /// `Some(1)` explicitly.
     pub fn with_cores(mut self, cores: Option<usize>) -> Self {
         self.cores = cores;
         self
