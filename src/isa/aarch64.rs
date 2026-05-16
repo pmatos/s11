@@ -170,6 +170,19 @@ impl InstructionType for Instruction {
             Instruction::Bfxil { .. } => 52,
             Instruction::Ubfiz { .. } => 53,
             Instruction::Sbfiz { .. } => 54,
+            // Branches / terminators (issue #69). Branches are not in the
+            // random-generation pool, so these IDs fall above `opcode_count`;
+            // the `id < opcode_count` invariant only applies to enumerated
+            // families.
+            Instruction::B { .. } => 55,
+            Instruction::BCond { .. } => 56,
+            Instruction::Ret { .. } => 57,
+            Instruction::Cbz { .. } => 58,
+            Instruction::Cbnz { .. } => 59,
+            Instruction::Tbz { .. } => 60,
+            Instruction::Tbnz { .. } => 61,
+            Instruction::Bl { .. } => 62,
+            Instruction::Br { .. } => 63,
         }
     }
 
@@ -234,6 +247,16 @@ impl InstructionType for Instruction {
             Instruction::Bfxil { .. } => "bfxil",
             Instruction::Ubfiz { .. } => "ubfiz",
             Instruction::Sbfiz { .. } => "sbfiz",
+            // Branches / terminators (issue #69)
+            Instruction::B { .. } => "b",
+            Instruction::BCond { .. } => "b.cond",
+            Instruction::Ret { .. } => "ret",
+            Instruction::Cbz { .. } => "cbz",
+            Instruction::Cbnz { .. } => "cbnz",
+            Instruction::Tbz { .. } => "tbz",
+            Instruction::Tbnz { .. } => "tbnz",
+            Instruction::Bl { .. } => "bl",
+            Instruction::Br { .. } => "br",
         }
     }
 
@@ -997,6 +1020,16 @@ impl InstructionGenerator<Instruction> for AArch64InstructionGenerator {
                         lsb,
                         width,
                     },
+                    // Branches have no rd; identity-mutate.
+                    Instruction::B { target } => Instruction::B { target },
+                    Instruction::BCond { target, cond } => Instruction::BCond { target, cond },
+                    Instruction::Ret { rn } => Instruction::Ret { rn },
+                    Instruction::Cbz { rn, target } => Instruction::Cbz { rn, target },
+                    Instruction::Cbnz { rn, target } => Instruction::Cbnz { rn, target },
+                    Instruction::Tbz { rt, bit, target } => Instruction::Tbz { rt, bit, target },
+                    Instruction::Tbnz { rt, bit, target } => Instruction::Tbnz { rt, bit, target },
+                    Instruction::Bl { target } => Instruction::Bl { target },
+                    Instruction::Br { rn } => Instruction::Br { rn },
                 }
             }
             2 => {
@@ -1376,6 +1409,16 @@ impl InstructionGenerator<Instruction> for AArch64InstructionGenerator {
                         lsb,
                         width,
                     },
+                    // Branches: no source operand mutation; identity.
+                    Instruction::B { target } => Instruction::B { target },
+                    Instruction::BCond { target, cond } => Instruction::BCond { target, cond },
+                    Instruction::Ret { rn } => Instruction::Ret { rn },
+                    Instruction::Cbz { rn, target } => Instruction::Cbz { rn, target },
+                    Instruction::Cbnz { rn, target } => Instruction::Cbnz { rn, target },
+                    Instruction::Tbz { rt, bit, target } => Instruction::Tbz { rt, bit, target },
+                    Instruction::Tbnz { rt, bit, target } => Instruction::Tbnz { rt, bit, target },
+                    Instruction::Bl { target } => Instruction::Bl { target },
+                    Instruction::Br { rn } => Instruction::Br { rn },
                 }
             }
             _ => unreachable!(),

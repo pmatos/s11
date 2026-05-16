@@ -1,6 +1,6 @@
 pub mod x86;
 
-use crate::ir::types::{Condition, ExtendKind, ShiftKind};
+use crate::ir::types::{Condition, ExtendKind, LabelId, ShiftKind};
 use crate::ir::{Instruction, Operand, Register};
 use dynasmrt::{DynasmApi, dynasm};
 
@@ -299,16 +299,24 @@ impl AArch64Assembler {
         Self
     }
 
+    /// Assemble a sequence of AArch64 instructions to machine code.
+    ///
+    /// `base_address` is the virtual address at which the first instruction
+    /// will execute; it is used solely to resolve PC-relative branch targets
+    /// (issue #69). For sequences without branches the value is irrelevant
+    /// and may be 0.
     pub fn assemble_instructions(
         &mut self,
         instructions: &[Instruction],
+        base_address: u64,
     ) -> Result<Vec<u8>, String> {
         // Create a new assembler for this operation
         let mut ops = dynasmrt::aarch64::Assembler::new()
             .map_err(|e| format!("Failed to create assembler: {:?}", e))?;
 
-        for instr in instructions {
-            self.encode_instruction_on(&mut ops, instr)?;
+        for (idx, instr) in instructions.iter().enumerate() {
+            let current_pc = base_address.wrapping_add((idx as u64) * 4);
+            self.encode_instruction_on(&mut ops, instr, current_pc)?;
         }
 
         ops.finalize()
@@ -321,7 +329,11 @@ impl AArch64Assembler {
         &self,
         ops: &mut dynasmrt::aarch64::Assembler,
         instr: &Instruction,
+        current_pc: u64,
     ) -> Result<(), String> {
+        // `current_pc` is consumed by branch-encoding arms below; suppress
+        // the unused-variable warning for the non-branch arms.
+        let _ = current_pc;
         match instr {
             Instruction::MovReg { rd, rn } => {
                 let rd_reg = register_to_dynasm(*rd)?;
@@ -1286,8 +1298,142 @@ impl AArch64Assembler {
                 dynasm!(ops ; .arch aarch64 ; sbfiz X(rd_reg), X(rn_reg), lsb_imm, width_imm);
                 Ok(())
             }
+
+            // ===== Issue #69: branches / control flow =====
+            // RET Xn / BR Xn: register-indirect transfers. No PC-relative
+            // immediate; encoding is independent of `current_pc`.
+            Instruction::Ret { rn } => {
+                let rn_reg = register_to_dynasm(*rn)?;
+                dynasm!(ops ; .arch aarch64 ; ret X(rn_reg));
+                Ok(())
+            }
+            Instruction::Br { rn } => {
+                let rn_reg = register_to_dynasm(*rn)?;
+                dynasm!(ops ; .arch aarch64 ; br X(rn_reg));
+                Ok(())
+            }
+            // B (unconditional) — PC-relative ±128 MiB. imm26 field holds the
+            // signed 4-byte-aligned offset; dynasm-rs takes the byte offset.
+            Instruction::B { target } => {
+                let offset = pc_relative_offset(*target, current_pc, BranchRange::B)?;
+                dynasm!(ops ; .arch aarch64 ; b offset);
+                Ok(())
+            }
+            // BL — same range as B but writes the return address to X30.
+            Instruction::Bl { target } => {
+                let offset = pc_relative_offset(*target, current_pc, BranchRange::B)?;
+                dynasm!(ops ; .arch aarch64 ; bl offset);
+                Ok(())
+            }
+            // B.cond — ±1 MiB. We pre-reject AL/NV at IR construction
+            // (is_encodable_aarch64) but defend in depth.
+            Instruction::BCond { target, cond } => {
+                if matches!(cond, Condition::AL | Condition::NV) {
+                    return Err(format!(
+                        "B.{} is not encodable (use plain B; NV is reserved)",
+                        cond
+                    ));
+                }
+                let offset = pc_relative_offset(*target, current_pc, BranchRange::Cond)?;
+                match cond {
+                    Condition::EQ => dynasm!(ops ; .arch aarch64 ; b.eq offset),
+                    Condition::NE => dynasm!(ops ; .arch aarch64 ; b.ne offset),
+                    Condition::CS => dynasm!(ops ; .arch aarch64 ; b.cs offset),
+                    Condition::CC => dynasm!(ops ; .arch aarch64 ; b.cc offset),
+                    Condition::MI => dynasm!(ops ; .arch aarch64 ; b.mi offset),
+                    Condition::PL => dynasm!(ops ; .arch aarch64 ; b.pl offset),
+                    Condition::VS => dynasm!(ops ; .arch aarch64 ; b.vs offset),
+                    Condition::VC => dynasm!(ops ; .arch aarch64 ; b.vc offset),
+                    Condition::HI => dynasm!(ops ; .arch aarch64 ; b.hi offset),
+                    Condition::LS => dynasm!(ops ; .arch aarch64 ; b.ls offset),
+                    Condition::GE => dynasm!(ops ; .arch aarch64 ; b.ge offset),
+                    Condition::LT => dynasm!(ops ; .arch aarch64 ; b.lt offset),
+                    Condition::GT => dynasm!(ops ; .arch aarch64 ; b.gt offset),
+                    Condition::LE => dynasm!(ops ; .arch aarch64 ; b.le offset),
+                    Condition::AL | Condition::NV => unreachable!("rejected above"),
+                }
+                Ok(())
+            }
+            // CBZ/CBNZ — register + ±1 MiB target.
+            Instruction::Cbz { rn, target } => {
+                let rn_reg = register_to_dynasm(*rn)?;
+                let offset = pc_relative_offset(*target, current_pc, BranchRange::Cond)?;
+                dynasm!(ops ; .arch aarch64 ; cbz X(rn_reg), offset);
+                Ok(())
+            }
+            Instruction::Cbnz { rn, target } => {
+                let rn_reg = register_to_dynasm(*rn)?;
+                let offset = pc_relative_offset(*target, current_pc, BranchRange::Cond)?;
+                dynasm!(ops ; .arch aarch64 ; cbnz X(rn_reg), offset);
+                Ok(())
+            }
+            // TBZ/TBNZ — register + bit + ±32 KiB target.
+            Instruction::Tbz { rt, bit, target } => {
+                if *bit > 63 {
+                    return Err(format!("TBZ bit {} out of range (0..=63)", bit));
+                }
+                let rt_reg = register_to_dynasm(*rt)?;
+                let bit = *bit as u32;
+                let offset = pc_relative_offset(*target, current_pc, BranchRange::Test)?;
+                dynasm!(ops ; .arch aarch64 ; tbz X(rt_reg), bit, offset);
+                Ok(())
+            }
+            Instruction::Tbnz { rt, bit, target } => {
+                if *bit > 63 {
+                    return Err(format!("TBNZ bit {} out of range (0..=63)", bit));
+                }
+                let rt_reg = register_to_dynasm(*rt)?;
+                let bit = *bit as u32;
+                let offset = pc_relative_offset(*target, current_pc, BranchRange::Test)?;
+                dynasm!(ops ; .arch aarch64 ; tbnz X(rt_reg), bit, offset);
+                Ok(())
+            }
         }
     }
+}
+
+/// PC-relative range limits for AArch64 branch encodings.
+#[derive(Debug, Clone, Copy)]
+enum BranchRange {
+    /// B / BL: ±128 MiB (imm26 << 2).
+    B,
+    /// B.cond / CBZ / CBNZ: ±1 MiB (imm19 << 2).
+    #[allow(dead_code)]
+    Cond,
+    /// TBZ / TBNZ: ±32 KiB (imm14 << 2).
+    #[allow(dead_code)]
+    Test,
+}
+
+impl BranchRange {
+    fn max_byte_offset(self) -> i64 {
+        match self {
+            BranchRange::B => 1 << 27,    // 128 MiB
+            BranchRange::Cond => 1 << 20, // 1 MiB
+            BranchRange::Test => 1 << 15, // 32 KiB
+        }
+    }
+}
+
+/// Compute the byte-offset of `target` from `current_pc`, validating it lies
+/// within the branch family's reachable range and is 4-byte aligned. The
+/// returned `i32` is the input dynasm-rs expects for the branch immediate.
+fn pc_relative_offset(target: LabelId, current_pc: u64, range: BranchRange) -> Result<i32, String> {
+    let offset = (target.0 as i64).wrapping_sub(current_pc as i64);
+    if offset % 4 != 0 {
+        return Err(format!(
+            "Branch target 0x{:x} not 4-byte aligned (offset {})",
+            target.0, offset
+        ));
+    }
+    let max = range.max_byte_offset();
+    if offset >= max || offset < -max {
+        return Err(format!(
+            "Branch offset {} out of range for {:?} (±{} bytes)",
+            offset, range, max
+        ));
+    }
+    Ok(offset as i32)
 }
 
 impl Default for AArch64Assembler {
@@ -1330,7 +1476,7 @@ mod tests {
             rn: Register::X1,
         }];
 
-        let result = assembler.assemble_instructions(&instructions);
+        let result = assembler.assemble_instructions(&instructions, 0);
         assert!(result.is_ok());
         let bytes = result.expect("MOV register encoding should succeed");
         assert_eq!(bytes.len(), 4); // One 32-bit instruction
@@ -1345,7 +1491,7 @@ mod tests {
             imm: 42,
         }];
 
-        let result = assembler.assemble_instructions(&instructions);
+        let result = assembler.assemble_instructions(&instructions, 0);
         assert!(result.is_ok());
         let bytes = result.expect("MOV immediate encoding should succeed");
         assert_eq!(bytes.len(), 4);
@@ -1361,7 +1507,7 @@ mod tests {
             rm: Operand::Register(Register::X2),
         }];
 
-        let result = assembler.assemble_instructions(&instructions);
+        let result = assembler.assemble_instructions(&instructions, 0);
         assert!(result.is_ok());
         let bytes = result.expect("ADD register encoding should succeed");
         assert_eq!(bytes.len(), 4);
@@ -1377,7 +1523,7 @@ mod tests {
             rm: Operand::Immediate(10),
         }];
 
-        let result = assembler.assemble_instructions(&instructions);
+        let result = assembler.assemble_instructions(&instructions, 0);
         assert!(result.is_ok());
         let bytes = result.expect("ADD immediate encoding should succeed");
         assert_eq!(bytes.len(), 4);
@@ -1392,7 +1538,7 @@ mod tests {
             imm: 0x10000, // Too large
         }];
 
-        let result = assembler.assemble_instructions(&instructions);
+        let result = assembler.assemble_instructions(&instructions, 0);
         assert!(result.is_err());
     }
 
@@ -1411,7 +1557,7 @@ mod tests {
             },
         ];
 
-        let result = assembler.assemble_instructions(&instructions);
+        let result = assembler.assemble_instructions(&instructions, 0);
         assert!(result.is_ok());
         let bytes = result.expect("Multiple instruction encoding should succeed");
         assert_eq!(bytes.len(), 8); // Two 32-bit instructions
@@ -1466,7 +1612,7 @@ mod tests {
         }];
 
         let bytes = assembler
-            .assemble_instructions(&instructions)
+            .assemble_instructions(&instructions, 0)
             .expect("MOV register encoding should succeed");
         disassemble_and_verify(&bytes, "mov", &["x0", "x1"]);
     }
@@ -1480,7 +1626,7 @@ mod tests {
         }];
 
         let bytes = assembler
-            .assemble_instructions(&instructions)
+            .assemble_instructions(&instructions, 0)
             .expect("MOV immediate encoding should succeed");
         disassemble_and_verify(&bytes, "mov", &["x0", "0x2a"]);
     }
@@ -1495,7 +1641,7 @@ mod tests {
         }];
 
         let bytes = assembler
-            .assemble_instructions(&instructions)
+            .assemble_instructions(&instructions, 0)
             .expect("ADD register encoding should succeed");
         disassemble_and_verify(&bytes, "add", &["x0", "x1", "x2"]);
     }
@@ -1510,7 +1656,7 @@ mod tests {
         }];
 
         let bytes = assembler
-            .assemble_instructions(&instructions)
+            .assemble_instructions(&instructions, 0)
             .expect("ADD immediate encoding should succeed");
         disassemble_and_verify(&bytes, "add", &["x0", "x1", "0xa"]);
     }
@@ -1525,7 +1671,7 @@ mod tests {
         }];
 
         let bytes = assembler
-            .assemble_instructions(&instructions)
+            .assemble_instructions(&instructions, 0)
             .expect("SUB register encoding should succeed");
         disassemble_and_verify(&bytes, "sub", &["x0", "x1", "x2"]);
     }
@@ -1540,7 +1686,7 @@ mod tests {
         }];
 
         let bytes = assembler
-            .assemble_instructions(&instructions)
+            .assemble_instructions(&instructions, 0)
             .expect("SUB immediate encoding should succeed");
         disassemble_and_verify(&bytes, "sub", &["x5", "x5", "#1"]);
     }
@@ -1555,7 +1701,7 @@ mod tests {
         }];
 
         let bytes = assembler
-            .assemble_instructions(&instructions)
+            .assemble_instructions(&instructions, 0)
             .expect("AND encoding should succeed");
         disassemble_and_verify(&bytes, "and", &["x0", "x1", "x2"]);
     }
@@ -1570,7 +1716,7 @@ mod tests {
         }];
 
         let bytes = assembler
-            .assemble_instructions(&instructions)
+            .assemble_instructions(&instructions, 0)
             .expect("ORR encoding should succeed");
         disassemble_and_verify(&bytes, "orr", &["x0", "x1", "x2"]);
     }
@@ -1585,7 +1731,7 @@ mod tests {
         }];
 
         let bytes = assembler
-            .assemble_instructions(&instructions)
+            .assemble_instructions(&instructions, 0)
             .expect("EOR encoding should succeed");
         disassemble_and_verify(&bytes, "eor", &["x0", "x0", "x0"]);
     }
@@ -1600,7 +1746,7 @@ mod tests {
         }];
 
         let bytes = assembler
-            .assemble_instructions(&instructions)
+            .assemble_instructions(&instructions, 0)
             .expect("LSL immediate encoding should succeed");
         disassemble_and_verify(&bytes, "lsl", &["x0", "x1", "#5"]);
     }
@@ -1615,7 +1761,7 @@ mod tests {
         }];
 
         let bytes = assembler
-            .assemble_instructions(&instructions)
+            .assemble_instructions(&instructions, 0)
             .expect("LSR immediate encoding should succeed");
         disassemble_and_verify(&bytes, "lsr", &["x0", "x1", "#8"]);
     }
@@ -1630,7 +1776,7 @@ mod tests {
         }];
 
         let bytes = assembler
-            .assemble_instructions(&instructions)
+            .assemble_instructions(&instructions, 0)
             .expect("ASR immediate encoding should succeed");
         disassemble_and_verify(&bytes, "asr", &["x0", "x1", "0x10"]);
     }
@@ -1645,7 +1791,7 @@ mod tests {
         }];
 
         let bytes = assembler
-            .assemble_instructions(&instructions)
+            .assemble_instructions(&instructions, 0)
             .expect("LSL register encoding should succeed");
         disassemble_and_verify(&bytes, "lsl", &["x0", "x1", "x2"]);
     }
@@ -1660,7 +1806,7 @@ mod tests {
             cond: Condition::EQ,
         }];
         let bytes = assembler
-            .assemble_instructions(&instructions)
+            .assemble_instructions(&instructions, 0)
             .expect("CSEL encoding should succeed");
         disassemble_and_verify(&bytes, "csel", &["x0", "x1", "x2", "eq"]);
     }
@@ -1675,7 +1821,7 @@ mod tests {
             cond: Condition::NE,
         }];
         let bytes = assembler
-            .assemble_instructions(&instructions)
+            .assemble_instructions(&instructions, 0)
             .expect("CSINC encoding should succeed");
         disassemble_and_verify(&bytes, "csinc", &["x3", "x4", "x5", "ne"]);
     }
@@ -1690,7 +1836,7 @@ mod tests {
             cond: Condition::LT,
         }];
         let bytes = assembler
-            .assemble_instructions(&instructions)
+            .assemble_instructions(&instructions, 0)
             .expect("CSINV encoding should succeed");
         disassemble_and_verify(&bytes, "csinv", &["x10", "x11", "x12", "lt"]);
     }
@@ -1705,7 +1851,7 @@ mod tests {
             cond: Condition::GE,
         }];
         let bytes = assembler
-            .assemble_instructions(&instructions)
+            .assemble_instructions(&instructions, 0)
             .expect("CSNEG encoding should succeed");
         disassemble_and_verify(&bytes, "csneg", &["x20", "x21", "x22", "ge"]);
     }
@@ -1720,7 +1866,7 @@ mod tests {
             cond: Condition::EQ,
         }];
         let bytes = assembler
-            .assemble_instructions(&instructions)
+            .assemble_instructions(&instructions, 0)
             .expect("CCMP register form should encode");
         disassemble_and_verify(&bytes, "ccmp", &["x1", "x2", "#5", "eq"]);
     }
@@ -1735,7 +1881,7 @@ mod tests {
             cond: Condition::NE,
         }];
         let bytes = assembler
-            .assemble_instructions(&instructions)
+            .assemble_instructions(&instructions, 0)
             .expect("CCMP immediate form should encode");
         disassemble_and_verify(&bytes, "ccmp", &["x3", "#0xf", "#0", "ne"]);
     }
@@ -1750,7 +1896,7 @@ mod tests {
             cond: Condition::LT,
         }];
         let bytes = assembler
-            .assemble_instructions(&instructions)
+            .assemble_instructions(&instructions, 0)
             .expect("CCMN register form should encode");
         disassemble_and_verify(&bytes, "ccmn", &["x0", "x1", "#0xf", "lt"]);
     }
@@ -1765,7 +1911,7 @@ mod tests {
             cond: Condition::GE,
         }];
         let bytes = assembler
-            .assemble_instructions(&instructions)
+            .assemble_instructions(&instructions, 0)
             .expect("CCMN immediate form should encode");
         disassemble_and_verify(&bytes, "ccmn", &["x4", "#7", "#4", "ge"]);
     }
@@ -1780,7 +1926,7 @@ mod tests {
             width: 16,
         }];
         let bytes = assembler
-            .assemble_instructions(&instructions)
+            .assemble_instructions(&instructions, 0)
             .expect("UBFX encoding should succeed");
         disassemble_and_verify(&bytes, "ubfx", &["x0", "x1", "#8", "#0x10"]);
     }
@@ -1797,7 +1943,7 @@ mod tests {
             width: 64,
         }];
         let bytes = assembler
-            .assemble_instructions(&instructions)
+            .assemble_instructions(&instructions, 0)
             .expect("UBFX (full width) encoding should succeed");
         // UBFX with (lsb=0, width=64) is canonically `mov x0, x1` in Capstone's
         // alias decoder, since immr=0/imms=63 with the UBFM bit pattern
@@ -1817,7 +1963,7 @@ mod tests {
             width: 8,
         }];
         let bytes = assembler
-            .assemble_instructions(&instructions)
+            .assemble_instructions(&instructions, 0)
             .expect("SBFIZ encoding should succeed");
         disassemble_and_verify(&bytes, "sbfiz", &["x0", "x1", "#4", "#8"]);
     }
@@ -1832,7 +1978,7 @@ mod tests {
             width: 8,
         }];
         let bytes = assembler
-            .assemble_instructions(&instructions)
+            .assemble_instructions(&instructions, 0)
             .expect("UBFIZ encoding should succeed");
         disassemble_and_verify(&bytes, "ubfiz", &["x0", "x1", "#4", "#8"]);
     }
@@ -1847,7 +1993,7 @@ mod tests {
             width: 8,
         }];
         let bytes = assembler
-            .assemble_instructions(&instructions)
+            .assemble_instructions(&instructions, 0)
             .expect("BFXIL encoding should succeed");
         disassemble_and_verify(&bytes, "bfxil", &["x0", "x1", "#8", "#8"]);
     }
@@ -1862,7 +2008,7 @@ mod tests {
             width: 8,
         }];
         let bytes = assembler
-            .assemble_instructions(&instructions)
+            .assemble_instructions(&instructions, 0)
             .expect("BFI encoding should succeed");
         disassemble_and_verify(&bytes, "bfi", &["x0", "x1", "#4", "#8"]);
     }
@@ -1877,7 +2023,7 @@ mod tests {
             width: 16,
         }];
         let bytes = assembler
-            .assemble_instructions(&instructions)
+            .assemble_instructions(&instructions, 0)
             .expect("SBFX encoding should succeed");
         disassemble_and_verify(&bytes, "sbfx", &["x0", "x1", "#8", "#0x10"]);
     }
@@ -1896,7 +2042,7 @@ mod tests {
             width: 8,
         }];
         let bytes = assembler
-            .assemble_instructions(&instructions)
+            .assemble_instructions(&instructions, 0)
             .expect("UBFX (high lsb) encoding should succeed");
         disassemble_and_verify(&bytes, "ubfx", &["x2", "x3", "#0x20", "#8"]);
     }
@@ -1911,7 +2057,7 @@ mod tests {
             ra: Register::X3,
         }];
         let bytes = assembler
-            .assemble_instructions(&instructions)
+            .assemble_instructions(&instructions, 0)
             .expect("MADD encoding should succeed");
         disassemble_and_verify(&bytes, "madd", &["x0", "x1", "x2", "x3"]);
     }
@@ -1926,7 +2072,7 @@ mod tests {
             ra: Register::X7,
         }];
         let bytes = assembler
-            .assemble_instructions(&instructions)
+            .assemble_instructions(&instructions, 0)
             .expect("MSUB encoding should succeed");
         disassemble_and_verify(&bytes, "msub", &["x4", "x5", "x6", "x7"]);
     }
@@ -1940,7 +2086,7 @@ mod tests {
             rm: Register::X12,
         }];
         let bytes = assembler
-            .assemble_instructions(&instructions)
+            .assemble_instructions(&instructions, 0)
             .expect("MNEG encoding should succeed");
         disassemble_and_verify(&bytes, "mneg", &["x10", "x11", "x12"]);
     }
@@ -1954,7 +2100,7 @@ mod tests {
             rm: Register::X15,
         }];
         let bytes = assembler
-            .assemble_instructions(&instructions)
+            .assemble_instructions(&instructions, 0)
             .expect("SMULH encoding should succeed");
         disassemble_and_verify(&bytes, "smulh", &["x13", "x14", "x15"]);
     }
@@ -1968,7 +2114,7 @@ mod tests {
             rm: Register::X18,
         }];
         let bytes = assembler
-            .assemble_instructions(&instructions)
+            .assemble_instructions(&instructions, 0)
             .expect("UMULH encoding should succeed");
         disassemble_and_verify(&bytes, "umulh", &["x16", "x17", "x18"]);
     }
@@ -1981,7 +2127,7 @@ mod tests {
             rm: Register::X1,
         }];
         let bytes = assembler
-            .assemble_instructions(&instructions)
+            .assemble_instructions(&instructions, 0)
             .expect("MVN encoding should succeed");
         disassemble_and_verify(&bytes, "mvn", &["x0", "x1"]);
     }
@@ -1994,7 +2140,7 @@ mod tests {
             rm: Register::X1,
         }];
         let bytes = assembler
-            .assemble_instructions(&instructions)
+            .assemble_instructions(&instructions, 0)
             .expect("NEG encoding should succeed");
         disassemble_and_verify(&bytes, "neg", &["x0", "x1"]);
     }
@@ -2007,7 +2153,7 @@ mod tests {
             rm: Register::X1,
         }];
         let bytes = assembler
-            .assemble_instructions(&instructions)
+            .assemble_instructions(&instructions, 0)
             .expect("NEGS encoding should succeed");
         disassemble_and_verify(&bytes, "negs", &["x0", "x1"]);
     }
@@ -2021,7 +2167,7 @@ mod tests {
             shift: 0,
         }];
         let bytes = assembler
-            .assemble_instructions(&instructions)
+            .assemble_instructions(&instructions, 0)
             .expect("MOVN encoding should succeed");
         // Exact byte-level check. MOVN 64-bit base is 0x92800000; imm16<<5
         // for #0xFFFF gives 0x1FFFE0; Rd=0 contributes nothing → word
@@ -2039,7 +2185,7 @@ mod tests {
             cond: Condition::EQ,
         }];
         let bytes = assembler
-            .assemble_instructions(&instructions)
+            .assemble_instructions(&instructions, 0)
             .expect("CSET encoding should succeed");
         // Capstone canonicalises `csinc x0, xzr, xzr, ne` back to `cset x0, eq`
         disassemble_and_verify(&bytes, "cset", &["x0", "eq"]);
@@ -2054,7 +2200,7 @@ mod tests {
             shift: Operand::Immediate(5),
         }];
         let bytes = assembler
-            .assemble_instructions(&instructions)
+            .assemble_instructions(&instructions, 0)
             .expect("ROR imm encoding should succeed");
         // Include the literal shift amount: an off-by-one in the encoded
         // immediate would otherwise slip through.
@@ -2070,7 +2216,7 @@ mod tests {
             shift: Operand::Register(Register::X2),
         }];
         let bytes = assembler
-            .assemble_instructions(&instructions)
+            .assemble_instructions(&instructions, 0)
             .expect("ROR reg encoding should succeed");
         disassemble_and_verify(&bytes, "ror", &["x0", "x1", "x2"]);
     }
@@ -2083,7 +2229,7 @@ mod tests {
             cond: Condition::NE,
         }];
         let bytes = assembler
-            .assemble_instructions(&instructions)
+            .assemble_instructions(&instructions, 0)
             .expect("CSETM encoding should succeed");
         disassemble_and_verify(&bytes, "csetm", &["x3", "ne"]);
     }
@@ -2107,7 +2253,7 @@ mod tests {
             },
         ] {
             let bytes = assembler
-                .assemble_instructions(&[instr])
+                .assemble_instructions(&[instr], 0)
                 .unwrap_or_else(|e| {
                     panic!(
                         "Expected SP-as-rn to encode, got Err({}) for {:?}",
@@ -2125,11 +2271,14 @@ mod tests {
     fn test_adds_imm_sp_rn_roundtrip() {
         let mut assembler = AArch64Assembler::new();
         let bytes = assembler
-            .assemble_instructions(&[Instruction::Adds {
-                rd: Register::X0,
-                rn: Register::SP,
-                rm: Operand::Immediate(8),
-            }])
+            .assemble_instructions(
+                &[Instruction::Adds {
+                    rd: Register::X0,
+                    rn: Register::SP,
+                    rm: Operand::Immediate(8),
+                }],
+                0,
+            )
             .expect("ADDS imm with SP rn should encode");
         disassemble_and_verify(&bytes, "adds", &["x0", "sp", "#8"]);
     }
@@ -2141,11 +2290,14 @@ mod tests {
     fn test_subs_imm_sp_rn_roundtrip() {
         let mut assembler = AArch64Assembler::new();
         let bytes = assembler
-            .assemble_instructions(&[Instruction::Subs {
-                rd: Register::X0,
-                rn: Register::SP,
-                rm: Operand::Immediate(8),
-            }])
+            .assemble_instructions(
+                &[Instruction::Subs {
+                    rd: Register::X0,
+                    rn: Register::SP,
+                    rm: Operand::Immediate(8),
+                }],
+                0,
+            )
             .expect("SUBS imm with SP rn should encode");
         disassemble_and_verify(&bytes, "subs", &["x0", "sp", "#8"]);
     }
@@ -2170,7 +2322,7 @@ mod tests {
                 rm: Operand::Immediate(8),
             },
         ] {
-            let result = assembler.assemble_instructions(&[instr]);
+            let result = assembler.assemble_instructions(&[instr], 0);
             assert!(
                 result.is_err(),
                 "Expected encoder to reject SP as rd, got {:?} for {:?}",
@@ -2199,7 +2351,7 @@ mod tests {
                 rm: Operand::Immediate(1),
             },
         ] {
-            let result = assembler.assemble_instructions(&[instr]);
+            let result = assembler.assemble_instructions(&[instr], 0);
             assert!(
                 result.is_err(),
                 "Expected encoder to reject {:?}, got {:?}",
@@ -2209,11 +2361,14 @@ mod tests {
         }
         // Register-form ADDS/SUBS with XZR as rn must still succeed — the
         // register-form encoding decodes 31 as XZR correctly.
-        let ok = assembler.assemble_instructions(&[Instruction::Adds {
-            rd: Register::X0,
-            rn: Register::XZR,
-            rm: Operand::Register(Register::X1),
-        }]);
+        let ok = assembler.assemble_instructions(
+            &[Instruction::Adds {
+                rd: Register::X0,
+                rn: Register::XZR,
+                rm: Operand::Register(Register::X1),
+            }],
+            0,
+        );
         assert!(ok.is_ok(), "register-form ADDS with XZR should encode");
     }
 
@@ -2244,7 +2399,7 @@ mod tests {
             },
         ];
         for instr in cases {
-            let result = assembler.assemble_instructions(&[instr]);
+            let result = assembler.assemble_instructions(&[instr], 0);
             assert!(
                 result.is_err(),
                 "Expected encoder to reject {:?}, got {:?}",
@@ -2263,7 +2418,7 @@ mod tests {
             shift: 16,
         }];
         let bytes = assembler
-            .assemble_instructions(&instructions)
+            .assemble_instructions(&instructions, 0)
             .expect("MOVN encoding with shift should succeed");
         // Base 0x92800000 | hw=1<<21 (shift/16=1) = 0x200000 | imm16=1<<5 = 0x20
         // → 0x92A00020, little-endian = [0x20, 0x00, 0xA0, 0x92].
@@ -2282,7 +2437,7 @@ mod tests {
             cond: Condition::EQ,
         }];
         let bytes = assembler
-            .assemble_instructions(&instructions)
+            .assemble_instructions(&instructions, 0)
             .expect("CSINV encoding should succeed");
         // disassemble_and_verify asserts mnemonic and operand presence; here
         // we additionally assert the operands are xN, not wN.
@@ -2507,7 +2662,7 @@ mod tests {
         for instr in cases {
             let mut assembler = AArch64Assembler::new();
             assembler
-                .assemble_instructions(&[instr])
+                .assemble_instructions(&[instr], 0)
                 .unwrap_or_else(|e| panic!("{} should assemble: {}", instr, e));
         }
     }
@@ -2637,7 +2792,7 @@ mod tests {
         for instr in cases {
             let mut assembler = AArch64Assembler::new();
             assert!(
-                assembler.assemble_instructions(&[instr]).is_err(),
+                assembler.assemble_instructions(&[instr], 0).is_err(),
                 "{} should be rejected",
                 instr
             );
@@ -2695,7 +2850,7 @@ mod tests {
         for (instr, mnemonic) in cases {
             let mut assembler = AArch64Assembler::new();
             let bytes = assembler
-                .assemble_instructions(std::slice::from_ref(instr))
+                .assemble_instructions(std::slice::from_ref(instr), 0)
                 .unwrap_or_else(|e| panic!("{} encoding should succeed: {}", mnemonic, e));
             let rd = instr.destination().unwrap().to_string();
             let rn = instr.source_registers()[0].to_string();
@@ -2710,10 +2865,13 @@ mod tests {
     fn test_uxtb_encoder_round_trip() {
         let mut assembler = AArch64Assembler::new();
         let bytes = assembler
-            .assemble_instructions(&[Instruction::Uxtb {
-                rd: Register::X0,
-                rn: Register::X1,
-            }])
+            .assemble_instructions(
+                &[Instruction::Uxtb {
+                    rd: Register::X0,
+                    rn: Register::X1,
+                }],
+                0,
+            )
             .expect("UXTB encoding should succeed");
         disassemble_and_verify(&bytes, "uxtb", &["w0", "w1"]);
     }
@@ -2779,7 +2937,7 @@ mod tests {
         for (instr, mnemonic, expected_fragments) in &cases {
             let mut assembler = AArch64Assembler::new();
             let bytes = assembler
-                .assemble_instructions(std::slice::from_ref(instr))
+                .assemble_instructions(std::slice::from_ref(instr), 0)
                 .unwrap_or_else(|e| panic!("{:?} encoding should succeed: {}", instr, e));
             let frag_refs: Vec<&str> = expected_fragments.iter().map(|s| s.as_str()).collect();
             disassemble_and_verify(&bytes, mnemonic, &frag_refs);
@@ -2791,10 +2949,13 @@ mod tests {
     fn test_sxtw_encoder_round_trip() {
         let mut assembler = AArch64Assembler::new();
         let bytes = assembler
-            .assemble_instructions(&[Instruction::Sxtw {
-                rd: Register::X0,
-                rn: Register::X1,
-            }])
+            .assemble_instructions(
+                &[Instruction::Sxtw {
+                    rd: Register::X0,
+                    rn: Register::X1,
+                }],
+                0,
+            )
             .expect("SXTW encoding should succeed");
         disassemble_and_verify(&bytes, "sxtw", &["x0", "w1"]);
     }
@@ -2804,10 +2965,13 @@ mod tests {
     fn test_sxth_encoder_round_trip() {
         let mut assembler = AArch64Assembler::new();
         let bytes = assembler
-            .assemble_instructions(&[Instruction::Sxth {
-                rd: Register::X0,
-                rn: Register::X1,
-            }])
+            .assemble_instructions(
+                &[Instruction::Sxth {
+                    rd: Register::X0,
+                    rn: Register::X1,
+                }],
+                0,
+            )
             .expect("SXTH encoding should succeed");
         disassemble_and_verify(&bytes, "sxth", &["x0", "w1"]);
     }
@@ -2818,10 +2982,13 @@ mod tests {
     fn test_uxth_encoder_round_trip() {
         let mut assembler = AArch64Assembler::new();
         let bytes = assembler
-            .assemble_instructions(&[Instruction::Uxth {
-                rd: Register::X0,
-                rn: Register::X1,
-            }])
+            .assemble_instructions(
+                &[Instruction::Uxth {
+                    rd: Register::X0,
+                    rn: Register::X1,
+                }],
+                0,
+            )
             .expect("UXTH encoding should succeed");
         disassemble_and_verify(&bytes, "uxth", &["w0", "w1"]);
     }
@@ -2832,10 +2999,13 @@ mod tests {
     fn test_sxtb_encoder_round_trip() {
         let mut assembler = AArch64Assembler::new();
         let bytes = assembler
-            .assemble_instructions(&[Instruction::Sxtb {
-                rd: Register::X0,
-                rn: Register::X1,
-            }])
+            .assemble_instructions(
+                &[Instruction::Sxtb {
+                    rd: Register::X0,
+                    rn: Register::X1,
+                }],
+                0,
+            )
             .expect("SXTB encoding should succeed");
         disassemble_and_verify(&bytes, "sxtb", &["x0", "w1"]);
     }
@@ -2953,7 +3123,7 @@ mod tests {
         for (instr, mnemonic, expected_ops) in cases {
             let mut assembler = AArch64Assembler::new();
             let bytes = assembler
-                .assemble_instructions(&[instr])
+                .assemble_instructions(&[instr], 0)
                 .unwrap_or_else(|e| panic!("{} encoding should succeed: {}", mnemonic, e));
             let refs: Vec<&str> = expected_ops.iter().map(|s| s.as_str()).collect();
             disassemble_and_verify(&bytes, mnemonic, &refs);
@@ -2974,6 +3144,210 @@ mod tests {
                 amount: 1,
             },
         };
-        assert!(assembler.assemble_instructions(&[instr]).is_err());
+        assert!(assembler.assemble_instructions(&[instr], 0).is_err());
+    }
+
+    // ===== Issue #69: branch / control-flow encoding =====
+
+    #[test]
+    fn test_ret_x30_round_trips_through_capstone() {
+        let mut assembler = AArch64Assembler::new();
+        let bytes = assembler
+            .assemble_instructions(&[Instruction::Ret { rn: Register::X30 }], 0)
+            .expect("RET X30 should encode");
+        assert_eq!(bytes.len(), 4, "AArch64 instructions are 4 bytes");
+        disassemble_and_verify(&bytes, "ret", &[]);
+    }
+
+    #[test]
+    fn test_br_x16_round_trips_through_capstone() {
+        let mut assembler = AArch64Assembler::new();
+        let bytes = assembler
+            .assemble_instructions(&[Instruction::Br { rn: Register::X16 }], 0)
+            .expect("BR X16 should encode");
+        disassemble_and_verify(&bytes, "br", &["x16"]);
+    }
+
+    /// Re-disassemble bytes with Capstone at a specific base address and
+    /// return the operand string of the (single) instruction. Useful for
+    /// PC-relative branch tests where the printed target depends on the
+    /// instruction's absolute address.
+    fn disasm_op_str_at(bytes: &[u8], base_addr: u64) -> String {
+        use capstone::prelude::*;
+        let cs = Capstone::new()
+            .arm64()
+            .mode(arch::arm64::ArchMode::Arm)
+            .build()
+            .expect("capstone");
+        let insns = cs.disasm_all(bytes, base_addr).expect("disasm");
+        assert_eq!(insns.len(), 1);
+        insns
+            .iter()
+            .next()
+            .unwrap()
+            .op_str()
+            .unwrap_or("")
+            .to_string()
+    }
+
+    #[test]
+    fn test_b_unconditional_encodes_forward_offset() {
+        // From PC=0x1000, branch to 0x1010 → +16 bytes / +4 instructions.
+        let mut assembler = AArch64Assembler::new();
+        let bytes = assembler
+            .assemble_instructions(
+                &[Instruction::B {
+                    target: LabelId(0x1010),
+                }],
+                0x1000,
+            )
+            .expect("B should encode");
+        let op = disasm_op_str_at(&bytes, 0x1000);
+        assert!(
+            op.contains("0x1010"),
+            "B operand should resolve to 0x1010, got '{}'",
+            op
+        );
+    }
+
+    #[test]
+    fn test_b_unconditional_rejects_out_of_range_offset() {
+        // B reaches ±128 MiB. 256 MiB is far past the limit.
+        let mut assembler = AArch64Assembler::new();
+        let err = assembler
+            .assemble_instructions(
+                &[Instruction::B {
+                    target: LabelId(0x1000_0000 + 0x1000_0000),
+                }],
+                0,
+            )
+            .expect_err("B at +256MiB must be rejected");
+        assert!(err.contains("out of range"), "got '{}'", err);
+    }
+
+    #[test]
+    fn test_bl_encodes_forward_offset() {
+        let mut assembler = AArch64Assembler::new();
+        let bytes = assembler
+            .assemble_instructions(
+                &[Instruction::Bl {
+                    target: LabelId(0x2000),
+                }],
+                0x1000,
+            )
+            .expect("BL should encode");
+        let op = disasm_op_str_at(&bytes, 0x1000);
+        assert!(
+            op.contains("0x2000"),
+            "BL target should resolve to 0x2000, got '{}'",
+            op
+        );
+    }
+
+    #[test]
+    fn test_cbz_encodes_with_register_and_target() {
+        let mut assembler = AArch64Assembler::new();
+        let bytes = assembler
+            .assemble_instructions(
+                &[Instruction::Cbz {
+                    rn: Register::X0,
+                    target: LabelId(0x1100),
+                }],
+                0x1000,
+            )
+            .expect("CBZ should encode");
+        let op = disasm_op_str_at(&bytes, 0x1000);
+        assert!(op.contains("x0") && op.contains("0x1100"), "got '{}'", op);
+    }
+
+    #[test]
+    fn test_cbnz_encodes_with_register_and_target() {
+        let mut assembler = AArch64Assembler::new();
+        let bytes = assembler
+            .assemble_instructions(
+                &[Instruction::Cbnz {
+                    rn: Register::X5,
+                    target: LabelId(0x1100),
+                }],
+                0x1000,
+            )
+            .expect("CBNZ should encode");
+        let op = disasm_op_str_at(&bytes, 0x1000);
+        assert!(op.contains("x5") && op.contains("0x1100"), "got '{}'", op);
+    }
+
+    #[test]
+    fn test_tbz_encodes_with_bit_and_target() {
+        // TBZ Xn, #bit, target — Capstone renders the register as `wN` when
+        // bit < 32 and `xN` when bit ≥ 32 (the encoding shares the bit field).
+        let mut assembler = AArch64Assembler::new();
+        let bytes = assembler
+            .assemble_instructions(
+                &[Instruction::Tbz {
+                    rt: Register::X3,
+                    bit: 5,
+                    target: LabelId(0x1100),
+                }],
+                0x1000,
+            )
+            .expect("TBZ should encode");
+        let op = disasm_op_str_at(&bytes, 0x1000);
+        assert!(
+            (op.contains("w3") || op.contains("x3")) && op.contains("0x1100"),
+            "TBZ op should contain reg and target, got '{}'",
+            op
+        );
+    }
+
+    #[test]
+    fn test_tbnz_encodes_with_bit_and_target() {
+        let mut assembler = AArch64Assembler::new();
+        let bytes = assembler
+            .assemble_instructions(
+                &[Instruction::Tbnz {
+                    rt: Register::X3,
+                    bit: 7,
+                    target: LabelId(0x1100),
+                }],
+                0x1000,
+            )
+            .expect("TBNZ should encode");
+        let op = disasm_op_str_at(&bytes, 0x1000);
+        assert!(
+            (op.contains("w3") || op.contains("x3")) && op.contains("0x1100"),
+            "got '{}'",
+            op
+        );
+    }
+
+    #[test]
+    fn test_b_cond_eq_encodes_with_condition_and_target() {
+        let mut assembler = AArch64Assembler::new();
+        let bytes = assembler
+            .assemble_instructions(
+                &[Instruction::BCond {
+                    target: LabelId(0x1100),
+                    cond: Condition::EQ,
+                }],
+                0x1000,
+            )
+            .expect("B.EQ should encode");
+        let op = disasm_op_str_at(&bytes, 0x1000);
+        assert!(
+            op.contains("0x1100"),
+            "B.EQ target should resolve, got '{}'",
+            op
+        );
+
+        // Verify the mnemonic carries the .eq suffix. Capstone with base=0
+        // prints the operand as raw PC-relative #imm; check the mnemonic alone.
+        use capstone::prelude::*;
+        let cs = Capstone::new()
+            .arm64()
+            .mode(arch::arm64::ArchMode::Arm)
+            .build()
+            .unwrap();
+        let insns = cs.disasm_all(&bytes, 0x1000).unwrap();
+        assert_eq!(insns.iter().next().unwrap().mnemonic().unwrap(), "b.eq");
     }
 }

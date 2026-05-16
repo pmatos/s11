@@ -134,11 +134,13 @@ mod tests {
     fn parse_fail_collects_all_unsupported_mnemonics_in_response() {
         // Response with three different unsupported instructions interleaved
         // with one supported `mov`. All three unsupported should be captured.
+        // (Note: branch mnemonics like `b`, `bl`, etc. are supported since
+        // issue #69; use memory ops as the unsupported set instead.)
         let target = vec![Instruction::MovImm {
             rd: Register::X0,
             imm: 1,
         }];
-        let raw = "ldr x0, [x1]\nmov x0, x1\nstr x2, [x3]\nb .Lend\n";
+        let raw = "ldr x0, [x1]\nmov x0, x1\nstr x2, [x3]\nldp x4, x5, [x6]\n";
         let (outcome, metrics) = classify(&target, raw, &live_out_x0());
         let mnemonics = match outcome {
             IterationOutcome::ParseFail {
@@ -157,8 +159,8 @@ mod tests {
             mnemonics
         );
         assert!(
-            mnemonics.contains(&"b".to_string()),
-            "b missing from {:?}",
+            mnemonics.contains(&"ldp".to_string()),
+            "ldp missing from {:?}",
             mnemonics
         );
         assert!(metrics.is_none());

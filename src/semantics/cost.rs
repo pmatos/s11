@@ -87,6 +87,16 @@ fn instruction_latency(instr: &Instruction) -> u64 {
         | Instruction::Bfxil { .. }
         | Instruction::Ubfiz { .. }
         | Instruction::Sbfiz { .. } => 1,
+        // Branches: 1-cycle latency (predicted; we don't model misprediction).
+        Instruction::B { .. }
+        | Instruction::BCond { .. }
+        | Instruction::Ret { .. }
+        | Instruction::Cbz { .. }
+        | Instruction::Cbnz { .. }
+        | Instruction::Tbz { .. }
+        | Instruction::Tbnz { .. }
+        | Instruction::Bl { .. }
+        | Instruction::Br { .. } => 1,
     }
 }
 

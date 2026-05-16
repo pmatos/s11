@@ -6,7 +6,8 @@ use std::fmt;
 use std::path::Path;
 
 use crate::ir::instructions::MOVW_LEGAL_SHIFTS;
-use crate::ir::{Condition, Instruction, Operand, Register, ShiftKind};
+use crate::ir::types::NORMAL_CONDITIONS;
+use crate::ir::{Condition, Instruction, LabelId, Operand, Register, ShiftKind};
 
 /// Parse error with location information
 #[derive(Debug, Clone)]
@@ -1090,6 +1091,155 @@ fn parse_csneg(operands: &[&str]) -> Result<Instruction, String> {
     Ok(Instruction::Csneg { rd, rn, rm, cond })
 }
 
+// ===== Issue #69: branch / control-flow parsers =====
+//
+// Branches in v1 are terminators: search holds them fixed, so the parser
+// is consumed only by `.s` round-trip and Capstone-disassembled binaries.
+// Numeric targets (the common Capstone form) are stored verbatim in
+// LabelId(u64); identifier-style labels (.Lfoo, loop_start) are hashed
+// into a stable u64. Two textually different label names hash to
+// distinct LabelIds — accepted as a v1 limitation.
+
+/// Parse a branch destination: numeric literal (0x.., decimal, optionally
+/// prefixed with `#`) or identifier-style label. The numeric value is the
+/// absolute target address; the assembler later resolves it to a
+/// PC-relative offset (see `pc_relative_offset` in `assembler::mod`).
+pub fn parse_branch_target(s: &str) -> Result<LabelId, String> {
+    let trimmed = s.trim();
+    if trimmed.is_empty() {
+        return Err("empty branch target".to_string());
+    }
+    // Strip a leading `#` (Capstone-style immediate prefix).
+    let body = trimmed.strip_prefix('#').unwrap_or(trimmed);
+    // Numeric forms first: 0x... or plain decimal.
+    if let Some(hex) = body.strip_prefix("0x").or_else(|| body.strip_prefix("0X")) {
+        return u64::from_str_radix(hex, 16)
+            .map(LabelId)
+            .map_err(|e| format!("invalid hex branch target '{}': {}", s, e));
+    }
+    if body.chars().all(|c| c.is_ascii_digit()) {
+        return body
+            .parse::<u64>()
+            .map(LabelId)
+            .map_err(|e| format!("invalid decimal branch target '{}': {}", s, e));
+    }
+    // Identifier-style label: hash the name to a stable u64.
+    use std::hash::{DefaultHasher, Hash, Hasher};
+    let mut h = DefaultHasher::new();
+    body.hash(&mut h);
+    Ok(LabelId(h.finish()))
+}
+
+fn parse_b(operands: &[&str]) -> Result<Instruction, String> {
+    if operands.len() != 1 {
+        return Err(format!("b requires 1 operand, got {}", operands.len()));
+    }
+    Ok(Instruction::B {
+        target: parse_branch_target(operands[0])?,
+    })
+}
+
+fn parse_bl(operands: &[&str]) -> Result<Instruction, String> {
+    if operands.len() != 1 {
+        return Err(format!("bl requires 1 operand, got {}", operands.len()));
+    }
+    Ok(Instruction::Bl {
+        target: parse_branch_target(operands[0])?,
+    })
+}
+
+fn parse_br(operands: &[&str]) -> Result<Instruction, String> {
+    if operands.len() != 1 {
+        return Err(format!("br requires 1 operand, got {}", operands.len()));
+    }
+    Ok(Instruction::Br {
+        rn: parse_register(operands[0])?,
+    })
+}
+
+fn parse_ret(operands: &[&str]) -> Result<Instruction, String> {
+    match operands.len() {
+        0 => Ok(Instruction::Ret { rn: Register::X30 }),
+        1 => Ok(Instruction::Ret {
+            rn: parse_register(operands[0])?,
+        }),
+        n => Err(format!("ret takes 0 or 1 operand, got {}", n)),
+    }
+}
+
+fn parse_b_cond(cond: Condition, operands: &[&str]) -> Result<Instruction, String> {
+    if !NORMAL_CONDITIONS.contains(&cond) {
+        // AL → use plain `b`. NV → reserved.
+        return Err(format!(
+            "b.{} is not encodable (AL: use plain b; NV: reserved)",
+            cond
+        ));
+    }
+    if operands.len() != 1 {
+        return Err(format!("b.cond requires 1 operand, got {}", operands.len()));
+    }
+    Ok(Instruction::BCond {
+        target: parse_branch_target(operands[0])?,
+        cond,
+    })
+}
+
+fn parse_cbz(operands: &[&str]) -> Result<Instruction, String> {
+    if operands.len() != 2 {
+        return Err(format!("cbz requires 2 operands, got {}", operands.len()));
+    }
+    Ok(Instruction::Cbz {
+        rn: parse_register(operands[0])?,
+        target: parse_branch_target(operands[1])?,
+    })
+}
+
+fn parse_cbnz(operands: &[&str]) -> Result<Instruction, String> {
+    if operands.len() != 2 {
+        return Err(format!("cbnz requires 2 operands, got {}", operands.len()));
+    }
+    Ok(Instruction::Cbnz {
+        rn: parse_register(operands[0])?,
+        target: parse_branch_target(operands[1])?,
+    })
+}
+
+fn parse_tbz_bit(s: &str) -> Result<u8, String> {
+    // The bit operand is `#N` or `N`, 0..=63.
+    let body = s.trim().strip_prefix('#').unwrap_or(s.trim());
+    let v: u32 = body
+        .parse()
+        .map_err(|e| format!("invalid TBZ/TBNZ bit '{}': {}", s, e))?;
+    if v > 63 {
+        return Err(format!("TBZ/TBNZ bit {} out of range (0..=63)", v));
+    }
+    Ok(v as u8)
+}
+
+fn parse_tbz(operands: &[&str]) -> Result<Instruction, String> {
+    if operands.len() != 3 {
+        return Err(format!("tbz requires 3 operands, got {}", operands.len()));
+    }
+    // Capstone prints TBZ as `wN` when bit<32, `xN` otherwise (both forms
+    // share the encoded register slot). Accept either spelling.
+    Ok(Instruction::Tbz {
+        rt: parse_w_or_x_register(operands[0])?,
+        bit: parse_tbz_bit(operands[1])?,
+        target: parse_branch_target(operands[2])?,
+    })
+}
+
+fn parse_tbnz(operands: &[&str]) -> Result<Instruction, String> {
+    if operands.len() != 3 {
+        return Err(format!("tbnz requires 3 operands, got {}", operands.len()));
+    }
+    Ok(Instruction::Tbnz {
+        rt: parse_w_or_x_register(operands[0])?,
+        bit: parse_tbz_bit(operands[1])?,
+        target: parse_branch_target(operands[2])?,
+    })
+}
+
 /// Parse a single line of assembly
 pub fn parse_line(line: &str) -> Result<LineResult, ParseLineError> {
     // Strip comments first
@@ -1228,6 +1378,22 @@ pub fn parse_line(line: &str) -> Result<LineResult, ParseLineError> {
             rn,
         })
         .map_err(ParseLineError::Other)?,
+        // ===== Issue #69: branches / control flow =====
+        "b" => parse_b(&operands).map_err(ParseLineError::Other)?,
+        "bl" => parse_bl(&operands).map_err(ParseLineError::Other)?,
+        "br" => parse_br(&operands).map_err(ParseLineError::Other)?,
+        "ret" => parse_ret(&operands).map_err(ParseLineError::Other)?,
+        "cbz" => parse_cbz(&operands).map_err(ParseLineError::Other)?,
+        "cbnz" => parse_cbnz(&operands).map_err(ParseLineError::Other)?,
+        "tbz" => parse_tbz(&operands).map_err(ParseLineError::Other)?,
+        "tbnz" => parse_tbnz(&operands).map_err(ParseLineError::Other)?,
+        // b.<cond> — split on the dot, parse the condition, dispatch.
+        op if op.starts_with("b.") => {
+            let suffix = &op[2..];
+            let cond = parse_condition(suffix)
+                .map_err(|_| ParseLineError::UnknownInstruction(opcode.clone()))?;
+            parse_b_cond(cond, &operands).map_err(ParseLineError::Other)?
+        }
         _ => return Err(ParseLineError::UnknownInstruction(opcode)),
     };
 
@@ -2127,5 +2293,160 @@ mod tests {
             }
         );
         assert_eq!(format!("{}", parsed), "uxtb x0, x1");
+    }
+
+    // ===== Issue #69: branch / control-flow parsing =====
+
+    #[test]
+    fn test_parse_ret_bare_defaults_to_x30() {
+        assert_eq!(parse_one("ret"), Instruction::Ret { rn: Register::X30 });
+    }
+
+    #[test]
+    fn test_parse_ret_with_explicit_register() {
+        assert_eq!(parse_one("ret x0"), Instruction::Ret { rn: Register::X0 });
+    }
+
+    #[test]
+    fn test_parse_ret_with_two_operands_errors() {
+        let result = parse_line("ret x0, x1");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_parse_b_unconditional_hex_target() {
+        assert_eq!(
+            parse_one("b 0x1000"),
+            Instruction::B {
+                target: LabelId(0x1000),
+            }
+        );
+    }
+
+    #[test]
+    fn test_parse_b_unconditional_with_hash_prefix() {
+        assert_eq!(
+            parse_one("b #0x1000"),
+            Instruction::B {
+                target: LabelId(0x1000),
+            }
+        );
+    }
+
+    #[test]
+    fn test_parse_bl_target() {
+        assert_eq!(
+            parse_one("bl 0x2000"),
+            Instruction::Bl {
+                target: LabelId(0x2000),
+            }
+        );
+    }
+
+    #[test]
+    fn test_parse_br_register() {
+        assert_eq!(parse_one("br x16"), Instruction::Br { rn: Register::X16 });
+    }
+
+    #[test]
+    fn test_parse_b_eq() {
+        assert_eq!(
+            parse_one("b.eq 0x1000"),
+            Instruction::BCond {
+                target: LabelId(0x1000),
+                cond: Condition::EQ,
+            }
+        );
+    }
+
+    #[test]
+    fn test_parse_b_ne() {
+        assert_eq!(
+            parse_one("b.ne 0x1000"),
+            Instruction::BCond {
+                target: LabelId(0x1000),
+                cond: Condition::NE,
+            }
+        );
+    }
+
+    #[test]
+    fn test_parse_b_al_rejected() {
+        // AL → use plain `b`. Parser must reject.
+        let result = parse_line("b.al 0x1000");
+        assert!(result.is_err(), "b.al should be rejected, got {:?}", result);
+    }
+
+    #[test]
+    fn test_parse_b_nv_rejected() {
+        let result = parse_line("b.nv 0x1000");
+        assert!(result.is_err(), "b.nv should be rejected, got {:?}", result);
+    }
+
+    #[test]
+    fn test_parse_b_garbage_suffix_unknown_instruction() {
+        let result = parse_line("b.xx 0x1000");
+        assert!(matches!(result, Err(ParseLineError::UnknownInstruction(_))));
+    }
+
+    #[test]
+    fn test_parse_cbz() {
+        assert_eq!(
+            parse_one("cbz x0, 0x1000"),
+            Instruction::Cbz {
+                rn: Register::X0,
+                target: LabelId(0x1000),
+            }
+        );
+    }
+
+    #[test]
+    fn test_parse_cbnz() {
+        assert_eq!(
+            parse_one("cbnz x5, 0x1000"),
+            Instruction::Cbnz {
+                rn: Register::X5,
+                target: LabelId(0x1000),
+            }
+        );
+    }
+
+    #[test]
+    fn test_parse_tbz_with_hash_bit() {
+        assert_eq!(
+            parse_one("tbz x3, #5, 0x1000"),
+            Instruction::Tbz {
+                rt: Register::X3,
+                bit: 5,
+                target: LabelId(0x1000),
+            }
+        );
+    }
+
+    #[test]
+    fn test_parse_tbnz() {
+        assert_eq!(
+            parse_one("tbnz x3, #7, 0x1000"),
+            Instruction::Tbnz {
+                rt: Register::X3,
+                bit: 7,
+                target: LabelId(0x1000),
+            }
+        );
+    }
+
+    #[test]
+    fn test_parse_tbz_bit_out_of_range_errors() {
+        let result = parse_line("tbz x3, #64, 0x1000");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_parse_b_identifier_label_hashes_consistently() {
+        let a = parse_one("b .Lfoo");
+        let b = parse_one("b .Lfoo");
+        assert_eq!(a, b, "same label should hash to same LabelId");
+        let c = parse_one("b .Lbar");
+        assert_ne!(a, c, "different labels should hash differently");
     }
 }

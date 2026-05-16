@@ -3,6 +3,7 @@
 #![allow(dead_code)]
 
 use crate::ir::Instruction;
+use crate::ir::instructions::split_terminator;
 use crate::semantics::concrete::{
     apply_sequence_concrete, find_first_difference, states_equal_for_live_out,
 };
@@ -160,9 +161,20 @@ impl EquivalenceConfig {
 /// Returns true if for all possible initial states, both sequences
 /// produce the same final state.
 pub fn check_equivalence(seq1: &[Instruction], seq2: &[Instruction]) -> EquivalenceResult {
+    // Issue #69: terminator-identity precheck. If either sequence ends in a
+    // branch / control-flow instruction, both must end in the SAME terminator
+    // (full struct equality including condition, register, bit, LabelId). The
+    // prefix (everything before the terminator) is what the equivalence layer
+    // semantically compares.
+    let (prefix1, terminator1) = split_terminator(seq1);
+    let (prefix2, terminator2) = split_terminator(seq2);
+    if terminator1 != terminator2 {
+        return EquivalenceResult::NotEquivalentFast(ConcreteMachineState::new_zeroed());
+    }
+
     // Unmasked entry point compares full state including NZCV (see
     // `states_not_equal`); flags are always observable here.
-    if let Some(early) = pre_smt_guard(seq1, seq2, true) {
+    if let Some(early) = pre_smt_guard(prefix1, prefix2, true) {
         return early;
     }
 
@@ -171,8 +183,8 @@ pub fn check_equivalence(seq1: &[Instruction], seq2: &[Instruction]) -> Equivale
 
     let initial_state = MachineState::new_symbolic("init");
 
-    let final_state1 = apply_sequence(initial_state.clone(), seq1);
-    let final_state2 = apply_sequence(initial_state, seq2);
+    let final_state1 = apply_sequence(initial_state.clone(), prefix1);
+    let final_state2 = apply_sequence(initial_state, prefix2);
 
     solver.assert(states_not_equal(&final_state1, &final_state2));
 
@@ -245,15 +257,22 @@ pub fn check_equivalence_with_config(
     seq2: &[Instruction],
     config: &EquivalenceConfig,
 ) -> EquivalenceResult {
-    if let Some(early) = pre_smt_guard(seq1, seq2, config.flags_live) {
+    // Issue #69: terminator-identity precheck — see `check_equivalence`.
+    let (prefix1, terminator1) = split_terminator(seq1);
+    let (prefix2, terminator2) = split_terminator(seq2);
+    if terminator1 != terminator2 {
+        return EquivalenceResult::NotEquivalentFast(ConcreteMachineState::new_zeroed());
+    }
+
+    if let Some(early) = pre_smt_guard(prefix1, prefix2, config.flags_live) {
         return early;
     }
 
-    if let Some(fast) = run_fast_path(seq1, seq2, config) {
+    if let Some(fast) = run_fast_path(prefix1, prefix2, config) {
         return fast;
     }
 
-    let solver = build_smt_solver(seq1, seq2, config);
+    let solver = build_smt_solver(prefix1, prefix2, config);
     interpret_smt_result(solver.check())
 }
 
@@ -273,15 +292,25 @@ pub fn check_equivalence_with_config_metrics(
 ) -> (EquivalenceResult, EquivalenceMetrics) {
     let metrics = EquivalenceMetrics::default();
 
-    if let Some(early) = pre_smt_guard(seq1, seq2, config.flags_live) {
+    // Issue #69: terminator-identity precheck — see `check_equivalence`.
+    let (prefix1, terminator1) = split_terminator(seq1);
+    let (prefix2, terminator2) = split_terminator(seq2);
+    if terminator1 != terminator2 {
+        return (
+            EquivalenceResult::NotEquivalentFast(ConcreteMachineState::new_zeroed()),
+            metrics,
+        );
+    }
+
+    if let Some(early) = pre_smt_guard(prefix1, prefix2, config.flags_live) {
         return (early, metrics);
     }
 
-    if let Some(fast) = run_fast_path(seq1, seq2, config) {
+    if let Some(fast) = run_fast_path(prefix1, prefix2, config) {
         return (fast, metrics);
     }
 
-    let solver = build_smt_solver(seq1, seq2, config);
+    let solver = build_smt_solver(prefix1, prefix2, config);
     let sat_result = solver.check();
     let smt_formula_bytes = if sat_result == SatResult::Unsat {
         Some(solver.to_string().len())
@@ -1899,6 +1928,80 @@ mod tests {
         assert_eq!(
             check_equivalence_with_config(&ubfx, &lsr_and, &config),
             EquivalenceResult::Equivalent
+        );
+    }
+
+    // ===== Issue #69: terminator-identity precheck =====
+
+    use crate::ir::LabelId;
+    use crate::ir::types::Condition;
+
+    fn mov_imm(imm: i64) -> Instruction {
+        Instruction::MovImm {
+            rd: Register::X0,
+            imm,
+        }
+    }
+
+    #[test]
+    fn check_equivalence_rejects_when_terminators_differ() {
+        // Same prefix, different conditional-branch terminator → NotEquivalent.
+        let seq1 = vec![
+            mov_imm(1),
+            Instruction::BCond {
+                target: LabelId(0x1000),
+                cond: Condition::EQ,
+            },
+        ];
+        let seq2 = vec![
+            mov_imm(1),
+            Instruction::BCond {
+                target: LabelId(0x1000),
+                cond: Condition::NE,
+            },
+        ];
+        let result = check_equivalence(&seq1, &seq2);
+        assert!(
+            matches!(result, EquivalenceResult::NotEquivalentFast(_)),
+            "got {:?}",
+            result
+        );
+    }
+
+    #[test]
+    fn check_equivalence_accepts_when_terminators_match() {
+        // Same prefix + same terminator → Equivalent.
+        let term = Instruction::Ret { rn: Register::X30 };
+        let seq1 = vec![mov_imm(1), term];
+        let seq2 = vec![mov_imm(1), term];
+        let result = check_equivalence(&seq1, &seq2);
+        assert!(
+            matches!(result, EquivalenceResult::Equivalent),
+            "got {:?}",
+            result
+        );
+    }
+
+    #[test]
+    fn check_equivalence_rejects_one_terminator_one_none() {
+        let seq1 = vec![mov_imm(1)];
+        let seq2 = vec![mov_imm(1), Instruction::Ret { rn: Register::X30 }];
+        let result = check_equivalence(&seq1, &seq2);
+        assert!(
+            matches!(result, EquivalenceResult::NotEquivalentFast(_)),
+            "got {:?}",
+            result
+        );
+    }
+
+    #[test]
+    fn check_equivalence_accepts_two_bare_rets() {
+        let term = Instruction::Ret { rn: Register::X30 };
+        let result = check_equivalence(&[term], &[term]);
+        assert!(
+            matches!(result, EquivalenceResult::Equivalent),
+            "got {:?}",
+            result
         );
     }
 }

@@ -1,6 +1,6 @@
 //! AArch64 instruction definitions for the IR
 
-use crate::ir::types::{Condition, Operand, Register, ShiftKind};
+use crate::ir::types::{Condition, LabelId, Operand, Register, ShiftKind};
 use std::fmt;
 
 /// Legal `lsl` amounts for the move-wide immediate family (MOVN / MOVZ / MOVK).
@@ -355,6 +355,43 @@ pub enum Instruction {
         lsb: u8,
         width: u8,
     },
+
+    // Branches / control flow (terminators only — never appear in the
+    // rewritable prefix; search holds them fixed).
+    B {
+        target: LabelId,
+    },
+    BCond {
+        target: LabelId,
+        cond: Condition,
+    },
+    Ret {
+        rn: Register,
+    },
+    Cbz {
+        rn: Register,
+        target: LabelId,
+    },
+    Cbnz {
+        rn: Register,
+        target: LabelId,
+    },
+    Tbz {
+        rt: Register,
+        bit: u8,
+        target: LabelId,
+    },
+    Tbnz {
+        rt: Register,
+        bit: u8,
+        target: LabelId,
+    },
+    Bl {
+        target: LabelId,
+    },
+    Br {
+        rn: Register,
+    },
 }
 
 impl Instruction {
@@ -423,9 +460,51 @@ impl Instruction {
             | Instruction::Tst { .. }
             | Instruction::Ccmp { .. }
             | Instruction::Ccmn { .. } => None,
+            // Branches / terminators have no destination register.
+            Instruction::B { .. }
+            | Instruction::BCond { .. }
+            | Instruction::Ret { .. }
+            | Instruction::Cbz { .. }
+            | Instruction::Cbnz { .. }
+            | Instruction::Tbz { .. }
+            | Instruction::Tbnz { .. }
+            | Instruction::Bl { .. }
+            | Instruction::Br { .. } => None,
         }
     }
 
+    /// Returns true if this instruction is a basic-block terminator (branch /
+    /// control flow). Terminators are held fixed by the search: mutation and
+    /// synthesis never produce or rewrite them, and the equivalence layer
+    /// strips them before applying prefix semantics.
+    pub fn is_terminator(&self) -> bool {
+        matches!(
+            self,
+            Instruction::B { .. }
+                | Instruction::BCond { .. }
+                | Instruction::Ret { .. }
+                | Instruction::Cbz { .. }
+                | Instruction::Cbnz { .. }
+                | Instruction::Tbz { .. }
+                | Instruction::Tbnz { .. }
+                | Instruction::Bl { .. }
+                | Instruction::Br { .. }
+        )
+    }
+}
+
+/// Split an instruction sequence into `(prefix, terminator)`. Returns the
+/// full slice as prefix and `None` if the sequence does not end with a
+/// terminator. Issue #69: shared by the search splitter (`find_shorter_equivalent`)
+/// and the equivalence precheck (`check_equivalence*`).
+pub fn split_terminator(seq: &[Instruction]) -> (&[Instruction], Option<&Instruction>) {
+    match seq.last() {
+        Some(last) if last.is_terminator() => (&seq[..seq.len() - 1], Some(last)),
+        _ => (seq, None),
+    }
+}
+
+impl Instruction {
     /// Returns true if this instruction modifies NZCV flags.
     ///
     /// Note: for flag-setting variants (NEGS, ADDS, SUBS, ANDS, BICS), this
@@ -461,6 +540,7 @@ impl Instruction {
                 | Instruction::Csetm { .. }
                 | Instruction::Ccmp { .. }
                 | Instruction::Ccmn { .. }
+                | Instruction::BCond { .. }
         )
     }
 
@@ -684,6 +764,21 @@ impl Instruction {
                     && *width >= 1
                     && (*lsb as u16 + *width as u16) <= 64
             }
+
+            // Branches: encodability is checked against PC-relative range at
+            // assembly time. IR-level shape:
+            //   - `B`, `Bl`, `Cbz`, `Cbnz`: always shape-valid.
+            //   - `BCond`: reject `AL` (use plain `B`) and `NV` (reserved).
+            //   - `Tbz`, `Tbnz`: bit must be in 0..=63 for 64-bit operand.
+            //   - `Ret`, `Br`: any register accepted; runtime semantics depend on the value.
+            Instruction::B { .. }
+            | Instruction::Bl { .. }
+            | Instruction::Cbz { .. }
+            | Instruction::Cbnz { .. }
+            | Instruction::Ret { .. }
+            | Instruction::Br { .. } => true,
+            Instruction::BCond { cond, .. } => !matches!(cond, Condition::AL | Condition::NV),
+            Instruction::Tbz { bit, .. } | Instruction::Tbnz { bit, .. } => *bit <= 63,
         }
     }
 
@@ -807,6 +902,16 @@ impl Instruction {
             Instruction::Bfi { rd, rn, .. } | Instruction::Bfxil { rd, rn, .. } => {
                 vec![*rd, *rn]
             }
+
+            // Branches: per-variant source-register sets.
+            //   B / BCond / Bl: no register operands.
+            //   Cbz / Cbnz: read `rn`.
+            //   Tbz / Tbnz: read `rt`.
+            //   Ret / Br: read `rn` (return address / indirect-branch target).
+            Instruction::B { .. } | Instruction::BCond { .. } | Instruction::Bl { .. } => vec![],
+            Instruction::Cbz { rn, .. } | Instruction::Cbnz { rn, .. } => vec![*rn],
+            Instruction::Tbz { rt, .. } | Instruction::Tbnz { rt, .. } => vec![*rt],
+            Instruction::Ret { rn } | Instruction::Br { rn } => vec![*rn],
         }
     }
 }
@@ -922,6 +1027,20 @@ impl fmt::Display for Instruction {
             Instruction::Sbfiz { rd, rn, lsb, width } => {
                 write!(f, "sbfiz {}, {}, #{}, #{}", rd, rn, lsb, width)
             }
+
+            Instruction::B { target } => write!(f, "b {}", target),
+            Instruction::BCond { target, cond } => write!(f, "b.{} {}", cond, target),
+            Instruction::Ret { rn } => write!(f, "ret {}", rn),
+            Instruction::Cbz { rn, target } => write!(f, "cbz {}, {}", rn, target),
+            Instruction::Cbnz { rn, target } => write!(f, "cbnz {}, {}", rn, target),
+            Instruction::Tbz { rt, bit, target } => {
+                write!(f, "tbz {}, #{}, {}", rt, bit, target)
+            }
+            Instruction::Tbnz { rt, bit, target } => {
+                write!(f, "tbnz {}, #{}, {}", rt, bit, target)
+            }
+            Instruction::Bl { target } => write!(f, "bl {}", target),
+            Instruction::Br { rn } => write!(f, "br {}", rn),
         }
     }
 }
@@ -2218,5 +2337,95 @@ mod tests {
             }
             .is_encodable_aarch64()
         );
+    }
+
+    #[test]
+    fn test_b_unconditional_is_terminator() {
+        let b = Instruction::B {
+            target: LabelId(0x1000),
+        };
+        assert!(b.is_terminator());
+    }
+
+    #[test]
+    fn test_b_cond_is_terminator() {
+        let b = Instruction::BCond {
+            target: LabelId(0x1000),
+            cond: Condition::EQ,
+        };
+        assert!(b.is_terminator());
+    }
+
+    #[test]
+    fn test_ret_is_terminator() {
+        let r = Instruction::Ret { rn: Register::X30 };
+        assert!(r.is_terminator());
+    }
+
+    #[test]
+    fn test_cbz_cbnz_are_terminators() {
+        assert!(
+            Instruction::Cbz {
+                rn: Register::X0,
+                target: LabelId(0x1000),
+            }
+            .is_terminator()
+        );
+        assert!(
+            Instruction::Cbnz {
+                rn: Register::X0,
+                target: LabelId(0x1000),
+            }
+            .is_terminator()
+        );
+    }
+
+    #[test]
+    fn test_tbz_tbnz_are_terminators() {
+        assert!(
+            Instruction::Tbz {
+                rt: Register::X0,
+                bit: 3,
+                target: LabelId(0x1000),
+            }
+            .is_terminator()
+        );
+        assert!(
+            Instruction::Tbnz {
+                rt: Register::X0,
+                bit: 3,
+                target: LabelId(0x1000),
+            }
+            .is_terminator()
+        );
+    }
+
+    #[test]
+    fn test_bl_is_terminator() {
+        let b = Instruction::Bl {
+            target: LabelId(0x1000),
+        };
+        assert!(b.is_terminator());
+    }
+
+    #[test]
+    fn test_br_is_terminator() {
+        let b = Instruction::Br { rn: Register::X16 };
+        assert!(b.is_terminator());
+    }
+
+    #[test]
+    fn test_non_branch_instructions_are_not_terminators() {
+        let mov = Instruction::MovImm {
+            rd: Register::X0,
+            imm: 42,
+        };
+        assert!(!mov.is_terminator());
+
+        let cmp = Instruction::Cmp {
+            rn: Register::X0,
+            rm: Operand::Register(Register::X1),
+        };
+        assert!(!cmp.is_terminator());
     }
 }

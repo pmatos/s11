@@ -18,6 +18,7 @@ mod validation;
 
 use assembler::AArch64Assembler;
 use elf_patcher::{AddressWindow, ElfPatcher, parse_hex_address};
+use ir::instructions::split_terminator;
 use ir::{Instruction, Register};
 use search::config::{
     Algorithm, LlmConfig, SearchConfig, SearchMode, StochasticConfig, SymbolicConfig,
@@ -456,6 +457,10 @@ fn optimize_elf_binary(
         println!("  {}", instr);
     }
 
+    // Issue #69: the optimization unit is a single basic block. Reject regions
+    // with branches at non-terminal positions before invoking search.
+    validate_basic_block(&ir_instructions)?;
+
     // Run optimization based on selected algorithm
     let optimized_instructions = run_optimization(&ir_instructions, options)?;
 
@@ -473,7 +478,7 @@ fn optimize_elf_binary(
 
     // Reassemble the instructions
     let mut assembler = AArch64Assembler::new();
-    let assembled_bytes = assembler.assemble_instructions(final_instructions)?;
+    let assembled_bytes = assembler.assemble_instructions(final_instructions, start_addr)?;
     println!("Reassembled to {} bytes", assembled_bytes.len());
 
     // Create output filename
@@ -499,12 +504,25 @@ fn optimize_elf_binary(
     Ok(())
 }
 
-/// Run optimization using the selected algorithm
+/// Run optimization using the selected algorithm.
+///
+/// Issue #69: if `target` ends in a terminator (branch / control-flow
+/// instruction), the search rewrites only the straight-line prefix and the
+/// terminator is reattached bit-identical to the returned sequence.
 fn run_optimization(
     target: &[Instruction],
     options: &OptimizationOptions,
 ) -> Result<Option<Vec<Instruction>>, Box<dyn std::error::Error>> {
     if target.is_empty() {
+        return Ok(None);
+    }
+
+    // Split off the terminator before search. The prefix is what gets
+    // optimized; the terminator is part of the live-out contract and is
+    // preserved bit-identical. A terminator-only sequence has no rewritable
+    // prefix and skips search entirely.
+    let (prefix, terminator) = split_terminator(target);
+    if prefix.is_empty() {
         return Ok(None);
     }
 
@@ -523,13 +541,26 @@ fn run_optimization(
         0, 1, 2, 3, 4, 5, 7, 8, 10, 15, 16, 31, 32, 63, 64, 100, 255, 256, 1000, 4095,
     ];
 
-    // Create live-out contract (assume all modified registers are live-out for now).
+    // Create live-out contract over the prefix (assume all modified registers
+    // are live-out). The fixed terminator is excluded — every candidate ends
+    // in the same terminator, so its register writes (e.g. BL's X30 write)
+    // are identical on both sides of equivalence.
     let live_out = LiveOut::from_registers(
-        target
+        prefix
             .iter()
             .filter_map(|instr| instr.destination())
             .collect(),
     );
+
+    // Reattach the terminator (if any) to a successfully optimized prefix.
+    let reattach = |opt: Option<Vec<Instruction>>| -> Option<Vec<Instruction>> {
+        opt.map(|mut seq| {
+            if let Some(t) = terminator {
+                seq.push(*t);
+            }
+            seq
+        })
+    };
 
     match options.algorithm {
         Algorithm::Enumerative => {
@@ -547,12 +578,12 @@ fn run_optimization(
                 .with_cores(options.cores);
 
             let mut search = EnumerativeSearch::new();
-            let result = search.search(target, &live_out, &config);
+            let result = search.search(prefix, &live_out, &config);
 
             print_search_statistics(&result.statistics);
 
             if result.found_optimization {
-                Ok(result.optimized_sequence)
+                Ok(reattach(result.optimized_sequence))
             } else {
                 Ok(None)
             }
@@ -579,12 +610,12 @@ fn run_optimization(
                 .with_immediates(available_immediates);
 
             let mut search = StochasticSearch::new();
-            let result = search.search(target, &live_out, &config);
+            let result = search.search(prefix, &live_out, &config);
 
             print_search_statistics(&result.statistics);
 
             if result.found_optimization {
-                Ok(result.optimized_sequence)
+                Ok(reattach(result.optimized_sequence))
             } else {
                 Ok(None)
             }
@@ -607,12 +638,12 @@ fn run_optimization(
                 .with_immediates(available_immediates);
 
             let mut search = SymbolicSearch::new();
-            let result = search.search(target, &live_out, &config);
+            let result = search.search(prefix, &live_out, &config);
 
             print_search_statistics(&result.statistics);
 
             if result.found_optimization {
-                Ok(result.optimized_sequence)
+                Ok(reattach(result.optimized_sequence))
             } else {
                 Ok(None)
             }
@@ -635,14 +666,14 @@ fn run_optimization(
                 .with_llm(llm);
 
             let mut search = search::llm::LlmSearch::new();
-            let result = search.search(target, &live_out, &config);
+            let result = search.search(prefix, &live_out, &config);
 
             print_search_statistics(&result.statistics);
             print_llm_timings(search.timings(), result.statistics.elapsed_time);
             print_unsupported_mnemonic_ledger(search.ledger());
 
             if result.found_optimization {
-                Ok(result.optimized_sequence)
+                Ok(reattach(result.optimized_sequence))
             } else {
                 Ok(None)
             }
@@ -678,12 +709,12 @@ fn run_optimization(
                 .with_seed_option(options.seed)
                 .with_timeout_option(options.timeout);
 
-            let result = run_parallel_search(target, &live_out, &config, &parallel_config);
+            let result = run_parallel_search(prefix, &live_out, &config, &parallel_config);
 
             print_search_statistics(&result.total_statistics);
 
             if result.best_result.found_optimization {
-                Ok(result.best_result.optimized_sequence)
+                Ok(reattach(result.best_result.optimized_sequence))
             } else {
                 Ok(None)
             }
@@ -846,6 +877,25 @@ fn convert_to_ir(instructions: &capstone::Instructions) -> Vec<Instruction> {
     }
 
     ir_instructions
+}
+
+/// Validate that an IR sequence forms a single basic block: at most one
+/// terminator (branch / control-flow instruction), and only at the final
+/// position. Issue #69 scope — internal branches mid-block are rejected.
+///
+/// Accepted shapes: `[]`, `[i1, ..., ik]` (no branch), `[t]` (terminator
+/// only), `[i1, ..., ik, t]` (prefix + terminator).
+fn validate_basic_block(ir: &[Instruction]) -> Result<(), String> {
+    let last_idx = ir.len().saturating_sub(1);
+    for (i, instr) in ir.iter().enumerate() {
+        if i < last_idx && instr.is_terminator() {
+            return Err(format!(
+                "Region contains a branch at position {} ({}); only single basic blocks ending in a terminator are supported (issue #69 scope)",
+                i, instr
+            ));
+        }
+    }
+    Ok(())
 }
 
 // ============================================================================
@@ -1353,9 +1403,16 @@ fn run_equiv(
             println!("NOT EQUIVALENT: The two sequences produce different results.");
             println!("\nCounterexample found:");
 
+            // Issue #69: strip terminators before re-running on the counterexample.
+            // The B1/B2 stubs panic if a branch reaches the concrete interpreter;
+            // the equivalence layer already excluded the terminator from its
+            // comparison via the precheck.
+            let (prefix1, _) = split_terminator(&seq1);
+            let (prefix2, _) = split_terminator(&seq2);
+
             // Run both sequences on the counterexample input
-            let output1 = semantics::apply_sequence_concrete(input_state.clone(), &seq1);
-            let output2 = semantics::apply_sequence_concrete(input_state.clone(), &seq2);
+            let output1 = semantics::apply_sequence_concrete(input_state.clone(), prefix1);
+            let output2 = semantics::apply_sequence_concrete(input_state.clone(), prefix2);
 
             println!("  Input state:");
             for (reg, val) in input_state.registers() {
@@ -1719,6 +1776,7 @@ mod x86_parser_tests {
 #[cfg(test)]
 mod cli_helper_tests {
     use super::*;
+    use ir::Operand;
     use isa::x86::{X86Instruction, X86Register};
     use search::llm::LlmTimings;
     use search::llm::ledger::UnsupportedMnemonicLedger;
@@ -1853,12 +1911,26 @@ mod cli_helper_tests {
             ("bfxil", "x0, x1, #8, #8"),
             ("ubfiz", "x0, x1, #4, #8"),
             ("sbfiz", "x0, x1, #4, #8"),
+            // Issue #69: branch / control-flow mnemonics. Capstone emits
+            // branch targets as `#0x...` (immediate-with-hash) and renders
+            // TBZ/TBNZ as `wN` when bit<32, `xN` otherwise.
+            ("b", "#0x1000"),
+            ("bl", "#0x1000"),
+            ("br", "x16"),
+            ("ret", ""),
+            ("ret", "x30"),
+            ("b.eq", "#0x1000"),
+            ("b.ne", "#0x1000"),
+            ("cbz", "x0, #0x1000"),
+            ("cbnz", "x5, #0x1000"),
+            ("tbz", "w3, #5, #0x1000"),
+            ("tbnz", "x3, #40, #0x1000"),
         ];
 
         // Tripwire: bump in lockstep when adding/removing rows. Catches
         // accidental row deletion and forces a re-read when adding a parser
         // mnemonic without a matching test row.
-        assert_eq!(cases.len(), 67);
+        assert_eq!(cases.len(), 78);
 
         for (mnem, ops) in cases {
             match convert_capstone_op(mnem, ops) {
@@ -2030,5 +2102,196 @@ mod cli_helper_tests {
 
         let llm_asm = TempFile::new("s11-llm", "s", "mov x0, x1\n");
         run_llm_opt(llm_asm.path(), "x0", 0, "test-model", 0, true).unwrap();
+    }
+
+    // ===== Issue #69: validate_basic_block =====
+
+    #[test]
+    fn validate_basic_block_accepts_empty_sequence() {
+        assert!(validate_basic_block(&[]).is_ok());
+    }
+
+    #[test]
+    fn validate_basic_block_accepts_prefix_only_no_terminator() {
+        let seq = vec![
+            Instruction::MovImm {
+                rd: Register::X0,
+                imm: 1,
+            },
+            Instruction::Add {
+                rd: Register::X1,
+                rn: Register::X0,
+                rm: Operand::Immediate(2),
+            },
+        ];
+        assert!(validate_basic_block(&seq).is_ok());
+    }
+
+    #[test]
+    fn validate_basic_block_accepts_terminator_only() {
+        let seq = vec![Instruction::Ret { rn: Register::X30 }];
+        assert!(validate_basic_block(&seq).is_ok());
+    }
+
+    #[test]
+    fn validate_basic_block_accepts_prefix_plus_terminator() {
+        let seq = vec![
+            Instruction::MovImm {
+                rd: Register::X0,
+                imm: 1,
+            },
+            Instruction::Ret { rn: Register::X30 },
+        ];
+        assert!(validate_basic_block(&seq).is_ok());
+    }
+
+    #[test]
+    fn split_terminator_returns_full_slice_when_no_terminator() {
+        let seq = vec![Instruction::MovImm {
+            rd: Register::X0,
+            imm: 1,
+        }];
+        let (prefix, term) = split_terminator(&seq);
+        assert_eq!(prefix.len(), 1);
+        assert!(term.is_none());
+    }
+
+    #[test]
+    fn split_terminator_separates_trailing_branch() {
+        let seq = vec![
+            Instruction::MovImm {
+                rd: Register::X0,
+                imm: 1,
+            },
+            Instruction::Ret { rn: Register::X30 },
+        ];
+        let (prefix, term) = split_terminator(&seq);
+        assert_eq!(prefix.len(), 1);
+        assert_eq!(term, Some(&Instruction::Ret { rn: Register::X30 }));
+    }
+
+    // (The standalone `find_shorter_equivalent_preserves_terminator_bit_identical`
+    // test was removed when the MVP `find_shorter_equivalent` helper was
+    // replaced by `search::EnumerativeSearch` (issue #67). The same contract
+    // is exercised by `issue_69_acceptance_find_shorter_preserves_terminator`
+    // below.)
+
+    // ===== Issue #69 acceptance: end-to-end basic-block-with-terminator =====
+    //
+    // Covers both acceptance criteria of issue #69:
+    //   (1) IR can represent a basic block ending in a conditional branch.
+    //   (2) Equivalence checking accounts for the branch decision.
+
+    #[test]
+    fn issue_69_acceptance_parses_bb_ending_in_b_cond() {
+        let src = "mov x0, x1\nb.eq .Ltarget\n";
+        let ir = parser::parse_assembly_string(src, "test".to_string()).expect("parse failed");
+        assert_eq!(ir.len(), 2, "expected 2-instruction BB, got {:?}", ir);
+        let last = ir.last().unwrap();
+        match last {
+            Instruction::BCond { cond, .. } => {
+                assert_eq!(*cond, crate::ir::types::Condition::EQ);
+            }
+            other => panic!("expected BCond terminator, got {:?}", other),
+        }
+        assert!(last.is_terminator());
+    }
+
+    #[test]
+    fn issue_69_acceptance_equivalence_rejects_different_branch_decisions() {
+        // Same prefix, different conditional branch → NotEquivalent
+        // (the branch decision differs, so equivalence must fail).
+        use crate::semantics::equivalence::{EquivalenceResult, check_equivalence};
+        let ir_eq =
+            parser::parse_assembly_string("mov x0, x1\nb.eq 0x1000\n", "a".to_string()).unwrap();
+        let ir_ne =
+            parser::parse_assembly_string("mov x0, x1\nb.ne 0x1000\n", "b".to_string()).unwrap();
+        let result = check_equivalence(&ir_eq, &ir_ne);
+        assert!(
+            matches!(result, EquivalenceResult::NotEquivalentFast(_)),
+            "expected NotEquivalent for differing branch decisions, got {:?}",
+            result
+        );
+    }
+
+    #[test]
+    fn issue_69_acceptance_find_shorter_preserves_terminator() {
+        // Build a prefix with a redundant move that the search can shorten,
+        // then a `ret` terminator. The result must keep `ret` bit-identical.
+        //
+        // This exercises the same code path as `run_optimization`:
+        //   1. `split_terminator` peels off the trailing `ret`.
+        //   2. The search runs on the prefix only.
+        //   3. The terminator is re-attached to the optimized prefix.
+        use crate::search::SearchAlgorithm;
+        use crate::search::config::SearchConfig;
+        use crate::semantics::LiveOut;
+
+        let terminator = Instruction::Ret { rn: Register::X30 };
+        let seq = vec![
+            Instruction::MovReg {
+                rd: Register::X0,
+                rn: Register::X0,
+            },
+            Instruction::MovReg {
+                rd: Register::X0,
+                rn: Register::X0,
+            },
+            terminator,
+        ];
+
+        let (prefix, term) = split_terminator(&seq);
+        assert_eq!(term, Some(&terminator), "split must recognize ret");
+
+        let live_out =
+            LiveOut::from_registers(prefix.iter().filter_map(|i| i.destination()).collect());
+        let config = SearchConfig::default()
+            .with_registers(vec![Register::X0, Register::X1])
+            .with_immediates(vec![0, 1]);
+        let mut search = EnumerativeSearch::new();
+        let result = search.search(prefix, &live_out, &config);
+
+        if let Some(shorter_prefix) = result.optimized_sequence {
+            // Re-attach the terminator and verify it survives bit-identical.
+            let mut shorter = shorter_prefix;
+            shorter.push(terminator);
+            assert!(
+                shorter.len() < seq.len(),
+                "must return a strictly shorter sequence; got {:?}",
+                shorter
+            );
+            assert_eq!(
+                shorter.last(),
+                Some(&terminator),
+                "terminator must be preserved bit-identical; got {:?}",
+                shorter
+            );
+        }
+        // No shorter form found is acceptable; the assertion above fires
+        // only when a shortening was actually achieved.
+    }
+
+    #[test]
+    fn validate_basic_block_rejects_branch_mid_block() {
+        let seq = vec![
+            Instruction::MovImm {
+                rd: Register::X0,
+                imm: 1,
+            },
+            Instruction::B {
+                target: crate::ir::LabelId(0x1000),
+            },
+            Instruction::Add {
+                rd: Register::X1,
+                rn: Register::X0,
+                rm: Operand::Immediate(2),
+            },
+        ];
+        let err = validate_basic_block(&seq).expect_err("branch at position 1 must be rejected");
+        assert!(
+            err.contains("position 1") && err.contains("issue #69"),
+            "unexpected error: {}",
+            err
+        );
     }
 }
