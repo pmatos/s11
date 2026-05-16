@@ -1,6 +1,13 @@
 #!/bin/bash
 
 # Build script for AArch64 + x86 test binaries.
+#
+# Issue #77 stage 3 step 26 will add RISC-V test-binary builds using
+# riscv{32,64}-linux-gnu-gcc, gracefully skipped when the toolchain is
+# absent (mirroring the existing gcc -m32 precedent). Blocked on step 23's
+# RISC-V semantics work — useful RISC-V integration tests need
+# `s11 disasm` and `s11 equiv` (asm-text) to produce meaningful output,
+# which requires the concrete + SMT executors.
 set -e
 
 echo "Building AArch64 test binaries..."
