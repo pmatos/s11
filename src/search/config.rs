@@ -317,6 +317,11 @@ pub struct SearchConfig {
     pub cost_metric: CostMetric,
     /// Overall timeout for the search
     pub timeout: Option<Duration>,
+    /// Number of worker threads (rayon) for algorithms that parallelise.
+    /// `None` lets rayon pick its default (typically logical-core count).
+    /// Currently consumed by `EnumerativeSearch`; ignored by single-threaded
+    /// algorithms.
+    pub cores: Option<usize>,
     /// Registers available for use in synthesized code
     pub available_registers: Vec<Register>,
     /// Immediate values to consider in synthesis
@@ -337,6 +342,7 @@ impl Default for SearchConfig {
             algorithm: Algorithm::default(),
             cost_metric: CostMetric::default(),
             timeout: Some(Duration::from_secs(60)),
+            cores: None,
             available_registers: vec![
                 Register::X0,
                 Register::X1,
@@ -369,6 +375,11 @@ impl SearchConfig {
 
     pub fn with_timeout(mut self, timeout: Duration) -> Self {
         self.timeout = Some(timeout);
+        self
+    }
+
+    pub fn with_cores(mut self, cores: Option<usize>) -> Self {
+        self.cores = cores;
         self
     }
 
