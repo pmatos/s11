@@ -1,6 +1,15 @@
 //! Assembly text parser for AArch64 instructions
 //!
 //! Parses GNU assembler syntax into the IR representation.
+//!
+//! Issue #77 stage 3 step 25 wraps this module's `parse_line` in a thin
+//! `AArch64Parser` newtype implementing `ISAParser<Instruction>` (a new
+//! associated type to be added on `ISA`). The contract is byte-for-byte
+//! identical — the newtype just dispatches through the trait. `convert_to_ir`
+//! in main.rs continues to delegate to `parse_line` per the project
+//! CLAUDE.md invariant. RISC-V gets `convert_to_riscv_ir` (binary path only;
+//! no asm-text parser until a follow-up). Blocked on step 23's RISC-V
+//! semantics work.
 
 use std::fmt;
 use std::path::Path;
