@@ -1,4 +1,14 @@
 //! Semantic equivalence checking for instruction sequences
+//!
+//! Issue #77 stage 2 step 19 plans to delete `X86EquivalenceConfig`,
+//! `check_equivalence_x86`, and `run_fast_path_x86` once
+//! `EquivalenceConfig<I>` is wired to consume `LiveOutMask<I::Register>`
+//! and the SearchAlgorithm<I> follow-up to step 11 lands. The CMP-presence
+//! heuristic in `run_fast_path_x86` merges into the generic `run_fast_path`
+//! as an `I::Flags`-aware optimisation (only triggers when `I::Flags != ()`).
+//! Today the x86 path still owns its config + entry points; the AArch64
+//! equivalence path consumes the generic surface via the trait route step 9
+//! introduced.
 
 #![allow(dead_code)]
 
