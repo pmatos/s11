@@ -2,10 +2,27 @@
 
 use crate::ir::instructions::MOVW_LEGAL_SHIFTS;
 use crate::ir::{Instruction, Operand, Register};
+use crate::isa::{AArch64, Assembler, InstructionType};
 
-/// Check if all instructions in a sequence can be encoded in AArch64 machine code.
+/// Generic encodability check: for any `<I: InstructionType, A: Assembler<I>>`,
+/// returns true iff every instruction passes `A::can_assemble`.
+///
+/// Added in #77 stage 1 step 11 as the canonical generic helper so x86 (stage
+/// 2 step 17) and RISC-V (stage 3 step 23) reuse the same shape. Today the
+/// only consumer is the AArch64 thin wrapper `is_sequence_encodable` below.
+pub fn is_sequence_encodable_for<I: InstructionType, A: Assembler<I>>(
+    sequence: &[I],
+    assembler: &A,
+) -> bool {
+    sequence.iter().all(|instr| assembler.can_assemble(instr))
+}
+
+/// Check if all instructions in a sequence can be encoded in AArch64 machine
+/// code. Routes through the generic `is_sequence_encodable_for` helper with
+/// the AArch64 marker (step 8's `Assembler::can_assemble` bridges
+/// `Instruction::is_encodable_aarch64()`).
 pub fn is_sequence_encodable(sequence: &[Instruction]) -> bool {
-    sequence.iter().all(|instr| instr.is_encodable_aarch64())
+    is_sequence_encodable_for(sequence, &AArch64)
 }
 
 /// Generate all encodable instructions using the given registers and immediates.
