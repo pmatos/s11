@@ -494,6 +494,49 @@ mod tests {
     }
 
     #[test]
+    fn length_four_target_iterates_past_length_three_dispatch() {
+        // Pins the `_ => {}` arm of the per-length dispatch: a length-4
+        // target makes the outer loop iterate over lengths 1, 2, and 3, so
+        // length 3 must hit the not-yet-implemented arm without panicking.
+        // The target intentionally has a length-1 equivalent (`add x0, x1,
+        // #1`) so cost-pruning collapses the length-2 enumeration after the
+        // first hit and the test completes in well under a second; the
+        // assertion still proves we *reached and survived* length 3.
+        let target = vec![
+            Instruction::MovReg {
+                rd: Register::X0,
+                rn: Register::X1,
+            },
+            Instruction::Add {
+                rd: Register::X0,
+                rn: Register::X0,
+                rm: Operand::Immediate(1),
+            },
+            Instruction::Sub {
+                rd: Register::X0,
+                rn: Register::X0,
+                rm: Operand::Immediate(1),
+            },
+            Instruction::Add {
+                rd: Register::X0,
+                rn: Register::X0,
+                rm: Operand::Immediate(1),
+            },
+        ];
+        let live_out = LiveOut::from_registers(vec![Register::X0]);
+
+        let mut search = EnumerativeSearch::new();
+        let result = search.search(&target, &live_out, &small_config());
+
+        // The important assertion is that the search returned — i.e. the
+        // length-3 `_ => {}` arm did not panic, the loop iterated past it,
+        // and the result was assembled cleanly.
+        assert!(result.statistics.elapsed_time > std::time::Duration::ZERO);
+        assert!(result.found_optimization, "length-1 collapse should fire");
+        assert_eq!(result.optimized_sequence.as_ref().map(Vec::len), Some(1));
+    }
+
+    #[test]
     fn search_honors_timeout() {
         // Construct a target with no length-1 equivalent in the small pool, so
         // length-1 enumeration runs all the way through. Then set an extremely
