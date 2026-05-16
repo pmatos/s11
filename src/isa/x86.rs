@@ -323,6 +323,7 @@ impl ISA for X86_64 {
     type Operand = X86Operand;
     type Instruction = X86Instruction;
     type Width = crate::isa::traits::U64;
+    type Flags = crate::semantics::state::Eflags;
 
     fn name(&self) -> &'static str {
         "x86-64"
@@ -359,6 +360,7 @@ impl ISA for X86_32 {
     type Operand = X86Operand;
     type Instruction = X86Instruction;
     type Width = crate::isa::traits::U32;
+    type Flags = crate::semantics::state::Eflags;
 
     fn name(&self) -> &'static str {
         "x86-32"
@@ -378,6 +380,36 @@ impl ISA for X86_32 {
 
     fn zero_register(&self) -> Option<X86Register> {
         None
+    }
+}
+
+/// Helper used by both `FlagsAnalysis<X86Instruction> for X86_64` and
+/// `for X86_32`: every x86 mnemonic except `Mov*` writes EFLAGS.
+fn x86_modifies_flags(instr: &X86Instruction) -> bool {
+    !matches!(
+        instr,
+        X86Instruction::MovReg { .. } | X86Instruction::MovImm { .. }
+    )
+}
+
+impl crate::isa::traits::FlagsAnalysis<X86Instruction> for X86_64 {
+    fn modifies_flags(instr: &X86Instruction) -> bool {
+        x86_modifies_flags(instr)
+    }
+
+    fn reads_flags(_instr: &X86Instruction) -> bool {
+        // No conditional ops in the current x86 mnemonic set.
+        false
+    }
+}
+
+impl crate::isa::traits::FlagsAnalysis<X86Instruction> for X86_32 {
+    fn modifies_flags(instr: &X86Instruction) -> bool {
+        x86_modifies_flags(instr)
+    }
+
+    fn reads_flags(_instr: &X86Instruction) -> bool {
+        false
     }
 }
 

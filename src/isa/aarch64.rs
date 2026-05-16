@@ -20,6 +20,7 @@ impl ISA for AArch64 {
     type Operand = Operand;
     type Instruction = Instruction;
     type Width = crate::isa::traits::U64;
+    type Flags = crate::semantics::state::ConditionFlags;
 
     fn name(&self) -> &'static str {
         "AArch64"
@@ -39,6 +40,16 @@ impl ISA for AArch64 {
 
     fn zero_register(&self) -> Option<Self::Register> {
         Some(Register::XZR)
+    }
+}
+
+impl crate::isa::traits::FlagsAnalysis<Instruction> for AArch64 {
+    fn modifies_flags(instr: &Instruction) -> bool {
+        instr.modifies_flags()
+    }
+
+    fn reads_flags(instr: &Instruction) -> bool {
+        instr.reads_flags()
     }
 }
 
