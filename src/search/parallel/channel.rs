@@ -1,4 +1,12 @@
 //! Solution sharing channel for parallel search workers.
+//!
+//! Issue #77 stage 1 step 12 note: these message and channel types are
+//! AArch64-typed (`Vec<Instruction>` on the payload). Genericising them over
+//! `<I: ISA>` adds `I::Instruction: 'static + Send + Sync` bounds across the
+//! whole worker spawn machinery; doing so before a second consumer exists
+//! adds churn without benefit. The generic form lands in stage 2 step 17 when
+//! `StochasticSearch<I>` materialises for x86 and the parallel coordinator
+//! gets a real second-arch user.
 
 #![allow(dead_code)]
 
