@@ -1936,6 +1936,71 @@ mod tests {
         );
     }
 
+    /// Extended parity helper supporting flag pre-state and flag post-state
+    /// agreement. Used by flag-setting (CMP/CMN/TST/ADDS/SUBS/ANDS/BICS/NEGS),
+    /// conditional (CSEL/CSINC/CSINV/CSNEG/CSET/CSETM), and flag+condition
+    /// (CCMP/CCMN) opcodes.
+    fn assert_concrete_smt_parity_full(
+        instr: &Instruction,
+        pre_values: &[(Register, u64)],
+        pre_flags: Option<crate::semantics::state::ConditionFlags>,
+        dest: Option<Register>,
+        check_post_flags: bool,
+    ) {
+        use crate::semantics::concrete::apply_instruction_concrete;
+        use crate::semantics::state::{ConcreteMachineState, ConcreteValue};
+
+        let mut concrete_pre = ConcreteMachineState::new_zeroed();
+        for &(reg, val) in pre_values {
+            concrete_pre.set_register(reg, ConcreteValue::new(val));
+        }
+        if let Some(flags) = pre_flags.clone() {
+            concrete_pre.set_flags(flags);
+        }
+        let concrete_post = apply_instruction_concrete(concrete_pre, instr);
+
+        let symbolic_pre = MachineState::new_symbolic("pre");
+        let solver = Solver::new();
+        for &(reg, val) in pre_values {
+            solver.assert(&symbolic_pre.get_register(reg).eq(&BV::from_u64(val, 64)));
+        }
+        if let Some(flags) = &pre_flags {
+            solver.assert(&symbolic_pre.n.eq(&BV::from_u64(flags.n as u64, 1)));
+            solver.assert(&symbolic_pre.z.eq(&BV::from_u64(flags.z as u64, 1)));
+            solver.assert(&symbolic_pre.c.eq(&BV::from_u64(flags.c as u64, 1)));
+            solver.assert(&symbolic_pre.v.eq(&BV::from_u64(flags.v as u64, 1)));
+        }
+        let symbolic_post = apply_instruction(symbolic_pre, instr);
+
+        let mut disagreements: Vec<z3::ast::Bool> = Vec::new();
+        if let Some(d) = dest {
+            let expected = BV::from_u64(concrete_post.get_register(d).as_u64(), 64);
+            disagreements.push(symbolic_post.get_register(d).eq(&expected).not());
+        }
+        if check_post_flags {
+            let cf = concrete_post.get_flags();
+            disagreements.push(symbolic_post.n.eq(&BV::from_u64(cf.n as u64, 1)).not());
+            disagreements.push(symbolic_post.z.eq(&BV::from_u64(cf.z as u64, 1)).not());
+            disagreements.push(symbolic_post.c.eq(&BV::from_u64(cf.c as u64, 1)).not());
+            disagreements.push(symbolic_post.v.eq(&BV::from_u64(cf.v as u64, 1)).not());
+        }
+        assert!(
+            !disagreements.is_empty(),
+            "assert_concrete_smt_parity_full needs either dest or check_post_flags"
+        );
+        let refs: Vec<&z3::ast::Bool> = disagreements.iter().collect();
+        solver.assert(&z3::ast::Bool::or(&refs));
+
+        assert_eq!(
+            solver.check(),
+            SatResult::Unsat,
+            "concrete/SMT parity violation: {:?} pre={:x?} pre_flags={:?}",
+            instr,
+            pre_values,
+            pre_flags,
+        );
+    }
+
     #[test]
     fn test_mov_reg_concrete_smt_parity() {
         let instr = Instruction::MovReg {
@@ -2676,6 +2741,431 @@ mod tests {
                 &[(Register::X1, v1), (Register::X2, v2)],
                 Register::X0,
             );
+        }
+    }
+
+    #[test]
+    fn test_cmp_reg_concrete_smt_parity() {
+        use crate::semantics::state::ConditionFlags;
+        // CMP rn, rm sets flags via subtraction, doesn't write a register.
+        let instr = Instruction::Cmp {
+            rn: Register::X1,
+            rm: Operand::Register(Register::X2),
+        };
+        let samples: &[(u64, u64)] = &[
+            (0, 0),                                         // equal: Z=1
+            (1, 0),                                         // pos minus zero
+            (0, 1),                                         // borrow: N=1, C=0
+            (0x8000_0000_0000_0000, 1),                     // overflow: V=1
+            (0xFFFF_FFFF_FFFF_FFFF, 0xFFFF_FFFF_FFFF_FFFF), // all-ones equal
+        ];
+        for &(v1, v2) in samples {
+            assert_concrete_smt_parity_full(
+                &instr,
+                &[(Register::X1, v1), (Register::X2, v2)],
+                Some(ConditionFlags::default()),
+                None,
+                true,
+            );
+        }
+    }
+
+    #[test]
+    fn test_cmn_reg_concrete_smt_parity() {
+        use crate::semantics::state::ConditionFlags;
+        let instr = Instruction::Cmn {
+            rn: Register::X1,
+            rm: Operand::Register(Register::X2),
+        };
+        let samples: &[(u64, u64)] = &[
+            (0, 0),
+            (1, 0xFFFF_FFFF_FFFF_FFFF), // sum wraps to 0 -> Z=1, C=1
+            (0x7FFF_FFFF_FFFF_FFFF, 1), // overflow: V=1
+            (0xFFFF_FFFF_FFFF_FFFF, 1), // wraps to 0
+        ];
+        for &(v1, v2) in samples {
+            assert_concrete_smt_parity_full(
+                &instr,
+                &[(Register::X1, v1), (Register::X2, v2)],
+                Some(ConditionFlags::default()),
+                None,
+                true,
+            );
+        }
+    }
+
+    #[test]
+    fn test_tst_reg_concrete_smt_parity() {
+        use crate::semantics::state::ConditionFlags;
+        // TST is AND for flags; doesn't write rd.
+        let instr = Instruction::Tst {
+            rn: Register::X1,
+            rm: Operand::Register(Register::X2),
+        };
+        let samples: &[(u64, u64)] = &[
+            (0, 0xFFFF_FFFF_FFFF_FFFF),                     // result=0 -> Z=1
+            (0xFFFF_FFFF_FFFF_FFFF, 0xFFFF_FFFF_FFFF_FFFF), // result=all-ones -> N=1
+            (0xAAAA_AAAA_AAAA_AAAA, 0x5555_5555_5555_5555), // result=0
+            (0xDEAD, 0xFFFF),                               // mixed
+        ];
+        for &(v1, v2) in samples {
+            assert_concrete_smt_parity_full(
+                &instr,
+                &[(Register::X1, v1), (Register::X2, v2)],
+                Some(ConditionFlags::default()),
+                None,
+                true,
+            );
+        }
+    }
+
+    #[test]
+    fn test_adds_reg_concrete_smt_parity() {
+        use crate::semantics::state::ConditionFlags;
+        let instr = Instruction::Adds {
+            rd: Register::X0,
+            rn: Register::X1,
+            rm: Operand::Register(Register::X2),
+        };
+        let samples: &[(u64, u64)] = &[
+            (0, 0),
+            (1, 0xFFFF_FFFF_FFFF_FFFF), // sum wraps to 0 -> Z=1, C=1
+            (0x8000_0000_0000_0000, 0x8000_0000_0000_0000), // both negative, V=1
+            (0x7FFF_FFFF_FFFF_FFFF, 1), // positive overflow: V=1
+        ];
+        for &(v1, v2) in samples {
+            assert_concrete_smt_parity_full(
+                &instr,
+                &[(Register::X1, v1), (Register::X2, v2)],
+                Some(ConditionFlags::default()),
+                Some(Register::X0),
+                true,
+            );
+        }
+    }
+
+    #[test]
+    fn test_subs_reg_concrete_smt_parity() {
+        use crate::semantics::state::ConditionFlags;
+        let instr = Instruction::Subs {
+            rd: Register::X0,
+            rn: Register::X1,
+            rm: Operand::Register(Register::X2),
+        };
+        let samples: &[(u64, u64)] = &[(0, 0), (0, 1), (1, 0), (0x8000_0000_0000_0000, 1)];
+        for &(v1, v2) in samples {
+            assert_concrete_smt_parity_full(
+                &instr,
+                &[(Register::X1, v1), (Register::X2, v2)],
+                Some(ConditionFlags::default()),
+                Some(Register::X0),
+                true,
+            );
+        }
+    }
+
+    #[test]
+    fn test_ands_reg_concrete_smt_parity() {
+        use crate::semantics::state::ConditionFlags;
+        let instr = Instruction::Ands {
+            rd: Register::X0,
+            rn: Register::X1,
+            rm: Operand::Register(Register::X2),
+        };
+        let samples: &[(u64, u64)] = &[
+            (0, 0xFFFF_FFFF_FFFF_FFFF),
+            (0xFFFF_FFFF_FFFF_FFFF, 0xFFFF_FFFF_FFFF_FFFF),
+            (0xAAAA_AAAA_AAAA_AAAA, 0x5555_5555_5555_5555),
+            (0xDEAD, 0xFFFF),
+        ];
+        for &(v1, v2) in samples {
+            assert_concrete_smt_parity_full(
+                &instr,
+                &[(Register::X1, v1), (Register::X2, v2)],
+                Some(ConditionFlags::default()),
+                Some(Register::X0),
+                true,
+            );
+        }
+    }
+
+    #[test]
+    fn test_bics_reg_concrete_smt_parity() {
+        use crate::semantics::state::ConditionFlags;
+        let instr = Instruction::Bics {
+            rd: Register::X0,
+            rn: Register::X1,
+            rm: Operand::Register(Register::X2),
+        };
+        let samples: &[(u64, u64)] = &[
+            (0xFFFF_FFFF_FFFF_FFFF, 0xFFFF_FFFF_FFFF_FFFF),
+            (0xFFFF_FFFF_FFFF_FFFF, 0),
+            (0xAAAA_AAAA_AAAA_AAAA, 0xAAAA_AAAA_AAAA_AAAA),
+        ];
+        for &(v1, v2) in samples {
+            assert_concrete_smt_parity_full(
+                &instr,
+                &[(Register::X1, v1), (Register::X2, v2)],
+                Some(ConditionFlags::default()),
+                Some(Register::X0),
+                true,
+            );
+        }
+    }
+
+    #[test]
+    fn test_negs_reg_concrete_smt_parity() {
+        use crate::semantics::state::ConditionFlags;
+        let instr = Instruction::Negs {
+            rd: Register::X0,
+            rm: Register::X1,
+        };
+        for v1 in &[0_u64, 1, 0x8000_0000_0000_0000, 0xFFFF_FFFF_FFFF_FFFF] {
+            assert_concrete_smt_parity_full(
+                &instr,
+                &[(Register::X1, *v1)],
+                Some(ConditionFlags::default()),
+                Some(Register::X0),
+                true,
+            );
+        }
+    }
+
+    #[test]
+    fn test_csel_concrete_smt_parity() {
+        use crate::ir::Condition;
+        use crate::semantics::state::ConditionFlags;
+        // CSEL reads flags + rn/rm and conditionally selects.
+        let instr_eq = Instruction::Csel {
+            rd: Register::X0,
+            rn: Register::X1,
+            rm: Register::X2,
+            cond: Condition::EQ,
+        };
+        let pre_flags = [
+            ConditionFlags {
+                n: false,
+                z: true,
+                c: false,
+                v: false,
+            }, // EQ holds
+            ConditionFlags::default(), // EQ fails
+        ];
+        for pf in &pre_flags {
+            assert_concrete_smt_parity_full(
+                &instr_eq,
+                &[(Register::X1, 0x1111), (Register::X2, 0x2222)],
+                Some(*pf),
+                Some(Register::X0),
+                false,
+            );
+        }
+    }
+
+    #[test]
+    fn test_csinc_concrete_smt_parity() {
+        use crate::ir::Condition;
+        use crate::semantics::state::ConditionFlags;
+        let instr = Instruction::Csinc {
+            rd: Register::X0,
+            rn: Register::X1,
+            rm: Register::X2,
+            cond: Condition::NE,
+        };
+        let pre_flags = [
+            ConditionFlags::default(),
+            ConditionFlags {
+                n: false,
+                z: true,
+                c: false,
+                v: false,
+            },
+        ];
+        for pf in &pre_flags {
+            assert_concrete_smt_parity_full(
+                &instr,
+                &[
+                    (Register::X1, 0x1111),
+                    (Register::X2, 0xFFFF_FFFF_FFFF_FFFF),
+                ],
+                Some(*pf),
+                Some(Register::X0),
+                false,
+            );
+        }
+    }
+
+    #[test]
+    fn test_csinv_concrete_smt_parity() {
+        use crate::ir::Condition;
+        use crate::semantics::state::ConditionFlags;
+        let instr = Instruction::Csinv {
+            rd: Register::X0,
+            rn: Register::X1,
+            rm: Register::X2,
+            cond: Condition::CS,
+        };
+        let pre_flags = [
+            ConditionFlags::default(),
+            ConditionFlags {
+                n: false,
+                z: false,
+                c: true,
+                v: false,
+            },
+        ];
+        for pf in &pre_flags {
+            assert_concrete_smt_parity_full(
+                &instr,
+                &[
+                    (Register::X1, 0xAAAA_AAAA_AAAA_AAAA),
+                    (Register::X2, 0x5555_5555_5555_5555),
+                ],
+                Some(*pf),
+                Some(Register::X0),
+                false,
+            );
+        }
+    }
+
+    #[test]
+    fn test_csneg_concrete_smt_parity() {
+        use crate::ir::Condition;
+        use crate::semantics::state::ConditionFlags;
+        let instr = Instruction::Csneg {
+            rd: Register::X0,
+            rn: Register::X1,
+            rm: Register::X2,
+            cond: Condition::MI,
+        };
+        let pre_flags = [
+            ConditionFlags::default(),
+            ConditionFlags {
+                n: true,
+                z: false,
+                c: false,
+                v: false,
+            },
+        ];
+        for pf in &pre_flags {
+            assert_concrete_smt_parity_full(
+                &instr,
+                &[(Register::X1, 0x1234), (Register::X2, 0x5678_9ABC)],
+                Some(*pf),
+                Some(Register::X0),
+                false,
+            );
+        }
+    }
+
+    #[test]
+    fn test_cset_concrete_smt_parity() {
+        use crate::ir::Condition;
+        use crate::semantics::state::ConditionFlags;
+        let instr = Instruction::Cset {
+            rd: Register::X0,
+            cond: Condition::EQ,
+        };
+        let pre_flags = [
+            ConditionFlags::default(),
+            ConditionFlags {
+                n: false,
+                z: true,
+                c: false,
+                v: false,
+            },
+        ];
+        for pf in &pre_flags {
+            assert_concrete_smt_parity_full(&instr, &[], Some(*pf), Some(Register::X0), false);
+        }
+    }
+
+    #[test]
+    fn test_csetm_concrete_smt_parity() {
+        use crate::ir::Condition;
+        use crate::semantics::state::ConditionFlags;
+        let instr = Instruction::Csetm {
+            rd: Register::X0,
+            cond: Condition::NE,
+        };
+        let pre_flags = [
+            ConditionFlags::default(),
+            ConditionFlags {
+                n: false,
+                z: true,
+                c: false,
+                v: false,
+            },
+        ];
+        for pf in &pre_flags {
+            assert_concrete_smt_parity_full(&instr, &[], Some(*pf), Some(Register::X0), false);
+        }
+    }
+
+    #[test]
+    fn test_ccmp_concrete_smt_parity() {
+        use crate::ir::Condition;
+        use crate::semantics::state::ConditionFlags;
+        // CCMP: if cond holds, run SUB and set NZCV from it; else load nzcv literal.
+        let instr = Instruction::Ccmp {
+            rn: Register::X1,
+            rm: Operand::Register(Register::X2),
+            nzcv: 0b1010, // N=1, Z=0, C=1, V=0
+            cond: Condition::EQ,
+        };
+        let pre_flags = [
+            ConditionFlags {
+                n: false,
+                z: true,
+                c: false,
+                v: false,
+            }, // EQ holds -> use SUB result
+            ConditionFlags::default(), // EQ fails -> use nzcv literal
+        ];
+        let val_samples = [(0u64, 0u64), (5u64, 3u64)];
+        for pf in &pre_flags {
+            for &(v1, v2) in &val_samples {
+                assert_concrete_smt_parity_full(
+                    &instr,
+                    &[(Register::X1, v1), (Register::X2, v2)],
+                    Some(*pf),
+                    None,
+                    true,
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_ccmn_concrete_smt_parity() {
+        use crate::ir::Condition;
+        use crate::semantics::state::ConditionFlags;
+        let instr = Instruction::Ccmn {
+            rn: Register::X1,
+            rm: Operand::Register(Register::X2),
+            nzcv: 0b0011,
+            cond: Condition::NE,
+        };
+        let pre_flags = [
+            ConditionFlags::default(),
+            ConditionFlags {
+                n: false,
+                z: true,
+                c: false,
+                v: false,
+            },
+        ];
+        let val_samples = [(0u64, 0u64), (5u64, 3u64)];
+        for pf in &pre_flags {
+            for &(v1, v2) in &val_samples {
+                assert_concrete_smt_parity_full(
+                    &instr,
+                    &[(Register::X1, v1), (Register::X2, v2)],
+                    Some(*pf),
+                    None,
+                    true,
+                );
+            }
         }
     }
 
