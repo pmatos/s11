@@ -396,7 +396,7 @@ mod tests {
         buf[0..4].copy_from_slice(b"\x7fELF");
         buf[4] = elf::abi::ELFCLASS64;
         buf[5] = elf::abi::ELFDATA2LSB;
-        buf[6] = elf::abi::EV_CURRENT as u8;
+        buf[6] = elf::abi::EV_CURRENT;
         buf[16..18].copy_from_slice(&elf::abi::ET_EXEC.to_le_bytes());
         buf[18..20].copy_from_slice(&elf::abi::EM_X86_64.to_le_bytes());
         buf[20..24].copy_from_slice(&(elf::abi::EV_CURRENT as u32).to_le_bytes());
