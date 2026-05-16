@@ -415,6 +415,163 @@ impl crate::isa::traits::FlagsAnalysis<X86Instruction> for X86_32 {
     }
 }
 
+// --- Trait surface impls (#77 stage 2 step 17) ---
+// Each impl delegates to the existing free function so the parallel
+// pipeline files (concrete_x86.rs / smt_x86.rs / cost_x86.rs /
+// assembler/x86.rs) can be deleted in stage 2 step 18 once stage 1's
+// SearchAlgorithm<I> follow-up wires the consumer side through these
+// trait impls.
+
+impl crate::isa::traits::ConcreteExecutor<X86Instruction> for X86_64 {
+    type Value = u64;
+    type State = crate::semantics::state::X86ConcreteMachineState;
+
+    fn execute_instruction(&self, state: Self::State, instruction: &X86Instruction) -> Self::State {
+        crate::semantics::concrete_x86::apply_instruction_concrete_x86(state, instruction)
+    }
+
+    fn new_zeroed_state(&self) -> Self::State {
+        crate::semantics::state::X86ConcreteMachineState::new_zeroed(64)
+    }
+
+    fn state_from_values(
+        &self,
+        values: std::collections::HashMap<X86Register, u64>,
+    ) -> Self::State {
+        let mut state = crate::semantics::state::X86ConcreteMachineState::new_zeroed(64);
+        for (reg, val) in values {
+            state.set_register(reg, crate::semantics::state::ConcreteValue::new(val));
+        }
+        state
+    }
+
+    fn get_register(&self, state: &Self::State, reg: X86Register) -> u64 {
+        state.get_register(reg).as_u64()
+    }
+
+    fn set_register(&self, state: &mut Self::State, reg: X86Register, value: u64) {
+        state.set_register(reg, crate::semantics::state::ConcreteValue::new(value));
+    }
+}
+
+impl crate::isa::traits::ConcreteExecutor<X86Instruction> for X86_32 {
+    type Value = u64;
+    type State = crate::semantics::state::X86ConcreteMachineState;
+
+    fn execute_instruction(&self, state: Self::State, instruction: &X86Instruction) -> Self::State {
+        crate::semantics::concrete_x86::apply_instruction_concrete_x86(state, instruction)
+    }
+
+    fn new_zeroed_state(&self) -> Self::State {
+        crate::semantics::state::X86ConcreteMachineState::new_zeroed(32)
+    }
+
+    fn state_from_values(
+        &self,
+        values: std::collections::HashMap<X86Register, u64>,
+    ) -> Self::State {
+        let mut state = crate::semantics::state::X86ConcreteMachineState::new_zeroed(32);
+        for (reg, val) in values {
+            state.set_register(reg, crate::semantics::state::ConcreteValue::new(val));
+        }
+        state
+    }
+
+    fn get_register(&self, state: &Self::State, reg: X86Register) -> u64 {
+        state.get_register(reg).as_u64()
+    }
+
+    fn set_register(&self, state: &mut Self::State, reg: X86Register, value: u64) {
+        state.set_register(reg, crate::semantics::state::ConcreteValue::new(value));
+    }
+}
+
+impl crate::isa::traits::SymbolicExecutor<X86Instruction> for X86_64 {
+    type State = crate::semantics::smt_x86::MachineStateX86;
+
+    fn execute_instruction(&self, state: Self::State, instruction: &X86Instruction) -> Self::State {
+        crate::semantics::smt_x86::apply_instruction(state, instruction)
+    }
+
+    fn new_symbolic_state(&self, prefix: &str) -> Self::State {
+        crate::semantics::smt_x86::MachineStateX86::new_symbolic(prefix, 64)
+    }
+}
+
+impl crate::isa::traits::SymbolicExecutor<X86Instruction> for X86_32 {
+    type State = crate::semantics::smt_x86::MachineStateX86;
+
+    fn execute_instruction(&self, state: Self::State, instruction: &X86Instruction) -> Self::State {
+        crate::semantics::smt_x86::apply_instruction(state, instruction)
+    }
+
+    fn new_symbolic_state(&self, prefix: &str) -> Self::State {
+        crate::semantics::smt_x86::MachineStateX86::new_symbolic(prefix, 32)
+    }
+}
+
+impl crate::isa::traits::CostModel<X86Instruction> for X86_64 {
+    fn instruction_cost(&self, instruction: &X86Instruction) -> u64 {
+        crate::semantics::cost_x86::instruction_cost(
+            instruction,
+            &crate::semantics::cost::CostMetric::InstructionCount,
+            64,
+        )
+    }
+}
+
+impl crate::isa::traits::CostModel<X86Instruction> for X86_32 {
+    fn instruction_cost(&self, instruction: &X86Instruction) -> u64 {
+        crate::semantics::cost_x86::instruction_cost(
+            instruction,
+            &crate::semantics::cost::CostMetric::InstructionCount,
+            32,
+        )
+    }
+}
+
+impl crate::isa::traits::Assembler<X86Instruction> for X86_64 {
+    fn assemble(&mut self, instructions: &[X86Instruction]) -> Result<Vec<u8>, String> {
+        crate::assembler::x86::X86Assembler::new_64().assemble_instructions(instructions)
+    }
+
+    fn can_assemble(&self, _instruction: &X86Instruction) -> bool {
+        // The 14 x86 mnemonics in this enum are all encodable in 64-bit mode.
+        true
+    }
+}
+
+impl crate::isa::traits::Assembler<X86Instruction> for X86_32 {
+    fn assemble(&mut self, instructions: &[X86Instruction]) -> Result<Vec<u8>, String> {
+        crate::assembler::x86::X86Assembler::new_32().assemble_instructions(instructions)
+    }
+
+    fn can_assemble(&self, instruction: &X86Instruction) -> bool {
+        // In 32-bit mode, R8..R15 are illegal. The x86 assembler's reg_index_32
+        // rejects them; reproduce the same check here so trait dispatch can
+        // pre-filter sequences before invoking the heavier assemble path.
+        fn reg_ok_32(r: X86Register) -> bool {
+            r.index().is_some_and(|i| i < 8)
+        }
+        match instruction {
+            X86Instruction::MovReg { rd, rs }
+            | X86Instruction::AddReg { rd, rs }
+            | X86Instruction::SubReg { rd, rs }
+            | X86Instruction::AndReg { rd, rs }
+            | X86Instruction::OrReg { rd, rs }
+            | X86Instruction::XorReg { rd, rs } => reg_ok_32(*rd) && reg_ok_32(*rs),
+            X86Instruction::MovImm { rd, .. }
+            | X86Instruction::AddImm { rd, .. }
+            | X86Instruction::SubImm { rd, .. }
+            | X86Instruction::AndImm { rd, .. }
+            | X86Instruction::OrImm { rd, .. }
+            | X86Instruction::XorImm { rd, .. } => reg_ok_32(*rd),
+            X86Instruction::CmpReg { rn, rs } => reg_ok_32(*rn) && reg_ok_32(*rs),
+            X86Instruction::CmpImm { rn, .. } => reg_ok_32(*rn),
+        }
+    }
+}
+
 /// Stub x86 mutator (#77 stage 1 step 10). Returns its input unchanged; the
 /// real x86 mutator body lands in stage 2 step 17 when x86 stochastic search
 /// is wired through the trait surface.
