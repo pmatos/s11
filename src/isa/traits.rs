@@ -9,6 +9,32 @@ use std::fmt::{Debug, Display};
 use std::hash::Hash;
 
 use rand::RngExt;
+/// Bitvector width marker.
+///
+/// Each ISA carries its register width as an associated type implementing this
+/// trait (per ADR-0004 decision 1). Width-aware SMT lowering uses `BITS` to
+/// size Z3 BVs; concrete state may use `Value` as the storage type.
+pub trait BVWidth: Send + Sync + Clone + Copy + Debug {
+    /// The width in bits (32 or 64 for the ISAs s11 currently targets).
+    const BITS: u32;
+}
+
+/// Width marker for 32-bit ISAs (x86-32, RV32).
+#[derive(Debug, Clone, Copy)]
+pub struct U32;
+
+impl BVWidth for U32 {
+    const BITS: u32 = 32;
+}
+
+/// Width marker for 64-bit ISAs (AArch64, x86-64, RV64).
+#[derive(Debug, Clone, Copy)]
+pub struct U64;
+
+impl BVWidth for U64 {
+    const BITS: u32 = 64;
+}
+
 /// Trait for register types
 pub trait RegisterType:
     Clone + Copy + PartialEq + Eq + Hash + Debug + Display + Send + Sync
@@ -100,6 +126,9 @@ pub trait ISA: Send + Sync + Clone {
     type Operand: OperandType<Register = Self::Register>;
     /// The instruction type for this ISA
     type Instruction: InstructionType<Register = Self::Register, Operand = Self::Operand>;
+    /// The register width as an associated type (ADR-0004 decision 1).
+    /// Used to size Z3 bitvectors and to type concrete value storage.
+    type Width: BVWidth;
 
     /// Name of this ISA (e.g., "AArch64", "RISC-V")
     fn name(&self) -> &'static str;
@@ -107,8 +136,11 @@ pub trait ISA: Send + Sync + Clone {
     /// Number of general-purpose registers
     fn register_count(&self) -> usize;
 
-    /// Register bit width (e.g., 64 for AArch64, 32 for ARM)
-    fn register_width(&self) -> u32;
+    /// Register bit width (e.g., 64 for AArch64, 32 for ARM).
+    /// Default impl returns `Self::Width::BITS`; backends should not override.
+    fn register_width(&self) -> u32 {
+        Self::Width::BITS
+    }
 
     /// Instruction size in bytes (fixed-width ISAs like ARM)
     fn instruction_size(&self) -> Option<usize>;

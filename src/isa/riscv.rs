@@ -459,16 +459,13 @@ impl ISA for RiscV32 {
     type Register = RiscVRegister;
     type Operand = RiscVOperand;
     type Instruction = RiscVInstruction;
+    type Width = crate::isa::traits::U32;
 
     fn name(&self) -> &'static str {
         "RISC-V 32"
     }
 
     fn register_count(&self) -> usize {
-        32
-    }
-
-    fn register_width(&self) -> u32 {
         32
     }
 
@@ -493,6 +490,7 @@ impl ISA for RiscV64 {
     type Register = RiscVRegister;
     type Operand = RiscVOperand;
     type Instruction = RiscVInstruction;
+    type Width = crate::isa::traits::U64;
 
     fn name(&self) -> &'static str {
         "RISC-V 64"
@@ -500,10 +498,6 @@ impl ISA for RiscV64 {
 
     fn register_count(&self) -> usize {
         32
-    }
-
-    fn register_width(&self) -> u32 {
-        64
     }
 
     fn instruction_size(&self) -> Option<usize> {

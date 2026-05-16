@@ -19,6 +19,7 @@ impl ISA for AArch64 {
     type Register = Register;
     type Operand = Operand;
     type Instruction = Instruction;
+    type Width = crate::isa::traits::U64;
 
     fn name(&self) -> &'static str {
         "AArch64"
@@ -26,10 +27,6 @@ impl ISA for AArch64 {
 
     fn register_count(&self) -> usize {
         31 // X0-X30, plus XZR
-    }
-
-    fn register_width(&self) -> u32 {
-        64
     }
 
     fn instruction_size(&self) -> Option<usize> {

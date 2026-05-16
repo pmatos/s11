@@ -322,6 +322,7 @@ impl ISA for X86_64 {
     type Register = X86Register;
     type Operand = X86Operand;
     type Instruction = X86Instruction;
+    type Width = crate::isa::traits::U64;
 
     fn name(&self) -> &'static str {
         "x86-64"
@@ -329,10 +330,6 @@ impl ISA for X86_64 {
 
     fn register_count(&self) -> usize {
         16
-    }
-
-    fn register_width(&self) -> u32 {
-        64
     }
 
     fn instruction_size(&self) -> Option<usize> {
@@ -361,6 +358,7 @@ impl ISA for X86_32 {
     type Register = X86Register;
     type Operand = X86Operand;
     type Instruction = X86Instruction;
+    type Width = crate::isa::traits::U32;
 
     fn name(&self) -> &'static str {
         "x86-32"
@@ -368,10 +366,6 @@ impl ISA for X86_32 {
 
     fn register_count(&self) -> usize {
         8
-    }
-
-    fn register_width(&self) -> u32 {
-        32
     }
 
     fn instruction_size(&self) -> Option<usize> {
