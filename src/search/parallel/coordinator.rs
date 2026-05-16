@@ -370,4 +370,57 @@ mod tests {
         // Should aggregate candidates from both workers
         assert!(result.total_statistics.candidates_evaluated > 0);
     }
+
+    // Issue #77 stage 1 step 2 safety net:
+    // verify that every spawned worker reports Finished and that no per-worker
+    // statistics are silently dropped. Stage 1 step 12 genericises the
+    // coordinator + channel types over <I: ISA>; this test must keep passing
+    // through that refactor. Iteration count is sized so all workers finish
+    // naturally well inside the timeout (the current stochastic worker does
+    // not check CoordinatorMessage::Stop mid-search; timeout-driven shutdown
+    // is out of scope here).
+    #[test]
+    fn test_parallel_search_no_dropped_finished_messages() {
+        let target = mov_add_sequence();
+        let live_out = LiveOut::from_registers(vec![Register::X0]);
+
+        let search_config = SearchConfig::default()
+            .with_registers(vec![Register::X0, Register::X1])
+            .with_immediates(vec![0, 1, 2])
+            .with_stochastic(StochasticConfig::default().with_iterations(200));
+
+        let num_workers = 4;
+        let parallel_config = ParallelConfig::default()
+            .with_workers(num_workers)
+            .with_symbolic(false)
+            .with_seed(42)
+            .with_timeout(Duration::from_secs(30));
+
+        let result = run_parallel_search(&target, &live_out, &search_config, &parallel_config);
+
+        // Every worker reported its stats (no dropped Finished messages).
+        assert_eq!(
+            result.worker_statistics.len(),
+            num_workers,
+            "expected {} worker stat entries, got {}",
+            num_workers,
+            result.worker_statistics.len(),
+        );
+
+        // Each worker_id appears exactly once across [0, num_workers).
+        let mut ids: Vec<usize> = result
+            .worker_statistics
+            .iter()
+            .map(|(id, _, _)| *id)
+            .collect();
+        ids.sort();
+        let expected: Vec<usize> = (0..num_workers).collect();
+        assert_eq!(ids, expected, "worker IDs should cover 0..{}", num_workers);
+
+        // At least one candidate was evaluated overall (sanity).
+        assert!(
+            result.total_statistics.candidates_evaluated > 0,
+            "expected workers to evaluate at least one candidate",
+        );
+    }
 }
