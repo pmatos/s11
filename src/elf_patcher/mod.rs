@@ -229,6 +229,11 @@ impl ElfPatcher {
             let gap_end = file_offset + window_size;
             while cursor < gap_end {
                 let nop = self.arch.nop_sequence(gap_end - cursor);
+                debug_assert!(
+                    !nop.is_empty(),
+                    "nop_sequence returned empty slice with {} bytes remaining",
+                    gap_end - cursor
+                );
                 patched_data[cursor..cursor + nop.len()].copy_from_slice(nop);
                 cursor += nop.len();
             }
