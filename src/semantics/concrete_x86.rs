@@ -1,6 +1,15 @@
 //! Concrete (non-symbolic) interpreter for the x86 backend.
 //!
 //! Mirrors `semantics::concrete::apply_instruction_concrete` but over
+//! ## Deletion gate
+//!
+//! Issue #77 stage 2 step 18 plans to delete this file once
+//! `optimize_elf_binary_x86` (src/main.rs) and the x86 unit tests below
+//! route through `<X86_64 as ConcreteExecutor<X86Instruction>>::execute_instruction`
+//! (added in step 17). That migration is blocked on the
+//! SearchAlgorithm<I> follow-up to step 11. Until then this file is the
+//! authoritative x86 concrete interpreter and the trait impl delegates here.
+//!
 //! `X86Instruction` and `X86ConcreteMachineState`. Operand widths follow
 //! `state.width()` — writes to registers are already masked by the
 //! state, and flag computation receives the correct width.
