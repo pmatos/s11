@@ -102,7 +102,10 @@ impl crate::isa::traits::CostModel<Instruction> for AArch64 {
 
 impl crate::isa::traits::Assembler<Instruction> for AArch64 {
     fn assemble(&mut self, instructions: &[Instruction]) -> Result<Vec<u8>, String> {
-        crate::assembler::AArch64Assembler::new().assemble_instructions(instructions)
+        // base_address=0 is correct for unbranching sequences (no PC-relative
+        // encoding involved). Trait callers that need real branch targets
+        // should reach for `AArch64Assembler` directly with their base_address.
+        crate::assembler::AArch64Assembler::new().assemble_instructions(instructions, 0)
     }
 
     /// Bridges the inherent `Instruction::is_encodable_aarch64()` so step 11
