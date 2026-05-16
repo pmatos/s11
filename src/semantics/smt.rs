@@ -2202,6 +2202,484 @@ mod tests {
     }
 
     #[test]
+    fn test_mov_imm_concrete_smt_parity() {
+        // MOV (immediate alias). imm range is [0, 0xFFFF] per the AArch64
+        // immediate-form spec; the parser refuses anything wider.
+        for imm in &[0_i64, 1, 0x100, 0x1234, 0xFFFF] {
+            let instr = Instruction::MovImm {
+                rd: Register::X0,
+                imm: *imm,
+            };
+            assert_concrete_smt_parity(&instr, &[], Register::X0);
+        }
+    }
+
+    #[test]
+    fn test_mvn_reg_concrete_smt_parity() {
+        let instr = Instruction::Mvn {
+            rd: Register::X0,
+            rm: Register::X1,
+        };
+        for v1 in &[0_u64, 0xFFFF_FFFF_FFFF_FFFF, 0xAAAA_AAAA_AAAA_AAAA, 0xDEAD] {
+            assert_concrete_smt_parity(&instr, &[(Register::X1, *v1)], Register::X0);
+        }
+    }
+
+    #[test]
+    fn test_neg_reg_concrete_smt_parity() {
+        let instr = Instruction::Neg {
+            rd: Register::X0,
+            rm: Register::X1,
+        };
+        for v1 in &[
+            0_u64,
+            1,
+            0xFFFF_FFFF_FFFF_FFFF,
+            0x8000_0000_0000_0000,
+            0xDEAD,
+        ] {
+            assert_concrete_smt_parity(&instr, &[(Register::X1, *v1)], Register::X0);
+        }
+    }
+
+    #[test]
+    fn test_bic_reg_concrete_smt_parity() {
+        let instr = Instruction::Bic {
+            rd: Register::X0,
+            rn: Register::X1,
+            rm: Operand::Register(Register::X2),
+        };
+        let samples: &[(u64, u64)] = &[
+            (0, 0xFFFF_FFFF_FFFF_FFFF),
+            (0xFFFF_FFFF_FFFF_FFFF, 0xAAAA_AAAA_AAAA_AAAA),
+            (0xDEAD_BEEF_CAFE_BABE, 0x0123_4567_89AB_CDEF),
+        ];
+        for &(v1, v2) in samples {
+            assert_concrete_smt_parity(
+                &instr,
+                &[(Register::X1, v1), (Register::X2, v2)],
+                Register::X0,
+            );
+        }
+    }
+
+    #[test]
+    fn test_orn_reg_concrete_smt_parity() {
+        let instr = Instruction::Orn {
+            rd: Register::X0,
+            rn: Register::X1,
+            rm: Operand::Register(Register::X2),
+        };
+        let samples: &[(u64, u64)] = &[
+            (0, 0xFFFF_FFFF_FFFF_FFFF),
+            (0xFFFF_FFFF_FFFF_FFFF, 0),
+            (0xDEAD_BEEF_CAFE_BABE, 0x0123_4567_89AB_CDEF),
+        ];
+        for &(v1, v2) in samples {
+            assert_concrete_smt_parity(
+                &instr,
+                &[(Register::X1, v1), (Register::X2, v2)],
+                Register::X0,
+            );
+        }
+    }
+
+    #[test]
+    fn test_eon_reg_concrete_smt_parity() {
+        let instr = Instruction::Eon {
+            rd: Register::X0,
+            rn: Register::X1,
+            rm: Operand::Register(Register::X2),
+        };
+        let samples: &[(u64, u64)] = &[
+            (0, 0xFFFF_FFFF_FFFF_FFFF),
+            (0xFFFF_FFFF_FFFF_FFFF, 0xFFFF_FFFF_FFFF_FFFF),
+            (0xDEAD_BEEF_CAFE_BABE, 0x0123_4567_89AB_CDEF),
+        ];
+        for &(v1, v2) in samples {
+            assert_concrete_smt_parity(
+                &instr,
+                &[(Register::X1, v1), (Register::X2, v2)],
+                Register::X0,
+            );
+        }
+    }
+
+    #[test]
+    fn test_ror_imm_concrete_smt_parity() {
+        // ROR: rotate right; concrete uses `rotate_right(amount & 31)` semantics
+        // adjusted for 64-bit (`& 63`). SMT uses bv_ror_64 helper.
+        let values: &[u64] = &[
+            0,
+            1,
+            0xFFFF_FFFF_FFFF_FFFF,
+            0x8000_0000_0000_0000,
+            0x1234_5678_9ABC_DEF0,
+        ];
+        let shifts: &[i64] = &[0, 1, 8, 32, 63];
+        for &v1 in values {
+            for &shift in shifts {
+                let instr = Instruction::Ror {
+                    rd: Register::X0,
+                    rn: Register::X1,
+                    shift: Operand::Immediate(shift),
+                };
+                assert_concrete_smt_parity(&instr, &[(Register::X1, v1)], Register::X0);
+            }
+        }
+    }
+
+    #[test]
+    fn test_clz_concrete_smt_parity() {
+        // CLZ: count leading zeros. value=0 returns 64.
+        let instr = Instruction::Clz {
+            rd: Register::X0,
+            rn: Register::X1,
+        };
+        let values: &[u64] = &[
+            0,
+            1,
+            0x8000_0000_0000_0000,
+            0x0000_0000_0000_0080,
+            0x0000_0000_FFFF_FFFF,
+            0xFFFF_FFFF_FFFF_FFFF,
+        ];
+        for &v1 in values {
+            assert_concrete_smt_parity(&instr, &[(Register::X1, v1)], Register::X0);
+        }
+    }
+
+    #[test]
+    fn test_cls_concrete_smt_parity() {
+        // CLS: count leading bits that match the sign bit, excluding the sign
+        // itself. Returns 63 for 0 or all-ones.
+        let instr = Instruction::Cls {
+            rd: Register::X0,
+            rn: Register::X1,
+        };
+        let values: &[u64] = &[
+            0,                     // all zero -> 63
+            0xFFFF_FFFF_FFFF_FFFF, // all one -> 63
+            0x8000_0000_0000_0000, // sign-bit only -> 0
+            0x4000_0000_0000_0000, // alternate sign -> 0
+            0x0000_0000_FFFF_FFFF, // mid run -> 31
+        ];
+        for &v1 in values {
+            assert_concrete_smt_parity(&instr, &[(Register::X1, v1)], Register::X0);
+        }
+    }
+
+    #[test]
+    fn test_rbit_concrete_smt_parity() {
+        let instr = Instruction::Rbit {
+            rd: Register::X0,
+            rn: Register::X1,
+        };
+        for v1 in &[
+            0_u64,
+            1,
+            0xFFFF_FFFF_FFFF_FFFF,
+            0x8000_0000_0000_0000,
+            0x1234_5678_9ABC_DEF0,
+        ] {
+            assert_concrete_smt_parity(&instr, &[(Register::X1, *v1)], Register::X0);
+        }
+    }
+
+    #[test]
+    fn test_rev_concrete_smt_parity() {
+        let instr = Instruction::Rev {
+            rd: Register::X0,
+            rn: Register::X1,
+        };
+        for v1 in &[
+            0_u64,
+            0xFFFF_FFFF_FFFF_FFFF,
+            0x1122_3344_5566_7788,
+            0x0102_0304_0506_0708,
+        ] {
+            assert_concrete_smt_parity(&instr, &[(Register::X1, *v1)], Register::X0);
+        }
+    }
+
+    #[test]
+    fn test_rev32_concrete_smt_parity() {
+        let instr = Instruction::Rev32 {
+            rd: Register::X0,
+            rn: Register::X1,
+        };
+        for v1 in &[
+            0_u64,
+            0xFFFF_FFFF_FFFF_FFFF,
+            0x1122_3344_5566_7788,
+            0xDEAD_BEEF_CAFE_BABE,
+        ] {
+            assert_concrete_smt_parity(&instr, &[(Register::X1, *v1)], Register::X0);
+        }
+    }
+
+    #[test]
+    fn test_rev16_concrete_smt_parity() {
+        let instr = Instruction::Rev16 {
+            rd: Register::X0,
+            rn: Register::X1,
+        };
+        for v1 in &[
+            0_u64,
+            0xFFFF_FFFF_FFFF_FFFF,
+            0x1122_3344_5566_7788,
+            0xDEAD_BEEF_CAFE_BABE,
+        ] {
+            assert_concrete_smt_parity(&instr, &[(Register::X1, *v1)], Register::X0);
+        }
+    }
+
+    #[test]
+    fn test_uxtb_concrete_smt_parity() {
+        let instr = Instruction::Uxtb {
+            rd: Register::X0,
+            rn: Register::X1,
+        };
+        for v1 in &[0_u64, 0x7F, 0x80, 0xFF, 0x1234_5678, 0xFFFF_FFFF_FFFF_FFFF] {
+            assert_concrete_smt_parity(&instr, &[(Register::X1, *v1)], Register::X0);
+        }
+    }
+
+    #[test]
+    fn test_uxth_concrete_smt_parity() {
+        let instr = Instruction::Uxth {
+            rd: Register::X0,
+            rn: Register::X1,
+        };
+        for v1 in &[
+            0_u64,
+            0x7FFF,
+            0x8000,
+            0xFFFF,
+            0x1234_5678,
+            0xFFFF_FFFF_FFFF_FFFF,
+        ] {
+            assert_concrete_smt_parity(&instr, &[(Register::X1, *v1)], Register::X0);
+        }
+    }
+
+    #[test]
+    fn test_sxtb_concrete_smt_parity() {
+        let instr = Instruction::Sxtb {
+            rd: Register::X0,
+            rn: Register::X1,
+        };
+        // 0x7F = +127 stays positive; 0x80 = -128 sign-extends.
+        for v1 in &[0_u64, 0x7F, 0x80, 0xFF, 0x1234_5678, 0xFFFF_FFFF_FFFF_FFFF] {
+            assert_concrete_smt_parity(&instr, &[(Register::X1, *v1)], Register::X0);
+        }
+    }
+
+    #[test]
+    fn test_sxth_concrete_smt_parity() {
+        let instr = Instruction::Sxth {
+            rd: Register::X0,
+            rn: Register::X1,
+        };
+        for v1 in &[
+            0_u64,
+            0x7FFF,
+            0x8000,
+            0xFFFF,
+            0x1234_5678,
+            0xFFFF_FFFF_FFFF_FFFF,
+        ] {
+            assert_concrete_smt_parity(&instr, &[(Register::X1, *v1)], Register::X0);
+        }
+    }
+
+    #[test]
+    fn test_sxtw_concrete_smt_parity() {
+        let instr = Instruction::Sxtw {
+            rd: Register::X0,
+            rn: Register::X1,
+        };
+        for v1 in &[
+            0_u64,
+            0x7FFF_FFFF,
+            0x8000_0000,
+            0xFFFF_FFFF,
+            0x1234_5678_9ABC_DEF0,
+            0xFFFF_FFFF_FFFF_FFFF,
+        ] {
+            assert_concrete_smt_parity(&instr, &[(Register::X1, *v1)], Register::X0);
+        }
+    }
+
+    #[test]
+    fn test_sdiv_concrete_smt_parity() {
+        // SDIV with div-by-zero (concrete returns 0; SMT ite-guards on rhs==0)
+        // and the i64::MIN / -1 overflow case (concrete returns i64::MIN via
+        // checked_div().unwrap_or; SMT bvsdiv wraps the same way).
+        let instr = Instruction::Sdiv {
+            rd: Register::X0,
+            rn: Register::X1,
+            rm: Register::X2,
+        };
+        let samples: &[(u64, u64)] = &[
+            (10, 3),
+            (10, 0),                                        // div-by-zero
+            (0x8000_0000_0000_0000, 0xFFFF_FFFF_FFFF_FFFF), // MIN / -1
+            (0xFFFF_FFFF_FFFF_FFFF, 1),                     // -1 / 1
+            (100, 0xFFFF_FFFF_FFFF_FFFE),                   // pos / -2
+        ];
+        for &(v1, v2) in samples {
+            assert_concrete_smt_parity(
+                &instr,
+                &[(Register::X1, v1), (Register::X2, v2)],
+                Register::X0,
+            );
+        }
+    }
+
+    #[test]
+    fn test_udiv_concrete_smt_parity() {
+        let instr = Instruction::Udiv {
+            rd: Register::X0,
+            rn: Register::X1,
+            rm: Register::X2,
+        };
+        let samples: &[(u64, u64)] = &[
+            (10, 3),
+            (10, 0), // div-by-zero
+            (0xFFFF_FFFF_FFFF_FFFF, 1),
+            (0xFFFF_FFFF_FFFF_FFFF, 0xFFFF_FFFF_FFFF_FFFF),
+        ];
+        for &(v1, v2) in samples {
+            assert_concrete_smt_parity(
+                &instr,
+                &[(Register::X1, v1), (Register::X2, v2)],
+                Register::X0,
+            );
+        }
+    }
+
+    #[test]
+    fn test_madd_concrete_smt_parity() {
+        let instr = Instruction::Madd {
+            rd: Register::X0,
+            rn: Register::X1,
+            rm: Register::X2,
+            ra: Register::X3,
+        };
+        let samples: &[(u64, u64, u64)] = &[
+            (0, 0, 0),
+            (2, 3, 5),
+            (0xFFFF_FFFF_FFFF_FFFF, 1, 1), // -1*1 + 1 = 0
+            (
+                0x1234_5678_9ABC_DEF0,
+                0x0FED_CBA9_8765_4321,
+                0xDEAD_BEEF_CAFE_BABE,
+            ),
+        ];
+        for &(v1, v2, v3) in samples {
+            assert_concrete_smt_parity(
+                &instr,
+                &[(Register::X1, v1), (Register::X2, v2), (Register::X3, v3)],
+                Register::X0,
+            );
+        }
+    }
+
+    #[test]
+    fn test_msub_concrete_smt_parity() {
+        let instr = Instruction::Msub {
+            rd: Register::X0,
+            rn: Register::X1,
+            rm: Register::X2,
+            ra: Register::X3,
+        };
+        let samples: &[(u64, u64, u64)] = &[
+            (0, 0, 0),
+            (2, 3, 10),
+            (1, 1, 0),
+            (0x1234, 0x5678, 0x9ABC_DEF0),
+        ];
+        for &(v1, v2, v3) in samples {
+            assert_concrete_smt_parity(
+                &instr,
+                &[(Register::X1, v1), (Register::X2, v2), (Register::X3, v3)],
+                Register::X0,
+            );
+        }
+    }
+
+    #[test]
+    fn test_mneg_concrete_smt_parity() {
+        let instr = Instruction::Mneg {
+            rd: Register::X0,
+            rn: Register::X1,
+            rm: Register::X2,
+        };
+        let samples: &[(u64, u64)] = &[
+            (0, 0xFFFF),
+            (2, 3),
+            (0xFFFF_FFFF_FFFF_FFFF, 0xFFFF_FFFF_FFFF_FFFF),
+            (0x1234, 0x5678),
+        ];
+        for &(v1, v2) in samples {
+            assert_concrete_smt_parity(
+                &instr,
+                &[(Register::X1, v1), (Register::X2, v2)],
+                Register::X0,
+            );
+        }
+    }
+
+    #[test]
+    fn test_smulh_concrete_smt_parity() {
+        // SMULH: high 64 bits of signed 128-bit product.
+        let instr = Instruction::Smulh {
+            rd: Register::X0,
+            rn: Register::X1,
+            rm: Register::X2,
+        };
+        let samples: &[(u64, u64)] = &[
+            (0, 0xFFFF),
+            (1, 1),
+            (0xFFFF_FFFF_FFFF_FFFF, 0xFFFF_FFFF_FFFF_FFFF), // (-1)*(-1) high = 0
+            (0x8000_0000_0000_0000, 0x8000_0000_0000_0000), // MIN*MIN
+            (0x1234_5678_9ABC_DEF0, 0x0FED_CBA9_8765_4321),
+        ];
+        for &(v1, v2) in samples {
+            assert_concrete_smt_parity(
+                &instr,
+                &[(Register::X1, v1), (Register::X2, v2)],
+                Register::X0,
+            );
+        }
+    }
+
+    #[test]
+    fn test_umulh_concrete_smt_parity() {
+        // UMULH: high 64 bits of unsigned 128-bit product.
+        let instr = Instruction::Umulh {
+            rd: Register::X0,
+            rn: Register::X1,
+            rm: Register::X2,
+        };
+        let samples: &[(u64, u64)] = &[
+            (0, 0xFFFF),
+            (1, 1),
+            (0xFFFF_FFFF_FFFF_FFFF, 0xFFFF_FFFF_FFFF_FFFF),
+            (0x8000_0000_0000_0000, 2),
+            (0x1234_5678_9ABC_DEF0, 0x0FED_CBA9_8765_4321),
+        ];
+        for &(v1, v2) in samples {
+            assert_concrete_smt_parity(
+                &instr,
+                &[(Register::X1, v1), (Register::X2, v2)],
+                Register::X0,
+            );
+        }
+    }
+
+    #[test]
     fn test_asr_imm_concrete_smt_parity() {
         // ASR is sign-sensitive: concrete (concrete.rs:96-101) routes through
         // `as_i64() >> shift` then back to u64; SMT uses Z3 `bvashr` which
