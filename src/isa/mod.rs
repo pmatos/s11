@@ -10,8 +10,8 @@ pub mod x86;
 
 #[allow(unused_imports)]
 pub use traits::{
-    Assembler, BVWidth, ConcreteExecutor, CostModel, FlagsAnalysis, ISA, InstructionGenerator,
-    InstructionType, OperandType, RegisterType, SymbolicExecutor, U32, U64,
+    Assembler, BVWidth, ConcreteExecutor, CostModel, FlagsAnalysis, ISA, ISAMutator,
+    InstructionGenerator, InstructionType, OperandType, RegisterType, SymbolicExecutor, U32, U64,
 };
 
 #[allow(unused_imports)]

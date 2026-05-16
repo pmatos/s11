@@ -461,6 +461,7 @@ impl ISA for RiscV32 {
     type Instruction = RiscVInstruction;
     type Width = crate::isa::traits::U32;
     type Flags = ();
+    type Mutator = RiscVMutator;
 
     fn name(&self) -> &'static str {
         "RISC-V 32"
@@ -493,6 +494,7 @@ impl ISA for RiscV64 {
     type Instruction = RiscVInstruction;
     type Width = crate::isa::traits::U64;
     type Flags = ();
+    type Mutator = RiscVMutator;
 
     fn name(&self) -> &'static str {
         "RISC-V 64"
@@ -533,6 +535,21 @@ impl crate::isa::traits::FlagsAnalysis<RiscVInstruction> for RiscV64 {
 
     fn reads_flags(_instr: &RiscVInstruction) -> bool {
         false
+    }
+}
+
+/// Stub RISC-V mutator (#77 stage 1 step 10). Real body lands in stage 3
+/// step 23 when RISC-V wires through end-to-end.
+#[derive(Debug, Default, Clone)]
+pub struct RiscVMutator;
+
+impl crate::isa::traits::ISAMutator<RiscVInstruction> for RiscVMutator {
+    fn mutate<R: rand::RngExt>(
+        &self,
+        _rng: &mut R,
+        sequence: &[RiscVInstruction],
+    ) -> Vec<RiscVInstruction> {
+        sequence.to_vec()
     }
 }
 
