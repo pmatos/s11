@@ -1979,6 +1979,95 @@ mod tests {
     }
 
     #[test]
+    fn test_sub_reg_concrete_smt_parity() {
+        let instr = Instruction::Sub {
+            rd: Register::X0,
+            rn: Register::X1,
+            rm: Operand::Register(Register::X2),
+        };
+        // Underflow, equal-args (zero result), sign-flip, and a generic pair.
+        let samples: &[(u64, u64)] = &[
+            (0, 1),
+            (0x1234_5678_9ABC_DEF0, 0x1234_5678_9ABC_DEF0),
+            (0x8000_0000_0000_0000, 0xFFFF_FFFF_FFFF_FFFF),
+            (0xDEAD_BEEF_CAFE_BABE, 0x0123_4567_89AB_CDEF),
+        ];
+        for &(v1, v2) in samples {
+            assert_concrete_smt_parity(
+                &instr,
+                &[(Register::X1, v1), (Register::X2, v2)],
+                Register::X0,
+            );
+        }
+    }
+
+    #[test]
+    fn test_and_reg_concrete_smt_parity() {
+        let instr = Instruction::And {
+            rd: Register::X0,
+            rn: Register::X1,
+            rm: Operand::Register(Register::X2),
+        };
+        let samples: &[(u64, u64)] = &[
+            (0, 0xFFFF_FFFF_FFFF_FFFF),
+            (0xFFFF_FFFF_FFFF_FFFF, 0xFFFF_FFFF_FFFF_FFFF),
+            (0xAAAA_AAAA_AAAA_AAAA, 0x5555_5555_5555_5555),
+            (0xDEAD_BEEF_CAFE_BABE, 0x0123_4567_89AB_CDEF),
+        ];
+        for &(v1, v2) in samples {
+            assert_concrete_smt_parity(
+                &instr,
+                &[(Register::X1, v1), (Register::X2, v2)],
+                Register::X0,
+            );
+        }
+    }
+
+    #[test]
+    fn test_orr_reg_concrete_smt_parity() {
+        let instr = Instruction::Orr {
+            rd: Register::X0,
+            rn: Register::X1,
+            rm: Operand::Register(Register::X2),
+        };
+        let samples: &[(u64, u64)] = &[
+            (0, 0),
+            (0xAAAA_AAAA_AAAA_AAAA, 0x5555_5555_5555_5555),
+            (0x8000_0000_0000_0000, 0x0000_0000_0000_0001),
+            (0xDEAD_BEEF_CAFE_BABE, 0x0123_4567_89AB_CDEF),
+        ];
+        for &(v1, v2) in samples {
+            assert_concrete_smt_parity(
+                &instr,
+                &[(Register::X1, v1), (Register::X2, v2)],
+                Register::X0,
+            );
+        }
+    }
+
+    #[test]
+    fn test_eor_reg_concrete_smt_parity() {
+        let instr = Instruction::Eor {
+            rd: Register::X0,
+            rn: Register::X1,
+            rm: Operand::Register(Register::X2),
+        };
+        let samples: &[(u64, u64)] = &[
+            (0, 0),
+            (0xFFFF_FFFF_FFFF_FFFF, 0xFFFF_FFFF_FFFF_FFFF),
+            (0xAAAA_AAAA_AAAA_AAAA, 0x5555_5555_5555_5555),
+            (0xDEAD_BEEF_CAFE_BABE, 0x0123_4567_89AB_CDEF),
+        ];
+        for &(v1, v2) in samples {
+            assert_concrete_smt_parity(
+                &instr,
+                &[(Register::X1, v1), (Register::X2, v2)],
+                Register::X0,
+            );
+        }
+    }
+
+    #[test]
     fn test_lsl_imm_concrete_smt_parity() {
         // LSL is width-sensitive: concrete (concrete.rs:84-88) masks the shift
         // amount with `& 63` before applying. SMT relies on Z3 bvshl with a
@@ -1998,6 +2087,137 @@ mod tests {
         for &v1 in values {
             for &shift in shifts {
                 let instr = Instruction::Lsl {
+                    rd: Register::X0,
+                    rn: Register::X1,
+                    shift: Operand::Immediate(shift),
+                };
+                assert_concrete_smt_parity(&instr, &[(Register::X1, v1)], Register::X0);
+            }
+        }
+    }
+
+    #[test]
+    fn test_lsr_imm_concrete_smt_parity() {
+        // Mirror of LSL but logical right shift (no sign extension).
+        let values: &[u64] = &[
+            0,
+            1,
+            0xFFFF_FFFF_FFFF_FFFF,
+            0x8000_0000_0000_0000,
+            0x1234_5678_9ABC_DEF0,
+        ];
+        let shifts: &[i64] = &[0, 1, 5, 16, 32, 63];
+        for &v1 in values {
+            for &shift in shifts {
+                let instr = Instruction::Lsr {
+                    rd: Register::X0,
+                    rn: Register::X1,
+                    shift: Operand::Immediate(shift),
+                };
+                assert_concrete_smt_parity(&instr, &[(Register::X1, v1)], Register::X0);
+            }
+        }
+    }
+
+    #[test]
+    fn test_mul_reg_concrete_smt_parity() {
+        // wrapping_mul on the concrete side, Z3 bvmul on the symbolic side.
+        // Samples include zero-mul, identity, MSB sign-bit, and overflow pair.
+        let instr = Instruction::Mul {
+            rd: Register::X0,
+            rn: Register::X1,
+            rm: Register::X2,
+        };
+        let samples: &[(u64, u64)] = &[
+            (0, 0xDEAD_BEEF_CAFE_BABE),
+            (1, 0xDEAD_BEEF_CAFE_BABE),
+            (0xFFFF_FFFF_FFFF_FFFF, 0xFFFF_FFFF_FFFF_FFFF), // (-1) * (-1) = 1 in wrapping
+            (0x8000_0000_0000_0000, 0x0000_0000_0000_0002), // overflow
+            (0x1234_5678_9ABC_DEF0, 0x0FED_CBA9_8765_4321),
+        ];
+        for &(v1, v2) in samples {
+            assert_concrete_smt_parity(
+                &instr,
+                &[(Register::X1, v1), (Register::X2, v2)],
+                Register::X0,
+            );
+        }
+    }
+
+    #[test]
+    fn test_movz_imm_concrete_smt_parity() {
+        // MOVZ: rd = (imm as u64) << shift, all other lanes zero.
+        // Shift legality is parser-enforced as {0, 16, 32, 48}; we exercise
+        // each lane to catch any width-related lowering bug.
+        let imms: &[u16] = &[0, 1, 0x1234, 0xFFFF];
+        let shifts: &[u8] = &[0, 16, 32, 48];
+        for &imm in imms {
+            for &shift in shifts {
+                let instr = Instruction::MovZ {
+                    rd: Register::X0,
+                    imm,
+                    shift,
+                };
+                assert_concrete_smt_parity(&instr, &[], Register::X0);
+            }
+        }
+    }
+
+    #[test]
+    fn test_movn_imm_concrete_smt_parity() {
+        // MOVN: rd = !((imm as u64) << shift).
+        let imms: &[u16] = &[0, 1, 0x1234, 0xFFFF];
+        let shifts: &[u8] = &[0, 16, 32, 48];
+        for &imm in imms {
+            for &shift in shifts {
+                let instr = Instruction::MovN {
+                    rd: Register::X0,
+                    imm,
+                    shift,
+                };
+                assert_concrete_smt_parity(&instr, &[], Register::X0);
+            }
+        }
+    }
+
+    #[test]
+    fn test_movk_imm_concrete_smt_parity() {
+        // MOVK reads rd before writing one 16-bit chunk. We need to pin a
+        // pre-value on X0 so concrete and SMT agree on the kept lanes.
+        let pre_values: &[u64] = &[0, 0xFFFF_FFFF_FFFF_FFFF, 0xAAAA_BBBB_CCCC_DDDD];
+        let imms: &[u16] = &[0, 0x1234, 0xFFFF];
+        let shifts: &[u8] = &[0, 16, 32, 48];
+        for &pre in pre_values {
+            for &imm in imms {
+                for &shift in shifts {
+                    let instr = Instruction::MovK {
+                        rd: Register::X0,
+                        imm,
+                        shift,
+                    };
+                    assert_concrete_smt_parity(&instr, &[(Register::X0, pre)], Register::X0);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn test_asr_imm_concrete_smt_parity() {
+        // ASR is sign-sensitive: concrete (concrete.rs:96-101) routes through
+        // `as_i64() >> shift` then back to u64; SMT uses Z3 `bvashr` which
+        // sign-preserves. Negative inputs (MSB set) must keep the sign bit.
+        let values: &[u64] = &[
+            0,
+            1,
+            0xFFFF_FFFF_FFFF_FFFF, // -1 signed
+            0x8000_0000_0000_0000, // i64::MIN
+            0x4000_0000_0000_0000, // positive, MSB-1 set
+            0x1234_5678_9ABC_DEF0,
+        ];
+        let shifts: &[i64] = &[0, 1, 5, 16, 32, 63];
+        for &v1 in values {
+            for &shift in shifts {
+                let instr = Instruction::Asr {
                     rd: Register::X0,
                     rn: Register::X1,
                     shift: Operand::Immediate(shift),
