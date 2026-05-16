@@ -21,6 +21,14 @@ const X86_NOP_TABLE: [&[u8]; 10] = [
 /// Architecture detected from the ELF `e_machine` field. Drives
 /// per-arch behaviours: instruction alignment for window validation
 /// and NOP byte choice for padding.
+///
+/// Issue #77 stage 3 step 24: this enum will gain `RiscV32` and `RiscV64`
+/// variants alongside the assembler stub from step 23.
+/// `instruction_alignment` will return 4 for both; `nop_bytes` will return
+/// `[0x13, 0x00, 0x00, 0x00]` (addi x0, x0, 0). `from_e_machine` extends
+/// to consume `e_ident[EI_CLASS]` so the `EM_RISCV` machine number can
+/// disambiguate RV32 vs RV64. Blocked on the from-scratch RISC-V
+/// semantics work tracked in the same follow-up that completes step 23.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DetectedArch {
     Aarch64,
