@@ -434,7 +434,10 @@ mod tests {
         let mut search = EnumerativeSearch::new();
         let result = search.search(&target, &live_out, &config);
 
-        assert!(result.found_optimization, "cores=Some(1) should still find rewrite");
+        assert!(
+            result.found_optimization,
+            "cores=Some(1) should still find rewrite"
+        );
         assert_eq!(result.optimized_sequence.as_ref().map(Vec::len), Some(1));
     }
 
