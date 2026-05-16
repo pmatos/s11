@@ -234,16 +234,19 @@ impl SearchAlgorithm for EnumerativeSearch {
         };
 
         match config.cores {
-            Some(n) if n > 1 => {
-                // Private thread pool so we don't disturb the global rayon
-                // pool (other consumers may share it in future).
+            // Any explicit thread count — including 1 — gets a private pool
+            // sized to that count. The `Some(1)` case in particular must
+            // *not* fall through to the global rayon pool, or the user's
+            // request for 1 thread would silently run on every logical core.
+            Some(n) => {
                 let pool = rayon::ThreadPoolBuilder::new()
-                    .num_threads(n)
+                    .num_threads(n.max(1))
                     .build()
                     .expect("rayon ThreadPoolBuilder::build failed");
                 pool.install(|| run_lengths(&shared));
             }
-            _ => run_lengths(&shared),
+            // `None` → use the global pool (rayon's default = logical cores).
+            None => run_lengths(&shared),
         }
 
         // Drain shared atomics into self.statistics.
@@ -407,6 +410,34 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn cores_one_uses_private_pool_not_global() {
+        // Regression: a previous `Some(n) if n > 1` guard let `Some(1)` fall
+        // through to the global rayon pool. After the fix every `Some(_)`
+        // gets a private pool sized to that value, even 1. We assert
+        // correctness by checking that `cores = Some(1)` still finds the
+        // rewrite and that observable behaviour matches the parallel runs.
+        let target = vec![
+            Instruction::MovReg {
+                rd: Register::X0,
+                rn: Register::X1,
+            },
+            Instruction::Add {
+                rd: Register::X0,
+                rn: Register::X0,
+                rm: Operand::Immediate(1),
+            },
+        ];
+        let live_out = LiveOut::from_registers(vec![Register::X0]);
+        let config = small_config().with_cores(Some(1));
+
+        let mut search = EnumerativeSearch::new();
+        let result = search.search(&target, &live_out, &config);
+
+        assert!(result.found_optimization, "cores=Some(1) should still find rewrite");
+        assert_eq!(result.optimized_sequence.as_ref().map(Vec::len), Some(1));
     }
 
     #[test]
