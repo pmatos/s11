@@ -460,6 +460,7 @@ impl ISA for RiscV32 {
     type Operand = RiscVOperand;
     type Instruction = RiscVInstruction;
     type Width = crate::isa::traits::U32;
+    type Flags = ();
 
     fn name(&self) -> &'static str {
         "RISC-V 32"
@@ -491,6 +492,7 @@ impl ISA for RiscV64 {
     type Operand = RiscVOperand;
     type Instruction = RiscVInstruction;
     type Width = crate::isa::traits::U64;
+    type Flags = ();
 
     fn name(&self) -> &'static str {
         "RISC-V 64"
@@ -510,6 +512,27 @@ impl ISA for RiscV64 {
 
     fn zero_register(&self) -> Option<Self::Register> {
         Some(RiscVRegister::X0)
+    }
+}
+
+impl crate::isa::traits::FlagsAnalysis<RiscVInstruction> for RiscV32 {
+    fn modifies_flags(_instr: &RiscVInstruction) -> bool {
+        // RISC-V has no condition flags.
+        false
+    }
+
+    fn reads_flags(_instr: &RiscVInstruction) -> bool {
+        false
+    }
+}
+
+impl crate::isa::traits::FlagsAnalysis<RiscVInstruction> for RiscV64 {
+    fn modifies_flags(_instr: &RiscVInstruction) -> bool {
+        false
+    }
+
+    fn reads_flags(_instr: &RiscVInstruction) -> bool {
+        false
     }
 }
 

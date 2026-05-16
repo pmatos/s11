@@ -129,6 +129,9 @@ pub trait ISA: Send + Sync + Clone {
     /// The register width as an associated type (ADR-0004 decision 1).
     /// Used to size Z3 bitvectors and to type concrete value storage.
     type Width: BVWidth;
+    /// Condition-code / flag state for this ISA (ADR-0004 decision 7).
+    /// AArch64 NZCV, x86 EFLAGS, or `()` for ISAs without flags.
+    type Flags: Clone + Debug + Default + PartialEq + Eq + Hash;
 
     /// Name of this ISA (e.g., "AArch64", "RISC-V")
     fn name(&self) -> &'static str;
@@ -252,4 +255,19 @@ pub trait Assembler<I: InstructionType>: Send + Sync {
 
     /// Check if an instruction can be assembled
     fn can_assemble(&self, instruction: &I) -> bool;
+}
+
+/// Per-ISA flag-analysis hook (ADR-0004 decision 7).
+///
+/// `flag_writers_diverge` and `validation::live_out::flags_live_out` consume
+/// this trait, NOT `InstructionType::has_side_effects` — the latter is too
+/// coarse on x86 (returns `true` for everything except MOV), so reusing it
+/// for flag analysis would over-trigger and tank optimisation quality.
+pub trait FlagsAnalysis<I: InstructionType>: Send + Sync {
+    /// Returns true if `instr` writes any flag bit.
+    fn modifies_flags(instr: &I) -> bool;
+
+    /// Returns true if `instr` reads any flag bit (e.g., CSEL, conditional
+    /// branches). RISC-V impls return false unconditionally.
+    fn reads_flags(instr: &I) -> bool;
 }
