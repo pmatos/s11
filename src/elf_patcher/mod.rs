@@ -2,6 +2,22 @@ use elf::{ElfBytes, endian::AnyEndian};
 use std::fs;
 use std::path::Path;
 
+/// Intel SDM canonical multi-byte NOP sequences, indexed by length.
+/// Index 0 is the empty slice (fallback for `len == 0`); indices 1..=9
+/// are the recommended sequences from the Intel optimization reference.
+const X86_NOP_TABLE: [&[u8]; 10] = [
+    &[],
+    &[0x90],
+    &[0x66, 0x90],
+    &[0x0f, 0x1f, 0x00],
+    &[0x0f, 0x1f, 0x40, 0x00],
+    &[0x0f, 0x1f, 0x44, 0x00, 0x00],
+    &[0x66, 0x0f, 0x1f, 0x44, 0x00, 0x00],
+    &[0x0f, 0x1f, 0x80, 0x00, 0x00, 0x00, 0x00],
+    &[0x0f, 0x1f, 0x84, 0x00, 0x00, 0x00, 0x00, 0x00],
+    &[0x66, 0x0f, 0x1f, 0x84, 0x00, 0x00, 0x00, 0x00, 0x00],
+];
+
 /// Architecture detected from the ELF `e_machine` field. Drives
 /// per-arch behaviours: instruction alignment for window validation
 /// and NOP byte choice for padding.
@@ -21,13 +37,26 @@ impl DetectedArch {
         }
     }
 
-    /// Per-instruction NOP bytes used to pad a shorter patch back up to
-    /// the original window size. AArch64 NOP is 0xd5_03_20_1f (LE); x86
-    /// NOP is the single-byte 0x90.
-    pub fn nop_bytes(&self) -> &'static [u8] {
+    /// Canonical NOP byte sequence to pad up to `len` remaining bytes.
+    /// Callers loop until the gap is filled. For x86 the function returns
+    /// the Intel-recommended sequence of `min(len, 9)` bytes; `len == 0`
+    /// returns `&[]`. For AArch64 it returns the 4-byte NOP and asserts
+    /// the caller respects 4-byte alignment.
+    pub fn nop_sequence(&self, len: usize) -> &'static [u8] {
         match self {
-            DetectedArch::Aarch64 => &[0x1f, 0x20, 0x03, 0xd5],
-            DetectedArch::X86_64 | DetectedArch::X86_32 => &[0x90],
+            DetectedArch::Aarch64 => {
+                assert!(
+                    len % 4 == 0,
+                    "AArch64 nop_sequence requires len % 4 == 0, got {}",
+                    len
+                );
+                if len == 0 {
+                    &[]
+                } else {
+                    &[0x1f, 0x20, 0x03, 0xd5]
+                }
+            }
+            DetectedArch::X86_64 | DetectedArch::X86_32 => X86_NOP_TABLE[len.min(9)],
         }
     }
 
@@ -196,14 +225,12 @@ impl ElfPatcher {
 
         // If new code is smaller than window, pad with arch-appropriate NOPs.
         if new_code.len() < window_size {
-            let remaining = window_size - new_code.len();
-            let nop = self.arch.nop_bytes();
-            let n = nop.len();
-            for i in 0..remaining / n {
-                let nop_start = patch_end + i * n;
-                if nop_start + n <= file_offset + window_size {
-                    patched_data[nop_start..nop_start + n].copy_from_slice(nop);
-                }
+            let mut cursor = patch_end;
+            let gap_end = file_offset + window_size;
+            while cursor < gap_end {
+                let nop = self.arch.nop_sequence(gap_end - cursor);
+                patched_data[cursor..cursor + nop.len()].copy_from_slice(nop);
+                cursor += nop.len();
             }
         }
 
@@ -236,13 +263,75 @@ mod tests {
     }
 
     #[test]
-    fn detected_arch_nop_bytes() {
+    fn x86_nop_sequence_canonical_five_byte() {
         assert_eq!(
-            DetectedArch::Aarch64.nop_bytes(),
-            &[0x1f, 0x20, 0x03, 0xd5][..]
+            DetectedArch::X86_64.nop_sequence(5),
+            &[0x0f, 0x1f, 0x44, 0x00, 0x00][..]
         );
-        assert_eq!(DetectedArch::X86_64.nop_bytes(), &[0x90][..]);
-        assert_eq!(DetectedArch::X86_32.nop_bytes(), &[0x90][..]);
+    }
+
+    #[test]
+    fn x86_nop_sequence_canonical_lengths_one_through_nine() {
+        let canonical: [&[u8]; 10] = [
+            &[],
+            &[0x90],
+            &[0x66, 0x90],
+            &[0x0f, 0x1f, 0x00],
+            &[0x0f, 0x1f, 0x40, 0x00],
+            &[0x0f, 0x1f, 0x44, 0x00, 0x00],
+            &[0x66, 0x0f, 0x1f, 0x44, 0x00, 0x00],
+            &[0x0f, 0x1f, 0x80, 0x00, 0x00, 0x00, 0x00],
+            &[0x0f, 0x1f, 0x84, 0x00, 0x00, 0x00, 0x00, 0x00],
+            &[0x66, 0x0f, 0x1f, 0x84, 0x00, 0x00, 0x00, 0x00, 0x00],
+        ];
+        for arch in [DetectedArch::X86_64, DetectedArch::X86_32] {
+            for (len, expected) in canonical.iter().enumerate() {
+                assert_eq!(
+                    arch.nop_sequence(len),
+                    *expected,
+                    "{:?} nop_sequence({}) mismatch",
+                    arch,
+                    len
+                );
+            }
+        }
+    }
+
+    #[test]
+    #[should_panic(expected = "len % 4 == 0")]
+    fn aarch64_nop_sequence_panics_on_misaligned_len() {
+        let _ = DetectedArch::Aarch64.nop_sequence(3);
+    }
+
+    #[test]
+    fn aarch64_nop_sequence_returns_four_byte_nop_or_empty() {
+        let nop: &[u8] = &[0x1f, 0x20, 0x03, 0xd5];
+        let empty: &[u8] = &[];
+        assert_eq!(DetectedArch::Aarch64.nop_sequence(0), empty);
+        for len in [4usize, 8, 12, 16, 64] {
+            assert_eq!(
+                DetectedArch::Aarch64.nop_sequence(len),
+                nop,
+                "Aarch64 nop_sequence({}) should be the 4-byte NOP",
+                len
+            );
+        }
+    }
+
+    #[test]
+    fn x86_nop_sequence_clamps_lengths_above_nine() {
+        let nine: &[u8] = &[0x66, 0x0f, 0x1f, 0x84, 0x00, 0x00, 0x00, 0x00, 0x00];
+        for arch in [DetectedArch::X86_64, DetectedArch::X86_32] {
+            for len in [10usize, 17, 100, 1024] {
+                assert_eq!(
+                    arch.nop_sequence(len),
+                    nine,
+                    "{:?} nop_sequence({}) should clamp to 9-byte canonical",
+                    arch,
+                    len
+                );
+            }
+        }
     }
 
     #[test]
@@ -286,5 +375,119 @@ mod tests {
             end: 0x1000,
         };
         assert!(invalid_window.start >= invalid_window.end);
+    }
+
+    /// Hand-rolled minimal x86_64 ELF used only by integration tests in this
+    /// module. Layout: header, .text data, .shstrtab data, then a section
+    /// header table with NULL / .text / .shstrtab. Only the fields
+    /// `ElfPatcher` actually reads are populated.
+    fn build_minimal_x86_64_elf(text_bytes: &[u8], text_vaddr: u64) -> Vec<u8> {
+        let elf_header_size = 64usize;
+        let shentsize = 64usize;
+        let shnum = 3usize;
+        let shstrtab: &[u8] = b"\0.text\0.shstrtab\0";
+        let text_offset = elf_header_size;
+        let shstrtab_offset = text_offset + text_bytes.len();
+        let shoff = shstrtab_offset + shstrtab.len();
+        let total_size = shoff + shentsize * shnum;
+
+        let mut buf = vec![0u8; total_size];
+
+        buf[0..4].copy_from_slice(b"\x7fELF");
+        buf[4] = elf::abi::ELFCLASS64;
+        buf[5] = elf::abi::ELFDATA2LSB;
+        buf[6] = elf::abi::EV_CURRENT as u8;
+        buf[16..18].copy_from_slice(&elf::abi::ET_EXEC.to_le_bytes());
+        buf[18..20].copy_from_slice(&elf::abi::EM_X86_64.to_le_bytes());
+        buf[20..24].copy_from_slice(&(elf::abi::EV_CURRENT as u32).to_le_bytes());
+        buf[40..48].copy_from_slice(&(shoff as u64).to_le_bytes());
+        buf[52..54].copy_from_slice(&(elf_header_size as u16).to_le_bytes());
+        buf[58..60].copy_from_slice(&(shentsize as u16).to_le_bytes());
+        buf[60..62].copy_from_slice(&(shnum as u16).to_le_bytes());
+        buf[62..64].copy_from_slice(&2u16.to_le_bytes());
+
+        buf[text_offset..text_offset + text_bytes.len()].copy_from_slice(text_bytes);
+        buf[shstrtab_offset..shstrtab_offset + shstrtab.len()].copy_from_slice(shstrtab);
+
+        let mut write_shdr = |index: usize, fields: [u64; 10]| {
+            let base = shoff + index * shentsize;
+            buf[base..base + 4].copy_from_slice(&(fields[0] as u32).to_le_bytes());
+            buf[base + 4..base + 8].copy_from_slice(&(fields[1] as u32).to_le_bytes());
+            buf[base + 8..base + 16].copy_from_slice(&fields[2].to_le_bytes());
+            buf[base + 16..base + 24].copy_from_slice(&fields[3].to_le_bytes());
+            buf[base + 24..base + 32].copy_from_slice(&fields[4].to_le_bytes());
+            buf[base + 32..base + 40].copy_from_slice(&fields[5].to_le_bytes());
+            buf[base + 40..base + 44].copy_from_slice(&(fields[6] as u32).to_le_bytes());
+            buf[base + 44..base + 48].copy_from_slice(&(fields[7] as u32).to_le_bytes());
+            buf[base + 48..base + 56].copy_from_slice(&fields[8].to_le_bytes());
+            buf[base + 56..base + 64].copy_from_slice(&fields[9].to_le_bytes());
+        };
+        write_shdr(0, [0; 10]);
+        write_shdr(
+            1,
+            [
+                1,
+                elf::abi::SHT_PROGBITS as u64,
+                (elf::abi::SHF_ALLOC | elf::abi::SHF_EXECINSTR) as u64,
+                text_vaddr,
+                text_offset as u64,
+                text_bytes.len() as u64,
+                0,
+                0,
+                1,
+                0,
+            ],
+        );
+        write_shdr(
+            2,
+            [
+                7,
+                elf::abi::SHT_STRTAB as u64,
+                0,
+                0,
+                shstrtab_offset as u64,
+                shstrtab.len() as u64,
+                0,
+                0,
+                1,
+                0,
+            ],
+        );
+
+        buf
+    }
+
+    #[test]
+    fn create_patched_copy_emits_canonical_x86_nop_padding() {
+        use crate::test_utils::TempFile;
+
+        let text_vaddr: u64 = 0x100000;
+        let text_bytes = [0xc3u8; 8];
+        let elf_bytes = build_minimal_x86_64_elf(&text_bytes, text_vaddr);
+
+        let input = TempFile::new_bytes("s11-elf-padding-in", "elf", &elf_bytes);
+        let output = TempFile::new_bytes("s11-elf-padding-out", "elf", &[]);
+
+        let patcher = ElfPatcher::new(input.path()).expect("patcher should accept minimal ELF");
+        assert_eq!(patcher.arch(), DetectedArch::X86_64);
+
+        let window = AddressWindow {
+            start: text_vaddr,
+            end: text_vaddr + 8,
+        };
+        let payload = [0x90u8, 0x90, 0x90];
+        patcher
+            .create_patched_copy(output.path(), &window, &payload)
+            .expect("patch should succeed");
+
+        let patched = std::fs::read(output.path()).expect("output should be readable");
+        let text_file_offset = 64usize;
+        let patched_window = &patched[text_file_offset..text_file_offset + 8];
+        assert_eq!(&patched_window[..3], &payload[..], "payload bytes mismatch");
+        assert_eq!(
+            &patched_window[3..],
+            &[0x0f, 0x1f, 0x44, 0x00, 0x00][..],
+            "padding should be the canonical 5-byte Intel NOP",
+        );
     }
 }
