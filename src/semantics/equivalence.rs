@@ -343,6 +343,15 @@ fn build_smt_solver(
     let final_state1 = apply_sequence(initial_state.clone(), seq1);
     let final_state2 = apply_sequence(initial_state, seq2);
 
+    // Safety guard added in issue #77 step 6: catch any future caller that
+    // splices states of mismatched width before Z3 panics on a BV-sort
+    // mismatch deep inside `states_not_equal_for_live_out`.
+    debug_assert_eq!(
+        final_state1.width(),
+        final_state2.width(),
+        "build_smt_solver: width mismatch between sequence final states",
+    );
+
     solver.assert(states_not_equal_for_live_out(
         &final_state1,
         &final_state2,

@@ -11,11 +11,14 @@ use z3::{Params, Solver};
 
 /// Reverse the byte order of a 64-bit BV by concatenating its 8 byte slices
 /// with byte 0 placed in the most-significant position.
-fn bv_swap_bytes_64(value: &BV) -> BV {
-    // Place byte 0 (originally at bits [7:0]) at the new top, byte 7
-    // (originally at bits [63:56]) at the new bottom.
+/// Reverse the byte order of a `width`-bit BV by concatenating its byte
+/// slices with byte 0 placed in the most-significant position. `width` must
+/// be a multiple of 8.
+fn bv_swap_bytes(value: &BV, width: u32) -> BV {
+    debug_assert!(width % 8 == 0, "bv_swap_bytes requires byte-multiple width");
+    let num_bytes = width / 8;
     let mut result = value.extract(7, 0);
-    for i in 1..8u32 {
+    for i in 1..num_bytes {
         let lo = i * 8;
         let hi = lo + 7;
         result = result.concat(&value.extract(hi, lo));
@@ -23,48 +26,49 @@ fn bv_swap_bytes_64(value: &BV) -> BV {
     result
 }
 
-/// 64-bit ROR composed as `(value lshr n) | (value shl (64 - n))`.
-/// Caller is responsible for masking `n` to 6 bits when needed (immediate
-/// callers with `n` already in 0..=63 may skip the mask).
+/// `width`-bit ROR composed as `(value lshr n) | (value shl (width - n))`.
+/// Caller is responsible for masking `n` to `log2(width)` bits when needed
+/// (immediate callers with `n` already in `0..width` may skip the mask).
 ///
-/// Edge case at n == 0: `complement` evaluates to 64, and SMTLIB2 bit-vector
-/// semantics define `bvshl(x, 64) = 0` (any shift ≥ the bit-width zeroes the
-/// value). So `hi = 0` and the result is just `value lshr 0 = value`.
-fn bv_ror_64(value: &BV, n: &BV) -> BV {
-    let mask = BV::from_u64(63, 64);
+/// Edge case at n == 0: `complement` evaluates to `width`, and SMTLIB2
+/// bit-vector semantics define `bvshl(x, width) = 0` (any shift ≥ the
+/// bit-width zeroes the value). So `hi = 0` and the result is just
+/// `value lshr 0 = value`.
+fn bv_ror(value: &BV, n: &BV, width: u32) -> BV {
+    let mask = BV::from_u64((width - 1) as u64, width);
     let n_masked = n.bvand(&mask);
-    let sixty_four = BV::from_u64(64, 64);
-    let complement = sixty_four.bvsub(&n_masked);
+    let width_const = BV::from_u64(width as u64, width);
+    let complement = width_const.bvsub(&n_masked);
     let lo = value.bvlshr(&n_masked);
     let hi = value.bvshl(&complement);
     lo.bvor(&hi)
 }
 
-/// Reverse the bit order of a 64-bit BV via 64 single-bit extracts.
-fn bv_reverse_bits_64(value: &BV) -> BV {
-    // Bit 0 of `value` becomes the new MSB; bit 63 becomes the new LSB.
+/// Reverse the bit order of a `width`-bit BV via single-bit extracts.
+fn bv_reverse_bits(value: &BV, width: u32) -> BV {
+    // Bit 0 of `value` becomes the new MSB; bit width-1 becomes the new LSB.
     let mut result = value.extract(0, 0);
-    for i in 1..64u32 {
+    for i in 1..width {
         result = result.concat(&value.extract(i, i));
     }
     result
 }
 
-/// Count leading zeros of a 64-bit BV using a nested ITE chain.
+/// Count leading zeros of a `width`-bit BV using a nested ITE chain.
 /// Iterates bit positions from LSB upward; later iterations overwrite the
 /// result when their bit is set, so the final result is the CLZ of the
 /// input — the number of leading zeros — derived from the highest-set-bit
-/// position found (or 64 if no bit is set).
+/// position found (or `width` if no bit is set).
 //
-// TODO(#112): replace this 64-deep ITE chain with an O(log n) binary-search
-// decomposition (top-32 / top-16 / … / top-1) to reduce Z3 formula depth.
-fn bv_clz_64(value: &BV) -> BV {
-    let mut result = BV::from_u64(64, 64);
+// TODO(#112): replace this width-deep ITE chain with an O(log n) binary-search
+// decomposition (top-W/2 / top-W/4 / … / top-1) to reduce Z3 formula depth.
+fn bv_clz(value: &BV, width: u32) -> BV {
+    let mut result = BV::from_u64(width as u64, width);
     let one_bit = BV::from_u64(1, 1);
-    for pos in 0..64u32 {
+    for pos in 0..width {
         let bit = value.extract(pos, pos);
         let is_set = bit.eq(&one_bit);
-        let clz_if_top = BV::from_u64(63 - pos as u64, 64);
+        let clz_if_top = BV::from_u64((width - 1 - pos) as u64, width);
         result = is_set.ite(&clz_if_top, &result);
     }
     result
@@ -117,36 +121,41 @@ pub fn create_solver_with_config(cfg: &SolverConfig) -> Solver {
     solver
 }
 
-/// Machine state representation for SMT solving
+/// Machine state representation for SMT solving.
+///
+/// Carries a `width` field per ADR-0004 decision 1; AArch64 is always
+/// width=64. All register BVs in `registers` are `width` bits wide.
 #[derive(Clone)]
 pub struct MachineState {
-    /// Register values as 64-bit bitvectors
+    /// Register values as `width`-bit bitvectors
     pub registers: HashMap<Register, BV>,
     /// NZCV condition flags as 1-bit bitvectors
     pub n: BV,
     pub z: BV,
     pub c: BV,
     pub v: BV,
+    width: u32,
 }
 
 impl MachineState {
-    /// Create a new symbolic machine state
+    /// Create a new symbolic AArch64 machine state (width=64).
     pub fn new_symbolic(prefix: &str) -> Self {
+        Self::new_symbolic_for_width(prefix, 64)
+    }
+
+    /// Create a new symbolic machine state with the given register width.
+    pub fn new_symbolic_for_width(prefix: &str, width: u32) -> Self {
         let mut registers = HashMap::new();
 
-        // Create symbolic variables for all registers
         for i in 0..=30 {
             if let Some(reg) = Register::from_index(i) {
                 let name = format!("{}_x{}", prefix, i);
-                registers.insert(reg, BV::new_const(name, 64));
+                registers.insert(reg, BV::new_const(name, width));
             }
         }
 
-        // XZR is always zero
-        registers.insert(Register::XZR, BV::from_i64(0, 64));
-
-        // SP is also symbolic
-        registers.insert(Register::SP, BV::new_const(format!("{}_sp", prefix), 64));
+        registers.insert(Register::XZR, BV::from_i64(0, width));
+        registers.insert(Register::SP, BV::new_const(format!("{}_sp", prefix), width));
 
         let n = BV::new_const(format!("{}_n", prefix), 1);
         let z = BV::new_const(format!("{}_z", prefix), 1);
@@ -159,7 +168,13 @@ impl MachineState {
             z,
             c,
             v,
+            width,
         }
+    }
+
+    /// Register bit width this state was constructed with.
+    pub fn width(&self) -> u32 {
+        self.width
     }
 
     /// Get the value of a register
@@ -192,15 +207,15 @@ impl MachineState {
     pub fn eval_operand(&self, operand: &Operand) -> BV {
         match operand {
             Operand::Register(reg) => self.get_register(*reg).clone(),
-            Operand::Immediate(imm) => BV::from_i64(*imm, 64),
+            Operand::Immediate(imm) => BV::from_i64(*imm, self.width),
             Operand::ShiftedRegister { reg, kind, amount } => {
                 let value = self.get_register(*reg).clone();
-                let amt = BV::from_u64(*amount as u64, 64);
+                let amt = BV::from_u64(*amount as u64, self.width);
                 match kind {
                     crate::ir::ShiftKind::Lsl => value.bvshl(&amt),
                     crate::ir::ShiftKind::Lsr => value.bvlshr(&amt),
                     crate::ir::ShiftKind::Asr => value.bvashr(&amt),
-                    crate::ir::ShiftKind::Ror => bv_ror_64(&value, &amt),
+                    crate::ir::ShiftKind::Ror => bv_ror(&value, &amt, self.width),
                 }
             }
             // Issue #60: ExtendedRegister extracts the low N bits, then
@@ -220,7 +235,7 @@ impl MachineState {
                 if *shift == 0 {
                     extended
                 } else {
-                    extended.bvshl(BV::from_u64(*shift as u64, 64))
+                    extended.bvshl(BV::from_u64(*shift as u64, self.width))
                 }
             }
         }
@@ -238,37 +253,39 @@ fn bv_zero() -> BV {
     BV::from_u64(0, 1)
 }
 
-/// Compute symbolic NZCV for the subtraction `lhs - rhs`. Mirrors
-/// `ConditionFlags::from_sub` in `state.rs` bit-for-bit.
-pub fn compute_flags_sub(lhs: &BV, rhs: &BV) -> Nzcv {
+/// Compute symbolic NZCV for the subtraction `lhs - rhs` at width `width`.
+/// Mirrors `ConditionFlags::from_sub` in `state.rs` bit-for-bit.
+pub fn compute_flags_sub(lhs: &BV, rhs: &BV, width: u32) -> Nzcv {
     let result = lhs.bvsub(rhs);
-    let zero64 = BV::from_u64(0, 64);
-    let n = result.extract(63, 63);
-    let z = result.eq(&zero64).ite(&bv_one(), &bv_zero());
+    let zero = BV::from_u64(0, width);
+    let msb = width - 1;
+    let n = result.extract(msb, msb);
+    let z = result.eq(&zero).ite(&bv_one(), &bv_zero());
     let c = lhs.bvuge(rhs).ite(&bv_one(), &bv_zero());
     // Signed overflow on subtraction: (lhs and rhs differ in sign) AND
     // (lhs and result differ in sign).
-    let lhs_sign = lhs.extract(63, 63);
-    let rhs_sign = rhs.extract(63, 63);
-    let res_sign = result.extract(63, 63);
+    let lhs_sign = lhs.extract(msb, msb);
+    let rhs_sign = rhs.extract(msb, msb);
+    let res_sign = result.extract(msb, msb);
     let v = lhs_sign.bvxor(&rhs_sign).bvand(&lhs_sign.bvxor(&res_sign));
     (n, z, c, v)
 }
 
-/// Compute symbolic NZCV for the addition `lhs + rhs`. Mirrors
-/// `ConditionFlags::from_add` in `state.rs`.
-pub fn compute_flags_add(lhs: &BV, rhs: &BV) -> Nzcv {
+/// Compute symbolic NZCV for the addition `lhs + rhs` at width `width`.
+/// Mirrors `ConditionFlags::from_add` in `state.rs`.
+pub fn compute_flags_add(lhs: &BV, rhs: &BV, width: u32) -> Nzcv {
     let result = lhs.bvadd(rhs);
-    let zero64 = BV::from_u64(0, 64);
-    let n = result.extract(63, 63);
-    let z = result.eq(&zero64).ite(&bv_one(), &bv_zero());
+    let zero = BV::from_u64(0, width);
+    let msb = width - 1;
+    let n = result.extract(msb, msb);
+    let z = result.eq(&zero).ite(&bv_one(), &bv_zero());
     // Carry on add: result < lhs (unsigned).
     let c = result.bvult(lhs).ite(&bv_one(), &bv_zero());
     // Signed overflow on add: (lhs and rhs share sign) AND (lhs and result
     // differ in sign).
-    let lhs_sign = lhs.extract(63, 63);
-    let rhs_sign = rhs.extract(63, 63);
-    let res_sign = result.extract(63, 63);
+    let lhs_sign = lhs.extract(msb, msb);
+    let rhs_sign = rhs.extract(msb, msb);
+    let res_sign = result.extract(msb, msb);
     let one_bit = bv_one();
     let signs_match = lhs_sign.bvxor(&rhs_sign).bvxor(&one_bit); // 1 when signs match
     let signs_flip = lhs_sign.bvxor(&res_sign); // 1 when lhs and result differ
@@ -287,12 +304,13 @@ pub fn nzcv_to_bvs(byte: u8) -> Nzcv {
     )
 }
 
-/// Compute symbolic NZCV for a logical (AND/ORR/EOR/TST) result. C and V are
-/// always cleared per the AArch64 ARM.
-pub fn compute_flags_logical(result: &BV) -> Nzcv {
-    let zero64 = BV::from_u64(0, 64);
-    let n = result.extract(63, 63);
-    let z = result.eq(&zero64).ite(&bv_one(), &bv_zero());
+/// Compute symbolic NZCV for a logical (AND/ORR/EOR/TST) result at width
+/// `width`. C and V are always cleared per the AArch64 ARM.
+pub fn compute_flags_logical(result: &BV, width: u32) -> Nzcv {
+    let zero = BV::from_u64(0, width);
+    let msb = width - 1;
+    let n = result.extract(msb, msb);
+    let z = result.eq(&zero).ite(&bv_one(), &bv_zero());
     (n, z, bv_zero(), bv_zero())
 }
 
@@ -335,13 +353,14 @@ pub fn condition_to_smt(cond: crate::ir::types::Condition, n: &BV, z: &BV, c: &B
 
 /// Apply an instruction to a machine state, returning the new state
 pub fn apply_instruction(mut state: MachineState, instruction: &Instruction) -> MachineState {
+    let width = state.width();
     match instruction {
         Instruction::MovReg { rd, rn } => {
             let value = state.get_register(*rn).clone();
             state.set_register(*rd, value);
         }
         Instruction::MovImm { rd, imm } => {
-            let value = BV::from_i64(*imm, 64);
+            let value = BV::from_i64(*imm, width);
             state.set_register(*rd, value);
         }
         Instruction::Add { rd, rn, rm } => {
@@ -404,7 +423,7 @@ pub fn apply_instruction(mut state: MachineState, instruction: &Instruction) -> 
         Instruction::Sdiv { rd, rn, rm } => {
             let lhs = state.get_register(*rn).clone();
             let rhs = state.get_register(*rm).clone();
-            let zero = BV::from_i64(0, 64);
+            let zero = BV::from_i64(0, width);
             let is_zero = rhs.eq(&zero);
             // AArch64: division by zero returns 0
             // For overflow case (MIN / -1), we handle it with bvsdiv which wraps correctly
@@ -415,7 +434,7 @@ pub fn apply_instruction(mut state: MachineState, instruction: &Instruction) -> 
         Instruction::Udiv { rd, rn, rm } => {
             let lhs = state.get_register(*rn).clone();
             let rhs = state.get_register(*rm).clone();
-            let zero = BV::from_u64(0, 64);
+            let zero = BV::from_u64(0, width);
             let is_zero = rhs.eq(&zero);
             // AArch64: division by zero returns 0
             let div_result = lhs.bvudiv(&rhs);
@@ -440,37 +459,37 @@ pub fn apply_instruction(mut state: MachineState, instruction: &Instruction) -> 
             state.set_register(*rd, a.bvmul(&b).bvneg());
         }
         Instruction::Smulh { rd, rn, rm } => {
-            // 64-bit sign-extend to 128, multiply, extract upper 64 bits.
-            let a = state.get_register(*rn).sign_ext(64);
-            let b = state.get_register(*rm).sign_ext(64);
+            // `width`-bit sign-extend to 2*width, multiply, extract upper width bits.
+            let a = state.get_register(*rn).sign_ext(width);
+            let b = state.get_register(*rm).sign_ext(width);
             let prod = a.bvmul(&b);
-            state.set_register(*rd, prod.extract(127, 64));
+            state.set_register(*rd, prod.extract(2 * width - 1, width));
         }
         Instruction::Umulh { rd, rn, rm } => {
-            // 64-bit zero-extend to 128, multiply, extract upper 64 bits.
-            let a = state.get_register(*rn).zero_ext(64);
-            let b = state.get_register(*rm).zero_ext(64);
+            // `width`-bit zero-extend to 2*width, multiply, extract upper width bits.
+            let a = state.get_register(*rn).zero_ext(width);
+            let b = state.get_register(*rm).zero_ext(width);
             let prod = a.bvmul(&b);
-            state.set_register(*rd, prod.extract(127, 64));
+            state.set_register(*rd, prod.extract(2 * width - 1, width));
         }
         // Comparison instructions set flags and don't modify registers.
         Instruction::Cmp { rn, rm } => {
             let lhs = state.get_register(*rn).clone();
             let rhs = state.eval_operand(rm);
-            let (n, z, c, v) = compute_flags_sub(&lhs, &rhs);
+            let (n, z, c, v) = compute_flags_sub(&lhs, &rhs, width);
             state.set_flags(n, z, c, v);
         }
         Instruction::Cmn { rn, rm } => {
             let lhs = state.get_register(*rn).clone();
             let rhs = state.eval_operand(rm);
-            let (n, z, c, v) = compute_flags_add(&lhs, &rhs);
+            let (n, z, c, v) = compute_flags_add(&lhs, &rhs, width);
             state.set_flags(n, z, c, v);
         }
         Instruction::Tst { rn, rm } => {
             let lhs = state.get_register(*rn).clone();
             let rhs = state.eval_operand(rm);
             let result = lhs.bvand(&rhs);
-            let (n, z, c, v) = compute_flags_logical(&result);
+            let (n, z, c, v) = compute_flags_logical(&result, width);
             state.set_flags(n, z, c, v);
         }
         // CCMP / CCMN: ITE between freshly-computed sub/add NZCV (true branch)
@@ -479,7 +498,7 @@ pub fn apply_instruction(mut state: MachineState, instruction: &Instruction) -> 
         Instruction::Ccmp { rn, rm, nzcv, cond } => {
             let lhs = state.get_register(*rn).clone();
             let rhs = state.eval_operand(rm);
-            let (n_t, z_t, c_t, v_t) = compute_flags_sub(&lhs, &rhs);
+            let (n_t, z_t, c_t, v_t) = compute_flags_sub(&lhs, &rhs, width);
             let pred =
                 condition_to_smt(*cond, &state.n, &state.z, &state.c, &state.v).eq(&bv_one());
             let (n_f, z_f, c_f, v_f) = nzcv_to_bvs(*nzcv);
@@ -493,7 +512,7 @@ pub fn apply_instruction(mut state: MachineState, instruction: &Instruction) -> 
         Instruction::Ccmn { rn, rm, nzcv, cond } => {
             let lhs = state.get_register(*rn).clone();
             let rhs = state.eval_operand(rm);
-            let (n_t, z_t, c_t, v_t) = compute_flags_add(&lhs, &rhs);
+            let (n_t, z_t, c_t, v_t) = compute_flags_add(&lhs, &rhs, width);
             let pred =
                 condition_to_smt(*cond, &state.n, &state.z, &state.c, &state.v).eq(&bv_one());
             let (n_f, z_f, c_f, v_f) = nzcv_to_bvs(*nzcv);
@@ -515,7 +534,7 @@ pub fn apply_instruction(mut state: MachineState, instruction: &Instruction) -> 
         }
         Instruction::Csinc { rd, rn, rm, cond } => {
             let rn_v = state.get_register(*rn).clone();
-            let rm_plus_one = state.get_register(*rm).bvadd(&BV::from_u64(1, 64));
+            let rm_plus_one = state.get_register(*rm).bvadd(&BV::from_u64(1, width));
             let pred =
                 condition_to_smt(*cond, &state.n, &state.z, &state.c, &state.v).eq(&bv_one());
             state.set_register(*rd, pred.ite(&rn_v, &rm_plus_one));
@@ -545,27 +564,27 @@ pub fn apply_instruction(mut state: MachineState, instruction: &Instruction) -> 
         // NEGS = SUBS rd, XZR, rm — write rd and the resulting NZCV.
         Instruction::Negs { rd, rm } => {
             let rhs = state.get_register(*rm).clone();
-            let zero = BV::from_u64(0, 64);
+            let zero = BV::from_u64(0, width);
             let value = zero.bvsub(&rhs);
-            let (n, z, c, v) = compute_flags_sub(&zero, &rhs);
+            let (n, z, c, v) = compute_flags_sub(&zero, &rhs, width);
             state.set_register(*rd, value);
             state.set_flags(n, z, c, v);
         }
         Instruction::MovN { rd, imm, shift } => {
             let value = !((*imm as u64) << (*shift as u32));
-            state.set_register(*rd, BV::from_u64(value, 64));
+            state.set_register(*rd, BV::from_u64(value, width));
         }
         Instruction::MovZ { rd, imm, shift } => {
             let value = (*imm as u64) << (*shift as u32);
-            state.set_register(*rd, BV::from_u64(value, 64));
+            state.set_register(*rd, BV::from_u64(value, width));
         }
         // MOVK keeps the 48 unwritten bits of rd. Encode as
         // `(rd_old & ~mask) | new_chunk` so the solver sees the data-flow
         // dependence on the prior rd value.
         Instruction::MovK { rd, imm, shift } => {
             let prev = state.get_register(*rd).clone();
-            let mask = BV::from_u64(!(0xFFFF_u64 << (*shift as u32)), 64);
-            let new_chunk = BV::from_u64((*imm as u64) << (*shift as u32), 64);
+            let mask = BV::from_u64(!(0xFFFF_u64 << (*shift as u32)), width);
+            let new_chunk = BV::from_u64((*imm as u64) << (*shift as u32), width);
             let result = prev.bvand(&mask).bvor(&new_chunk);
             state.set_register(*rd, result);
         }
@@ -581,7 +600,7 @@ pub fn apply_instruction(mut state: MachineState, instruction: &Instruction) -> 
             let lhs = state.get_register(*rn).clone();
             let rhs = state.eval_operand(rm);
             let result = lhs.bvand(rhs.bvnot());
-            let (n, z, c, v) = compute_flags_logical(&result);
+            let (n, z, c, v) = compute_flags_logical(&result, width);
             state.set_register(*rd, result);
             state.set_flags(n, z, c, v);
         }
@@ -602,14 +621,14 @@ pub fn apply_instruction(mut state: MachineState, instruction: &Instruction) -> 
         Instruction::Adds { rd, rn, rm } => {
             let lhs = state.get_register(*rn).clone();
             let rhs = state.eval_operand(rm);
-            let (n, z, c, v) = compute_flags_add(&lhs, &rhs);
+            let (n, z, c, v) = compute_flags_add(&lhs, &rhs, width);
             state.set_register(*rd, lhs.bvadd(&rhs));
             state.set_flags(n, z, c, v);
         }
         Instruction::Subs { rd, rn, rm } => {
             let lhs = state.get_register(*rn).clone();
             let rhs = state.eval_operand(rm);
-            let (n, z, c, v) = compute_flags_sub(&lhs, &rhs);
+            let (n, z, c, v) = compute_flags_sub(&lhs, &rhs, width);
             state.set_register(*rd, lhs.bvsub(&rhs));
             state.set_flags(n, z, c, v);
         }
@@ -617,7 +636,7 @@ pub fn apply_instruction(mut state: MachineState, instruction: &Instruction) -> 
             let lhs = state.get_register(*rn).clone();
             let rhs = state.eval_operand(rm);
             let result = lhs.bvand(&rhs);
-            let (n, z, c, v) = compute_flags_logical(&result);
+            let (n, z, c, v) = compute_flags_logical(&result, width);
             state.set_register(*rd, result);
             state.set_flags(n, z, c, v);
         }
@@ -625,53 +644,51 @@ pub fn apply_instruction(mut state: MachineState, instruction: &Instruction) -> 
         Instruction::Cset { rd, cond } => {
             let pred =
                 condition_to_smt(*cond, &state.n, &state.z, &state.c, &state.v).eq(&bv_one());
-            let one64 = BV::from_u64(1, 64);
-            let zero64 = BV::from_u64(0, 64);
-            state.set_register(*rd, pred.ite(&one64, &zero64));
+            let one = BV::from_u64(1, width);
+            let zero = BV::from_u64(0, width);
+            state.set_register(*rd, pred.ite(&one, &zero));
         }
         Instruction::Csetm { rd, cond } => {
             let pred =
                 condition_to_smt(*cond, &state.n, &state.z, &state.c, &state.v).eq(&bv_one());
-            let ones = BV::from_u64(u64::MAX, 64);
-            let zero64 = BV::from_u64(0, 64);
-            state.set_register(*rd, pred.ite(&ones, &zero64));
+            let ones = BV::from_i64(-1, width); // all-ones at any width
+            let zero = BV::from_u64(0, width);
+            state.set_register(*rd, pred.ite(&ones, &zero));
         }
-        // ROR: composed via bv_ror_64 (see helper at top of file for the
-        // edge-case discussion at n == 0).
+        // ROR: composed via the width-aware bv_ror helper.
         Instruction::Ror { rd, rn, shift } => {
             let value = state.get_register(*rn).clone();
             let n = state.eval_operand(shift);
-            state.set_register(*rd, bv_ror_64(&value, &n));
+            state.set_register(*rd, bv_ror(&value, &n, width));
         }
-        // CLZ: count leading zero bits; returns 64 when the value is zero.
+        // CLZ: count leading zero bits; returns `width` when the value is zero.
         Instruction::Clz { rd, rn } => {
             let value = state.get_register(*rn).clone();
-            state.set_register(*rd, bv_clz_64(&value));
+            state.set_register(*rd, bv_clz(&value, width));
         }
         // CLS: count leading sign-bit replicas (excluding the sign bit).
-        // Fold the sign bit out via `x XOR (x ASR 63)` so the answer reduces
-        // to `clz(folded) - 1`. Bit 63 of `folded` is always 0 (a positive
-        // sign cancels its own top bit; a negative sign inverts it to 0),
-        // so `bv_clz_64(folded) ∈ [1, 64]` and the subtraction lands in
-        // `[0, 63]` — `bvsub` never wraps. For all-sign inputs (0 or -1)
-        // folded is zero, clz is 64, and the result is 63.
+        // Fold the sign bit out via `x XOR (x ASR (width-1))` so the answer
+        // reduces to `clz(folded) - 1`. Bit width-1 of `folded` is always 0,
+        // so `bv_clz(folded) ∈ [1, width]` and the subtraction lands in
+        // `[0, width-1]` — `bvsub` never wraps. For all-sign inputs (0 or -1)
+        // folded is zero, clz is `width`, and the result is `width - 1`.
         Instruction::Cls { rd, rn } => {
             let value = state.get_register(*rn).clone();
-            let asr = value.bvashr(&BV::from_u64(63, 64));
+            let asr = value.bvashr(&BV::from_u64((width - 1) as u64, width));
             let folded = value.bvxor(&asr);
-            let clz = bv_clz_64(&folded);
-            let result = clz.bvsub(&BV::from_u64(1, 64));
+            let clz = bv_clz(&folded, width);
+            let result = clz.bvsub(&BV::from_u64(1, width));
             state.set_register(*rd, result);
         }
-        // RBIT: reverse the 64 bits.
+        // RBIT: reverse the bits of the value.
         Instruction::Rbit { rd, rn } => {
             let value = state.get_register(*rn).clone();
-            state.set_register(*rd, bv_reverse_bits_64(&value));
+            state.set_register(*rd, bv_reverse_bits(&value, width));
         }
-        // REV: byte-reverse the 64-bit value.
+        // REV: byte-reverse the value.
         Instruction::Rev { rd, rn } => {
             let value = state.get_register(*rn).clone();
-            state.set_register(*rd, bv_swap_bytes_64(&value));
+            state.set_register(*rd, bv_swap_bytes(&value, width));
         }
         // REV32: byte-reverse within each 32-bit half independently.
         Instruction::Rev32 { rd, rn } => {
@@ -1396,7 +1413,7 @@ mod tests {
         let state = MachineState::new_symbolic("pre");
         let x0 = state.get_register(Register::X0).clone();
         let x1 = state.get_register(Register::X1).clone();
-        let expected = compute_flags_sub(&x0, &x1);
+        let expected = compute_flags_sub(&x0, &x1, 64);
         let after = apply_instruction(
             state,
             &Instruction::Cmp {
@@ -1605,7 +1622,7 @@ mod tests {
         force_flags(&mut state, 0, 1, 0, 0);
         let x1 = state.get_register(Register::X1).clone();
         let x2 = state.get_register(Register::X2).clone();
-        let expected = compute_flags_sub(&x1, &x2);
+        let expected = compute_flags_sub(&x1, &x2, 64);
         let after = apply_instruction(
             state,
             &Instruction::Ccmp {
@@ -1643,7 +1660,7 @@ mod tests {
         force_flags(&mut state, 0, 1, 0, 0);
         let x1 = state.get_register(Register::X1).clone();
         let x2 = state.get_register(Register::X2).clone();
-        let expected = compute_flags_add(&x1, &x2);
+        let expected = compute_flags_add(&x1, &x2, 64);
         let after = apply_instruction(
             state,
             &Instruction::Ccmn {
@@ -1673,7 +1690,7 @@ mod tests {
                     rn: Register::X0,
                     rm: rm_reg.clone(),
                 },
-                compute_flags_add(&x0, &x1),
+                compute_flags_add(&x0, &x1, 64),
                 "CMN x0, x1",
             ),
             (
@@ -1681,7 +1698,7 @@ mod tests {
                     rn: Register::X0,
                     rm: rm_reg.clone(),
                 },
-                compute_flags_logical(&x0.bvand(&x1)),
+                compute_flags_logical(&x0.bvand(&x1), 64),
                 "TST x0, x1",
             ),
             (
@@ -1690,7 +1707,7 @@ mod tests {
                     rn: Register::X0,
                     rm: rm_reg.clone(),
                 },
-                compute_flags_add(&x0, &x1),
+                compute_flags_add(&x0, &x1, 64),
                 "ADDS x2, x0, x1",
             ),
             (
@@ -1699,7 +1716,7 @@ mod tests {
                     rn: Register::X0,
                     rm: rm_reg.clone(),
                 },
-                compute_flags_sub(&x0, &x1),
+                compute_flags_sub(&x0, &x1, 64),
                 "SUBS x2, x0, x1",
             ),
             (
@@ -1708,7 +1725,7 @@ mod tests {
                     rn: Register::X0,
                     rm: rm_reg.clone(),
                 },
-                compute_flags_logical(&x0.bvand(&x1)),
+                compute_flags_logical(&x0.bvand(&x1), 64),
                 "ANDS x2, x0, x1",
             ),
             (
@@ -1716,7 +1733,7 @@ mod tests {
                     rd: Register::X2,
                     rm: Register::X1,
                 },
-                compute_flags_sub(&BV::from_u64(0, 64), &x1),
+                compute_flags_sub(&BV::from_u64(0, 64), &x1, 64),
                 "NEGS x2, x1",
             ),
             (
@@ -1725,7 +1742,7 @@ mod tests {
                     rn: Register::X0,
                     rm: rm_reg.clone(),
                 },
-                compute_flags_logical(&x0.bvand(&x1.bvnot())),
+                compute_flags_logical(&x0.bvand(&x1.bvnot()), 64),
                 "BICS x2, x0, x1",
             ),
         ];
@@ -1772,7 +1789,7 @@ mod tests {
             let rhs = BV::from_u64(b, 64);
             let expected = ConditionFlags::from_sub(a, b, a.wrapping_sub(b));
             assert_flags_match(
-                compute_flags_sub(&lhs, &rhs),
+                compute_flags_sub(&lhs, &rhs, 64),
                 expected,
                 &format!("compute_flags_sub({a}, {b}) vs ConditionFlags::from_sub"),
             );
@@ -1794,7 +1811,7 @@ mod tests {
             let rhs = BV::from_u64(b, 64);
             let expected = ConditionFlags::from_add(a, b, a.wrapping_add(b));
             assert_flags_match(
-                compute_flags_add(&lhs, &rhs),
+                compute_flags_add(&lhs, &rhs, 64),
                 expected,
                 &format!("compute_flags_add({a}, {b}) vs ConditionFlags::from_add"),
             );
@@ -1809,7 +1826,7 @@ mod tests {
             let result = BV::from_u64(r, 64);
             let expected = ConditionFlags::from_logical(r);
             assert_flags_match(
-                compute_flags_logical(&result),
+                compute_flags_logical(&result, 64),
                 expected,
                 &format!("compute_flags_logical({r}) vs ConditionFlags::from_logical"),
             );
