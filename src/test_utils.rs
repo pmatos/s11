@@ -9,6 +9,10 @@ pub(crate) struct TempFile {
 
 impl TempFile {
     pub(crate) fn new(prefix: &str, extension: &str, content: &str) -> Self {
+        Self::new_bytes(prefix, extension, content.as_bytes())
+    }
+
+    pub(crate) fn new_bytes(prefix: &str, extension: &str, content: &[u8]) -> Self {
         let id = TEMP_FILE_COUNTER.fetch_add(1, Ordering::Relaxed);
         let path = std::env::temp_dir().join(format!(
             "{}-{}-{}.{}",
