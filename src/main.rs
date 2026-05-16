@@ -410,9 +410,15 @@ struct OptimizationOptions {
 // indirectly through the existing free functions, which step 8 wired to the
 // trait impls. Stage 2 step 20 merges this function with
 // `optimize_elf_binary_x86` into a single `optimize_elf_binary_generic<I: ISA>`
-// once x86 has its own SearchAlgorithm impl (stage 2 step 17). For now the
-// AArch64-typed signature is preserved so existing callers do not need
-// turbofish.
+// once x86 has its own SearchAlgorithm impl. For now the AArch64-typed
+// signature is preserved so existing callers do not need turbofish.
+//
+// Step 20 status: BLOCKED on the SearchAlgorithm<I> follow-up to step 11.
+// `optimize_elf_binary_x86` uses `find_shorter_equivalent_x86` which directly
+// drives the candidate enumerator over X86Instruction — there is no x86
+// SearchAlgorithm impl to dispatch to. Once that lands, the merge is
+// mechanical: `match detect_cli_arch_from_elf(...) { Aarch64 => ::<AArch64>,
+// X86_64 => ::<X86_64>, X86_32 => ::<X86_32>, Riscv* => stage 3 }`.
 fn optimize_elf_binary(
     path: &Path,
     start_addr: u64,
