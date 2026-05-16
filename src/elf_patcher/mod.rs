@@ -46,7 +46,7 @@ impl DetectedArch {
         match self {
             DetectedArch::Aarch64 => {
                 assert!(
-                    len % 4 == 0,
+                    len.is_multiple_of(4),
                     "AArch64 nop_sequence requires len % 4 == 0, got {}",
                     len
                 );
