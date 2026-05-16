@@ -51,24 +51,18 @@ impl SharedState {
     }
 
     fn record_improvement(&self, candidate: Vec<Instruction>, cost: u64) {
-        // Compare-exchange loop: only commit if we actually beat the current
-        // best. Without this, two threads racing to record different
-        // improvements could install a worse one after a better one.
-        let mut current = self.best_cost.load(Ordering::Acquire);
-        while cost < current {
-            match self.best_cost.compare_exchange(
-                current,
-                cost,
-                Ordering::AcqRel,
-                Ordering::Acquire,
-            ) {
-                Ok(_) => {
-                    *self.best.lock().expect("best mutex poisoned") = Some(candidate);
-                    self.improvements_found.fetch_add(1, Ordering::Relaxed);
-                    return;
-                }
-                Err(actual) => current = actual,
-            }
+        // Take the mutex first, then re-check best_cost under the lock. The
+        // outer atomic load is still useful for the lock-free cost-prune fast
+        // path in the per-length runners, but every actual commit happens
+        // under the mutex so we cannot interleave a worse candidate after a
+        // better one. Without the re-check, two threads could both CAS-win
+        // sequentially (worse first, better second) and then have the worse
+        // thread acquire the mutex last and clobber the better candidate.
+        let mut guard = self.best.lock().expect("best mutex poisoned");
+        if cost < self.best_cost.load(Ordering::Acquire) {
+            self.best_cost.store(cost, Ordering::Release);
+            *guard = Some(candidate);
+            self.improvements_found.fetch_add(1, Ordering::Relaxed);
         }
     }
 }
