@@ -5,8 +5,6 @@
 //! register/immediate sets (shared with the symbolic path) and verifies each
 //! against the target with the live-out/flag-aware equivalence checker.
 
-#![allow(dead_code)]
-
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
