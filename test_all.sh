@@ -1,6 +1,13 @@
 #!/bin/bash
 
-# Test script for s11
+# Test script for s11.
+#
+# Issue #77 stage 2 step 21 will extend this script with x86-via-trait
+# integration tests once stage 2 steps 18-20 land (parallel-pipeline
+# deletion + optimize_elf_binary merge). Today the AArch64 integration
+# suite is the only one that runs; x86 tests live in the unit tests
+# inside concrete_x86.rs / smt_x86.rs / cost_x86.rs / the x86 trait
+# impls in src/isa/x86.rs.
 set -e
 
 echo "=== s11 Test Suite ==="
