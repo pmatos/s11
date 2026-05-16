@@ -38,9 +38,13 @@ impl DetectedArch {
     }
 
     /// Canonical NOP byte sequence to pad up to `len` remaining bytes.
-    /// Callers loop until the gap is filled. For x86 the function returns
-    /// the Intel-recommended sequence of `min(len, 9)` bytes; `len == 0`
-    /// returns `&[]`. For AArch64 it returns the 4-byte NOP and asserts
+    /// Callers loop until the gap is filled. For x86-64 the function
+    /// returns the Intel-recommended sequence of `min(len, 9)` bytes
+    /// (`len == 0` returns `&[]`). For x86-32 it always returns the
+    /// single-byte `0x90` NOP — the multi-byte `0f 1f` family is
+    /// Pentium Pro / P6+, and `EM_386` does not encode a CPU baseline
+    /// stronger than i386, so emitting them could fault on legacy
+    /// hardware. For AArch64 it returns the 4-byte NOP and asserts
     /// the caller respects 4-byte alignment.
     pub fn nop_sequence(&self, len: usize) -> &'static [u8] {
         match self {
@@ -56,7 +60,14 @@ impl DetectedArch {
                     &[0x1f, 0x20, 0x03, 0xd5]
                 }
             }
-            DetectedArch::X86_64 | DetectedArch::X86_32 => X86_NOP_TABLE[len.min(9)],
+            DetectedArch::X86_64 => X86_NOP_TABLE[len.min(9)],
+            DetectedArch::X86_32 => {
+                if len == 0 {
+                    &[]
+                } else {
+                    &[0x90]
+                }
+            }
         }
     }
 
@@ -276,7 +287,7 @@ mod tests {
     }
 
     #[test]
-    fn x86_nop_sequence_canonical_lengths_one_through_nine() {
+    fn x86_64_nop_sequence_canonical_lengths_one_through_nine() {
         let canonical: [&[u8]; 10] = [
             &[],
             &[0x90],
@@ -289,16 +300,28 @@ mod tests {
             &[0x0f, 0x1f, 0x84, 0x00, 0x00, 0x00, 0x00, 0x00],
             &[0x66, 0x0f, 0x1f, 0x84, 0x00, 0x00, 0x00, 0x00, 0x00],
         ];
-        for arch in [DetectedArch::X86_64, DetectedArch::X86_32] {
-            for (len, expected) in canonical.iter().enumerate() {
-                assert_eq!(
-                    arch.nop_sequence(len),
-                    *expected,
-                    "{:?} nop_sequence({}) mismatch",
-                    arch,
-                    len
-                );
-            }
+        for (len, expected) in canonical.iter().enumerate() {
+            assert_eq!(
+                DetectedArch::X86_64.nop_sequence(len),
+                *expected,
+                "X86_64 nop_sequence({}) mismatch",
+                len
+            );
+        }
+    }
+
+    #[test]
+    fn x86_32_nop_sequence_uses_single_byte_only_for_pre_p6_safety() {
+        let empty: &[u8] = &[];
+        let one: &[u8] = &[0x90];
+        assert_eq!(DetectedArch::X86_32.nop_sequence(0), empty);
+        for len in [1usize, 2, 3, 5, 9, 17, 100] {
+            assert_eq!(
+                DetectedArch::X86_32.nop_sequence(len),
+                one,
+                "X86_32 nop_sequence({}) must stay at single-byte 0x90 (pre-P6 safety)",
+                len
+            );
         }
     }
 
@@ -324,18 +347,15 @@ mod tests {
     }
 
     #[test]
-    fn x86_nop_sequence_clamps_lengths_above_nine() {
+    fn x86_64_nop_sequence_clamps_lengths_above_nine() {
         let nine: &[u8] = &[0x66, 0x0f, 0x1f, 0x84, 0x00, 0x00, 0x00, 0x00, 0x00];
-        for arch in [DetectedArch::X86_64, DetectedArch::X86_32] {
-            for len in [10usize, 17, 100, 1024] {
-                assert_eq!(
-                    arch.nop_sequence(len),
-                    nine,
-                    "{:?} nop_sequence({}) should clamp to 9-byte canonical",
-                    arch,
-                    len
-                );
-            }
+        for len in [10usize, 17, 100, 1024] {
+            assert_eq!(
+                DetectedArch::X86_64.nop_sequence(len),
+                nine,
+                "X86_64 nop_sequence({}) should clamp to 9-byte canonical",
+                len
+            );
         }
     }
 
