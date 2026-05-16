@@ -538,8 +538,49 @@ impl crate::isa::traits::FlagsAnalysis<RiscVInstruction> for RiscV64 {
     }
 }
 
-/// Stub RISC-V mutator (#77 stage 1 step 10). Real body lands in stage 3
-/// step 23 when RISC-V wires through end-to-end.
+/// `Assembler<RiscVInstruction>` per ADR-0005: dynasm-rs has no RISC-V
+/// backend, so `<RiscV32/64 as Assembler>::assemble` returns `Err` and
+/// `can_assemble` returns `false` (search pipeline pre-filters everything
+/// out). A follow-up PR swaps the Err for a real encoder.
+impl crate::isa::traits::Assembler<RiscVInstruction> for RiscV32 {
+    fn assemble(&mut self, _instructions: &[RiscVInstruction]) -> Result<Vec<u8>, String> {
+        Err(
+            "RISC-V machine-code emission is not yet implemented (ADR-0005); \
+             pass --algorithm enumerative for assembly-text output only"
+                .into(),
+        )
+    }
+
+    fn can_assemble(&self, _instruction: &RiscVInstruction) -> bool {
+        false
+    }
+}
+
+impl crate::isa::traits::Assembler<RiscVInstruction> for RiscV64 {
+    fn assemble(&mut self, _instructions: &[RiscVInstruction]) -> Result<Vec<u8>, String> {
+        Err(
+            "RISC-V machine-code emission is not yet implemented (ADR-0005); \
+             pass --algorithm enumerative for assembly-text output only"
+                .into(),
+        )
+    }
+
+    fn can_assemble(&self, _instruction: &RiscVInstruction) -> bool {
+        false
+    }
+}
+
+// Note: `ConcreteExecutor<RiscVInstruction>`, `SymbolicExecutor<RiscVInstruction>`,
+// and `CostModel<RiscVInstruction>` impls for RiscV32 / RiscV64 are intentionally
+// **not** added here. Each needs a from-scratch semantics implementation for the
+// 16 mnemonics (`riscv.rs:233-318`) — there are no existing free functions to
+// delegate to (the AArch64/x86 step 8 + step 17 pattern depended on
+// pre-existing `apply_instruction_concrete`/`smt`/`cost` helpers). That
+// implementation work is tracked as a follow-up RISC-V issue; the assembler
+// stub above lets the rest of the trait surface compile end-to-end.
+
+/// Stub RISC-V mutator (#77 stage 1 step 10). Real body lands in the same
+/// follow-up RISC-V issue that adds the concrete + SMT executor bodies.
 #[derive(Debug, Default, Clone)]
 pub struct RiscVMutator;
 
