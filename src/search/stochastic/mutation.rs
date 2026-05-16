@@ -1012,6 +1012,9 @@ pub fn mutate_opcode_in_place<R: RngExt>(rng: &mut R, instr: &mut Instruction) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use proptest::prelude::*;
+    use rand::SeedableRng;
+    use rand::rngs::StdRng;
 
     fn default_mutator() -> Mutator {
         Mutator::new(
@@ -1409,6 +1412,83 @@ mod tests {
                 "mutation changed the terminator: got {:?}",
                 mutated
             );
+        }
+    }
+
+    // Issue #77 stage 1 step 2 safety net:
+    // every output of `Mutator::mutate` must be a well-formed `Vec<Instruction>`
+    // that the encodability filter (`crate::search::candidate::is_sequence_encodable`)
+    // can classify without panicking. Stage 1 step 10 promotes the mutator to
+    // <I as ISA>::Mutator and stage 1 step 11 swaps the filter to
+    // <I as ISA>::Assembler::can_assemble; this invariant must keep holding.
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(64))]
+
+        #[test]
+        fn mutator_output_is_classifiable(seed in 0u64..10_000) {
+            let mutator = default_mutator();
+            let mut rng = StdRng::seed_from_u64(seed);
+
+            let starting_sequences = vec![
+                vec![Instruction::MovImm { rd: Register::X0, imm: 0 }],
+                vec![Instruction::Add {
+                    rd: Register::X0,
+                    rn: Register::X1,
+                    rm: Operand::Register(Register::X2),
+                }],
+                vec![
+                    Instruction::MovReg { rd: Register::X0, rn: Register::X1 },
+                    Instruction::Add {
+                        rd: Register::X0,
+                        rn: Register::X0,
+                        rm: Operand::Immediate(1),
+                    },
+                ],
+                vec![Instruction::And {
+                    rd: Register::X0,
+                    rn: Register::X1,
+                    rm: Operand::ShiftedRegister {
+                        reg: Register::X2,
+                        kind: crate::ir::ShiftKind::Ror,
+                        amount: 4,
+                    },
+                }],
+            ];
+
+            for seq in &starting_sequences {
+                // Run several mutations off this seeded RNG so we cover a
+                // range of MutationType selections per seed.
+                for _ in 0..16 {
+                    let mutated = mutator.mutate(&mut rng, seq);
+
+                    // Encodability classification must succeed without panic.
+                    let _ = crate::search::candidate::is_sequence_encodable(&mutated);
+
+                    // Every register the mutated instruction references must
+                    // be either in the configured pool or one of the special
+                    // registers (XZR, SP).
+                    for instr in &mutated {
+                        for r in instr.source_registers() {
+                            prop_assert!(
+                                mutator.registers.contains(&r)
+                                    || matches!(r, Register::XZR | Register::SP),
+                                "mutated instruction {:?} uses source register {:?} \
+                                 outside the configured pool {:?}",
+                                instr, r, mutator.registers,
+                            );
+                        }
+                        if let Some(rd) = instr.destination() {
+                            prop_assert!(
+                                mutator.registers.contains(&rd)
+                                    || matches!(rd, Register::XZR | Register::SP),
+                                "mutated instruction {:?} writes destination \
+                                 register {:?} outside the configured pool {:?}",
+                                instr, rd, mutator.registers,
+                            );
+                        }
+                    }
+                }
+            }
         }
     }
 }
