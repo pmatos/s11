@@ -186,7 +186,7 @@ impl Eflags {
     }
 }
 
-fn mask_to_width(value: u64, width: u32) -> u64 {
+pub(crate) fn mask_to_width(value: u64, width: u32) -> u64 {
     match width {
         64 => value,
         32 => value & 0xffff_ffff,
@@ -247,16 +247,27 @@ impl fmt::Display for ConcreteValue {
     }
 }
 
-/// Concrete machine state for fast validation
+/// Concrete machine state for fast validation.
+///
+/// Per ADR-0004 decision 6, the state carries a width tag and masks writes
+/// before storing (mask-on-write). AArch64 is always width=64, which makes
+/// the mask a no-op; the field is there so stages 1+ can parameterise this
+/// type and reuse the same struct for narrower widths.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ConcreteMachineState {
     registers: HashMap<Register, ConcreteValue>,
     flags: ConditionFlags,
+    width: u32,
 }
 
 impl ConcreteMachineState {
-    /// Create a new state with all registers set to zero
+    /// Create a new AArch64 (width=64) state with all registers set to zero.
     pub fn new_zeroed() -> Self {
+        Self::new_zeroed_for_width(64)
+    }
+
+    /// Create a new state with the given register width, all registers zero.
+    pub fn new_zeroed_for_width(width: u32) -> Self {
         let mut registers = HashMap::new();
 
         for i in 0..=30 {
@@ -271,7 +282,13 @@ impl ConcreteMachineState {
         ConcreteMachineState {
             registers,
             flags: ConditionFlags::new(),
+            width,
         }
+    }
+
+    /// Register width this state was constructed with.
+    pub fn width(&self) -> u32 {
+        self.width
     }
 
     /// Create state from a map of register values
@@ -292,10 +309,12 @@ impl ConcreteMachineState {
         }
     }
 
-    /// Set the value of a register (XZR writes are ignored)
+    /// Set the value of a register (XZR writes are ignored). Masks the value
+    /// to the state's width per ADR-0004 decision 6.
     pub fn set_register(&mut self, reg: Register, value: ConcreteValue) {
         if reg != Register::XZR {
-            self.registers.insert(reg, value);
+            let masked = mask_to_width(value.0, self.width);
+            self.registers.insert(reg, ConcreteValue::new(masked));
         }
     }
 
