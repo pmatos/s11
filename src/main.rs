@@ -404,6 +404,15 @@ struct OptimizationOptions {
 
 // --- Optimization Function ---
 
+// Issue #77 stage 1 step 15 note: this AArch64 optimization path consumes the
+// new trait-surface scaffolding (`<AArch64 as ConcreteExecutor<Instruction>>`,
+// `<AArch64 as SymbolicExecutor<Instruction>>`, `<AArch64 as Assembler<...>>`)
+// indirectly through the existing free functions, which step 8 wired to the
+// trait impls. Stage 2 step 20 merges this function with
+// `optimize_elf_binary_x86` into a single `optimize_elf_binary_generic<I: ISA>`
+// once x86 has its own SearchAlgorithm impl (stage 2 step 17). For now the
+// AArch64-typed signature is preserved so existing callers do not need
+// turbofish.
 fn optimize_elf_binary(
     path: &Path,
     start_addr: u64,
