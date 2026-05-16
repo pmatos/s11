@@ -21,6 +21,7 @@ impl ISA for AArch64 {
     type Instruction = Instruction;
     type Width = crate::isa::traits::U64;
     type Flags = crate::semantics::state::ConditionFlags;
+    type Mutator = crate::search::stochastic::mutation::AArch64Mutator;
 
     fn name(&self) -> &'static str {
         "AArch64"

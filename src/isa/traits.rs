@@ -132,6 +132,8 @@ pub trait ISA: Send + Sync + Clone {
     /// Condition-code / flag state for this ISA (ADR-0004 decision 7).
     /// AArch64 NZCV, x86 EFLAGS, or `()` for ISAs without flags.
     type Flags: Clone + Debug + Default + PartialEq + Eq + Hash;
+    /// Stochastic-search mutator for this ISA (ADR-0004 decision 2).
+    type Mutator: ISAMutator<Self::Instruction>;
 
     /// Name of this ISA (e.g., "AArch64", "RISC-V")
     fn name(&self) -> &'static str;
@@ -255,6 +257,19 @@ pub trait Assembler<I: InstructionType>: Send + Sync {
 
     /// Check if an instruction can be assembled
     fn can_assemble(&self, instruction: &I) -> bool;
+}
+
+/// Per-ISA mutator hook for stochastic search (ADR-0004 decision 2).
+///
+/// `<I as ISA>::Mutator` promotes the free `Mutator` type at
+/// `src/search/stochastic/mutation.rs:71-100` so MCMC can route through trait
+/// dispatch. Construction (registers, immediates, weights) is per-impl because
+/// the construction shape varies between ISAs; this trait pins only the
+/// observable `mutate` surface so the search algorithm can stay generic.
+pub trait ISAMutator<I: InstructionType>: Send + Sync {
+    /// Apply a random mutation to `sequence` and return the (possibly equal)
+    /// mutated sequence.
+    fn mutate<R: rand::RngExt>(&self, rng: &mut R, sequence: &[I]) -> Vec<I>;
 }
 
 /// Per-ISA flag-analysis hook (ADR-0004 decision 7).

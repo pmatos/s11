@@ -69,6 +69,7 @@ pub enum MutationType {
 }
 
 /// Mutator for instruction sequences
+#[derive(Debug)]
 pub struct Mutator {
     registers: Vec<Register>,
     immediates: Vec<i64>,
@@ -966,6 +967,31 @@ impl Mutator {
         } else {
             Operand::Immediate(1)
         }
+    }
+}
+
+/// AArch64 mutator newtype exposing the free `Mutator` through the
+/// `ISAMutator<Instruction>` trait (#77 stage 1 step 10, ADR-0004 decision 2).
+/// The body stays in `src/search/stochastic/mutation.rs` to avoid moving the
+/// cyclic dep on `crate::search::candidate::generate_random_instruction`; the
+/// newtype just re-exposes the same surface under the trait name.
+#[derive(Debug)]
+pub struct AArch64Mutator(Mutator);
+
+impl AArch64Mutator {
+    pub fn new(registers: Vec<Register>, immediates: Vec<i64>, weights: MutationWeights) -> Self {
+        Self(Mutator::new(registers, immediates, weights))
+    }
+
+    /// Access the inner free `Mutator` for consumers that haven't migrated yet.
+    pub fn inner(&self) -> &Mutator {
+        &self.0
+    }
+}
+
+impl crate::isa::ISAMutator<Instruction> for AArch64Mutator {
+    fn mutate<R: RngExt>(&self, rng: &mut R, sequence: &[Instruction]) -> Vec<Instruction> {
+        self.0.mutate(rng, sequence)
     }
 }
 

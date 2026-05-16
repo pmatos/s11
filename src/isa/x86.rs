@@ -324,6 +324,7 @@ impl ISA for X86_64 {
     type Instruction = X86Instruction;
     type Width = crate::isa::traits::U64;
     type Flags = crate::semantics::state::Eflags;
+    type Mutator = X86Mutator;
 
     fn name(&self) -> &'static str {
         "x86-64"
@@ -361,6 +362,7 @@ impl ISA for X86_32 {
     type Instruction = X86Instruction;
     type Width = crate::isa::traits::U32;
     type Flags = crate::semantics::state::Eflags;
+    type Mutator = X86Mutator;
 
     fn name(&self) -> &'static str {
         "x86-32"
@@ -410,6 +412,22 @@ impl crate::isa::traits::FlagsAnalysis<X86Instruction> for X86_32 {
 
     fn reads_flags(_instr: &X86Instruction) -> bool {
         false
+    }
+}
+
+/// Stub x86 mutator (#77 stage 1 step 10). Returns its input unchanged; the
+/// real x86 mutator body lands in stage 2 step 17 when x86 stochastic search
+/// is wired through the trait surface.
+#[derive(Debug, Default, Clone)]
+pub struct X86Mutator;
+
+impl crate::isa::traits::ISAMutator<X86Instruction> for X86Mutator {
+    fn mutate<R: rand::RngExt>(
+        &self,
+        _rng: &mut R,
+        sequence: &[X86Instruction],
+    ) -> Vec<X86Instruction> {
+        sequence.to_vec()
     }
 }
 
