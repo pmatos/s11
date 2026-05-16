@@ -56,6 +56,13 @@ impl SharedState {
         // better one. Without the re-check, two threads could both CAS-win
         // sequentially (worse first, better second) and then have the worse
         // thread acquire the mutex last and clobber the better candidate.
+        //
+        // Ordering: the cost-prune fast path in `run_length_one`/`_two` loads
+        // `best_cost` with `Ordering::Acquire`. The store below is `Release`
+        // (not `Relaxed`) so those loads observe the new value — the mutex
+        // unlock would publish the mutex-protected `best`, but the atomic is
+        // read independently of the mutex on the fast path, so it needs its
+        // own release.
         let mut guard = self.best.lock().expect("best mutex poisoned");
         if cost < self.best_cost.load(Ordering::Acquire) {
             self.best_cost.store(cost, Ordering::Release);
