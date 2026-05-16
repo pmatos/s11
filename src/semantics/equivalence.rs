@@ -13,7 +13,6 @@ use crate::semantics::smt::{
     states_not_equal_for_live_out,
 };
 use crate::semantics::state::ConcreteMachineState;
-use crate::validation::live_out::flags_live_out;
 use crate::validation::random::{
     RandomInputConfig, generate_edge_case_inputs, generate_random_inputs,
 };
@@ -30,10 +29,19 @@ use z3::SatResult;
 /// (`flags_live = false`), the guard would otherwise reject sound rewrites
 /// such as `cmp x0, #0` ≡ `<empty>` under a register-only live-out mask, so
 /// the call site gates this check on flag liveness.
+///
+/// Issue #77 step 9: rather than reach for `Instruction::modifies_flags()` via
+/// `flags_live_out`, we route through the `FlagsAnalysis<I>` trait (ADR-0004
+/// decision 7). This lets the same guard ship for x86 in stage 2 without
+/// accidentally substituting `InstructionType::has_side_effects` (which would
+/// over-trigger — x86's impl returns `true` for everything except MOV).
 fn flag_writers_diverge(target: &[Instruction], candidate: &[Instruction]) -> bool {
-    let tw = flags_live_out(target);
-    let cw = flags_live_out(candidate);
-    tw != cw
+    use crate::isa::{AArch64, FlagsAnalysis};
+    fn writes_any_flag(seq: &[Instruction]) -> bool {
+        seq.iter()
+            .any(<AArch64 as FlagsAnalysis<Instruction>>::modifies_flags)
+    }
+    writes_any_flag(target) != writes_any_flag(candidate)
 }
 
 /// Combined pre-SMT soundness guard. Single source of truth for the
