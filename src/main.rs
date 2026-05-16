@@ -18,14 +18,14 @@ mod validation;
 
 use assembler::AArch64Assembler;
 use elf_patcher::{AddressWindow, ElfPatcher, parse_hex_address};
-use ir::{Instruction, Operand, Register};
+use ir::{Instruction, Register};
 use search::config::{
     Algorithm, LlmConfig, SearchConfig, SearchMode, StochasticConfig, SymbolicConfig,
 };
 use search::parallel::{ParallelConfig, run_parallel_search};
-use search::{SearchAlgorithm, StochasticSearch, SymbolicSearch};
+use search::{EnumerativeSearch, SearchAlgorithm, StochasticSearch, SymbolicSearch};
 use semantics::cost::CostMetric;
-use semantics::{EquivalenceResult, LiveOut, LiveOutRegisters, check_equivalence};
+use semantics::{LiveOut, LiveOutRegisters};
 
 // --- Command Line Arguments ---
 
@@ -533,9 +533,29 @@ fn run_optimization(
 
     match options.algorithm {
         Algorithm::Enumerative => {
-            // Use existing enumerative search
             println!("\nRunning enumerative search...");
-            Ok(find_shorter_equivalent(target))
+            if let Some(n) = options.cores {
+                println!("  Cores: {}", n);
+            }
+
+            let config = SearchConfig::default()
+                .with_cost_metric(options.cost_metric)
+                .with_timeout_option(options.timeout)
+                .with_verbose(options.verbose)
+                .with_registers(available_registers)
+                .with_immediates(available_immediates)
+                .with_cores(options.cores);
+
+            let mut search = EnumerativeSearch::new();
+            let result = search.search(target, &live_out, &config);
+
+            print_search_statistics(&result.statistics);
+
+            if result.found_optimization {
+                Ok(result.optimized_sequence)
+            } else {
+                Ok(None)
+            }
         }
         Algorithm::Stochastic => {
             println!("\nRunning stochastic (MCMC) search...");
@@ -1190,121 +1210,6 @@ fn optimize_elf_binary_x86(
     patcher.create_patched_copy(&output_path, &window, &new_bytes)?;
     println!("Created optimized binary: {}", output_path.display());
     Ok(())
-}
-
-// For simplicity in MVP, immediate is fixed for generation, but can be varied in input.
-const IMM_VALUE_FOR_GENERATION: i64 = 1;
-
-// --- Equivalence Checker ---
-
-fn are_sequences_equivalent(seq1: &[Instruction], seq2: &[Instruction]) -> Result<bool, String> {
-    match check_equivalence(seq1, seq2) {
-        EquivalenceResult::Equivalent => Ok(true),
-        EquivalenceResult::NotEquivalent | EquivalenceResult::NotEquivalentFast(_) => Ok(false),
-        EquivalenceResult::Unknown(msg) => Err(msg),
-    }
-}
-
-// --- Enumerative Search ---
-
-fn generate_all_instructions() -> Vec<Instruction> {
-    let mut instrs = Vec::new();
-    // Use only first few registers for MVP
-    let regs = [Register::X0, Register::X1, Register::X2];
-
-    // Add (register)
-    for rd in regs {
-        for rn in regs {
-            for rm in regs {
-                instrs.push(Instruction::Add {
-                    rd,
-                    rn,
-                    rm: Operand::Register(rm),
-                });
-            }
-        }
-    }
-
-    // Add (immediate)
-    for rd in regs {
-        for rn in regs {
-            instrs.push(Instruction::Add {
-                rd,
-                rn,
-                rm: Operand::Immediate(IMM_VALUE_FOR_GENERATION),
-            });
-        }
-    }
-
-    // MovReg
-    for rd in regs {
-        for rn in regs {
-            instrs.push(Instruction::MovReg { rd, rn });
-        }
-    }
-
-    // MovImm
-    for rd in regs {
-        instrs.push(Instruction::MovImm {
-            rd,
-            imm: IMM_VALUE_FOR_GENERATION,
-        });
-        instrs.push(Instruction::MovImm { rd, imm: 0 });
-    }
-
-    // Eor (for zeroing)
-    for rd in regs {
-        instrs.push(Instruction::Eor {
-            rd,
-            rn: rd,
-            rm: Operand::Register(rd),
-        });
-    }
-
-    instrs
-}
-
-fn find_shorter_equivalent(original_seq: &[Instruction]) -> Option<Vec<Instruction>> {
-    if original_seq.is_empty() {
-        return None;
-    }
-
-    let all_possible_single_instrs = generate_all_instructions();
-
-    // Search for sequences of length 1 up to original_seq.len() - 1
-    for len in 1..original_seq.len() {
-        println!("Searching for equivalent sequences of length {}...", len);
-        // This MVP only implements search for length 1 for simplicity.
-        // A full enumerator would generate sequences of `len`.
-        if len == 1 {
-            for instr_candidate in &all_possible_single_instrs {
-                let candidate_seq = vec![*instr_candidate];
-                print!("  Testing candidate: ");
-                for i in &candidate_seq {
-                    print!("{}; ", i);
-                }
-
-                match are_sequences_equivalent(original_seq, &candidate_seq) {
-                    Ok(true) => {
-                        println!("Found equivalent!");
-                        return Some(candidate_seq);
-                    }
-                    Ok(false) => {
-                        println!("Not equivalent.");
-                    }
-                    Err(e) => {
-                        eprintln!("SMT Error for candidate: {}", e);
-                    }
-                }
-            }
-        } else {
-            // Placeholder for generating sequences of length > 1
-            // This would involve iterating `len` times over `all_possible_single_instrs`
-            // and forming all combinations.
-            println!("  (Skipping length {} for MVP simplicity)", len);
-        }
-    }
-    None
 }
 
 // --- Equivalence Checking Command ---

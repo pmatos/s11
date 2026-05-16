@@ -114,6 +114,7 @@ src/
 ├── search/              # Search algorithms (AArch64-typed in v1)
 │   ├── candidate.rs     # AArch64 candidate generation
 │   ├── candidate_x86.rs # x86 candidate generation
+│   ├── enumerative/     # Exhaustive search up to target.len()-1 (rayon-parallel; AArch64)
 │   ├── stochastic/      # MCMC with Metropolis-Hastings (AArch64)
 │   ├── symbolic/        # SMT-based synthesis (AArch64)
 │   ├── parallel/        # Multi-threaded coordination (AArch64)
