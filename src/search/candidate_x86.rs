@@ -257,33 +257,16 @@ mod tests {
 
     #[test]
     fn enumerator_includes_cmov_per_condition_and_register_pair() {
-        use crate::isa::x86::X86Condition;
         let regs = [X86Register::RAX, X86Register::RBX];
         let imms = [0i64];
         let all = generate_all_x86_instructions(&regs, &imms);
 
         // For every (rd, rs, cond) triple expected, find a matching Cmov.
-        let conds = [
-            X86Condition::E,
-            X86Condition::NE,
-            X86Condition::B,
-            X86Condition::AE,
-            X86Condition::BE,
-            X86Condition::A,
-            X86Condition::L,
-            X86Condition::GE,
-            X86Condition::LE,
-            X86Condition::G,
-            X86Condition::S,
-            X86Condition::NS,
-            X86Condition::O,
-            X86Condition::NO,
-            X86Condition::P,
-            X86Condition::NP,
-        ];
+        // Reuse the module-level constant so a future condition added to
+        // CMOV_CONDITIONS automatically extends the test's coverage.
         for &rd in &regs {
             for &rs in &regs {
-                for &cond in &conds {
+                for &cond in &CMOV_CONDITIONS {
                     let needle = X86Instruction::Cmov { rd, rs, cond };
                     assert!(all.contains(&needle), "candidate pool missing {:?}", needle);
                 }

@@ -1075,14 +1075,10 @@ fn find_shorter_equivalent_x86(
     // the reader depends on. Drop `.fast_only()` for those iterations so
     // the SMT path also runs. The two configs differ only in fast_only;
     // building them once outside the loop avoids per-iteration churn.
-    let reads_flags = |seq: &[isa::x86::X86Instruction]| -> bool {
-        seq.iter().any(|i| {
-            matches!(
-                i,
-                isa::x86::X86Instruction::Cmov { .. } | isa::x86::X86Instruction::Jcc { .. }
-            )
-        })
-    };
+    // Route through `isa::x86::x86_reads_flags` so a future flag-reader
+    // (e.g. SETcc) only needs the predicate updated in one place.
+    let reads_flags =
+        |seq: &[isa::x86::X86Instruction]| -> bool { seq.iter().any(isa::x86::x86_reads_flags) };
     let target_reads_flags = reads_flags(target);
     let cfg_fast = X86EquivalenceConfig::new(width)
         .live_out(live_out.clone())
