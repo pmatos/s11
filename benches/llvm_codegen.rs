@@ -4,6 +4,7 @@
 
 use criterion::{Criterion, criterion_group, criterion_main};
 use s11::bench_support::{append_json, discover_specs_in, run_bench, run_provenance};
+use std::cell::Cell;
 use std::path::PathBuf;
 use std::time::Duration;
 
@@ -26,17 +27,27 @@ fn phase2(c: &mut Criterion) {
     group.measurement_time(Duration::from_secs(10));
 
     for spec in &specs {
-        let mut record = run_bench(spec);
-        record.git_sha = git_sha.clone();
-        record.timestamp_utc = timestamp_utc.clone();
-        append_json(&record, &out);
-
         let spec_owned = spec.clone();
+        let sha = git_sha.clone();
+        let ts = timestamp_utc.clone();
+        let out = out.clone();
         group.bench_function(spec_owned.id.clone(), |b| {
+            // See benches/hackers_delight.rs for the rationale: JSON
+            // emission inside iter_custom so filtered runs only emit
+            // for selected fixtures; Cell<bool> dedups warm-up +
+            // measurement repeats. PR #269 review.
+            let emitted = Cell::new(false);
             b.iter_custom(|iters| {
                 let mut total = Duration::ZERO;
                 for _ in 0..iters {
-                    total += run_bench(&spec_owned).search_elapsed;
+                    let mut record = run_bench(&spec_owned);
+                    total += record.search_elapsed;
+                    if !emitted.get() {
+                        record.git_sha = sha.clone();
+                        record.timestamp_utc = ts.clone();
+                        append_json(&record, &out);
+                        emitted.set(true);
+                    }
                 }
                 total
             });
