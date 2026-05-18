@@ -281,7 +281,10 @@ impl Default for SymbolicSearch {
     }
 }
 
-impl SearchAlgorithm for SymbolicSearch {
+impl SearchAlgorithm<crate::isa::AArch64> for SymbolicSearch {
+    type LiveOut = LiveOut;
+    type Result = SearchResult;
+
     fn search(
         &mut self,
         target: &[Instruction],

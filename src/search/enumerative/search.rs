@@ -196,7 +196,10 @@ impl Default for EnumerativeSearch {
     }
 }
 
-impl SearchAlgorithm for EnumerativeSearch {
+impl SearchAlgorithm<crate::isa::AArch64> for EnumerativeSearch {
+    type LiveOut = LiveOut;
+    type Result = SearchResult;
+
     fn search(
         &mut self,
         target: &[Instruction],
