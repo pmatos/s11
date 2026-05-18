@@ -448,12 +448,17 @@ impl AArch64Assembler {
                     }
                 }
             }
+            // For AND/ORR/EOR: rd resolution depends on the rm operand shape —
+            // the immediate form encodes Rd in the Xn|SP slot (accepts SP,
+            // rejects XZR), while the register and shifted-register forms use
+            // the plain Xn slot (rejects SP). Resolving rd inside each arm
+            // avoids prematurely rejecting `<op> sp, xn, #imm`.
             Instruction::And { rd, rn, rm } => {
-                let rd_reg = register_to_dynasm(*rd)?;
                 let rn_reg = register_to_dynasm(*rn)?;
 
                 match rm {
                     Operand::Register(rm_reg) => {
+                        let rd_reg = register_to_dynasm(*rd)?;
                         let rm_reg_num = register_to_dynasm(*rm_reg)?;
                         dynasm!(ops
                             ; .arch aarch64
@@ -478,6 +483,7 @@ impl AArch64Assembler {
                         Ok(())
                     }
                     Operand::ShiftedRegister { reg, kind, amount } => {
+                        let rd_reg = register_to_dynasm(*rd)?;
                         let rm_reg_num = register_to_dynasm(*reg)?;
                         emit_shifted_reg_3op_logical!(
                             ops, and, rd_reg, rn_reg, rm_reg_num, kind, *amount
@@ -489,11 +495,11 @@ impl AArch64Assembler {
                 }
             }
             Instruction::Orr { rd, rn, rm } => {
-                let rd_reg = register_to_dynasm(*rd)?;
                 let rn_reg = register_to_dynasm(*rn)?;
 
                 match rm {
                     Operand::Register(rm_reg) => {
+                        let rd_reg = register_to_dynasm(*rd)?;
                         let rm_reg_num = register_to_dynasm(*rm_reg)?;
                         dynasm!(ops
                             ; .arch aarch64
@@ -517,6 +523,7 @@ impl AArch64Assembler {
                         Ok(())
                     }
                     Operand::ShiftedRegister { reg, kind, amount } => {
+                        let rd_reg = register_to_dynasm(*rd)?;
                         let rm_reg_num = register_to_dynasm(*reg)?;
                         emit_shifted_reg_3op_logical!(
                             ops, orr, rd_reg, rn_reg, rm_reg_num, kind, *amount
@@ -528,11 +535,11 @@ impl AArch64Assembler {
                 }
             }
             Instruction::Eor { rd, rn, rm } => {
-                let rd_reg = register_to_dynasm(*rd)?;
                 let rn_reg = register_to_dynasm(*rn)?;
 
                 match rm {
                     Operand::Register(rm_reg) => {
+                        let rd_reg = register_to_dynasm(*rd)?;
                         let rm_reg_num = register_to_dynasm(*rm_reg)?;
                         dynasm!(ops
                             ; .arch aarch64
@@ -556,6 +563,7 @@ impl AArch64Assembler {
                         Ok(())
                     }
                     Operand::ShiftedRegister { reg, kind, amount } => {
+                        let rd_reg = register_to_dynasm(*rd)?;
                         let rm_reg_num = register_to_dynasm(*reg)?;
                         emit_shifted_reg_3op_logical!(
                             ops, eor, rd_reg, rn_reg, rm_reg_num, kind, *amount
@@ -1939,6 +1947,45 @@ mod tests {
             .assemble_instructions(&instructions, 0)
             .expect("AND with single high bit should encode");
         disassemble_and_verify(&bytes, "and", &["x0", "x1", "0x8000000000000000"]);
+    }
+
+    #[test]
+    fn test_and_immediate_with_sp_destination_roundtrips() {
+        // AArch64 AND (immediate) puts rd in the Xn|SP slot — SP-as-destination
+        // is a legitimate encoding. Verifies the assembler routes rd through
+        // register_to_dynasm_xsp inside the Immediate arm (not the plain Xn
+        // helper used by the register/shifted-register arms).
+        let mut assembler = AArch64Assembler::new();
+        let instructions = vec![Instruction::And {
+            rd: Register::SP,
+            rn: Register::X1,
+            rm: Operand::Immediate(0xFF),
+        }];
+
+        let bytes = assembler
+            .assemble_instructions(&instructions, 0)
+            .expect("AND with SP destination (immediate form) should encode");
+        disassemble_and_verify(&bytes, "and", &["sp", "x1", "0xff"]);
+    }
+
+    #[test]
+    fn test_ands_immediate_with_xzr_destination_roundtrips() {
+        // ANDS (immediate) with rd=XZR is the canonical TST shape per ARM ARM;
+        // Capstone disassembles it back as `tst`. Verifies the assembler
+        // accepts rd=XZR for ANDS (which uses the plain Xn slot, unlike
+        // AND/ORR/EOR's Xn|SP slot) and that round-trip yields the TST alias.
+        let mut assembler = AArch64Assembler::new();
+        let instructions = vec![Instruction::Ands {
+            rd: Register::XZR,
+            rn: Register::X1,
+            rm: Operand::Immediate(0xFF),
+        }];
+
+        let bytes = assembler
+            .assemble_instructions(&instructions, 0)
+            .expect("ANDS with XZR destination (immediate form) should encode");
+        // Capstone canonicalises ANDS XZR ..., #imm → TST X..., #imm.
+        disassemble_and_verify(&bytes, "tst", &["x1", "0xff"]);
     }
 
     #[test]
