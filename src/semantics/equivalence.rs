@@ -721,7 +721,8 @@ pub fn check_equivalence_x86_for_search(
 /// for the AArch64 backend: fast path uses the concrete interpreter over
 /// random inputs (and EFLAGS comparison when CMP is present or the mask
 /// declares flags live); slow path lowers to Z3 BVs and checks UNSAT of the
-/// not-equal assertion over live-out registers.
+/// not-equal assertion over live-out registers, plus the five tracked
+/// EFLAGS bits when `flags_live` is set (issue #74).
 pub fn check_equivalence_x86(
     seq1: &[crate::isa::x86::X86Instruction],
     seq2: &[crate::isa::x86::X86Instruction],

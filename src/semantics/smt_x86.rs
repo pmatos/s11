@@ -203,8 +203,9 @@ pub fn compute_eflags_logical(result: &BV, width: u32) -> EflagsBvs {
     (bv_zero(), pf, zf, sf, bv_zero())
 }
 
-/// Apply a single x86 instruction symbolically. CMP variants are no-ops
-/// because we do not (yet) model EFLAGS in Z3.
+/// Apply a single x86 instruction symbolically. Arithmetic / logic /
+/// CMP arms bind the five tracked flag BVs via `compute_eflags_*`;
+/// CMOV reads them via `x86_condition_to_smt` (issue #74).
 pub fn apply_instruction(
     mut state: MachineStateX86,
     instruction: &X86Instruction,

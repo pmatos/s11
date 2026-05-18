@@ -7,17 +7,42 @@
 //! as encoder errors at use-site.
 
 use crate::assembler::x86::{X86Assembler, X86Mode};
-use crate::isa::x86::{X86Instruction, X86Register};
+use crate::isa::x86::{X86Condition, X86Instruction, X86Register};
 use rand::RngExt;
 
-/// Enumerate every reg/reg and reg/imm form of the 14 minimal-core
-/// variants for the given register and immediate pools.
+/// The 16 canonical x86 condition codes enumerated for CMOV candidates.
+/// Jcc is intentionally *not* enumerated here — it is a terminator
+/// (see `X86Instruction::is_terminator`) and the search pool must
+/// exclude terminators, mirroring the AArch64 branch precedent.
+const CMOV_CONDITIONS: [X86Condition; 16] = [
+    X86Condition::E,
+    X86Condition::NE,
+    X86Condition::B,
+    X86Condition::AE,
+    X86Condition::BE,
+    X86Condition::A,
+    X86Condition::L,
+    X86Condition::GE,
+    X86Condition::LE,
+    X86Condition::G,
+    X86Condition::S,
+    X86Condition::NS,
+    X86Condition::O,
+    X86Condition::NO,
+    X86Condition::P,
+    X86Condition::NP,
+];
+
+/// Enumerate every reg/reg and reg/imm form of the minimal-core
+/// variants plus CMOV (per condition × register pair) for the given
+/// register and immediate pools.
 pub fn generate_all_x86_instructions(
     registers: &[X86Register],
     immediates: &[i64],
 ) -> Vec<X86Instruction> {
+    let r2 = registers.len() * registers.len();
     let mut out = Vec::with_capacity(
-        registers.len() * registers.len() * 7 + registers.len() * immediates.len() * 7,
+        r2 * 7 + registers.len() * immediates.len() * 7 + r2 * CMOV_CONDITIONS.len(),
     );
 
     for &rd in registers {
@@ -41,6 +66,17 @@ pub fn generate_all_x86_instructions(
             out.push(X86Instruction::OrImm { rd, imm });
             out.push(X86Instruction::XorImm { rd, imm });
             out.push(X86Instruction::CmpImm { rn: rd, imm });
+        }
+    }
+
+    // Issue #74: CMOV per (rd, rs, cond). `rd == rs` is a legal but
+    // wasteful no-op variant; left in for symmetry with the other
+    // reg/reg loops above.
+    for &rd in registers {
+        for &rs in registers {
+            for &cond in &CMOV_CONDITIONS {
+                out.push(X86Instruction::Cmov { rd, rs, cond });
+            }
         }
     }
 
@@ -186,25 +222,23 @@ mod tests {
         let all = generate_all_x86_instructions(&regs, &imms);
         // 7 reg-reg variants × N×N register pairs
         // + 7 reg-imm variants × N × M
-        let expected = 7 * regs.len() * regs.len() + 7 * regs.len() * imms.len();
+        // + 16 CMOV conditions × N×N register pairs (issue #74)
+        let expected = 7 * regs.len() * regs.len()
+            + 7 * regs.len() * imms.len()
+            + 16 * regs.len() * regs.len();
         assert_eq!(all.len(), expected);
     }
 
     #[test]
-    fn covers_all_seven_mnemonics() {
+    fn covers_all_minimal_mnemonics() {
         let regs = [X86Register::RAX];
         let imms = [0i64];
         let all = generate_all_x86_instructions(&regs, &imms);
 
         let mnemonics: std::collections::HashSet<&str> = all.iter().map(|i| i.mnemonic()).collect();
-        assert!(mnemonics.contains("mov"));
-        assert!(mnemonics.contains("add"));
-        assert!(mnemonics.contains("sub"));
-        assert!(mnemonics.contains("and"));
-        assert!(mnemonics.contains("or"));
-        assert!(mnemonics.contains("xor"));
-        assert!(mnemonics.contains("cmp"));
-        assert_eq!(mnemonics.len(), 7);
+        for required in ["mov", "add", "sub", "and", "or", "xor", "cmp", "cmov"] {
+            assert!(mnemonics.contains(required), "missing {}", required);
+        }
     }
 
     #[test]
@@ -217,5 +251,73 @@ mod tests {
                 assert!(regs.contains(&dst), "{:?} dest not in pool", instr);
             }
         }
+    }
+
+    // --- issue #74: CMOV enumeration + Jcc exclusion ---
+
+    #[test]
+    fn enumerator_includes_cmov_per_condition_and_register_pair() {
+        use crate::isa::x86::X86Condition;
+        let regs = [X86Register::RAX, X86Register::RBX];
+        let imms = [0i64];
+        let all = generate_all_x86_instructions(&regs, &imms);
+
+        // For every (rd, rs, cond) triple expected, find a matching Cmov.
+        let conds = [
+            X86Condition::E,
+            X86Condition::NE,
+            X86Condition::B,
+            X86Condition::AE,
+            X86Condition::BE,
+            X86Condition::A,
+            X86Condition::L,
+            X86Condition::GE,
+            X86Condition::LE,
+            X86Condition::G,
+            X86Condition::S,
+            X86Condition::NS,
+            X86Condition::O,
+            X86Condition::NO,
+            X86Condition::P,
+            X86Condition::NP,
+        ];
+        for &rd in &regs {
+            for &rs in &regs {
+                for &cond in &conds {
+                    let needle = X86Instruction::Cmov { rd, rs, cond };
+                    assert!(all.contains(&needle), "candidate pool missing {:?}", needle);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn enumerator_excludes_jcc_terminator() {
+        let regs = [X86Register::RAX];
+        let imms = [0i64];
+        let all = generate_all_x86_instructions(&regs, &imms);
+        for instr in &all {
+            assert!(
+                !matches!(instr, X86Instruction::Jcc { .. }),
+                "Jcc must never appear in the candidate pool: {:?}",
+                instr
+            );
+        }
+    }
+
+    #[test]
+    fn covers_eight_mnemonics_after_cmov_added() {
+        let regs = [X86Register::RAX];
+        let imms = [0i64];
+        let all = generate_all_x86_instructions(&regs, &imms);
+        let mnemonics: std::collections::HashSet<&str> = all.iter().map(|i| i.mnemonic()).collect();
+        assert!(mnemonics.contains("cmov"));
+        assert!(!mnemonics.contains("jcc"));
+        assert_eq!(
+            mnemonics.len(),
+            8,
+            "expected 7 minimal-core + cmov mnemonics, got {:?}",
+            mnemonics
+        );
     }
 }

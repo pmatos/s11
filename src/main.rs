@@ -2475,4 +2475,141 @@ mod cli_helper_tests {
             err
         );
     }
+
+    // --- issue #74: end-to-end CMP + CMOV / Jcc pipeline ---
+
+    #[test]
+    fn issue_74_cmp_cmov_round_trips_through_asm_disasm_parse() {
+        use assembler::x86::X86Assembler;
+        use capstone::prelude::*;
+        use isa::x86::{X86Condition, X86Instruction, X86Register};
+        use parser::x86::x86_ir_from_mnemonic;
+
+        let original = vec![
+            X86Instruction::CmpReg {
+                rn: X86Register::RAX,
+                rs: X86Register::RBX,
+            },
+            X86Instruction::Cmov {
+                rd: X86Register::RAX,
+                rs: X86Register::RCX,
+                cond: X86Condition::E,
+            },
+        ];
+        let mut asm = X86Assembler::new_64();
+        let bytes = asm
+            .assemble_instructions(&original)
+            .expect("encode cmp + cmove");
+        let cs = capstone::Capstone::new()
+            .x86()
+            .mode(capstone::arch::x86::ArchMode::Mode64)
+            .syntax(capstone::arch::x86::ArchSyntax::Intel)
+            .build()
+            .expect("capstone init");
+        let insns = cs.disasm_all(&bytes, 0x0).expect("disassemble");
+        let recovered: Vec<X86Instruction> = insns
+            .iter()
+            .map(|i| {
+                let mn = i.mnemonic().unwrap_or("");
+                let op = i.op_str().unwrap_or("");
+                x86_ir_from_mnemonic(mn, op)
+                    .expect("parse succeeds")
+                    .expect("parse yields IR")
+            })
+            .collect();
+        assert_eq!(recovered, original);
+    }
+
+    #[test]
+    fn issue_74_jcc_round_trips_through_asm_disasm_parse() {
+        use assembler::x86::X86Assembler;
+        use capstone::prelude::*;
+        use isa::x86::{X86Condition, X86Instruction};
+        use parser::x86::x86_ir_from_mnemonic;
+
+        let original = vec![X86Instruction::Jcc {
+            cond: X86Condition::NE,
+        }];
+        let mut asm = X86Assembler::new_64();
+        let bytes = asm.assemble_instructions(&original).expect("encode jne");
+        let cs = capstone::Capstone::new()
+            .x86()
+            .mode(capstone::arch::x86::ArchMode::Mode64)
+            .syntax(capstone::arch::x86::ArchSyntax::Intel)
+            .build()
+            .expect("capstone init");
+        let insns = cs.disasm_all(&bytes, 0x0).expect("disassemble");
+        assert_eq!(insns.len(), 1);
+        let mn = insns.iter().next().unwrap().mnemonic().unwrap_or("");
+        let op = insns.iter().next().unwrap().op_str().unwrap_or("");
+        let parsed = x86_ir_from_mnemonic(mn, op)
+            .expect("parse succeeds")
+            .expect("parse yields IR");
+        assert_eq!(parsed, original[0]);
+    }
+
+    #[test]
+    fn issue_74_cmp_cmov_pipeline_distinguishes_different_cmov_sources_when_flags_live() {
+        use isa::x86::{X86Condition, X86Instruction, X86Register};
+        use semantics::equivalence::{
+            EquivalenceResult, X86EquivalenceConfig, check_equivalence_x86,
+        };
+        use semantics::state::X86LiveOutMask;
+
+        let target = vec![
+            X86Instruction::CmpReg {
+                rn: X86Register::RAX,
+                rs: X86Register::RBX,
+            },
+            X86Instruction::Cmov {
+                rd: X86Register::RAX,
+                rs: X86Register::RCX,
+                cond: X86Condition::E,
+            },
+        ];
+        let proposal = vec![
+            X86Instruction::CmpReg {
+                rn: X86Register::RAX,
+                rs: X86Register::RBX,
+            },
+            X86Instruction::Cmov {
+                rd: X86Register::RAX,
+                rs: X86Register::RDX,
+                cond: X86Condition::E,
+            },
+        ];
+        let cfg = X86EquivalenceConfig::new_for_64()
+            .live_out(X86LiveOutMask::from_registers(vec![X86Register::RAX]).with_flags(true));
+        assert!(matches!(
+            check_equivalence_x86(&target, &proposal, &cfg),
+            EquivalenceResult::NotEquivalent
+        ));
+    }
+
+    #[test]
+    fn issue_74_cmp_cmov_pipeline_self_equivalent_under_flags_live() {
+        use isa::x86::{X86Condition, X86Instruction, X86Register};
+        use semantics::equivalence::{
+            EquivalenceResult, X86EquivalenceConfig, check_equivalence_x86,
+        };
+        use semantics::state::X86LiveOutMask;
+
+        let seq = vec![
+            X86Instruction::CmpReg {
+                rn: X86Register::RAX,
+                rs: X86Register::RBX,
+            },
+            X86Instruction::Cmov {
+                rd: X86Register::RAX,
+                rs: X86Register::RCX,
+                cond: X86Condition::NE,
+            },
+        ];
+        let cfg = X86EquivalenceConfig::new_for_64()
+            .live_out(X86LiveOutMask::from_registers(vec![X86Register::RAX]).with_flags(true));
+        assert_eq!(
+            check_equivalence_x86(&seq.clone(), &seq, &cfg),
+            EquivalenceResult::Equivalent
+        );
+    }
 }
