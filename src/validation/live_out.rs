@@ -20,7 +20,9 @@ impl std::fmt::Display for ParseLiveOutRegistersError {
 
 impl std::error::Error for ParseLiveOutRegistersError {}
 
-/// Parse a register name like "x0", "X1", "sp", "SP"
+/// Parse a register name like "x0", "X1", "sp", "SP". Accepts the standard
+/// AArch64 aliases `fp` (x29) and `lr` (x30) to match the assembly parser at
+/// `src/parser/mod.rs::parse_register`.
 fn parse_register(s: &str) -> Result<Register, ParseLiveOutRegistersError> {
     let s = s.trim().to_lowercase();
 
@@ -29,6 +31,12 @@ fn parse_register(s: &str) -> Result<Register, ParseLiveOutRegistersError> {
     }
     if s == "xzr" {
         return Ok(Register::XZR);
+    }
+    if s == "fp" {
+        return Ok(Register::X29);
+    }
+    if s == "lr" {
+        return Ok(Register::X30);
     }
 
     if let Some(num_str) = s.strip_prefix('x')
@@ -236,10 +244,33 @@ mod tests {
     }
 
     #[test]
+    fn test_parse_register_fp_lr_aliases() {
+        assert_eq!(parse_register("fp"), Ok(Register::X29));
+        assert_eq!(parse_register("FP"), Ok(Register::X29));
+        assert_eq!(parse_register("lr"), Ok(Register::X30));
+        assert_eq!(parse_register("LR"), Ok(Register::X30));
+    }
+
+    #[test]
     fn test_parse_register_invalid() {
         assert!(parse_register("r0").is_err());
         assert!(parse_register("x32").is_err());
         assert!(parse_register("foo").is_err());
+    }
+
+    #[test]
+    fn test_parse_live_out_contract_accepts_fp_lr_aliases() {
+        let (live_out, flags_live) = parse_live_out_contract("fp,lr").unwrap();
+        assert!(live_out.contains_register(Register::X29));
+        assert!(live_out.contains_register(Register::X30));
+        assert!(!flags_live);
+    }
+
+    #[test]
+    fn test_parse_live_out_contract_fp_lr_with_flags() {
+        let (live_out, flags_live) = parse_live_out_contract("lr;nzcv").unwrap();
+        assert!(live_out.contains_register(Register::X30));
+        assert!(flags_live);
     }
 
     #[test]
