@@ -3,27 +3,27 @@
 #![allow(dead_code)]
 
 use crate::ir::{Instruction, Register};
-use crate::semantics::live_out::{LiveOut, LiveOutRegisters};
+use crate::semantics::live_out::{LiveOut, RegisterSet};
 use std::str::FromStr;
 
 /// Error type for parsing live-out register sets.
 #[derive(Debug, Clone, PartialEq)]
-pub struct ParseLiveOutRegistersError {
+pub struct ParseRegisterSetError {
     pub message: String,
 }
 
-impl std::fmt::Display for ParseLiveOutRegistersError {
+impl std::fmt::Display for ParseRegisterSetError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(&self.message)
     }
 }
 
-impl std::error::Error for ParseLiveOutRegistersError {}
+impl std::error::Error for ParseRegisterSetError {}
 
 /// Parse a register name like "x0", "X1", "sp", "SP". Accepts the standard
 /// AArch64 aliases `fp` (x29) and `lr` (x30) to match the assembly parser at
 /// `src/parser/mod.rs::parse_register`.
-fn parse_register(s: &str) -> Result<Register, ParseLiveOutRegistersError> {
+fn parse_register(s: &str) -> Result<Register, ParseRegisterSetError> {
     let s = s.trim().to_lowercase();
 
     if s == "sp" {
@@ -46,25 +46,25 @@ fn parse_register(s: &str) -> Result<Register, ParseLiveOutRegistersError> {
         return Ok(reg);
     }
 
-    Err(ParseLiveOutRegistersError {
+    Err(ParseRegisterSetError {
         message: format!("invalid register name: '{}'", s),
     })
 }
 
-impl FromStr for LiveOutRegisters {
-    type Err = ParseLiveOutRegistersError;
+impl FromStr for RegisterSet<Register> {
+    type Err = ParseRegisterSetError;
 
     /// Parse a comma or space-separated list of register names
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         let s = s.trim();
 
         if s.is_empty() {
-            return Ok(LiveOutRegisters::empty());
+            return Ok(RegisterSet::empty());
         }
 
         let separator = if s.contains(',') { ',' } else { ' ' };
 
-        let mut mask = LiveOutRegisters::empty();
+        let mut mask = RegisterSet::empty();
         for part in s.split(separator) {
             let part = part.trim();
             if part.is_empty() {
@@ -81,42 +81,44 @@ impl FromStr for LiveOutRegisters {
 /// Parse the CLI `--live-out` contract string.
 ///
 /// Grammar: `<regs>` or `<regs>;<flags>`. The register half follows
-/// `LiveOutRegisters::from_str` (comma- or space-separated, case-insensitive,
+/// `RegisterSet::<Register>::from_str` (comma- or space-separated, case-insensitive,
 /// accepts `x0..x30`, `sp`, `xzr`). The flag half currently accepts only the
 /// group token `nzcv`; per-flag tokens `n`/`z`/`c`/`v` are reserved for a
 /// future per-flag liveness extension and rejected today. A bareword `nzcv`
 /// with no leading `;` is rejected to keep that reservation unambiguous.
 ///
-/// Returns `(LiveOut, flags_live)`. Callers pass `flags_live` to
-/// `EquivalenceConfig::with_flags(...)` (see ADR-0006).
-pub fn parse_live_out_contract(s: &str) -> Result<(LiveOut, bool), ParseLiveOutRegistersError> {
+/// Returns a `LiveOut` whose `flags_live()` bit reflects the optional
+/// `;nzcv` suffix (ADR-0006). The mask is consumed directly by
+/// `EquivalenceConfig::with_live_out(...)`; callers no longer need to thread
+/// a separate `flags_live` boolean.
+pub fn parse_live_out_contract(s: &str) -> Result<LiveOut, ParseRegisterSetError> {
     let trimmed = s.trim();
     let semicolon_count = trimmed.matches(';').count();
     if semicolon_count > 1 {
-        return Err(ParseLiveOutRegistersError {
+        return Err(ParseRegisterSetError {
             message: format!("--live-out accepts at most one ';' (got: '{}')", s),
         });
     }
     if semicolon_count == 0 {
         if trimmed.eq_ignore_ascii_case("nzcv") {
-            return Err(ParseLiveOutRegistersError {
+            return Err(ParseRegisterSetError {
                 message: format!(
                     "flag-only live-out requires a leading ';' (e.g. \";nzcv\"); got '{}'",
                     s
                 ),
             });
         }
-        let regs = LiveOutRegisters::from_str(trimmed)?;
-        return Ok((LiveOut::from_register_set(regs), false));
+        let regs = RegisterSet::<Register>::from_str(trimmed)?;
+        return Ok(regs);
     }
     let (regs_part, flags_part) = trimmed.split_once(';').unwrap();
-    let regs = LiveOutRegisters::from_str(regs_part.trim())?;
+    let regs = RegisterSet::<Register>::from_str(regs_part.trim())?;
     let flags_tok = flags_part.trim().to_ascii_lowercase();
     let flags_live = match flags_tok.as_str() {
         "" => false,
         "nzcv" => true,
         "n" | "z" | "c" | "v" => {
-            return Err(ParseLiveOutRegistersError {
+            return Err(ParseRegisterSetError {
                 message: format!(
                     "per-flag token '{}' is reserved for a future extension; use 'nzcv' for all flags",
                     flags_tok
@@ -124,17 +126,17 @@ pub fn parse_live_out_contract(s: &str) -> Result<(LiveOut, bool), ParseLiveOutR
             });
         }
         other => {
-            return Err(ParseLiveOutRegistersError {
+            return Err(ParseRegisterSetError {
                 message: format!("unknown flag token '{}'; expected 'nzcv'", other),
             });
         }
     };
-    Ok((LiveOut::from_register_set(regs), flags_live))
+    Ok(regs.with_flags(flags_live))
 }
 
 /// Compute the set of registers written by a sequence of instructions
-pub fn compute_written_registers(instructions: &[Instruction]) -> LiveOutRegisters {
-    let mut mask = LiveOutRegisters::empty();
+pub fn compute_written_registers(instructions: &[Instruction]) -> RegisterSet<Register> {
+    let mut mask = RegisterSet::empty();
     for instr in instructions {
         if let Some(dest) = instr.destination() {
             mask.add(dest);
@@ -190,13 +192,13 @@ pub fn reads_flags_before_writing(instructions: &[Instruction]) -> bool {
 
 /// Compute the set of registers read before written by a sequence of instructions.
 ///
-/// This is the intra-sequence live-in set: any register the sequence reads
-/// before defining (writing) is in the result. XZR is never included.
-/// It reuses `LiveOutRegisters` because live-in and live-out registers are both
-/// architecture-register sets; see ADR-0001 for the design rationale.
-pub fn compute_live_in_registers(instructions: &[Instruction]) -> LiveOutRegisters {
-    let mut live_in = LiveOutRegisters::empty();
-    let mut written = LiveOutRegisters::empty();
+/// Returns the set of registers the sequence reads before defining (writing).
+/// XZR is never included. The return type `RegisterSet<Register>` is the same
+/// neutral carrier used by live-out analyses — live-in and live-out are both
+/// architecture-register sets (closes #85; see ADR-0001 for the design rationale).
+pub fn compute_live_in_registers(instructions: &[Instruction]) -> RegisterSet<Register> {
+    let mut live_in = RegisterSet::empty();
+    let mut written = RegisterSet::empty();
 
     for instr in instructions {
         for src in instr.source_registers() {
@@ -239,7 +241,7 @@ mod tests {
 
     #[test]
     fn display_renders_message_without_type_prefix() {
-        let err = ParseLiveOutRegistersError {
+        let err = ParseRegisterSetError {
             message: "invalid register name: 'foo'".to_string(),
         };
         assert_eq!(err.to_string(), "invalid register name: 'foo'");
@@ -286,22 +288,22 @@ mod tests {
 
     #[test]
     fn test_parse_live_out_contract_accepts_fp_lr_aliases() {
-        let (live_out, flags_live) = parse_live_out_contract("fp,lr").unwrap();
+        let live_out = parse_live_out_contract("fp,lr").unwrap();
         assert!(live_out.contains_register(Register::X29));
         assert!(live_out.contains_register(Register::X30));
-        assert!(!flags_live);
+        assert!(!live_out.flags_live());
     }
 
     #[test]
     fn test_parse_live_out_contract_fp_lr_with_flags() {
-        let (live_out, flags_live) = parse_live_out_contract("lr;nzcv").unwrap();
+        let live_out = parse_live_out_contract("lr;nzcv").unwrap();
         assert!(live_out.contains_register(Register::X30));
-        assert!(flags_live);
+        assert!(live_out.flags_live());
     }
 
     #[test]
     fn test_live_out_registers_from_str_comma_separated() {
-        let mask: LiveOutRegisters = "x0, x1, x2".parse().unwrap();
+        let mask: LiveOut = "x0, x1, x2".parse().unwrap();
         assert!(mask.contains(Register::X0));
         assert!(mask.contains(Register::X1));
         assert!(mask.contains(Register::X2));
@@ -310,7 +312,7 @@ mod tests {
 
     #[test]
     fn test_live_out_registers_from_str_space_separated() {
-        let mask: LiveOutRegisters = "x0 x1 x2".parse().unwrap();
+        let mask: LiveOut = "x0 x1 x2".parse().unwrap();
         assert!(mask.contains(Register::X0));
         assert!(mask.contains(Register::X1));
         assert!(mask.contains(Register::X2));
@@ -318,7 +320,7 @@ mod tests {
 
     #[test]
     fn test_live_out_registers_from_str_mixed_case() {
-        let mask: LiveOutRegisters = "X0, x1, SP".parse().unwrap();
+        let mask: LiveOut = "X0, x1, SP".parse().unwrap();
         assert!(mask.contains(Register::X0));
         assert!(mask.contains(Register::X1));
         assert!(mask.contains(Register::SP));
@@ -326,20 +328,20 @@ mod tests {
 
     #[test]
     fn test_live_out_registers_from_str_empty() {
-        let mask: LiveOutRegisters = "".parse().unwrap();
+        let mask: LiveOut = "".parse().unwrap();
         assert!(mask.is_empty());
     }
 
     #[test]
     fn test_live_out_registers_from_str_whitespace() {
-        let mask: LiveOutRegisters = "  x0  ,  x1  ".parse().unwrap();
+        let mask: LiveOut = "  x0  ,  x1  ".parse().unwrap();
         assert!(mask.contains(Register::X0));
         assert!(mask.contains(Register::X1));
     }
 
     #[test]
     fn test_live_out_registers_from_str_invalid() {
-        let result: Result<LiveOutRegisters, _> = "x0, invalid, x1".parse();
+        let result: Result<LiveOut, _> = "x0, invalid, x1".parse();
         assert!(result.is_err());
     }
 
@@ -584,68 +586,68 @@ mod tests {
 
     #[test]
     fn test_parse_live_out_contract_regs_and_flags() {
-        let (live_out, flags_live) = parse_live_out_contract("x0,x1;nzcv").unwrap();
+        let live_out = parse_live_out_contract("x0,x1;nzcv").unwrap();
         assert!(live_out.contains_register(Register::X0));
         assert!(live_out.contains_register(Register::X1));
-        assert!(flags_live);
+        assert!(live_out.flags_live());
     }
 
     #[test]
     fn test_parse_live_out_contract_regs_only_flags_off() {
-        let (live_out, flags_live) = parse_live_out_contract("x0,x1").unwrap();
+        let live_out = parse_live_out_contract("x0,x1").unwrap();
         assert!(live_out.contains_register(Register::X0));
         assert!(live_out.contains_register(Register::X1));
-        assert!(!flags_live);
+        assert!(!live_out.flags_live());
     }
 
     #[test]
     fn test_parse_live_out_contract_flags_only() {
-        let (live_out, flags_live) = parse_live_out_contract(";nzcv").unwrap();
-        assert_eq!(live_out.registers().len(), 0);
-        assert!(flags_live);
+        let live_out = parse_live_out_contract(";nzcv").unwrap();
+        assert_eq!(live_out.len(), 0);
+        assert!(live_out.flags_live());
     }
 
     #[test]
     fn test_parse_live_out_contract_trailing_semicolon() {
-        let (live_out, flags_live) = parse_live_out_contract("x0,x1;").unwrap();
+        let live_out = parse_live_out_contract("x0,x1;").unwrap();
         assert!(live_out.contains_register(Register::X0));
-        assert!(!flags_live);
+        assert!(!live_out.flags_live());
     }
 
     #[test]
     fn test_parse_live_out_contract_uppercase_passes() {
-        let (live_out, flags_live) = parse_live_out_contract("X0,X1;NZCV").unwrap();
+        let live_out = parse_live_out_contract("X0,X1;NZCV").unwrap();
         assert!(live_out.contains_register(Register::X0));
         assert!(live_out.contains_register(Register::X1));
-        assert!(flags_live);
+        assert!(live_out.flags_live());
     }
 
     #[test]
     fn test_parse_live_out_contract_empty_input() {
-        let (live_out, flags_live) = parse_live_out_contract("").unwrap();
-        assert_eq!(live_out.registers().len(), 0);
-        assert!(!flags_live);
+        let live_out = parse_live_out_contract("").unwrap();
+        assert_eq!(live_out.len(), 0);
+        assert!(!live_out.flags_live());
     }
 
     #[test]
     fn test_parse_live_out_contract_whitespace_around_semicolon() {
-        let (live_out, flags_live) = parse_live_out_contract("x0 ; nzcv").unwrap();
+        let live_out = parse_live_out_contract("x0 ; nzcv").unwrap();
         assert!(live_out.contains_register(Register::X0));
-        assert!(flags_live);
+        assert!(live_out.flags_live());
     }
 
     #[test]
     fn test_parse_live_out_contract_lone_semicolon() {
-        let (live_out, flags_live) = parse_live_out_contract(";").unwrap();
-        assert_eq!(live_out.registers().len(), 0);
-        assert!(!flags_live);
+        let live_out = parse_live_out_contract(";").unwrap();
+        assert_eq!(live_out.len(), 0);
+        assert!(!live_out.flags_live());
     }
 
     #[test]
     fn test_parse_live_out_contract_whitespace_only_sides() {
-        let (live_out, flags_live) = parse_live_out_contract("  ;  ").unwrap();
-        assert_eq!(live_out.registers().len(), 0);
-        assert!(!flags_live);
+        let live_out = parse_live_out_contract("  ;  ").unwrap();
+        assert_eq!(live_out.len(), 0);
+        assert!(!live_out.flags_live());
     }
 
     #[test]

@@ -136,7 +136,7 @@ impl StochasticBackend<crate::isa::AArch64> for crate::isa::AArch64 {
         // AArch64's `LiveOut` does not carry a flags_live bit (the
         // over-approximate flag-writer guard lives in equivalence.rs
         // pre-SMT). Mirror mcmc.rs's existing call which passes false.
-        crate::semantics::concrete::states_equal_for_live_out(s1, s2, live_out.registers(), false)
+        crate::semantics::concrete::states_equal_for_live_out(s1, s2, live_out, false)
     }
 
     fn sequence_cost(seq: &[crate::ir::Instruction], metric: &CostMetric, _width: u32) -> u64 {

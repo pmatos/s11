@@ -126,7 +126,7 @@ impl SearchAlgorithm<crate::isa::AArch64> for LlmSearch {
         }
 
         let live_in = compute_live_in_registers(target);
-        let prompt = build_prompt(target, &live_in, live_out.registers());
+        let prompt = build_prompt(target, &live_in, live_out);
         let timeout = config.timeout.unwrap_or(Duration::from_secs(60));
         let max_calls = config.llm.max_codex_calls;
 
