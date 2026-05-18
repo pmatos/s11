@@ -116,7 +116,7 @@ pub fn x86_ir_from_mnemonic(
 ) -> Result<Option<X86Instruction>, String> {
     let mnemonic = mnemonic.trim().to_lowercase();
 
-    // Issue #74: CMOVcc — strip "cmov" prefix, parse suffix, expect
+    // CMOVcc — strip "cmov" prefix, parse suffix, expect
     // two register operands. Unknown suffixes are errors, not Ok(None).
     if let Some(suffix) = mnemonic.strip_prefix("cmov") {
         let cond = parse_x86_condition(suffix)?;
@@ -133,7 +133,7 @@ pub fn x86_ir_from_mnemonic(
         return Ok(Some(X86Instruction::Cmov { rd, rs, cond }));
     }
 
-    // Issue #74: Jcc — strip "j" prefix (excluding "jmp"), parse suffix,
+    // Jcc — strip "j" prefix (excluding "jmp"), parse suffix,
     // validate the operand is a numeric target then discard it.
     if mnemonic != "jmp"
         && let Some(suffix) = mnemonic.strip_prefix('j')
@@ -644,5 +644,43 @@ mod tests {
         // surface it loudly.
         let r = x86_ir_from_mnemonic("je", "label");
         assert!(r.is_err(), "expected Err, got {:?}", r);
+    }
+
+    #[test]
+    fn jcc_gas_aliases_normalize_to_canonical_conditions() {
+        // GAS aliases (jc → jb, jz → je, jnae → jb, jnle → jg, etc.)
+        // must produce the same Jcc IR as their canonical spelling so
+        // the optimizer sees identical sequences regardless of which
+        // form the upstream toolchain emitted.
+        use crate::isa::x86::X86Condition;
+        let alias_cases = [
+            ("jc", X86Condition::B),
+            ("jz", X86Condition::E),
+            ("jnz", X86Condition::NE),
+            ("jnae", X86Condition::B),
+            ("jnb", X86Condition::AE),
+            ("jnc", X86Condition::AE),
+            ("jna", X86Condition::BE),
+            ("jnbe", X86Condition::A),
+            ("jnge", X86Condition::L),
+            ("jnl", X86Condition::GE),
+            ("jng", X86Condition::LE),
+            ("jnle", X86Condition::G),
+            ("jpe", X86Condition::P),
+            ("jpo", X86Condition::NP),
+        ];
+        for (mn, expected_cond) in alias_cases {
+            let r = x86_ir_from_mnemonic(mn, "0x100")
+                .unwrap_or_else(|e| panic!("parse {}: {}", mn, e))
+                .unwrap_or_else(|| panic!("parse {} produced None", mn));
+            assert_eq!(
+                r,
+                X86Instruction::Jcc {
+                    cond: expected_cond
+                },
+                "alias {} should normalize to canonical cond",
+                mn
+            );
+        }
     }
 }
