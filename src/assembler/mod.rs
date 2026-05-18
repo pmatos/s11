@@ -401,6 +401,19 @@ macro_rules! emit_mem_ext {
                 }
                 Ok::<(), String>(())
             }
+            // UXTX on an X-form index is architecturally equivalent to LSL
+            // (both select option=011 in the LDR-register encoding). dynasm
+            // disallows the UXTX token for memory operands but accepts the
+            // bare/LSL form, so dispatch through that. Mirrors GNU `as`,
+            // which silently rewrites `[Xn, Xm, UXTX]` to `[Xn, Xm]`.
+            ExtendKind::Uxtx => {
+                if shift_n == 0 {
+                    dynasm!($ops ; .arch aarch64 ; $mnem $rt_tok(rt_n), [XSP(base_n), X(idx_n)]);
+                } else {
+                    dynasm!($ops ; .arch aarch64 ; $mnem $rt_tok(rt_n), [XSP(base_n), X(idx_n), LSL shift_n]);
+                }
+                Ok::<(), String>(())
+            }
             _ => Err(format!(
                 "{} cannot use extend kind {:?} (rejected by is_encodable_aarch64)",
                 stringify!($mnem),
@@ -4323,6 +4336,43 @@ mod tests {
         let (m, op) = disasm_mnem_op(&bytes);
         assert_eq!(m, "ldr");
         assert_eq!(op, "x0, [x1, x2, sxtx #3]");
+    }
+
+    #[test]
+    fn ldr_x_uxtx_extended_index_no_shift() {
+        // UXTX on an X-form index is architecturally equivalent to LSL #0.
+        // Capstone renders the canonical form (`[x1, x2]`) since dynasm
+        // emits option=011 with shift=0.
+        let bytes = assemble_one(Instruction::Ldr {
+            rt: Register::X0,
+            addr: AddressOperand::Ext {
+                base: Register::X1,
+                idx: Register::X2,
+                kind: ExtendKind::Uxtx,
+                shift: 0,
+            },
+            width: AccessWidth::Extended,
+        });
+        let (m, op) = disasm_mnem_op(&bytes);
+        assert_eq!(m, "ldr");
+        assert_eq!(op, "x0, [x1, x2]");
+    }
+
+    #[test]
+    fn ldr_x_uxtx_extended_index_shift_three() {
+        let bytes = assemble_one(Instruction::Ldr {
+            rt: Register::X0,
+            addr: AddressOperand::Ext {
+                base: Register::X1,
+                idx: Register::X2,
+                kind: ExtendKind::Uxtx,
+                shift: 3,
+            },
+            width: AccessWidth::Extended,
+        });
+        let (m, op) = disasm_mnem_op(&bytes);
+        assert_eq!(m, "ldr");
+        assert_eq!(op, "x0, [x1, x2, lsl #3]");
     }
 
     #[test]
