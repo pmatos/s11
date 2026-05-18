@@ -1218,7 +1218,7 @@ mod tests {
         };
         let mut changed = false;
         for _ in 0..200 {
-            let mut seq = vec![initial.clone()];
+            let mut seq = vec![initial];
             mutator.mutate_operand(&mut rng, &mut seq);
             if seq[0] != initial {
                 changed = true;
