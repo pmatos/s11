@@ -209,29 +209,28 @@ where
             if proposal_cost < best_cost {
                 self.statistics.smt_queries += 1;
 
-                match <I as StochasticBackend<I>>::check_equivalence(
+                let (verdict, metrics) = <I as StochasticBackend<I>>::check_equivalence(
                     target,
                     &proposal,
                     live_out,
                     width,
                     smt_timeout,
-                ) {
-                    EquivalenceResult::Equivalent => {
-                        self.statistics.smt_equivalent += 1;
-                        self.statistics.improvements_found += 1;
+                );
+                self.statistics.smt_elapsed += metrics.smt_elapsed;
+                if let EquivalenceResult::Equivalent = verdict {
+                    self.statistics.smt_equivalent += 1;
+                    self.statistics.improvements_found += 1;
 
-                        best_equivalent = Some(proposal.clone());
-                        best_cost = proposal_cost;
-                        self.statistics.best_cost_found = best_cost;
+                    best_equivalent = Some(proposal.clone());
+                    best_cost = proposal_cost;
+                    self.statistics.best_cost_found = best_cost;
 
-                        if config.verbose {
-                            println!(
-                                "Found improvement at iteration {}: cost {} -> {}",
-                                iteration, original_cost, best_cost
-                            );
-                        }
+                    if config.verbose {
+                        println!(
+                            "Found improvement at iteration {}: cost {} -> {}",
+                            iteration, original_cost, best_cost
+                        );
                     }
-                    _ => {}
                 }
             }
 

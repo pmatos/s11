@@ -263,9 +263,11 @@ where
 
         self.statistics.smt_queries += 1;
 
-        match <I as SymbolicBackend<I>>::check_equivalence(
+        let (verdict, metrics) = <I as SymbolicBackend<I>>::check_equivalence(
             target, candidate, live_out, width, timeout,
-        ) {
+        );
+        self.statistics.smt_elapsed += metrics.smt_elapsed;
+        match verdict {
             EquivalenceResult::Equivalent => {
                 self.statistics.smt_equivalent += 1;
                 self.statistics.candidates_passed_fast += 1;

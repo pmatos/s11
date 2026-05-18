@@ -18,7 +18,9 @@ use crate::search::config::{Algorithm, SearchConfig};
 use crate::search::result::{SearchResult, SearchStatistics};
 use crate::semantics::cost::sequence_cost;
 use crate::semantics::live_out::LiveOut;
-use crate::semantics::{EquivalenceConfig, EquivalenceResult, check_equivalence_with_config};
+use crate::semantics::{
+    EquivalenceConfig, EquivalenceResult, check_equivalence_with_config_metrics,
+};
 
 /// Shared state for parallel workers. Counters are atomic to avoid locking; the
 /// best-so-far sequence is behind a `Mutex` because it is only touched on an
@@ -29,6 +31,7 @@ struct SharedState {
     candidates_evaluated: AtomicU64,
     smt_queries: AtomicU64,
     smt_equivalent: AtomicU64,
+    smt_elapsed_nanos: AtomicU64,
     candidates_passed_fast: AtomicU64,
     improvements_found: AtomicU64,
     best: Mutex<Option<Vec<Instruction>>>,
@@ -42,6 +45,7 @@ impl SharedState {
             candidates_evaluated: AtomicU64::new(0),
             smt_queries: AtomicU64::new(0),
             smt_equivalent: AtomicU64::new(0),
+            smt_elapsed_nanos: AtomicU64::new(0),
             candidates_passed_fast: AtomicU64::new(0),
             improvements_found: AtomicU64::new(0),
             best: Mutex::new(None),
@@ -92,7 +96,17 @@ fn verify_candidate(
         .with_flags(true);
 
     shared.smt_queries.fetch_add(1, Ordering::Relaxed);
-    match check_equivalence_with_config(target, candidate, &equiv_config) {
+    let (verdict, metrics) =
+        check_equivalence_with_config_metrics(target, candidate, &equiv_config);
+    let solver_nanos: u64 = metrics
+        .smt_elapsed
+        .as_nanos()
+        .try_into()
+        .unwrap_or(u64::MAX);
+    shared
+        .smt_elapsed_nanos
+        .fetch_add(solver_nanos, Ordering::Relaxed);
+    match verdict {
         EquivalenceResult::Equivalent => {
             shared.smt_equivalent.fetch_add(1, Ordering::Relaxed);
             shared
@@ -272,6 +286,8 @@ impl SearchAlgorithm<crate::isa::AArch64> for EnumerativeSearch {
         self.statistics.candidates_evaluated = shared.candidates_evaluated.load(Ordering::Relaxed);
         self.statistics.smt_queries = shared.smt_queries.load(Ordering::Relaxed);
         self.statistics.smt_equivalent = shared.smt_equivalent.load(Ordering::Relaxed);
+        self.statistics.smt_elapsed =
+            Duration::from_nanos(shared.smt_elapsed_nanos.load(Ordering::Relaxed));
         self.statistics.candidates_passed_fast =
             shared.candidates_passed_fast.load(Ordering::Relaxed);
         self.statistics.improvements_found = shared.improvements_found.load(Ordering::Relaxed);
@@ -309,6 +325,55 @@ mod tests {
         let result = search.search(&[], &LiveOut::all_registers(), &SearchConfig::default());
         assert!(!result.found_optimization);
         assert!(result.optimized_sequence.is_none());
+    }
+
+    #[test]
+    fn statistics_aggregate_smt_elapsed() {
+        // Reuse the same length-3 target as `finds_length_two_rewrite` —
+        // proven to drive at least one SMT equivalence check during the
+        // length-2 sweep. After the search returns, the cumulative SMT
+        // wall time must be non-zero, and it must be <= the overall search
+        // elapsed (sanity check on aggregation correctness).
+        let target = vec![
+            Instruction::MovReg {
+                rd: Register::X0,
+                rn: Register::X1,
+            },
+            Instruction::Eor {
+                rd: Register::X0,
+                rn: Register::X0,
+                rm: Operand::Register(Register::X0),
+            },
+            Instruction::Eor {
+                rd: Register::X2,
+                rn: Register::X2,
+                rm: Operand::Register(Register::X2),
+            },
+        ];
+        let live_out = LiveOut::from_registers(vec![Register::X0, Register::X2]);
+        let config = SearchConfig::default()
+            .with_registers(vec![Register::X0, Register::X1, Register::X2])
+            .with_immediates(vec![0, 1])
+            .with_timeout(std::time::Duration::from_secs(30));
+
+        let mut search = EnumerativeSearch::new();
+        let result = search.search(&target, &live_out, &config);
+
+        assert!(
+            result.statistics.smt_queries > 0,
+            "precondition: search must hit SMT"
+        );
+        assert!(
+            result.statistics.smt_elapsed > std::time::Duration::ZERO,
+            "smt_elapsed must aggregate non-zero solver time; got {:?}",
+            result.statistics.smt_elapsed
+        );
+        assert!(
+            result.statistics.smt_elapsed <= result.statistics.elapsed_time,
+            "smt_elapsed ({:?}) must be <= overall elapsed ({:?})",
+            result.statistics.smt_elapsed,
+            result.statistics.elapsed_time
+        );
     }
 
     fn small_config() -> SearchConfig {
