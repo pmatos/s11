@@ -123,6 +123,24 @@ just test-all        # build + run ./test_all.sh end-to-end demo
 ./ci_check.sh        # what CI runs before push
 ```
 
+### Benchmarks
+
+```
+just bench           # all three phases
+just bench-phase1    # Hacker's Delight micro-suite only
+just bench-clean     # wipe criterion reports + JSONL accumulator
+```
+
+Each criterion sample emits one JSON-Lines record to
+`benches/results/results.jsonl`. Criterion HTML reports land under
+`target/criterion/`. Phase 2 fixtures are not committed; run
+`scripts/harvest_llvm_codegen.sh` to populate them from
+`llvm-project/llvm/test/CodeGen/AArch64/`. See `benches/README.md` for
+the layout, schema, and how to add a new fixture.
+
+Benchmarks are **not** wired into CI — full runs are tens of minutes
+and would burn through GitHub Actions minutes.
+
 ### Mutation testing (informational, local-only)
 
 s11 uses [cargo-mutants] to surface tests that are too weak to detect

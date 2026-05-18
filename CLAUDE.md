@@ -65,6 +65,30 @@ Both recipes depend on `build-tests` so that AArch64 integration-test binaries a
 
 In CI, `.github/workflows/coverage.yml` runs on PRs and pushes to `main`, collects LCOV across unit + integration tests, and uploads to [Codecov](https://codecov.io/) using the `CODECOV_TOKEN` repo secret. Project/patch thresholds live in `codecov.yml`.
 
+### Benchmark suite (issue #70)
+
+Criterion-driven benchmarks live under `benches/`. Three phases —
+Hacker's Delight micro-suite (Phase 1), LLVM AArch64 codegen sample
+(Phase 2), and an algebraic-identities catalog (Phase 3). The shared
+harness (`load_sequence`, `run_bench`, `append_json`,
+`discover_specs_in`) lives in `src/bench_support.rs` because criterion
+benchmarks built with `harness = false` cannot run `#[test]` blocks
+— the lib-test path is the only way to unit-test the helpers.
+
+Each criterion sample emits one JSON-Lines record to
+`benches/results/results.jsonl`. See `benches/README.md` for the schema
+and how to add a fixture.
+
+- `just bench` / `just bench-phase1` / `just bench-clean` are the entry
+  points.
+- Benchmarks are **not** wired into CI — full runs are tens of minutes
+  and would burn through GitHub Actions budget.
+- Reproducibility depends on a seeded `StochasticConfig`. The bench
+  harness sets `spec.seed + sample_index` per record so runs are
+  deterministic given the pair.
+- Phase 2 fixtures are not committed; run
+  `scripts/harvest_llvm_codegen.sh` to populate them.
+
 ### Mutation Testing (informational, local-only)
 
 Mutation testing runs via [cargo-mutants](https://mutants.rs/) and is **informational only** — it does not gate merges. It is **not** wired into CI to keep GitHub Actions minutes for the test/clippy/CodeQL workflows.
