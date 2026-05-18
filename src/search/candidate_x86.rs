@@ -47,9 +47,65 @@ pub fn generate_all_x86_instructions(
     out
 }
 
+/// Default register pool for x86 stochastic / symbolic / hybrid / LLM
+/// search. Mirrors the AArch64 baseline of 8 GPRs (X0–X7). RSP and RBP
+/// are deliberately excluded so search never touches the stack frame.
+pub fn default_x86_registers() -> Vec<X86Register> {
+    vec![
+        X86Register::RAX,
+        X86Register::RCX,
+        X86Register::RDX,
+        X86Register::RBX,
+        X86Register::RSI,
+        X86Register::RDI,
+        X86Register::R8,
+        X86Register::R9,
+    ]
+}
+
+/// Default immediate pool for x86 search. Same set of constants the
+/// AArch64 path uses (`src/main.rs:522`) so the two backends share a
+/// fairness baseline for comparison.
+pub fn default_x86_immediates() -> Vec<i64> {
+    vec![
+        0, 1, 2, 3, 4, 5, 7, 8, 10, 15, 16, 31, 32, 63, 64, 100, 255, 256, 1000, 4095,
+    ]
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn default_register_pool_excludes_stack_pointer_and_base_pointer() {
+        let pool = default_x86_registers();
+        assert!(!pool.contains(&X86Register::RSP), "RSP must not be in pool");
+        assert!(!pool.contains(&X86Register::RBP), "RBP must not be in pool");
+        assert_eq!(
+            pool.len(),
+            8,
+            "pool should mirror AArch64 X0..X7 cardinality"
+        );
+        // Ensure no duplicates.
+        let mut sorted = pool.clone();
+        sorted.sort_by_key(|r| *r as u8);
+        sorted.dedup();
+        assert_eq!(sorted.len(), pool.len(), "pool has duplicates");
+    }
+
+    #[test]
+    fn default_immediate_pool_starts_at_zero_and_includes_powers_of_two() {
+        let imms = default_x86_immediates();
+        assert_eq!(imms[0], 0, "first immediate must be 0");
+        for power in [1, 2, 4, 8, 16, 32, 64, 256] {
+            assert!(
+                imms.contains(&power),
+                "missing power-of-two {} in immediate pool",
+                power
+            );
+        }
+        assert_eq!(imms.len(), 20, "pool size should mirror AArch64 baseline");
+    }
 
     #[test]
     fn count_matches_formula() {
