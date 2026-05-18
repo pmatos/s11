@@ -265,8 +265,7 @@ fn fast_path_input_registers(
 /// NZCV as live-out: the standard random/edge-case inputs leave initial
 /// NZCV at `ConditionFlags::default()` (all zero), so a CCMP under a
 /// condition predicate that depends on an incoming flag (e.g. `mi`) only
-/// gets exercised on the condition-false branch. PR #172 review thread
-/// PRRT_kwDOOuU3Hc6CxjC4.
+/// gets exercised on the condition-false branch.
 fn fast_path_initial_nzcv_variants(
     input_regs: &[crate::ir::Register],
 ) -> Vec<ConcreteMachineState> {
@@ -2125,9 +2124,6 @@ mod tests {
         );
     }
 
-    /// Soundness regression test for PR #172 review thread
-    /// PRRT_kwDOOuU3Hc6Cw2qx.
-    ///
     /// `tst x1, #1` and `tst x1, #2` differ on NZCV when bit 0 vs bit 1 of
     /// x1 is set, so a flag-aware live-out contract must classify them as
     /// non-equivalent. Prior to the source-register randomization fix, the
@@ -2157,9 +2153,6 @@ mod tests {
         );
     }
 
-    /// Soundness regression test for PR #172 review thread
-    /// PRRT_kwDOOuU3Hc6CxjC4.
-    ///
     /// `ccmp x0, #0, #0, mi` and `ccmp x1, #1, #0, mi` both fall through to
     /// the immediate-NZCV `#0` branch when initial N is false, so all flags
     /// land at zero regardless of x0/x1. When initial N is true, the MI
