@@ -38,7 +38,7 @@ fn phase2(c: &mut Criterion) {
                     let mut record: BenchRecord = run_bench(&spec_owned, next_sample);
                     record.git_sha = sha.clone();
                     record.timestamp_utc = ts.clone();
-                    let elapsed = Duration::from_millis(record.search_elapsed_ms);
+                    let elapsed = record.search_elapsed;
                     append_json(&record, &out);
                     total += elapsed;
                     next_sample = next_sample.wrapping_add(1);

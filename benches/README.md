@@ -100,7 +100,7 @@ over `sample_index` per `benchmark_id`.
 | `cost_metric` | Cost function: `instructioncount` / `latency` / `codesize`. |
 | `original_length` / `found_length` | Target length and optimized length (or `null` if no optimization). |
 | `original_cost` / `best_cost` | Cost under the chosen metric. |
-| `search_elapsed_ms` | Wall time of the search itself. |
+| `search_elapsed_ms` | Wall time of the search itself, truncated to milliseconds for legibility. Sub-millisecond runs serialise as `0`; the bench driver uses the precise `Duration` internally so criterion's timing analysis sees real values. |
 | `smt_elapsed_ms` | Cumulative Z3 `solver.check()` time. Often zero — the pre-SMT guard rejects most flag-divergent candidates before reaching the solver. |
 | `smt_queries` / `smt_equivalent` | SMT call count (net of fast-path rollbacks) and how many proved equivalence. |
 | `candidates_evaluated` | Total candidates considered. |
