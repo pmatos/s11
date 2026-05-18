@@ -121,13 +121,16 @@ pub fn load_sequence(path: &Path) -> (Vec<Instruction>, LiveOut, bool) {
     (sequence, live_out, flags_live)
 }
 
-/// One row of the benchmark JSON-Lines output. See
-/// `benches/common/schema.md` (added in step 8) for the canonical
-/// field listing.
+/// One canonical record per `(benchmark_id, cargo bench invocation)`.
+///
+/// JSON emission is gated to a single call site outside criterion's
+/// `iter_custom`, so the JSONL accumulator contains exactly one row
+/// per fixture per `cargo bench` run. Criterion's HTML report owns the
+/// per-sample variance; this record is the snapshot downstream tooling
+/// diffs across commits.
 #[derive(Debug, Clone, Serialize)]
 pub struct BenchRecord {
     pub benchmark_id: String,
-    pub sample_index: u32,
     pub phase: u8,
     pub algorithm: String,
     pub seed: u64,
@@ -187,8 +190,7 @@ pub fn append_json(record: &BenchRecord, path: &Path) {
 }
 
 /// Spec for one benchmark — derived from the fixture path and the
-/// surrounding bench file. `sample_index` is supplied separately by
-/// `run_bench` so the same spec can drive criterion's per-sample loop.
+/// surrounding bench file.
 #[derive(Debug, Clone)]
 pub struct BenchSpec {
     pub id: String,
@@ -202,21 +204,22 @@ pub struct BenchSpec {
 
 /// Run the optimizer against one fixture and synthesise a `BenchRecord`.
 ///
-/// `sample_index` is mixed into the stochastic seed so multiple
-/// criterion samples explore independent RNG trajectories while staying
-/// deterministic given `(spec.seed, sample_index)`. Non-stochastic
-/// algorithms ignore the seed entirely.
-pub fn run_bench(spec: &BenchSpec, sample_index: u32) -> BenchRecord {
+/// Deterministic given `spec.seed`. Bench drivers call this **once per
+/// `cargo bench` invocation** outside criterion's `iter_custom` so the
+/// JSON-Lines accumulator stays exactly one record per fixture —
+/// criterion's warmup phase would otherwise emit unmeasured records
+/// (PR #269 review). Inside `iter_custom`, drivers re-call `run_bench`
+/// just to read `search_elapsed` for criterion's timing model.
+pub fn run_bench(spec: &BenchSpec) -> BenchRecord {
     let (target, live_out, _flags_live) = load_sequence(&spec.fixture);
     let original_length = target.len();
     let original_cost = sequence_cost(&target, &spec.cost_metric);
 
-    let effective_seed = spec.seed.wrapping_add(sample_index as u64);
     let mut config = SearchConfig::default()
         .with_algorithm(spec.algorithm)
         .with_cost_metric(spec.cost_metric)
         .with_timeout(spec.timeout);
-    config.stochastic.seed = Some(effective_seed);
+    config.stochastic.seed = Some(spec.seed);
 
     let (statistics, optimized) = match spec.algorithm {
         Algorithm::Enumerative => {
@@ -249,10 +252,9 @@ pub fn run_bench(spec: &BenchSpec, sample_index: u32) -> BenchRecord {
 
     BenchRecord {
         benchmark_id: spec.id.clone(),
-        sample_index,
         phase: spec.phase,
         algorithm: spec.algorithm.to_string(),
-        seed: effective_seed,
+        seed: spec.seed,
         cost_metric: format!("{:?}", spec.cost_metric).to_ascii_lowercase(),
         original_length,
         found_length,
@@ -323,7 +325,6 @@ mod tests {
         let path = dir.path().join("results.jsonl");
         let record = BenchRecord {
             benchmark_id: "demo".to_string(),
-            sample_index: 0,
             phase: 1,
             algorithm: "enumerative".to_string(),
             seed: 7,
@@ -345,17 +346,18 @@ mod tests {
         };
         append_json(&record, &path);
         let mut second = record.clone();
-        second.sample_index = 1;
+        second.benchmark_id = "demo-2".to_string();
         append_json(&second, &path);
 
         let body = std::fs::read_to_string(&path).expect("read jsonl");
         let lines: Vec<&str> = body.lines().collect();
         assert_eq!(lines.len(), 2, "two appends → two lines");
-        for line in &lines {
-            let parsed: serde_json::Value =
-                serde_json::from_str(line).expect("each line must be valid JSON");
-            assert_eq!(parsed["benchmark_id"], "demo");
-        }
+        let parsed: Vec<serde_json::Value> = lines
+            .iter()
+            .map(|l| serde_json::from_str(l).expect("each line must be valid JSON"))
+            .collect();
+        assert_eq!(parsed[0]["benchmark_id"], "demo");
+        assert_eq!(parsed[1]["benchmark_id"], "demo-2");
     }
 
     /// Smoke-test every shipped fixture (Phase 1 + Phase 3): each
@@ -411,10 +413,9 @@ mod tests {
             timeout: Duration::from_secs(30),
         };
 
-        let record = run_bench(&spec, 0);
+        let record = run_bench(&spec);
 
         assert_eq!(record.benchmark_id, "mov_add_fuse");
-        assert_eq!(record.sample_index, 0);
         assert_eq!(record.phase, 1);
         assert_eq!(record.algorithm, "enumerative");
         assert_eq!(record.seed, 42);

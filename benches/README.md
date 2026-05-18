@@ -13,8 +13,8 @@ cargo bench --bench hackers_delight -- max --quick   # one fixture, fast smoke r
 
 Output:
 
-- `benches/results/results.jsonl` — one record per criterion sample,
-  appended across all runs. Schema below.
+- `benches/results/results.jsonl` — exactly one record per fixture
+  per `cargo bench` invocation, appended across all runs. Schema below.
 - `target/criterion/<group>/<fixture>/report/index.html` — criterion's
   per-fixture HTML report.
 
@@ -63,13 +63,16 @@ A missing `// Live-out:` header panics with a pointer to this file.
 
 ## JSON record schema
 
-Each criterion sample emits one record. Downstream tooling aggregates
-over `sample_index` per `benchmark_id`.
+One record per fixture per `cargo bench` run. Bench drivers emit the
+JSON before driving criterion's `iter_custom`, so warm-up iterations
+never appear in the file. Criterion's HTML report under
+`target/criterion/<group>/<fixture>/` owns the per-sample variance; the
+JSON record below is the canonical snapshot downstream tooling diffs
+across commits.
 
 ```json
 {
   "benchmark_id": "mov_add_fuse",
-  "sample_index": 0,
   "phase": 3,
   "algorithm": "enumerative",
   "seed": 42,
@@ -93,10 +96,9 @@ over `sample_index` per `benchmark_id`.
 | Field | Meaning |
 | --- | --- |
 | `benchmark_id` | Fixture file stem (`abs`, `mov_add_fuse`, …). |
-| `sample_index` | Criterion runs each fixture N times; index counts up. |
 | `phase` | 1 = Hacker's Delight, 2 = LLVM CodeGen, 3 = algebraic identities. |
 | `algorithm` | Search algorithm (currently always `enumerative`). |
-| `seed` | RNG seed used for this sample (`spec.seed + sample_index`). |
+| `seed` | RNG seed (passed verbatim from `spec.seed`; stochastic search uses it directly, deterministic algorithms ignore it). |
 | `cost_metric` | Cost function: `instructioncount` / `latency` / `codesize`. |
 | `original_length` / `found_length` | Target length and optimized length (or `null` if no optimization). |
 | `original_cost` / `best_cost` | Cost under the chosen metric. |
