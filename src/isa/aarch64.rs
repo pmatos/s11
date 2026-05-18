@@ -2001,7 +2001,8 @@ mod tests {
 
         // (imm_max, host instruction builder used to wrap the resulting Operand
         // so we can call `is_encodable_aarch64` on a real Instruction).
-        let cases: Vec<(i64, Box<dyn Fn(Operand) -> Instruction>)> = vec![
+        type ImmCase = (i64, Box<dyn Fn(Operand) -> Instruction>);
+        let cases: Vec<ImmCase> = vec![
             (
                 0xFFF,
                 Box::new(|rm| Instruction::Add {
