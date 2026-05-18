@@ -857,6 +857,15 @@ pub fn apply_instruction(mut state: MachineState, instruction: &Instruction) -> 
             "Branches are terminators; strip them before SMT apply_sequence. Reached: {:?}",
             instruction
         ),
+        // Memory ops (issue #68). SMT lowering arrives in step 7 alongside
+        // the `Array<BV64, BV8>` field on `MachineState`.
+        Instruction::Ldr { .. }
+        | Instruction::Ldrs { .. }
+        | Instruction::Str { .. }
+        | Instruction::Ldp { .. }
+        | Instruction::Stp { .. } => {
+            unimplemented!("Memory-op SMT lowering arrives in step 7 (issue #68)")
+        }
     }
     state
 }

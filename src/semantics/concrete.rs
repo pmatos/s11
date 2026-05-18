@@ -525,6 +525,17 @@ pub fn apply_instruction_concrete(
             "Branches are terminators; strip them before apply_sequence_concrete. Reached: {:?}",
             instruction
         ),
+        // Memory ops (issue #68). Concrete semantics for LDR-family land in
+        // step 6; until the memory model is plumbed onto ConcreteMachineState
+        // there is no way to evaluate these and callers should not synthesise
+        // them yet.
+        Instruction::Ldr { .. }
+        | Instruction::Ldrs { .. }
+        | Instruction::Str { .. }
+        | Instruction::Ldp { .. }
+        | Instruction::Stp { .. } => {
+            unimplemented!("Memory-op concrete semantics arrive in step 6 (issue #68)")
+        }
     }
     state
 }

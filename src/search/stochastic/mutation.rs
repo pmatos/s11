@@ -403,6 +403,14 @@ impl Mutator {
             | Instruction::Tbnz { .. }
             | Instruction::Bl { .. }
             | Instruction::Br { .. } => {}
+
+            // Memory ops (issue #68): dedicated rt/base/idx/offset rotation
+            // slots arrive in step 16. Skip for now.
+            Instruction::Ldr { .. }
+            | Instruction::Ldrs { .. }
+            | Instruction::Str { .. }
+            | Instruction::Ldp { .. }
+            | Instruction::Stp { .. } => {}
         }
     }
 
@@ -874,6 +882,36 @@ impl Mutator {
             Instruction::Tbnz { rt, bit, target } => Instruction::Tbnz { rt, bit, target },
             Instruction::Bl { target } => Instruction::Bl { target },
             Instruction::Br { rn } => Instruction::Br { rn },
+
+            // Memory ops (issue #68): width/sign-extend bridges arrive in
+            // step 16. Identity-mutate for now.
+            Instruction::Ldr { rt, addr, width } => Instruction::Ldr { rt, addr, width },
+            Instruction::Ldrs { rt, addr, width } => Instruction::Ldrs { rt, addr, width },
+            Instruction::Str { rt, addr, width } => Instruction::Str { rt, addr, width },
+            Instruction::Ldp {
+                rt1,
+                rt2,
+                addr,
+                width,
+                signed,
+            } => Instruction::Ldp {
+                rt1,
+                rt2,
+                addr,
+                width,
+                signed,
+            },
+            Instruction::Stp {
+                rt1,
+                rt2,
+                addr,
+                width,
+            } => Instruction::Stp {
+                rt1,
+                rt2,
+                addr,
+                width,
+            },
         };
     }
 

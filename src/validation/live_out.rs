@@ -134,11 +134,13 @@ pub fn parse_live_out_contract(s: &str) -> Result<LiveOut, ParseRegisterSetError
     Ok(regs.with_flags(flags_live))
 }
 
-/// Compute the set of registers written by a sequence of instructions
+/// Compute the set of registers written by a sequence of instructions.
+/// Uses `destinations()` so memory ops with writeback (PreIndex / PostIndex)
+/// or pair loads (LDP) contribute multiple registers per instruction.
 pub fn compute_written_registers(instructions: &[Instruction]) -> RegisterSet<Register> {
     let mut mask = RegisterSet::empty();
     for instr in instructions {
-        if let Some(dest) = instr.destination() {
+        for dest in instr.destinations() {
             mask.add(dest);
         }
     }
@@ -206,7 +208,7 @@ pub fn compute_live_in_registers(instructions: &[Instruction]) -> RegisterSet<Re
                 live_in.add(src);
             }
         }
-        if let Some(dest) = instr.destination() {
+        for dest in instr.destinations() {
             written.add(dest);
         }
     }
