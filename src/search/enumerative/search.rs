@@ -402,12 +402,7 @@ mod tests {
         ];
         let live_out = LiveOut::from_registers(vec![Register::X0]);
 
-        // 60s (was 10s) is generous enough to absorb cargo-llvm-cov's 3-5x
-        // instrumentation overhead — under coverage the 10s budget could
-        // expire before the search found the rewrite, failing the
-        // `expect("expected an optimization")` below. The test is asserting
-        // a correctness property (output respects register restrictions),
-        // not search speed, so a loose upper bound is the right knob.
+        // 60s budget absorbs cargo-llvm-cov's 3-5x instrumentation overhead.
         let config = SearchConfig::default()
             .with_registers(vec![Register::X0, Register::X1])
             .with_immediates(vec![0, 1])
@@ -568,14 +563,12 @@ mod tests {
         ];
         let live_out = LiveOut::from_registers(vec![Register::X0, Register::X2]);
 
-        // Override the SMT solver timeout (default 30s) to 200ms so a single
-        // in-flight Z3 query when the 50ms app-timeout fires can't dominate
-        // the worker-drain wall-clock. This is what made the wall-clock
-        // assertion below flake on busy CI runners and under cargo-llvm-cov.
+        // cores=1 + 200ms SMT cap bound post-timeout drain deterministically.
         let config = SearchConfig::default()
             .with_registers(vec![Register::X0, Register::X1, Register::X2])
             .with_immediates(vec![0, 1])
             .with_timeout(std::time::Duration::from_millis(50))
+            .with_cores(Some(1))
             .with_symbolic(
                 SymbolicConfig::default().with_timeout(std::time::Duration::from_millis(200)),
             );
@@ -585,13 +578,7 @@ mod tests {
         let result = search.search(&target, &live_out, &config);
         let elapsed = start.elapsed();
 
-        // Hard upper bound: the search must respect the timeout. With rayon
-        // (config.cores = None uses the global pool), in-flight workers
-        // continue past the stop signal until their current candidate finishes,
-        // so the effective drain time is bounded by the per-candidate SMT
-        // solver timeout above (200ms) rather than the 30s default. 10s is
-        // generous slack on top of that to absorb cargo-llvm-cov's 3-5x
-        // instrumentation overhead and noisy CI runners.
+        // 10s ceiling: 1 worker × 200ms drain × cargo-llvm-cov 3-5x ≈ 1s typical.
         assert!(
             elapsed < std::time::Duration::from_secs(10),
             "search ran for {:?}, expected < 10s under a 50ms timeout",
