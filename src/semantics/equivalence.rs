@@ -135,8 +135,17 @@ impl EquivalenceConfig {
     }
 
     /// Builder method to set live-out contract.
+    ///
+    /// Preserves any previously-set `flags_live` bit. Without this carry,
+    /// `.with_flags(true).live_out(LiveOut::from_registers(...))` would
+    /// silently drop NZCV-liveness because `from_registers` defaults
+    /// `flags_live` to `false` — a regression footgun introduced when
+    /// `flags_live` moved from `EquivalenceConfig` onto the mask (ADR-0004
+    /// §5). The OR-merge makes the builder order-independent: flags are
+    /// live if either the existing config OR the new mask says so.
     pub fn live_out(mut self, live_out: LiveOut) -> Self {
-        self.live_out = live_out;
+        let merged_flags = self.live_out.flags_live() || live_out.flags_live();
+        self.live_out = live_out.with_flags(merged_flags);
         self
     }
 
@@ -771,6 +780,33 @@ mod tests {
 
         let config = EquivalenceConfig::default().with_flags(false);
         assert!(!config.live_out.flags_live());
+    }
+
+    #[test]
+    fn aarch64_live_out_builder_preserves_flags_live() {
+        // Regression: with `flags_live` on the mask, the builder order
+        // `.with_flags(true).live_out(...)` used to silently drop the flag bit
+        // because `LiveOut::from_registers(...)` defaults `flags_live` to
+        // false. The builder must merge (OR) the prior flag state so flags
+        // stay live regardless of builder order.
+        let config = EquivalenceConfig::default()
+            .with_flags(true)
+            .live_out(LiveOut::from_registers(vec![Register::X0]));
+        assert!(
+            config.live_out.flags_live(),
+            "live_out() must preserve flags_live set by an earlier with_flags()"
+        );
+
+        // Reverse order (already known-good) still works.
+        let config = EquivalenceConfig::default()
+            .live_out(LiveOut::from_registers(vec![Register::X0]))
+            .with_flags(true);
+        assert!(config.live_out.flags_live());
+
+        // Explicit flags on the new mask propagate even with no prior with_flags.
+        let config = EquivalenceConfig::default()
+            .live_out(LiveOut::from_registers(vec![Register::X0]).with_flags(true));
+        assert!(config.live_out.flags_live());
     }
 
     #[test]
