@@ -3,8 +3,8 @@
 #![allow(dead_code)]
 
 use crate::ir::Register;
-use crate::ir::types::Condition;
-use std::collections::{HashMap, HashSet};
+use crate::ir::types::{AccessWidth, Condition};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fmt;
 
 /// NZCV condition flags (Negative, Zero, Carry, oVerflow)
@@ -258,6 +258,11 @@ pub struct ConcreteMachineState {
     registers: HashMap<Register, ConcreteValue>,
     flags: ConditionFlags,
     width: u32,
+    /// Sparse byte-addressed memory. Absent keys denote zero so that
+    /// structural equality of two states matches semantic equality (see
+    /// ADR-0007). `write_bytes` prunes zero entries to maintain that
+    /// invariant.
+    memory: BTreeMap<u64, u8>,
 }
 
 impl ConcreteMachineState {
@@ -283,6 +288,7 @@ impl ConcreteMachineState {
             registers,
             flags: ConditionFlags::new(),
             width,
+            memory: BTreeMap::new(),
         }
     }
 
@@ -331,6 +337,45 @@ impl ConcreteMachineState {
     /// Set the condition flags
     pub fn set_flags(&mut self, flags: ConditionFlags) {
         self.flags = flags;
+    }
+
+    /// Borrow the sparse memory map. Used by `states_equal_for_live_out`
+    /// to compare memory across two final states (see ADR-0007).
+    pub fn memory(&self) -> &BTreeMap<u64, u8> {
+        &self.memory
+    }
+
+    /// Read `width.bytes()` bytes starting at `addr`, little-endian, and
+    /// zero-extend into a u64. Absent keys denote zero.
+    pub fn read_bytes(&self, addr: u64, width: AccessWidth) -> u64 {
+        let n = width.bytes() as usize;
+        let mut value: u64 = 0;
+        for i in 0..n {
+            let byte = self
+                .memory
+                .get(&addr.wrapping_add(i as u64))
+                .copied()
+                .unwrap_or(0) as u64;
+            value |= byte << (8 * i);
+        }
+        value
+    }
+
+    /// Write `width.bytes()` low bytes of `value` to memory at `addr`,
+    /// little-endian. Zero bytes are pruned from the BTreeMap so that
+    /// structural equality continues to match semantic equality (absent
+    /// key = zero) — see ADR-0007.
+    pub fn write_bytes(&mut self, addr: u64, value: u64, width: AccessWidth) {
+        let n = width.bytes() as usize;
+        for i in 0..n {
+            let byte = ((value >> (8 * i)) & 0xff) as u8;
+            let key = addr.wrapping_add(i as u64);
+            if byte == 0 {
+                self.memory.remove(&key);
+            } else {
+                self.memory.insert(key, byte);
+            }
+        }
     }
 }
 
@@ -736,5 +781,77 @@ mod tests {
         assert!(f.cf, "borrow");
         assert!(f.sf, "32-bit MSB set");
         assert!(!f.zf);
+    }
+
+    // ---- Memory model (issue #68 step 5) ----
+
+    #[test]
+    fn read_bytes_returns_zero_on_fresh_state() {
+        use crate::ir::types::AccessWidth;
+        let state = ConcreteMachineState::new_zeroed();
+        assert_eq!(state.read_bytes(0x1000, AccessWidth::Extended), 0);
+        assert_eq!(state.read_bytes(0x1000, AccessWidth::Byte), 0);
+    }
+
+    #[test]
+    fn write_then_read_round_trips_at_each_width() {
+        use crate::ir::types::AccessWidth;
+        let mut state = ConcreteMachineState::new_zeroed();
+        state.write_bytes(0x1000, 0xDEADBEEF_CAFEBABE, AccessWidth::Extended);
+        assert_eq!(
+            state.read_bytes(0x1000, AccessWidth::Extended),
+            0xDEADBEEF_CAFEBABE
+        );
+
+        state.write_bytes(0x2000, 0x1234_5678, AccessWidth::Word);
+        assert_eq!(state.read_bytes(0x2000, AccessWidth::Word), 0x1234_5678);
+
+        state.write_bytes(0x3000, 0xAB, AccessWidth::Byte);
+        assert_eq!(state.read_bytes(0x3000, AccessWidth::Byte), 0xAB);
+    }
+
+    #[test]
+    fn write_is_little_endian() {
+        use crate::ir::types::AccessWidth;
+        let mut state = ConcreteMachineState::new_zeroed();
+        state.write_bytes(0x100, 0x0807_0605_0403_0201, AccessWidth::Extended);
+        // Byte at +0 holds the low byte (0x01); byte at +7 holds the high byte (0x08).
+        assert_eq!(state.read_bytes(0x100, AccessWidth::Byte), 0x01);
+        assert_eq!(state.read_bytes(0x107, AccessWidth::Byte), 0x08);
+    }
+
+    #[test]
+    fn overlapping_writes_resolve_per_byte() {
+        use crate::ir::types::AccessWidth;
+        let mut state = ConcreteMachineState::new_zeroed();
+        state.write_bytes(0x100, 0x0807_0605_0403_0201, AccessWidth::Extended);
+        // Overwrite bytes 2-3 with a half-word store.
+        state.write_bytes(0x102, 0xCAFE, AccessWidth::Half);
+        // The full 64-bit read sees the original bytes 0-1 and 4-7, plus the
+        // patched bytes at 2-3 (little-endian).
+        assert_eq!(
+            state.read_bytes(0x100, AccessWidth::Extended),
+            0x0807_0605_CAFE_0201
+        );
+    }
+
+    #[test]
+    fn write_of_zero_byte_prunes_entry() {
+        use crate::ir::types::AccessWidth;
+        let mut state = ConcreteMachineState::new_zeroed();
+        state.write_bytes(0x100, 0x1234_5678, AccessWidth::Word);
+        // Overwrite with zero — the BTreeMap entries should be removed so
+        // structural equality matches semantic equality (absent key = zero).
+        state.write_bytes(0x100, 0, AccessWidth::Word);
+        assert!(state.memory().is_empty(), "zero writes must prune");
+    }
+
+    #[test]
+    fn equality_of_states_is_structural_after_prune() {
+        use crate::ir::types::AccessWidth;
+        let mut a = ConcreteMachineState::new_zeroed();
+        let b = ConcreteMachineState::new_zeroed();
+        a.write_bytes(0x100, 0, AccessWidth::Word);
+        assert_eq!(a, b, "writing zeroes must not perturb structural equality");
     }
 }
