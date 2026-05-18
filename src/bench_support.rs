@@ -293,6 +293,34 @@ mod tests {
         }
     }
 
+    /// Smoke-test every shipped Hacker's Delight fixture: each must
+    /// parse via `load_sequence` without panicking. Catches typos in
+    /// the fixture set without depending on running the optimizer.
+    #[test]
+    fn every_phase1_fixture_parses() {
+        let manifest_dir = env!("CARGO_MANIFEST_DIR");
+        let dir = std::path::Path::new(manifest_dir).join("benches/hackers_delight");
+        let entries: Vec<_> = std::fs::read_dir(&dir)
+            .expect("benches/hackers_delight must exist")
+            .filter_map(Result::ok)
+            .filter(|e| e.path().extension().is_some_and(|x| x == "s"))
+            .collect();
+        assert!(
+            entries.len() >= 15,
+            "expected at least 15 Phase 1 fixtures, found {}",
+            entries.len()
+        );
+        for entry in entries {
+            let path = entry.path();
+            let (seq, _live_out, _flags_live) = load_sequence(&path);
+            assert!(
+                !seq.is_empty(),
+                "fixture {} parsed to an empty sequence",
+                path.display()
+            );
+        }
+    }
+
     #[test]
     fn run_bench_enumerative_records_metrics_for_fusible_target() {
         // `mov x0, x1; add x0, x0, #1` collapses into `add x0, x1, #1`
