@@ -296,7 +296,19 @@ fn run_fast_path(
     config: &EquivalenceConfig,
 ) -> Option<EquivalenceResult> {
     let live_out_registers = config.live_out.registers();
-    let input_regs = fast_path_input_registers(live_out_registers, seq1, seq2);
+    // Under `fast_only`, the SMT path that would otherwise catch divergences
+    // depending on source registers outside `live_out` is skipped — extend
+    // the random-input mask to cover seq1+seq2 source registers so e.g.
+    // `tst x1, #1` vs `tst x1, #2` is caught under `--live-out ';nzcv'
+    // --fast-only`. Otherwise stay with the live-out-only mask: the SMT
+    // path is authoritative (operates on symbolic inputs), and the larger
+    // mask measurably increases per-call cost in search algorithms which
+    // run check_equivalence on thousands of candidates.
+    let input_regs: Vec<crate::ir::Register> = if config.fast_only {
+        fast_path_input_registers(live_out_registers, seq1, seq2)
+    } else {
+        live_out_registers.iter().cloned().collect()
+    };
 
     let random_config = RandomInputConfig {
         count: config.random_test_count,
