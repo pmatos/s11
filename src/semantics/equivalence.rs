@@ -308,6 +308,7 @@ fn fast_path_initial_nzcv_variants(
     let variant_regs_config = RandomInputConfig {
         count: 16,
         registers: input_regs.to_vec(),
+        memory_seed_size: 0,
     };
     let mut variants = generate_random_inputs(&variant_regs_config);
     for (i, input) in variants.iter_mut().enumerate() {
@@ -344,9 +345,18 @@ fn run_fast_path(
         live_out_registers.iter().cloned().collect()
     };
 
+    // Seed memory when either sequence touches it, so that LDR observations
+    // during the fast-random pass return non-trivial values. See ADR-0007.
+    let touches_mem = crate::validation::live_out::touches_memory(seq1)
+        || crate::validation::live_out::touches_memory(seq2);
     let random_config = RandomInputConfig {
         count: config.random_test_count,
         registers: input_regs.clone(),
+        memory_seed_size: if touches_mem {
+            crate::validation::random::MEMORY_SEED_SIZE
+        } else {
+            0
+        },
     };
     let random_inputs = generate_random_inputs(&random_config);
 
@@ -604,9 +614,16 @@ pub fn find_counterexample_concrete(
     let live_out_registers = &config.live_out;
     let input_regs: Vec<_> = live_out_registers.iter().cloned().collect();
 
+    let touches_mem = crate::validation::live_out::touches_memory(seq1)
+        || crate::validation::live_out::touches_memory(seq2);
     let random_config = RandomInputConfig {
         count: config.random_test_count,
         registers: input_regs.clone(),
+        memory_seed_size: if touches_mem {
+            crate::validation::random::MEMORY_SEED_SIZE
+        } else {
+            0
+        },
     };
     let random_inputs = generate_random_inputs(&random_config);
 
