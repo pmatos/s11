@@ -428,7 +428,7 @@ struct OptimizationOptions {
 // `optimize_elf_binary_x86` still drives `find_shorter_equivalent_x86`
 // over `X86Instruction` directly.
 fn optimize_elf_binary(
-    elf_patcher: &ElfPatcher,
+    patcher: &ElfPatcher,
     path: &Path,
     start_addr: u64,
     end_addr: u64,
@@ -444,11 +444,11 @@ fn optimize_elf_binary(
         end: end_addr,
     };
 
-    let section = elf_patcher.validate_address_window(&window)?;
+    let section = patcher.validate_address_window(&window)?;
     println!("Window is within section: {}", section.name);
 
     // Get the original instructions in the window
-    let original_bytes = elf_patcher.get_instructions_in_window(&window)?;
+    let original_bytes = patcher.get_instructions_in_window(&window)?;
     println!("Original code: {} bytes", original_bytes.len());
 
     // Initialize Capstone disassembler
@@ -523,7 +523,7 @@ fn optimize_elf_binary(
     };
 
     // Create patched ELF file
-    elf_patcher.create_patched_copy(&output_path, &window, &assembled_bytes)?;
+    patcher.create_patched_copy(&output_path, &window, &assembled_bytes)?;
     println!("Created optimized binary: {}", output_path.display());
 
     Ok(())
