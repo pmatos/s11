@@ -489,12 +489,9 @@ fn parse_subs(operands: &[&str]) -> Result<Instruction, String> {
 
 /// Parse ANDS instruction (register-only rm)
 fn parse_ands(operands: &[&str]) -> Result<Instruction, String> {
-    if operands.len() != 3 {
-        return Err(format!("ands requires 3 operands, got {}", operands.len()));
-    }
+    let rm = parse_rm_3op("ands", operands)?;
     let rd = parse_register(operands[0])?;
     let rn = parse_register(operands[1])?;
-    let rm = Operand::Register(parse_register(operands[2])?);
     Ok(Instruction::Ands { rd, rn, rm })
 }
 
@@ -1726,6 +1723,11 @@ mod tests {
         // the encodability check. Valid bitmask values (e.g., #1) are accepted.
         assert!(parse_line("and x0, x1, #1").is_ok());
         assert!(parse_line("and x0, x1, #5").is_err());
+
+        // ANDS immediate must reach the encoder via the parser so Capstone
+        // disassembly of an ELF region containing `ands x?, x?, #imm` round-trips.
+        assert!(parse_line("ands x0, x1, #0xff").is_ok());
+        assert!(parse_line("ands x0, x1, #5").is_err());
     }
 
     // Full assembly parsing tests
