@@ -100,10 +100,10 @@ fn bv_zero() -> BV {
 fn parity8_bv(result: &BV) -> BV {
     let mut acc = result.extract(0, 0);
     for i in 1..8u32 {
-        acc = acc.bvxor(&result.extract(i, i));
+        acc = acc.bvxor(result.extract(i, i));
     }
     // PF = 1 iff XOR-reduction == 0 (even number of set bits).
-    acc.eq(&bv_zero()).ite(&bv_one(), &bv_zero())
+    acc.eq(bv_zero()).ite(&bv_one(), &bv_zero())
 }
 
 /// Top bit of `value` as a 1-bit BV (SF flag).
@@ -113,7 +113,7 @@ fn top_bit_bv(value: &BV, width: u32) -> BV {
 
 /// Zero predicate of `value` as a 1-bit BV (ZF flag).
 fn is_zero_bv(value: &BV, width: u32) -> BV {
-    value.eq(&BV::from_u64(0, width)).ite(&bv_one(), &bv_zero())
+    value.eq(BV::from_u64(0, width)).ite(&bv_one(), &bv_zero())
 }
 
 /// Translate an `X86Condition` into a symbolic `Bool` predicate over
@@ -401,7 +401,7 @@ mod tests {
         // Z3 should be able to prove rax == 12.
         let solver = Solver::new();
         let actual = s1.get_register(X86Register::RAX);
-        solver.assert(&actual.eq(&BV::from_i64(12, 64)).not());
+        solver.assert(actual.eq(BV::from_i64(12, 64)).not());
         // If the negation is unsatisfiable, the original equality is a theorem.
         assert_eq!(solver.check(), SatResult::Unsat);
     }
@@ -419,7 +419,7 @@ mod tests {
         );
         let solver = Solver::new();
         let actual = s1.get_register(X86Register::RAX);
-        solver.assert(&actual.eq(&BV::from_i64(0, 64)).not());
+        solver.assert(actual.eq(BV::from_i64(0, 64)).not());
         assert_eq!(solver.check(), SatResult::Unsat);
     }
 
@@ -435,7 +435,7 @@ mod tests {
             },
         );
         let solver = Solver::new();
-        solver.assert(&s1.get_register(X86Register::RAX).eq(&rax_before).not());
+        solver.assert(s1.get_register(X86Register::RAX).eq(&rax_before).not());
         assert_eq!(
             solver.check(),
             SatResult::Unsat,
@@ -466,7 +466,7 @@ mod tests {
         let eq_regs = rax.eq(&rbx);
         let eq_zf = zf.eq(&zf_one);
         let iff = eq_zf.iff(&eq_regs);
-        solver.assert(&iff.not());
+        solver.assert(iff.not());
         assert_eq!(
             solver.check(),
             SatResult::Unsat,
@@ -493,7 +493,7 @@ mod tests {
         let unsigned_lt = rax.bvult(&rbx);
         let eq_cf = cf.eq(&cf_one);
         let iff = eq_cf.iff(&unsigned_lt);
-        solver.assert(&iff.not());
+        solver.assert(iff.not());
         assert_eq!(
             solver.check(),
             SatResult::Unsat,
@@ -524,7 +524,7 @@ mod tests {
         let zf_one = BV::from_u64(1, 1);
         let expected = zf_init.eq(&zf_one).ite(&rbx_init, &rax_init);
         let solver = Solver::new();
-        solver.assert(&rax_after.eq(&expected).not());
+        solver.assert(rax_after.eq(&expected).not());
         assert_eq!(
             solver.check(),
             SatResult::Unsat,
@@ -548,7 +548,7 @@ mod tests {
         let zero = BV::from_u64(0, 1);
         let one = BV::from_u64(1, 1);
         let solver = Solver::new();
-        solver.assert(&z3::ast::Bool::or(&[
+        solver.assert(z3::ast::Bool::or(&[
             &cf.eq(&zero).not(),
             &of.eq(&zero).not(),
             &zf.eq(&one).not(),
@@ -580,7 +580,7 @@ mod tests {
         let solver = Solver::new();
         let sum_zero = rax_init.bvadd(&rbx_init).eq(&zero);
         let iff = zf.eq(&zf_one).iff(&sum_zero);
-        solver.assert(&iff.not());
+        solver.assert(iff.not());
         assert_eq!(solver.check(), SatResult::Unsat);
     }
 
@@ -602,7 +602,7 @@ mod tests {
         let solver = Solver::new();
         let borrow = rax_init.bvult(&rbx_init);
         let iff = cf.eq(&cf_one).iff(&borrow);
-        solver.assert(&iff.not());
+        solver.assert(iff.not());
         assert_eq!(solver.check(), SatResult::Unsat);
     }
 
@@ -621,14 +621,14 @@ mod tests {
         let symbolic_pre = MachineStateX86::new_symbolic("pre", 64);
         let solver = Solver::new();
         solver.assert(
-            &symbolic_pre
+            symbolic_pre
                 .get_register(X86Register::RAX)
-                .eq(&BV::from_u64(lhs, 64)),
+                .eq(BV::from_u64(lhs, 64)),
         );
         solver.assert(
-            &symbolic_pre
+            symbolic_pre
                 .get_register(X86Register::RBX)
-                .eq(&BV::from_u64(rhs, 64)),
+                .eq(BV::from_u64(rhs, 64)),
         );
         let symbolic_post = apply_instruction(symbolic_pre, instr);
 
@@ -637,18 +637,18 @@ mod tests {
         let one_bit = |b: bool| BV::from_u64(b as u64, 1);
         let (cf_s, pf_s, zf_s, sf_s, of_s) = symbolic_post.get_flags();
         let mut diffs: Vec<z3::ast::Bool> = vec![
-            cf_s.eq(&one_bit(cf_post.cf)).not(),
-            pf_s.eq(&one_bit(cf_post.pf)).not(),
-            zf_s.eq(&one_bit(cf_post.zf)).not(),
-            sf_s.eq(&one_bit(cf_post.sf)).not(),
-            of_s.eq(&one_bit(cf_post.of)).not(),
+            cf_s.eq(one_bit(cf_post.cf)).not(),
+            pf_s.eq(one_bit(cf_post.pf)).not(),
+            zf_s.eq(one_bit(cf_post.zf)).not(),
+            sf_s.eq(one_bit(cf_post.sf)).not(),
+            of_s.eq(one_bit(cf_post.of)).not(),
         ];
         if let Some(rd) = instr.destination() {
             let expected = BV::from_u64(concrete_post.get_register(rd).as_u64(), 64);
             diffs.push(symbolic_post.get_register(rd).eq(&expected).not());
         }
         let refs: Vec<&z3::ast::Bool> = diffs.iter().collect();
-        solver.assert(&z3::ast::Bool::or(&refs));
+        solver.assert(z3::ast::Bool::or(&refs));
         assert_eq!(
             solver.check(),
             SatResult::Unsat,
