@@ -563,4 +563,47 @@ mod tests {
             "second pad should be the canonical 8-byte Intel NOP",
         );
     }
+
+    #[test]
+    fn elf_patcher_does_not_reread_file_after_construction() {
+        // Pins the invariant the issue-88 dispatch refactor relies on:
+        // once an ElfPatcher is constructed, every accessor it exposes serves
+        // data from the in-memory buffer rather than reopening the file.
+        // Callers (the `s11 opt` dispatch) can therefore construct the patcher
+        // once and thread it into the per-arch helpers without paying for a
+        // second `fs::read` + `ElfBytes::minimal_parse`.
+        use crate::test_utils::TempFile;
+
+        let text_vaddr: u64 = 0x100000;
+        let text_bytes = [0xc3u8; 8];
+        let elf_bytes = build_minimal_x86_64_elf(&text_bytes, text_vaddr);
+
+        let input = TempFile::new_bytes("s11-elf-no-reread", "elf", &elf_bytes);
+        let saved_path = input.path().to_path_buf();
+        let patcher = ElfPatcher::new(&saved_path).expect("patcher should accept minimal ELF");
+
+        std::fs::remove_file(&saved_path).expect("remove input before exercising patcher");
+        assert!(
+            !saved_path.exists(),
+            "precondition: input file removed so any disk read would fail",
+        );
+
+        assert_eq!(patcher.arch(), DetectedArch::X86_64);
+
+        let window = AddressWindow {
+            start: text_vaddr,
+            end: text_vaddr + 8,
+        };
+        let section = patcher
+            .validate_address_window(&window)
+            .expect("validate should not reopen the file");
+        assert_eq!(section.virtual_addr, text_vaddr);
+
+        let bytes = patcher
+            .get_instructions_in_window(&window)
+            .expect("get_instructions should not reopen the file");
+        assert_eq!(bytes, text_bytes.to_vec());
+
+        // TempFile::drop tolerates a missing file (test_utils.rs:33-37).
+    }
 }
