@@ -572,19 +572,246 @@ impl crate::isa::traits::Assembler<X86Instruction> for X86_32 {
     }
 }
 
-/// Stub x86 mutator (#77 stage 1 step 10). Returns its input unchanged; the
-/// real x86 mutator body lands in stage 2 step 17 when x86 stochastic search
-/// is wired through the trait surface.
-#[derive(Debug, Default, Clone)]
-pub struct X86Mutator;
+/// x86 mutator for stochastic search. Carries a filtered register pool
+/// (Mode32 excludes R8-R15 once at construction), an immediate pool and
+/// the four operator weights borrowed from the AArch64 `Mutator`.
+///
+/// **Destructive-form invariant** (`src/isa/x86.rs:150-158`): every
+/// non-MOV variant has `rd` in `source_registers()`. Mutating any
+/// single operand slot preserves this — there is no path that
+/// "splits" rd and rs into a shape that drops a source.
+///
+/// `Default` yields the x86-64 / 8-register baseline so
+/// `<X86_64 as ISA>::Mutator = X86Mutator` produces a usable instance
+/// from `X86Mutator::default()` if a caller has nothing better.
+#[derive(Debug, Clone)]
+pub struct X86Mutator {
+    registers: Vec<X86Register>,
+    immediates: Vec<i64>,
+    weights: crate::search::config::MutationWeights,
+    mode: crate::assembler::x86::X86Mode,
+}
+
+impl X86Mutator {
+    /// Construct a mutator with explicit pools, weights, and mode.
+    /// Mode32 filters R8-R15 out of `registers` once here so downstream
+    /// mutation cannot reintroduce extended registers.
+    pub fn new(
+        registers: Vec<X86Register>,
+        immediates: Vec<i64>,
+        weights: crate::search::config::MutationWeights,
+        mode: crate::assembler::x86::X86Mode,
+    ) -> Self {
+        let registers = registers
+            .into_iter()
+            .filter(|r| {
+                mode != crate::assembler::x86::X86Mode::Mode32
+                    || matches!(r.index(), Some(i) if i < 8)
+            })
+            .collect();
+        Self {
+            registers,
+            immediates,
+            weights,
+            mode,
+        }
+    }
+
+    fn pick_register<R: rand::RngExt>(&self, rng: &mut R) -> X86Register {
+        if self.registers.is_empty() {
+            X86Register::RAX
+        } else {
+            self.registers[rng.random_range(0..self.registers.len())]
+        }
+    }
+
+    fn pick_immediate<R: rand::RngExt>(&self, rng: &mut R) -> i64 {
+        if self.immediates.is_empty() {
+            0
+        } else {
+            self.immediates[rng.random_range(0..self.immediates.len())]
+        }
+    }
+
+    fn random_instruction<R: rand::RngExt>(&self, rng: &mut R) -> X86Instruction {
+        // 14 variants: 7 reg-reg + 7 reg-imm.
+        let opcode = rng.random_range(0..14u32);
+        let rd = self.pick_register(rng);
+        let rs = self.pick_register(rng);
+        let imm = self.pick_immediate(rng);
+        match opcode {
+            0 => X86Instruction::MovReg { rd, rs },
+            1 => X86Instruction::MovImm { rd, imm },
+            2 => X86Instruction::AddReg { rd, rs },
+            3 => X86Instruction::AddImm { rd, imm },
+            4 => X86Instruction::SubReg { rd, rs },
+            5 => X86Instruction::SubImm { rd, imm },
+            6 => X86Instruction::AndReg { rd, rs },
+            7 => X86Instruction::AndImm { rd, imm },
+            8 => X86Instruction::OrReg { rd, rs },
+            9 => X86Instruction::OrImm { rd, imm },
+            10 => X86Instruction::XorReg { rd, rs },
+            11 => X86Instruction::XorImm { rd, imm },
+            12 => X86Instruction::CmpReg { rn: rd, rs },
+            _ => X86Instruction::CmpImm { rn: rd, imm },
+        }
+    }
+
+    fn mutate_operand<R: rand::RngExt>(&self, rng: &mut R, sequence: &mut [X86Instruction]) {
+        if sequence.is_empty() {
+            return;
+        }
+        let idx = rng.random_range(0..sequence.len());
+        match &mut sequence[idx] {
+            X86Instruction::MovReg { rd, rs } => {
+                if rng.random_bool(0.5) {
+                    *rd = self.pick_register(rng);
+                } else {
+                    *rs = self.pick_register(rng);
+                }
+            }
+            X86Instruction::MovImm { rd, imm } => {
+                if rng.random_bool(0.5) {
+                    *rd = self.pick_register(rng);
+                } else {
+                    *imm = self.pick_immediate(rng);
+                }
+            }
+            X86Instruction::AddReg { rd, rs }
+            | X86Instruction::SubReg { rd, rs }
+            | X86Instruction::AndReg { rd, rs }
+            | X86Instruction::OrReg { rd, rs }
+            | X86Instruction::XorReg { rd, rs } => {
+                if rng.random_bool(0.5) {
+                    *rd = self.pick_register(rng);
+                } else {
+                    *rs = self.pick_register(rng);
+                }
+            }
+            X86Instruction::AddImm { rd, imm }
+            | X86Instruction::SubImm { rd, imm }
+            | X86Instruction::AndImm { rd, imm }
+            | X86Instruction::OrImm { rd, imm }
+            | X86Instruction::XorImm { rd, imm } => {
+                if rng.random_bool(0.5) {
+                    *rd = self.pick_register(rng);
+                } else {
+                    *imm = self.pick_immediate(rng);
+                }
+            }
+            X86Instruction::CmpReg { rn, rs } => {
+                if rng.random_bool(0.5) {
+                    *rn = self.pick_register(rng);
+                } else {
+                    *rs = self.pick_register(rng);
+                }
+            }
+            X86Instruction::CmpImm { rn, imm } => {
+                if rng.random_bool(0.5) {
+                    *rn = self.pick_register(rng);
+                } else {
+                    *imm = self.pick_immediate(rng);
+                }
+            }
+        }
+    }
+
+    /// Swap the variant of a randomly-chosen instruction while keeping
+    /// its operand shape (reg-reg → reg-reg, reg-imm → reg-imm). CMP
+    /// has no rd so CMP variants stay within CMP.
+    fn mutate_opcode<R: rand::RngExt>(&self, rng: &mut R, sequence: &mut [X86Instruction]) {
+        if sequence.is_empty() {
+            return;
+        }
+        let idx = rng.random_range(0..sequence.len());
+        let current = sequence[idx];
+        sequence[idx] = match current {
+            X86Instruction::MovReg { rd, rs }
+            | X86Instruction::AddReg { rd, rs }
+            | X86Instruction::SubReg { rd, rs }
+            | X86Instruction::AndReg { rd, rs }
+            | X86Instruction::OrReg { rd, rs }
+            | X86Instruction::XorReg { rd, rs } => match rng.random_range(0..6u32) {
+                0 => X86Instruction::MovReg { rd, rs },
+                1 => X86Instruction::AddReg { rd, rs },
+                2 => X86Instruction::SubReg { rd, rs },
+                3 => X86Instruction::AndReg { rd, rs },
+                4 => X86Instruction::OrReg { rd, rs },
+                _ => X86Instruction::XorReg { rd, rs },
+            },
+            X86Instruction::MovImm { rd, imm }
+            | X86Instruction::AddImm { rd, imm }
+            | X86Instruction::SubImm { rd, imm }
+            | X86Instruction::AndImm { rd, imm }
+            | X86Instruction::OrImm { rd, imm }
+            | X86Instruction::XorImm { rd, imm } => match rng.random_range(0..6u32) {
+                0 => X86Instruction::MovImm { rd, imm },
+                1 => X86Instruction::AddImm { rd, imm },
+                2 => X86Instruction::SubImm { rd, imm },
+                3 => X86Instruction::AndImm { rd, imm },
+                4 => X86Instruction::OrImm { rd, imm },
+                _ => X86Instruction::XorImm { rd, imm },
+            },
+            X86Instruction::CmpReg { .. } | X86Instruction::CmpImm { .. } => current,
+        };
+    }
+
+    fn mutate_swap<R: rand::RngExt>(&self, rng: &mut R, sequence: &mut [X86Instruction]) {
+        if sequence.len() < 2 {
+            return;
+        }
+        let a = rng.random_range(0..sequence.len());
+        let mut b = rng.random_range(0..sequence.len());
+        while b == a {
+            b = rng.random_range(0..sequence.len());
+        }
+        sequence.swap(a, b);
+    }
+
+    fn mutate_instruction<R: rand::RngExt>(&self, rng: &mut R, sequence: &mut [X86Instruction]) {
+        if sequence.is_empty() {
+            return;
+        }
+        let idx = rng.random_range(0..sequence.len());
+        sequence[idx] = self.random_instruction(rng);
+    }
+}
+
+impl Default for X86Mutator {
+    fn default() -> Self {
+        Self::new(
+            (0..8u8).filter_map(X86Register::from_index).collect(),
+            vec![
+                0, 1, 2, 3, 4, 5, 7, 8, 10, 15, 16, 31, 32, 63, 64, 100, 255, 256, 1000, 4095,
+            ],
+            crate::search::config::MutationWeights::default(),
+            crate::assembler::x86::X86Mode::Mode64,
+        )
+    }
+}
 
 impl crate::isa::traits::ISAMutator<X86Instruction> for X86Mutator {
     fn mutate<R: rand::RngExt>(
         &self,
-        _rng: &mut R,
+        rng: &mut R,
         sequence: &[X86Instruction],
     ) -> Vec<X86Instruction> {
-        sequence.to_vec()
+        if sequence.is_empty() {
+            return sequence.to_vec();
+        }
+        let mut out = sequence.to_vec();
+        let thresholds = self.weights.cumulative_thresholds();
+        let r: f64 = rng.random();
+        if r < thresholds[0] {
+            self.mutate_operand(rng, &mut out);
+        } else if r < thresholds[1] {
+            self.mutate_opcode(rng, &mut out);
+        } else if r < thresholds[2] {
+            self.mutate_swap(rng, &mut out);
+        } else {
+            self.mutate_instruction(rng, &mut out);
+        }
+        out
     }
 }
 
@@ -1174,5 +1401,178 @@ mod tests {
         }
         assert!(X86Register::from_index(16).is_none());
         assert!(X86Register::from_index(255).is_none());
+    }
+
+    // ---- X86Mutator (issue #73 Phase B) ----
+
+    #[test]
+    fn x86_mutator_eventually_changes_the_sequence() {
+        use crate::isa::traits::ISAMutator;
+        use crate::search::candidate_x86::{default_x86_immediates, default_x86_registers};
+        use crate::search::config::MutationWeights;
+        use rand::SeedableRng;
+        use rand_chacha::ChaCha8Rng;
+
+        let mutator = X86Mutator::new(
+            default_x86_registers(),
+            default_x86_immediates(),
+            MutationWeights::default(),
+            crate::assembler::x86::X86Mode::Mode64,
+        );
+        let target = vec![X86Instruction::MovImm {
+            rd: X86Register::RAX,
+            imm: 0,
+        }];
+        let mut rng = ChaCha8Rng::seed_from_u64(7);
+        let mut changed = false;
+        for _ in 0..200 {
+            let mutated = mutator.mutate(&mut rng, &target);
+            if mutated != target {
+                changed = true;
+                break;
+            }
+        }
+        assert!(
+            changed,
+            "200 mutations produced no change \u{2014} stub still wired?"
+        );
+    }
+
+    #[test]
+    fn x86_mutator_preserves_sequence_length() {
+        use crate::isa::traits::ISAMutator;
+        use crate::search::candidate_x86::{default_x86_immediates, default_x86_registers};
+        use crate::search::config::MutationWeights;
+        use rand::SeedableRng;
+        use rand_chacha::ChaCha8Rng;
+
+        let mutator = X86Mutator::new(
+            default_x86_registers(),
+            default_x86_immediates(),
+            MutationWeights::default(),
+            crate::assembler::x86::X86Mode::Mode64,
+        );
+        let target = vec![
+            X86Instruction::MovImm {
+                rd: X86Register::RAX,
+                imm: 0,
+            },
+            X86Instruction::AddReg {
+                rd: X86Register::RAX,
+                rs: X86Register::RBX,
+            },
+            X86Instruction::CmpImm {
+                rn: X86Register::RAX,
+                imm: 5,
+            },
+        ];
+        for seed in 0..50u64 {
+            let mut rng = ChaCha8Rng::seed_from_u64(seed);
+            let mutated = mutator.mutate(&mut rng, &target);
+            assert_eq!(
+                mutated.len(),
+                target.len(),
+                "seed {} changed sequence length",
+                seed
+            );
+        }
+    }
+
+    #[test]
+    fn x86_mutator_mode32_never_emits_extended_registers() {
+        use crate::isa::traits::{ISAMutator, InstructionType};
+        use crate::search::config::MutationWeights;
+        use rand::SeedableRng;
+        use rand_chacha::ChaCha8Rng;
+
+        // Pool deliberately includes R8-R15 to verify Mode32 filters
+        // them out at construction time.
+        let pool = vec![
+            X86Register::RAX,
+            X86Register::RCX,
+            X86Register::R8,
+            X86Register::R9,
+            X86Register::R15,
+        ];
+        let mutator = X86Mutator::new(
+            pool,
+            vec![0i64, 1],
+            MutationWeights::default(),
+            crate::assembler::x86::X86Mode::Mode32,
+        );
+        let mut rng = ChaCha8Rng::seed_from_u64(42);
+        let mut seq = vec![X86Instruction::MovImm {
+            rd: X86Register::RAX,
+            imm: 0,
+        }];
+        for _ in 0..500 {
+            seq = mutator.mutate(&mut rng, &seq);
+            for instr in &seq {
+                if let Some(rd) = instr.destination() {
+                    assert!(
+                        matches!(rd.index(), Some(i) if i < 8),
+                        "Mode32 produced extended rd {:?}",
+                        rd
+                    );
+                }
+                for rs in instr.source_registers() {
+                    assert!(
+                        matches!(rs.index(), Some(i) if i < 8),
+                        "Mode32 produced extended rs {:?}",
+                        rs
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn x86_mutator_destructive_form_invariant() {
+        // For every destructive variant (non-MOV, non-CMP that writes
+        // rd), `rd` must appear in `source_registers()` per
+        // src/isa/x86.rs:228-245. The mutator must preserve that.
+        use crate::isa::traits::{ISAMutator, InstructionType};
+        use crate::search::candidate_x86::{default_x86_immediates, default_x86_registers};
+        use crate::search::config::MutationWeights;
+        use rand::SeedableRng;
+        use rand_chacha::ChaCha8Rng;
+
+        let mutator = X86Mutator::new(
+            default_x86_registers(),
+            default_x86_immediates(),
+            MutationWeights::default(),
+            crate::assembler::x86::X86Mode::Mode64,
+        );
+        let seed_target = vec![X86Instruction::AddReg {
+            rd: X86Register::RAX,
+            rs: X86Register::RBX,
+        }];
+        let mut rng = ChaCha8Rng::seed_from_u64(99);
+        let mut seq = seed_target;
+        for _ in 0..300 {
+            seq = mutator.mutate(&mut rng, &seq);
+            for instr in &seq {
+                let destructive = matches!(
+                    instr,
+                    X86Instruction::AddReg { .. }
+                        | X86Instruction::SubReg { .. }
+                        | X86Instruction::AndReg { .. }
+                        | X86Instruction::OrReg { .. }
+                        | X86Instruction::XorReg { .. }
+                        | X86Instruction::AddImm { .. }
+                        | X86Instruction::SubImm { .. }
+                        | X86Instruction::AndImm { .. }
+                        | X86Instruction::OrImm { .. }
+                        | X86Instruction::XorImm { .. }
+                );
+                if destructive && let Some(rd) = instr.destination() {
+                    assert!(
+                        instr.source_registers().contains(&rd),
+                        "destructive {:?} dropped rd from sources",
+                        instr
+                    );
+                }
+            }
+        }
     }
 }
