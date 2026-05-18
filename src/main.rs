@@ -1080,10 +1080,117 @@ fn find_shorter_equivalent_x86(
     None
 }
 
+/// Run x86 stochastic search and return the optimized sequence if any.
+/// Width selects between `X86_64` and `X86_32` backends. Read live-out
+/// from the target via `validation::live_out::x86_live_out_from_target`
+/// (issue #73 Phase 1) so EFLAGS liveness is honoured when the target
+/// contains a flag-writer.
+fn run_x86_stochastic(
+    target: &[isa::x86::X86Instruction],
+    width: u32,
+    options: &OptimizationOptions,
+) -> Option<Vec<isa::x86::X86Instruction>> {
+    use search::SearchAlgorithm;
+    use search::stochastic::StochasticSearch;
+    use validation::live_out::x86_live_out_from_target;
+
+    let stochastic_config = search::config::StochasticConfig::default()
+        .with_beta(options.beta)
+        .with_iterations(options.iterations)
+        .with_seed_option(options.seed);
+    let config = search::config::SearchConfig::default()
+        .with_stochastic(stochastic_config)
+        .with_cost_metric(options.cost_metric)
+        .with_timeout_option(options.timeout)
+        .with_verbose(options.verbose)
+        .with_x86_registers(search::candidate_x86::default_x86_registers())
+        .with_immediates(search::candidate_x86::default_x86_immediates())
+        .with_x86_width(width);
+    let live_out = x86_live_out_from_target(target);
+
+    // Extract (optimized, statistics) in each width branch separately:
+    // the two `SearchResultFor<X86_64>` / `SearchResultFor<X86_32>`
+    // types are not the same, so the `if/else` must produce a
+    // width-agnostic tuple.
+    let (optimized, statistics) = if width == 32 {
+        let mut search: StochasticSearch<isa::X86_32> = StochasticSearch::new();
+        let result = search.search(target, &live_out, &config);
+        (
+            result
+                .found_optimization
+                .then_some(result.optimized_sequence)
+                .flatten(),
+            result.statistics,
+        )
+    } else {
+        let mut search: StochasticSearch<isa::X86_64> = StochasticSearch::new();
+        let result = search.search(target, &live_out, &config);
+        (
+            result
+                .found_optimization
+                .then_some(result.optimized_sequence)
+                .flatten(),
+            result.statistics,
+        )
+    };
+    print_search_statistics(&statistics);
+    optimized
+}
+
+/// Run x86 symbolic (SMT) search and return the optimized sequence if
+/// any. Same width / live-out handling as `run_x86_stochastic`.
+fn run_x86_symbolic(
+    target: &[isa::x86::X86Instruction],
+    width: u32,
+    options: &OptimizationOptions,
+) -> Option<Vec<isa::x86::X86Instruction>> {
+    use search::SearchAlgorithm;
+    use search::symbolic::SymbolicSearch;
+    use validation::live_out::x86_live_out_from_target;
+
+    let symbolic_config = search::config::SymbolicConfig::default()
+        .with_search_mode(options.search_mode)
+        .with_timeout(options.solver_timeout);
+    let config = search::config::SearchConfig::default()
+        .with_symbolic(symbolic_config)
+        .with_cost_metric(options.cost_metric)
+        .with_timeout_option(options.timeout)
+        .with_verbose(options.verbose)
+        .with_x86_registers(search::candidate_x86::default_x86_registers())
+        .with_immediates(search::candidate_x86::default_x86_immediates())
+        .with_x86_width(width);
+    let live_out = x86_live_out_from_target(target);
+
+    let (optimized, statistics) = if width == 32 {
+        let mut search: SymbolicSearch<isa::X86_32> = SymbolicSearch::new();
+        let result = search.search(target, &live_out, &config);
+        (
+            result
+                .found_optimization
+                .then_some(result.optimized_sequence)
+                .flatten(),
+            result.statistics,
+        )
+    } else {
+        let mut search: SymbolicSearch<isa::X86_64> = SymbolicSearch::new();
+        let result = search.search(target, &live_out, &config);
+        (
+            result
+                .found_optimization
+                .then_some(result.optimized_sequence)
+                .flatten(),
+            result.statistics,
+        )
+    };
+    print_search_statistics(&statistics);
+    optimized
+}
+
 fn optimize_elf_binary_x86(
     path: &Path,
     start_addr: u64,
     end_addr: u64,
+    options: &OptimizationOptions,
 ) -> Result<(), Box<dyn std::error::Error>> {
     use elf_patcher::{AddressWindow, DetectedArch};
 
@@ -1162,7 +1269,16 @@ fn optimize_elf_binary_x86(
         println!("  {}", instr);
     }
 
-    let optimized = find_shorter_equivalent_x86(&ir, width);
+    let optimized = match options.algorithm {
+        Algorithm::Enumerative => find_shorter_equivalent_x86(&ir, width),
+        Algorithm::Stochastic => run_x86_stochastic(&ir, width, options),
+        Algorithm::Symbolic => run_x86_symbolic(&ir, width, options),
+        Algorithm::Hybrid | Algorithm::Llm => {
+            // Rejected upstream at the CLI layer; defensive check here
+            // in case a programmatic caller bypasses it.
+            return Err("hybrid and llm are AArch64-only".into());
+        }
+    };
     let Some(final_ir) = optimized else {
         // Without a shorter sequence to substitute there is nothing to
         // patch. Round-tripping the original IR through dynasm could
@@ -1467,35 +1583,35 @@ fn main() {
                 }
             }
             let is_x86 = matches!(cli_arch, CliArch::X86_64 | CliArch::X86_32);
-            if is_x86 && !matches!(algorithm, CliAlgorithm::Enumerative) {
+            // Issue #73: x86 now supports enumerative + stochastic +
+            // symbolic. Hybrid and LLM remain AArch64-only (the parallel
+            // coordinator is still AArch64-typed per #77 stage 2 step 12
+            // deferral; the LLM path is AArch64-only by design per
+            // ADR-0004 decision 3).
+            if is_x86 && matches!(algorithm, CliAlgorithm::Hybrid | CliAlgorithm::Llm) {
                 eprintln!(
-                    "x86 only supports --algorithm enumerative in this release; \
-                     stochastic/symbolic/hybrid/llm are AArch64-only."
+                    "x86 supports --algorithm enumerative / stochastic / symbolic in this release; \
+                     hybrid and llm remain AArch64-only."
                 );
                 std::process::exit(1);
             }
-            // The x86 path uses a fixed enumerative + fast-path-only
-            // pipeline in v1, so most search-tuning options are
-            // silently dropped. Warn the user so an unexpected --beta
-            // / --iterations / --timeout / --cores / --cost-metric on
-            // an x86 invocation isn't mistaken for being honored.
-            if is_x86 {
+            if is_x86 && matches!(algorithm, CliAlgorithm::Enumerative) {
+                // Enumerative x86 still ignores most search-tuning flags
+                // (it's a fixed length-1 enumerator with a fast-path-only
+                // equivalence check).
                 let mut ignored: Vec<&str> = Vec::new();
                 if timeout.is_some() {
                     ignored.push("--timeout");
                 }
                 if !matches!(cost_metric, CliCostMetric::CodeSize) {
-                    ignored.push("--cost-metric (x86 v1 always uses CodeSize)");
+                    ignored.push("--cost-metric (x86 enumerative always uses CodeSize)");
                 }
                 if cores.is_some() {
-                    ignored.push("--cores (x86 v1 is single-threaded)");
+                    ignored.push("--cores (x86 enumerative is single-threaded)");
                 }
                 if !ignored.is_empty() {
                     eprintln!(
-                        "warning: x86 v1 ignores the following option(s): {}. \
-                         Stochastic/symbolic-specific flags (--beta, --iterations, \
-                         --seed, --search-mode, --solver-timeout, --no-symbolic, \
-                         --llm-*) are also ignored even when not listed.",
+                        "warning: x86 enumerative ignores the following option(s): {}.",
                         ignored.join(", ")
                     );
                 }
@@ -1534,7 +1650,7 @@ fn main() {
             };
 
             let opt_result = if is_x86 {
-                optimize_elf_binary_x86(&binary, start_addr, end_addr)
+                optimize_elf_binary_x86(&binary, start_addr, end_addr, &options)
             } else {
                 optimize_elf_binary(&binary, start_addr, end_addr, &options)
             };
