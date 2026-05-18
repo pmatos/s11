@@ -457,6 +457,23 @@ pub fn check_equivalence_with_config_metrics(
         );
     }
 
+    // ADR-0007: auto-derive memory_live and force fast_only off when memory
+    // ops appear (see `check_equivalence_with_config` above for rationale).
+    let memory_touched = crate::validation::live_out::touches_memory(prefix1)
+        || crate::validation::live_out::touches_memory(prefix2);
+    let mut config_owned;
+    let config: &EquivalenceConfig = if memory_touched && (!config.memory_live || config.fast_only)
+    {
+        config_owned = config.clone();
+        config_owned.memory_live = true;
+        if config_owned.fast_only {
+            config_owned.fast_only = false;
+        }
+        &config_owned
+    } else {
+        config
+    };
+
     if let Some(early) = pre_smt_guard(prefix1, prefix2, config.live_out.flags_live()) {
         return (early, metrics);
     }

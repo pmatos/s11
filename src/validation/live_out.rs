@@ -147,6 +147,22 @@ pub fn compute_written_registers(instructions: &[Instruction]) -> RegisterSet<Re
     mask
 }
 
+/// Returns true if the sequence contains any memory-touching instruction.
+/// Drives the auto-derivation of `EquivalenceConfig::memory_live` (and the
+/// `fast_only` carve-out) in `check_equivalence_with_config`. See ADR-0007.
+pub fn touches_memory(instructions: &[Instruction]) -> bool {
+    instructions.iter().any(|i| {
+        matches!(
+            i,
+            Instruction::Ldr { .. }
+                | Instruction::Ldrs { .. }
+                | Instruction::Str { .. }
+                | Instruction::Ldp { .. }
+                | Instruction::Stp { .. }
+        )
+    })
+}
+
 /// Returns true if NZCV may be observable after the sequence executes.
 ///
 /// Static check: returns true iff **any** flag-writing instruction appears
