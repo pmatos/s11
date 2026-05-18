@@ -134,6 +134,39 @@ fn apply_binop(
 /// Convenience for tests / callers that don't have an operand wrapper.
 fn _operand_unused(_op: X86Operand) {}
 
+/// Apply a sequence of x86 instructions to a concrete machine state.
+/// Mirrors `apply_sequence_concrete` for AArch64; used by
+/// stochastic/symbolic search to evaluate a candidate against a test
+/// input.
+pub fn apply_sequence_concrete_x86(
+    state: crate::semantics::state::X86ConcreteMachineState,
+    sequence: &[X86Instruction],
+) -> crate::semantics::state::X86ConcreteMachineState {
+    let mut s = state;
+    for instr in sequence {
+        s = apply_instruction_concrete_x86(s, instr);
+    }
+    s
+}
+
+/// Compare two x86 concrete states over the registers (and, when
+/// `mask.flags_live()`, the EFLAGS) declared live-out by `mask`.
+pub fn states_equal_for_live_out_x86(
+    state1: &crate::semantics::state::X86ConcreteMachineState,
+    state2: &crate::semantics::state::X86ConcreteMachineState,
+    mask: &crate::semantics::state::X86LiveOutMask,
+) -> bool {
+    for reg in mask.iter() {
+        if state1.get_register(*reg) != state2.get_register(*reg) {
+            return false;
+        }
+    }
+    if mask.flags_live() && state1.get_flags() != state2.get_flags() {
+        return false;
+    }
+    true
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -344,5 +377,69 @@ mod tests {
             },
         );
         assert_eq!(after.get_register(X86Register::RAX).as_u64(), 0x0000_0042);
+    }
+
+    // ---- apply_sequence_concrete_x86 + states_equal_for_live_out_x86 ----
+
+    #[test]
+    fn apply_sequence_concrete_x86_threads_state_left_to_right() {
+        use crate::semantics::state::{ConcreteValue, X86ConcreteMachineState};
+
+        let mut state = X86ConcreteMachineState::new_zeroed(64);
+        state.set_register(X86Register::RBX, ConcreteValue::new(7));
+        let seq = vec![
+            X86Instruction::MovReg {
+                rd: X86Register::RAX,
+                rs: X86Register::RBX,
+            },
+            X86Instruction::AddImm {
+                rd: X86Register::RAX,
+                imm: 3,
+            },
+        ];
+        let after = apply_sequence_concrete_x86(state, &seq);
+        assert_eq!(after.get_register(X86Register::RAX).as_u64(), 10);
+    }
+
+    #[test]
+    fn states_equal_for_live_out_x86_ignores_non_live_registers() {
+        use crate::semantics::state::{ConcreteValue, X86ConcreteMachineState, X86LiveOutMask};
+
+        let mut a = X86ConcreteMachineState::new_zeroed(64);
+        let mut b = X86ConcreteMachineState::new_zeroed(64);
+        a.set_register(X86Register::RAX, ConcreteValue::new(42));
+        b.set_register(X86Register::RAX, ConcreteValue::new(42));
+        a.set_register(X86Register::RCX, ConcreteValue::new(1));
+        b.set_register(X86Register::RCX, ConcreteValue::new(99)); // differs
+
+        // Only RAX live-out: equal.
+        let mask = X86LiveOutMask::from_registers(vec![X86Register::RAX]);
+        assert!(states_equal_for_live_out_x86(&a, &b, &mask));
+
+        // RCX live-out too: unequal.
+        let mask = X86LiveOutMask::from_registers(vec![X86Register::RAX, X86Register::RCX]);
+        assert!(!states_equal_for_live_out_x86(&a, &b, &mask));
+    }
+
+    #[test]
+    fn states_equal_for_live_out_x86_honours_flags_live() {
+        use crate::semantics::state::{
+            ConcreteValue, Eflags, X86ConcreteMachineState, X86LiveOutMask,
+        };
+
+        let mut a = X86ConcreteMachineState::new_zeroed(64);
+        let mut b = X86ConcreteMachineState::new_zeroed(64);
+        a.set_register(X86Register::RAX, ConcreteValue::new(0));
+        b.set_register(X86Register::RAX, ConcreteValue::new(0));
+        let mut flags_set = Eflags::new();
+        flags_set.zf = true;
+        a.set_flags(flags_set);
+        // b keeps default (zf = false).
+
+        let no_flags = X86LiveOutMask::from_registers(vec![X86Register::RAX]);
+        assert!(states_equal_for_live_out_x86(&a, &b, &no_flags));
+
+        let with_flags = no_flags.with_flags(true);
+        assert!(!states_equal_for_live_out_x86(&a, &b, &with_flags));
     }
 }

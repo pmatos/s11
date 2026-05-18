@@ -327,6 +327,15 @@ pub struct SearchConfig {
     pub available_registers: Vec<Register>,
     /// Immediate values to consider in synthesis
     pub available_immediates: Vec<i64>,
+    /// x86 register pool (issue #73). Consumed by
+    /// `<X86_64 as StochasticBackend>::registers_from_config` and the
+    /// x86 symbolic / LLM backends. Defaults to the same 8 GPRs the
+    /// AArch64 pool ships at the same cardinality.
+    pub x86_available_registers: Vec<crate::isa::x86::X86Register>,
+    /// x86 operand width: 64 for x86-64, 32 for x86-32.
+    pub x86_width: u32,
+    /// x86 assembler mode. Mirrors `x86_width`.
+    pub x86_mode: crate::assembler::x86::X86Mode,
     /// Stochastic-specific configuration
     pub stochastic: StochasticConfig,
     /// Symbolic-specific configuration
@@ -355,6 +364,18 @@ impl Default for SearchConfig {
             available_immediates: vec![
                 0, 1, 2, 3, 4, 5, 7, 8, 10, 15, 16, 31, 32, 63, 64, 100, 255, 256, 1000, 4095,
             ],
+            x86_available_registers: vec![
+                crate::isa::x86::X86Register::RAX,
+                crate::isa::x86::X86Register::RCX,
+                crate::isa::x86::X86Register::RDX,
+                crate::isa::x86::X86Register::RBX,
+                crate::isa::x86::X86Register::RSI,
+                crate::isa::x86::X86Register::RDI,
+                crate::isa::x86::X86Register::R8,
+                crate::isa::x86::X86Register::R9,
+            ],
+            x86_width: 64,
+            x86_mode: crate::assembler::x86::X86Mode::Mode64,
             stochastic: StochasticConfig::default(),
             symbolic: SymbolicConfig::default(),
             llm: LlmConfig::default(),
@@ -426,6 +447,23 @@ impl SearchConfig {
 
     pub fn with_timeout_option(mut self, timeout: Option<Duration>) -> Self {
         self.timeout = timeout;
+        self
+    }
+
+    /// Set the x86 register pool (issue #73).
+    pub fn with_x86_registers(mut self, registers: Vec<crate::isa::x86::X86Register>) -> Self {
+        self.x86_available_registers = registers;
+        self
+    }
+
+    /// Set the x86 width (32 or 64) and matching assembler mode.
+    pub fn with_x86_width(mut self, width: u32) -> Self {
+        self.x86_width = width;
+        self.x86_mode = if width == 32 {
+            crate::assembler::x86::X86Mode::Mode32
+        } else {
+            crate::assembler::x86::X86Mode::Mode64
+        };
         self
     }
 }
