@@ -235,11 +235,17 @@ pub fn compute_live_in_registers(instructions: &[Instruction]) -> RegisterSet<Re
 /// Build an `X86LiveOutMask` from a target sequence by treating every
 /// written register as live-out and declaring EFLAGS live whenever the
 /// target contains any instruction with observable side effects (i.e.
-/// any non-MOV variant — see `InstructionType::has_side_effects` for
-/// the contract).
+/// any non-MOV / non-CMOV / non-Jcc variant — see
+/// `InstructionType::has_side_effects` for the contract).
 ///
-/// Mirrors the ad-hoc construction inside `find_shorter_equivalent_x86`
-/// (`src/main.rs`) so search algorithms reuse the same liveness rule.
+/// **Asymmetry:** CMOV and Jcc READ EFLAGS but report
+/// `has_side_effects=false` (they don't write flags), so a CMOV-only or
+/// Jcc-only target gets `flags_live=false` from this helper.
+/// `find_shorter_equivalent_x86` (`src/main.rs`) compensates by
+/// dropping `.fast_only()` when the target contains any flag-reader,
+/// forcing the SMT path to fully account for incoming EFLAGS. Direct
+/// callers that bypass that helper must apply their own equivalent
+/// guard if their downstream code reads flags.
 pub fn x86_live_out_from_target(
     target: &[crate::isa::x86::X86Instruction],
 ) -> crate::semantics::state::X86LiveOutMask {
