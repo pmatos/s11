@@ -397,15 +397,16 @@ fn test_opt_rejects_unsupported_instruction_window() {
         .join("loops_debug");
     check_test_binary(&test_elf);
 
-    // Scan loops_debug for the first `stp x29, x30, [sp, #-0x10]!` — an
-    // unsupported mnemonic for the AArch64 optimization path. Targeting a
-    // 4-byte window on that instruction must abort before any output file
-    // is written.
+    // Scan loops_debug for the first `paciasp` — pointer authentication is
+    // unsupported by the AArch64 optimization path. (Memory ops moved to
+    // supported in issue #68, so the old `stp` fixture became valid; see
+    // ADR-0007.) Targeting a 4-byte window on this instruction must abort
+    // before any output file is written.
     let start_addr = find_encoding_masked(
         &test_elf,
-        &[0xfd, 0x7b, 0xbf, 0xa9],
+        &[0x3f, 0x23, 0x03, 0xd5],
         &[0xff, 0xff, 0xff, 0xff],
-        "stp x29, x30, [sp, #-0x10]!",
+        "paciasp",
     );
     let end_addr = start_addr + 4;
 
@@ -433,7 +434,7 @@ fn test_opt_rejects_unsupported_instruction_window() {
 
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
-        stderr.contains("unsupported instruction") && stderr.contains("stp"),
+        stderr.contains("unsupported instruction") && stderr.contains("paciasp"),
         "stderr should identify the offending mnemonic; got: {stderr}",
     );
     assert!(
