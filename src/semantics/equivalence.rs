@@ -240,6 +240,10 @@ pub struct EquivalenceMetrics {
     /// declarations) at the moment `check()` was called. None if SMT was
     /// not called.
     pub smt_formula_bytes: Option<usize>,
+    /// Wall-clock time spent inside `solver.check()`. `Duration::ZERO` when
+    /// the solver was not invoked (fast path resolved the candidate or the
+    /// pre-SMT guard fired).
+    pub smt_elapsed: Duration,
 }
 
 /// Build the fast-path input randomization set.
@@ -452,7 +456,9 @@ pub fn check_equivalence_with_config_metrics(
     }
 
     let solver = build_smt_solver(prefix1, prefix2, config);
+    let smt_start = std::time::Instant::now();
     let sat_result = solver.check();
+    let smt_elapsed = smt_start.elapsed();
     let smt_formula_bytes = if sat_result == SatResult::Unsat {
         Some(solver.to_string().len())
     } else {
@@ -464,6 +470,7 @@ pub fn check_equivalence_with_config_metrics(
         EquivalenceMetrics {
             smt_called: true,
             smt_formula_bytes,
+            smt_elapsed,
         },
     )
 }
@@ -2305,6 +2312,58 @@ mod tests {
             matches!(result, EquivalenceResult::NotEquivalentFast(_)),
             "expected NotEquivalentFast for csel-vs-mov under --fast-only --live-out x0, got {:?}",
             result
+        );
+    }
+
+    #[test]
+    fn smt_elapsed_is_nonzero_when_solver_runs() {
+        // MOV #0 vs EOR self — semantically equivalent under x0-only
+        // live-out, fast-path forwards to SMT because random concrete
+        // inputs all agree. Solver must run and report a nonzero
+        // smt_elapsed.
+        let seq1 = vec![Instruction::MovImm {
+            rd: Register::X0,
+            imm: 0,
+        }];
+        let seq2 = vec![Instruction::Eor {
+            rd: Register::X0,
+            rn: Register::X0,
+            rm: Operand::Register(Register::X0),
+        }];
+        let cfg =
+            EquivalenceConfig::default().live_out(LiveOut::from_registers(vec![Register::X0]));
+        let (result, metrics) = check_equivalence_with_config_metrics(&seq1, &seq2, &cfg);
+        assert_eq!(result, EquivalenceResult::Equivalent);
+        assert!(metrics.smt_called, "solver should have been invoked");
+        assert!(
+            metrics.smt_elapsed > Duration::ZERO,
+            "smt_elapsed must be nonzero when solver runs; got {:?}",
+            metrics.smt_elapsed
+        );
+    }
+
+    #[test]
+    fn smt_elapsed_is_zero_when_fast_path_rejects() {
+        // MOV #1 vs MOV #2 — the first random concrete input diverges,
+        // so fast-path rejects before SMT is built. smt_elapsed must
+        // be exactly zero.
+        let seq1 = vec![Instruction::MovImm {
+            rd: Register::X0,
+            imm: 1,
+        }];
+        let seq2 = vec![Instruction::MovImm {
+            rd: Register::X0,
+            imm: 2,
+        }];
+        let cfg =
+            EquivalenceConfig::default().live_out(LiveOut::from_registers(vec![Register::X0]));
+        let (result, metrics) = check_equivalence_with_config_metrics(&seq1, &seq2, &cfg);
+        assert!(matches!(result, EquivalenceResult::NotEquivalentFast(_)));
+        assert!(!metrics.smt_called, "fast path should reject before SMT");
+        assert_eq!(
+            metrics.smt_elapsed,
+            Duration::ZERO,
+            "smt_elapsed must be zero on fast-path rejection"
         );
     }
 }
