@@ -190,6 +190,10 @@ fn encode_64(ops: &mut dynasmrt::x64::Assembler, instr: &X86Instruction) -> Resu
             // Cycle 13 wires the dynasm cmovCC dispatch. Reject until then.
             Err("Cmov encoding not wired yet (issue #74 cycle 13)".to_string())
         }
+        X86Instruction::Jcc { .. } => {
+            // Cycle 14 wires the short-form Jcc dispatch. Reject until then.
+            Err("Jcc encoding not wired yet (issue #74 cycle 14)".to_string())
+        }
     }
 }
 
@@ -289,6 +293,10 @@ fn encode_32(ops: &mut dynasmrt::x86::Assembler, instr: &X86Instruction) -> Resu
         X86Instruction::Cmov { .. } => {
             // Cycle 13 wires the dynasm cmovCC dispatch. Reject until then.
             Err("Cmov encoding not wired yet (issue #74 cycle 13)".to_string())
+        }
+        X86Instruction::Jcc { .. } => {
+            // Cycle 14 wires the short-form Jcc dispatch. Reject until then.
+            Err("Jcc encoding not wired yet (issue #74 cycle 14)".to_string())
         }
     }
 }

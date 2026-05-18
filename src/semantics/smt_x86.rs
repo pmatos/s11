@@ -317,6 +317,10 @@ pub fn apply_instruction(
             let rd_old = state.get_register(*rd).clone();
             state.set_register(*rd, pred.ite(&rs_val, &rd_old));
         }
+        // Jcc reads EFLAGS but transfers control; nothing is observable
+        // in the data-state machine modelled here. Cycle 10 peels Jccs
+        // off the sequence before applying it symbolically.
+        X86Instruction::Jcc { .. } => {}
     }
     state
 }
