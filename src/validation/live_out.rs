@@ -212,6 +212,26 @@ pub fn compute_live_in_registers(instructions: &[Instruction]) -> LiveOutRegiste
     live_in
 }
 
+/// Build an `X86LiveOutMask` from a target sequence by treating every
+/// written register as live-out and declaring EFLAGS live whenever the
+/// target contains any instruction with observable side effects (i.e.
+/// any non-MOV variant — see `InstructionType::has_side_effects` for
+/// the contract).
+///
+/// Mirrors the ad-hoc construction inside `find_shorter_equivalent_x86`
+/// (`src/main.rs`) so search algorithms reuse the same liveness rule.
+pub fn x86_live_out_from_target(
+    target: &[crate::isa::x86::X86Instruction],
+) -> crate::semantics::state::X86LiveOutMask {
+    use crate::isa::InstructionType;
+    use crate::semantics::state::X86LiveOutMask;
+
+    let registers: Vec<crate::isa::x86::X86Register> =
+        target.iter().filter_map(|i| i.destination()).collect();
+    let flags_live = target.iter().any(InstructionType::has_side_effects);
+    X86LiveOutMask::from_registers(registers).with_flags(flags_live)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -670,5 +690,49 @@ mod tests {
     #[test]
     fn test_parse_live_out_contract_invalid_register_still_errors() {
         assert!(parse_live_out_contract("x0,bogus;nzcv").is_err());
+    }
+
+    // ---- x86 live-out helper ----
+
+    #[test]
+    fn x86_live_out_mov_only_target_has_no_flags_live() {
+        use crate::isa::x86::{X86Instruction, X86Register};
+        let target = [X86Instruction::MovReg {
+            rd: X86Register::RAX,
+            rs: X86Register::RBX,
+        }];
+        let mask = x86_live_out_from_target(&target);
+        assert!(mask.contains(X86Register::RAX));
+        assert!(
+            !mask.flags_live(),
+            "MOV does not write EFLAGS — flags must not be marked live"
+        );
+    }
+
+    #[test]
+    fn x86_live_out_target_with_arith_sets_flags_live() {
+        use crate::isa::x86::{X86Instruction, X86Register};
+        let target = [X86Instruction::AddReg {
+            rd: X86Register::RAX,
+            rs: X86Register::RBX,
+        }];
+        let mask = x86_live_out_from_target(&target);
+        assert!(mask.contains(X86Register::RAX));
+        assert!(
+            mask.flags_live(),
+            "ADD has EFLAGS side effects — flags must be live"
+        );
+    }
+
+    #[test]
+    fn x86_live_out_target_with_cmp_only_sets_flags_live_but_no_registers() {
+        use crate::isa::x86::{X86Instruction, X86Register};
+        let target = [X86Instruction::CmpReg {
+            rn: X86Register::RAX,
+            rs: X86Register::RBX,
+        }];
+        let mask = x86_live_out_from_target(&target);
+        assert_eq!(mask.len(), 0, "CMP writes no destination register");
+        assert!(mask.flags_live());
     }
 }

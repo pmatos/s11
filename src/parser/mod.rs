@@ -1,6 +1,7 @@
 //! Assembly text parser for AArch64 instructions
 //!
-//! Parses GNU assembler syntax into the IR representation.
+//! Parses GNU assembler syntax into the IR representation. The x86
+//! Intel-syntax parser lives in the [`x86`] submodule.
 //!
 //! Issue #77 stage 3 step 25 wraps this module's `parse_line` in a thin
 //! `AArch64Parser` newtype implementing `ISAParser<Instruction>` (a new
@@ -17,6 +18,8 @@ use std::path::Path;
 use crate::ir::instructions::MOVW_LEGAL_SHIFTS;
 use crate::ir::types::NORMAL_CONDITIONS;
 use crate::ir::{Condition, Instruction, LabelId, Operand, Register, ShiftKind};
+
+pub mod x86;
 
 /// Parse error with location information
 #[derive(Debug, Clone)]
