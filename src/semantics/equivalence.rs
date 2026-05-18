@@ -2,7 +2,7 @@
 //!
 //! Issue #77 stage 2 step 19 plans to delete `X86EquivalenceConfig`,
 //! `check_equivalence_x86`, and `run_fast_path_x86` once
-//! `EquivalenceConfig<I>` is wired to consume `LiveOutMask<I::Register>`
+//! `EquivalenceConfig<I>` is wired to consume `RegisterSet<I::Register>`
 //! and the SearchAlgorithm<I> follow-up to step 11 lands. The CMP-presence
 //! heuristic in `run_fast_path_x86` merges into the generic `run_fast_path`
 //! as an `I::Flags`-aware optimisation (only triggers when `I::Flags != ()`).
@@ -95,6 +95,8 @@ pub enum EquivalenceResult {
 #[derive(Debug, Clone)]
 pub struct EquivalenceConfig {
     /// Observable architectural state that must match after execution.
+    /// Per ADR-0004 decision 5, `flags_live` lives on the mask itself
+    /// (`live_out.flags_live()`) rather than as a separate config field.
     pub live_out: LiveOut,
     /// Number of random tests to run before SMT
     pub random_test_count: usize,
@@ -102,9 +104,6 @@ pub struct EquivalenceConfig {
     pub smt_timeout: Option<Duration>,
     /// Skip SMT verification (fast path only)
     pub fast_only: bool,
-    /// Treat NZCV as live-out (include flag equality in both fast-path and
-    /// SMT comparisons).
-    pub flags_live: bool,
 }
 
 impl Default for EquivalenceConfig {
@@ -114,7 +113,6 @@ impl Default for EquivalenceConfig {
             random_test_count: 10,
             smt_timeout: Some(Duration::from_secs(30)),
             fast_only: false,
-            flags_live: false,
         }
     }
 }
@@ -168,9 +166,9 @@ impl EquivalenceConfig {
 
     /// Builder method to mark NZCV as live-out — flag inequality then
     /// participates in both the fast-path concrete comparison and the SMT
-    /// formula. Mirrors `X86LiveOutMask::with_flags(true)` on the x86 side.
+    /// formula. Stores the bit on the live-out mask itself (ADR-0004 §5).
     pub fn with_flags(mut self, flags_live: bool) -> Self {
-        self.flags_live = flags_live;
+        self.live_out = self.live_out.with_flags(flags_live);
         self
     }
 }
@@ -238,7 +236,7 @@ pub struct EquivalenceMetrics {
 /// vs `tst x1, #2` under a flag-only contract — see the regression test in
 /// this module). The SMT path is unaffected; it operates on symbolic inputs.
 fn fast_path_input_registers(
-    live_out_registers: &crate::semantics::live_out::LiveOutRegisters,
+    live_out_registers: &crate::semantics::live_out::RegisterSet<crate::ir::Register>,
     seq1: &[Instruction],
     seq2: &[Instruction],
 ) -> Vec<crate::ir::Register> {
@@ -294,7 +292,7 @@ fn run_fast_path(
     seq2: &[Instruction],
     config: &EquivalenceConfig,
 ) -> Option<EquivalenceResult> {
-    let live_out_registers = config.live_out.registers();
+    let live_out_registers = &config.live_out;
     // Under `fast_only`, the SMT path that would otherwise catch divergences
     // depending on source registers outside `live_out` is skipped — extend
     // the random-input mask to cover seq1+seq2 source registers so e.g.
@@ -319,7 +317,12 @@ fn run_fast_path(
         let state1 = apply_sequence_concrete(input.clone(), seq1);
         let state2 = apply_sequence_concrete(input.clone(), seq2);
 
-        if !states_equal_for_live_out(&state1, &state2, live_out_registers, config.flags_live) {
+        if !states_equal_for_live_out(
+            &state1,
+            &state2,
+            live_out_registers,
+            config.live_out.flags_live(),
+        ) {
             return Some(EquivalenceResult::NotEquivalentFast(input.clone()));
         }
     }
@@ -329,7 +332,12 @@ fn run_fast_path(
         let state1 = apply_sequence_concrete(input.clone(), seq1);
         let state2 = apply_sequence_concrete(input.clone(), seq2);
 
-        if !states_equal_for_live_out(&state1, &state2, live_out_registers, config.flags_live) {
+        if !states_equal_for_live_out(
+            &state1,
+            &state2,
+            live_out_registers,
+            config.live_out.flags_live(),
+        ) {
             return Some(EquivalenceResult::NotEquivalentFast(input.clone()));
         }
     }
@@ -341,7 +349,7 @@ fn run_fast_path(
     // handles this correctly via symbolic initial state, and adding 16
     // inputs to every search-algorithm candidate would burn significant
     // wall-clock time on a verifier that's normally SMT-authoritative.
-    // NOT gated on `config.flags_live` — a flag-reading sequence whose
+    // NOT gated on `config.live_out.flags_live()` — a flag-reading sequence whose
     // *register* output depends on incoming NZCV (e.g. `csel x0, x1, x2, mi`
     // under `--live-out x0`) also needs the variants for the fast path to
     // catch divergence on the condition-true branch.
@@ -349,7 +357,12 @@ fn run_fast_path(
         for input in &fast_path_initial_nzcv_variants(&input_regs) {
             let state1 = apply_sequence_concrete(input.clone(), seq1);
             let state2 = apply_sequence_concrete(input.clone(), seq2);
-            if !states_equal_for_live_out(&state1, &state2, live_out_registers, config.flags_live) {
+            if !states_equal_for_live_out(
+                &state1,
+                &state2,
+                live_out_registers,
+                config.live_out.flags_live(),
+            ) {
                 return Some(EquivalenceResult::NotEquivalentFast(input.clone()));
             }
         }
@@ -375,7 +388,7 @@ pub fn check_equivalence_with_config(
         return EquivalenceResult::NotEquivalentFast(ConcreteMachineState::new_zeroed());
     }
 
-    if let Some(early) = pre_smt_guard(prefix1, prefix2, config.flags_live) {
+    if let Some(early) = pre_smt_guard(prefix1, prefix2, config.live_out.flags_live()) {
         return early;
     }
 
@@ -413,7 +426,7 @@ pub fn check_equivalence_with_config_metrics(
         );
     }
 
-    if let Some(early) = pre_smt_guard(prefix1, prefix2, config.flags_live) {
+    if let Some(early) = pre_smt_guard(prefix1, prefix2, config.live_out.flags_live()) {
         return (early, metrics);
     }
 
@@ -466,8 +479,8 @@ fn build_smt_solver(
     solver.assert(states_not_equal_for_live_out(
         &final_state1,
         &final_state2,
-        config.live_out.registers(),
-        config.flags_live,
+        &config.live_out,
+        config.live_out.flags_live(),
     ));
     solver
 }
@@ -536,7 +549,7 @@ pub fn find_counterexample_concrete(
     crate::semantics::state::ConcreteValue,
     crate::semantics::state::ConcreteValue,
 )> {
-    let live_out_registers = config.live_out.registers();
+    let live_out_registers = &config.live_out;
     let input_regs: Vec<_> = live_out_registers.iter().cloned().collect();
 
     let random_config = RandomInputConfig {
@@ -549,9 +562,12 @@ pub fn find_counterexample_concrete(
         let state1 = apply_sequence_concrete(input.clone(), seq1);
         let state2 = apply_sequence_concrete(input.clone(), seq2);
 
-        if let Some(diff) =
-            find_first_difference(&state1, &state2, live_out_registers, config.flags_live)
-        {
+        if let Some(diff) = find_first_difference(
+            &state1,
+            &state2,
+            live_out_registers,
+            config.live_out.flags_live(),
+        ) {
             return Some(diff);
         }
     }
@@ -561,9 +577,12 @@ pub fn find_counterexample_concrete(
         let state1 = apply_sequence_concrete(input.clone(), seq1);
         let state2 = apply_sequence_concrete(input.clone(), seq2);
 
-        if let Some(diff) =
-            find_first_difference(&state1, &state2, live_out_registers, config.flags_live)
-        {
+        if let Some(diff) = find_first_difference(
+            &state1,
+            &state2,
+            live_out_registers,
+            config.live_out.flags_live(),
+        ) {
             return Some(diff);
         }
     }
@@ -742,6 +761,17 @@ mod tests {
     use crate::ir::{Operand, Register};
     use crate::isa::x86::{X86Instruction, X86Register};
     use crate::semantics::state::X86LiveOutMask;
+
+    #[test]
+    fn aarch64_with_flags_writes_through_mask() {
+        // After moving `flags_live` from `EquivalenceConfig` onto the mask,
+        // `with_flags(true)` must make `config.live_out.flags_live()` true.
+        let config = EquivalenceConfig::default().with_flags(true);
+        assert!(config.live_out.flags_live());
+
+        let config = EquivalenceConfig::default().with_flags(false);
+        assert!(!config.live_out.flags_live());
+    }
 
     #[test]
     fn x86_mov_zero_equivalent_to_xor_self_when_flags_dead() {
@@ -2140,7 +2170,7 @@ mod tests {
     /// `tst x1, #1` and `tst x1, #2` differ on NZCV when bit 0 vs bit 1 of
     /// x1 is set, so a flag-aware live-out contract must classify them as
     /// non-equivalent. Prior to the source-register randomization fix, the
-    /// fast path only varied registers in `config.live_out.registers()` —
+    /// fast path only varied registers in `config.live_out` —
     /// empty for a flag-only contract — so x1 stayed at zero across all
     /// random + edge-case inputs and both sequences reported flags as zero,
     /// returning `Equivalent` under `--fast-only`. The fix unions the source
@@ -2204,7 +2234,7 @@ mod tests {
     /// `csel x0, x1, x2, mi` reads incoming N to decide whether x0 = x1
     /// (N=true) or x0 = x2 (N=false). With a register-live contract
     /// (`--live-out x0` but `flags_live=false`), the initial-NZCV variants
-    /// were originally gated on `config.flags_live` — so all fast-path
+    /// were originally gated on `config.live_out.flags_live()` — so all fast-path
     /// inputs left N=false and the candidate `mov x0, x2` was accepted as
     /// equivalent even when x1 != x2 and N=true would differ. Broadening
     /// the gate to fire on any flag-reading sequence (regardless of whether

@@ -8,10 +8,10 @@
 //! generification of this module is planned.
 
 use crate::ir::{Instruction, Register};
-use crate::semantics::live_out::LiveOutRegisters;
+use crate::semantics::live_out::RegisterSet;
 
 /// Render a register set as a comma-separated list (e.g. "x0, x1, x2").
-fn render_register_set(mask: &LiveOutRegisters) -> String {
+fn render_register_set(mask: &RegisterSet<Register>) -> String {
     let mut names: Vec<String> = (0..=30u8)
         .filter_map(Register::from_index)
         .filter(|r| mask.contains(*r))
@@ -26,8 +26,8 @@ fn render_register_set(mask: &LiveOutRegisters) -> String {
 /// Build the full prompt sent to `codex exec`.
 pub fn build_prompt(
     target: &[Instruction],
-    live_in: &LiveOutRegisters,
-    live_out: &LiveOutRegisters,
+    live_in: &RegisterSet<Register>,
+    live_out: &RegisterSet<Register>,
 ) -> String {
     let mut s = String::new();
     s.push_str(
@@ -71,8 +71,8 @@ mod tests {
     use super::*;
     use crate::ir::{Operand, Register};
 
-    fn mask(regs: &[Register]) -> LiveOutRegisters {
-        let mut m = LiveOutRegisters::empty();
+    fn mask(regs: &[Register]) -> RegisterSet<Register> {
+        let mut m = RegisterSet::empty();
         for r in regs {
             m.add(*r);
         }

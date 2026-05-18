@@ -1,7 +1,7 @@
 //! Concrete interpreter for fast validation of instruction sequences
 
 use crate::ir::{Condition, Instruction, Operand, Register, ShiftKind};
-use crate::semantics::live_out::LiveOutRegisters;
+use crate::semantics::live_out::RegisterSet;
 use crate::semantics::state::{ConcreteMachineState, ConcreteValue, ConditionFlags};
 
 /// Evaluate an operand to get its concrete value
@@ -580,7 +580,7 @@ pub fn apply_sequence_concrete(
 pub fn states_equal_for_live_out(
     state1: &ConcreteMachineState,
     state2: &ConcreteMachineState,
-    live_out: &LiveOutRegisters,
+    live_out: &RegisterSet<Register>,
     flags_live: bool,
 ) -> bool {
     for reg in live_out.iter() {
@@ -600,7 +600,7 @@ pub fn states_equal_for_live_out(
 pub fn find_first_difference(
     state1: &ConcreteMachineState,
     state2: &ConcreteMachineState,
-    live_out: &LiveOutRegisters,
+    live_out: &RegisterSet<Register>,
     flags_live: bool,
 ) -> Option<(Register, ConcreteValue, ConcreteValue)> {
     for reg in live_out.iter() {
@@ -965,7 +965,7 @@ mod tests {
         let state1 = state_with(vec![(Register::X0, 42), (Register::X1, 100)]);
         let state2 = state_with(vec![(Register::X0, 42), (Register::X1, 999)]);
 
-        let live_out = LiveOutRegisters::from_registers(vec![Register::X0]);
+        let live_out = RegisterSet::<Register>::from_registers(vec![Register::X0]);
         assert!(states_equal_for_live_out(
             &state1, &state2, &live_out, false
         ));
@@ -976,7 +976,7 @@ mod tests {
         let state1 = state_with(vec![(Register::X0, 42)]);
         let state2 = state_with(vec![(Register::X0, 43)]);
 
-        let live_out = LiveOutRegisters::from_registers(vec![Register::X0]);
+        let live_out = RegisterSet::<Register>::from_registers(vec![Register::X0]);
         assert!(!states_equal_for_live_out(
             &state1, &state2, &live_out, false
         ));
@@ -987,7 +987,7 @@ mod tests {
         let state1 = state_with(vec![(Register::X0, 42), (Register::X1, 100)]);
         let state2 = state_with(vec![(Register::X0, 42), (Register::X1, 200)]);
 
-        let live_out = LiveOutRegisters::from_registers(vec![Register::X0, Register::X1]);
+        let live_out = RegisterSet::<Register>::from_registers(vec![Register::X0, Register::X1]);
         let diff = find_first_difference(&state1, &state2, &live_out, false);
         assert!(diff.is_some());
         let (reg, v1, v2) = diff.unwrap();
@@ -1001,7 +1001,7 @@ mod tests {
         let state1 = state_with(vec![(Register::X0, 42)]);
         let state2 = state_with(vec![(Register::X0, 42)]);
 
-        let live_out = LiveOutRegisters::from_registers(vec![Register::X0]);
+        let live_out = RegisterSet::<Register>::from_registers(vec![Register::X0]);
         let diff = find_first_difference(&state1, &state2, &live_out, false);
         assert!(diff.is_none());
     }
@@ -1023,7 +1023,7 @@ mod tests {
         }];
         let state2 = apply_sequence_concrete(state, &seq2);
 
-        let live_out = LiveOutRegisters::from_registers(vec![Register::X0]);
+        let live_out = RegisterSet::<Register>::from_registers(vec![Register::X0]);
         assert!(states_equal_for_live_out(
             &state1, &state2, &live_out, false
         ));

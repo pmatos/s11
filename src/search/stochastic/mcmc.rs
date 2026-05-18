@@ -13,7 +13,7 @@
 //!    d. Accept/reject based on Metropolis-Hastings criterion
 //! 4. Return best found optimization
 
-use crate::ir::Instruction;
+use crate::ir::{Instruction, Register};
 use crate::isa::{ISA, ISAMutator};
 use crate::search::config::SearchConfig;
 use crate::search::result::{SearchResultFor, SearchStatistics};
@@ -22,7 +22,7 @@ use crate::search::stochastic::backend::StochasticBackend;
 use crate::search::{Algorithm, SearchAlgorithm};
 use crate::semantics::EquivalenceResult;
 use crate::semantics::concrete::{apply_sequence_concrete, states_equal_for_live_out};
-use crate::semantics::live_out::LiveOutRegisters;
+use crate::semantics::live_out::RegisterSet;
 use crate::semantics::state::ConcreteMachineState;
 use rand::{RngExt, SeedableRng};
 use rand_chacha::ChaCha8Rng;
@@ -277,7 +277,7 @@ pub fn evaluate_with_tests(
     _target: &[Instruction],
     test_inputs: &[ConcreteMachineState],
     target_outputs: &[ConcreteMachineState],
-    live_out: &LiveOutRegisters,
+    live_out: &RegisterSet<Register>,
 ) -> (u64, bool) {
     let mut passes_all = true;
 
@@ -422,7 +422,7 @@ mod tests {
         let input = ConcreteMachineState::new_zeroed();
         let target_output = apply_sequence_concrete(input.clone(), &target);
 
-        let live_out = LiveOutRegisters::from_registers(vec![Register::X0]);
+        let live_out = RegisterSet::<Register>::from_registers(vec![Register::X0]);
         let (cost, passes) =
             evaluate_with_tests(&proposal, &target, &[input], &[target_output], &live_out);
 
@@ -441,7 +441,7 @@ mod tests {
         let input = ConcreteMachineState::new_zeroed();
         let target_output = apply_sequence_concrete(input.clone(), &target);
 
-        let live_out = LiveOutRegisters::from_registers(vec![Register::X0]);
+        let live_out = RegisterSet::<Register>::from_registers(vec![Register::X0]);
         let (cost, passes) =
             evaluate_with_tests(&proposal, &target, &[input], &[target_output], &live_out);
 

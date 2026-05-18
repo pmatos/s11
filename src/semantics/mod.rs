@@ -19,6 +19,6 @@ pub use equivalence::{EquivalenceConfig, EquivalenceResult, check_equivalence_wi
 #[allow(unused_imports)]
 pub use equivalence::{EquivalenceMetrics, check_equivalence_with_config_metrics};
 #[allow(unused_imports)]
-pub use live_out::{LiveOut, LiveOutRegisters};
+pub use live_out::{LiveOut, RegisterSet};
 #[allow(unused_imports)]
 pub use state::{ConcreteMachineState, ConcreteValue, ConditionFlags};

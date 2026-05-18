@@ -1,13 +1,16 @@
-//! Live-out contract for equivalence checking.
+//! Live-out and live-in register contracts for equivalence checking.
 //!
-//! `LiveOut` names the full observable architectural state contract. Today the
-//! only populated slice is `LiveOutRegisters`; condition state, memory, and PC
-//! can be added beside it without renaming the search/equivalence boundary.
+//! `RegisterSet<R>` is the per-ISA generic carrier: a set of architectural
+//! registers plus a `flags_live` bit. The same shape is reused for live-in
+//! analyses (see `validation::live_out::compute_live_in_registers`) because
+//! live-in and live-out are both register sets — hence the neutral name
+//! (closes #85; supersedes the earlier `LiveOutMask<R>` / `LiveOutRegisters`
+//! split).
 //!
-//! `LiveOutMask<R>` (added in #77 stage 1 step 7) is the per-ISA-register
-//! generic shape that stage 1 step 9 wires into `EquivalenceConfig<I>` and
-//! stage 2 step 16 lifts to subsume `X86LiveOutMask`. `flags_live` lives on
-//! the mask per ADR-0004 decision 5.
+//! `LiveOut` is the AArch64 alias `RegisterSet<crate::ir::Register>` and is
+//! the boundary type the search and equivalence layers use. ADR-0004 decision
+//! 5 documents the consolidation; x86 (`X86LiveOutMask`) follows in #77 stage
+//! 2 step 16.
 
 use crate::ir::Register;
 use crate::isa::RegisterType;
@@ -20,15 +23,15 @@ use std::fmt;
 /// the same contract object. Stage 1 step 9 migrates `EquivalenceConfig` to
 /// `EquivalenceConfig<I>` and threads this type through every consumer; stage
 /// 2 step 16 replaces the parallel `X86LiveOutMask` with
-/// `LiveOutMask<X86Register>` and drops the duplicate type.
+/// `RegisterSet<X86Register>` and drops the duplicate type.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct LiveOutMask<R: RegisterType> {
+pub struct RegisterSet<R: RegisterType> {
     regs: HashSet<R>,
     flags_live: bool,
 }
 
 #[allow(dead_code)] // public API, wired in #77 stage 1 step 9
-impl<R: RegisterType> LiveOutMask<R> {
+impl<R: RegisterType> RegisterSet<R> {
     /// Empty mask, flags not live.
     pub fn empty() -> Self {
         Self {
@@ -50,6 +53,12 @@ impl<R: RegisterType> LiveOutMask<R> {
         if !reg.is_zero_register() {
             self.regs.insert(reg);
         }
+    }
+
+    /// Remove a register from the set.
+    #[allow(dead_code)]
+    pub fn remove(&mut self, reg: R) {
+        self.regs.remove(&reg);
     }
 
     /// Returns true if `reg` is live-out.
@@ -84,134 +93,55 @@ impl<R: RegisterType> LiveOutMask<R> {
     pub fn set_flags_live(&mut self, live: bool) {
         self.flags_live = live;
     }
+
+    /// Builder form of `set_flags_live`. Mirrors `X86LiveOutMask::with_flags`.
+    pub fn with_flags(mut self, flags_live: bool) -> Self {
+        self.flags_live = flags_live;
+        self
+    }
+
+    /// AArch64-flavored alias for `contains`. Kept so call sites using
+    /// the old `LiveOut::contains_register(reg)` keep compiling after
+    /// `LiveOut` becomes a type alias for this mask.
+    pub fn contains_register(&self, reg: R) -> bool {
+        self.contains(reg)
+    }
 }
 
-/// Observable architectural state that must match after executing a sequence.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct LiveOut {
-    registers: LiveOutRegisters,
-}
-
-impl LiveOut {
-    /// Create a live-out contract containing all general-purpose registers.
+impl RegisterSet<Register> {
+    /// All general-purpose AArch64 registers (X0..X30, SP); excludes XZR.
     pub fn all_registers() -> Self {
-        Self {
-            registers: LiveOutRegisters::all_registers(),
-        }
-    }
-
-    /// Create a live-out contract from the register slice.
-    pub fn from_registers(regs: Vec<Register>) -> Self {
-        Self {
-            registers: LiveOutRegisters::from_registers(regs),
-        }
-    }
-
-    /// Create a live-out contract from an already parsed register slice.
-    pub fn from_register_set(registers: LiveOutRegisters) -> Self {
-        Self { registers }
-    }
-
-    /// The register slice of this live-out contract.
-    pub fn registers(&self) -> &LiveOutRegisters {
-        &self.registers
-    }
-
-    /// Check whether a register is live-out.
-    pub fn contains_register(&self, reg: Register) -> bool {
-        self.registers.contains(reg)
-    }
-}
-
-impl From<LiveOutRegisters> for LiveOut {
-    fn from(registers: LiveOutRegisters) -> Self {
-        Self::from_register_set(registers)
-    }
-}
-
-impl fmt::Display for LiveOut {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "LiveOut {{ registers={} }}", self.registers)
-    }
-}
-
-/// Register set specifying which registers are live-out (need to be preserved)
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct LiveOutRegisters {
-    registers: HashSet<Register>,
-}
-
-impl LiveOutRegisters {
-    /// Create a register set with all general-purpose registers (X0-X30, SP)
-    pub fn all_registers() -> Self {
-        let mut registers = HashSet::new();
+        let mut mask = Self::empty();
         for i in 0..=30 {
             if let Some(reg) = Register::from_index(i) {
-                registers.insert(reg);
+                mask.add(reg);
             }
         }
-        registers.insert(Register::SP);
-        LiveOutRegisters { registers }
-    }
-
-    /// Create a register set from a list of registers
-    pub fn from_registers(regs: Vec<Register>) -> Self {
-        LiveOutRegisters {
-            registers: regs.into_iter().collect(),
-        }
-    }
-
-    /// Create an empty register set
-    pub fn empty() -> Self {
-        LiveOutRegisters {
-            registers: HashSet::new(),
-        }
-    }
-
-    /// Add a register to the register set
-    pub fn add(&mut self, reg: Register) {
-        if reg != Register::XZR {
-            self.registers.insert(reg);
-        }
-    }
-
-    /// Remove a register from the register set
-    #[allow(dead_code)]
-    pub fn remove(&mut self, reg: Register) {
-        self.registers.remove(&reg);
-    }
-
-    /// Check if a register is in the register set
-    pub fn contains(&self, reg: Register) -> bool {
-        self.registers.contains(&reg)
-    }
-
-    /// Iterate over registers in the register set
-    pub fn iter(&self) -> impl Iterator<Item = &Register> {
-        self.registers.iter()
-    }
-
-    /// Get the number of registers in the register set
-    #[allow(dead_code)]
-    pub fn len(&self) -> usize {
-        self.registers.len()
-    }
-
-    /// Check if the register set is empty
-    #[allow(dead_code)]
-    pub fn is_empty(&self) -> bool {
-        self.registers.is_empty()
+        mask.add(Register::SP);
+        mask
     }
 }
 
-impl fmt::Display for LiveOutRegisters {
+/// Self-documenting Display: `LiveOut { registers={x0, x1} }`.
+///
+/// Format from PR #79: wrapping the register slice in a labelled outer
+/// keeps the rendering forward-compatible with extra state slices
+/// (flags_live today, memory/PC tomorrow) without breaking log readers.
+impl fmt::Display for RegisterSet<Register> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let mut regs: Vec<_> = self.registers.iter().collect();
+        let mut regs: Vec<_> = self.iter().collect();
         regs.sort_by_key(|r| r.index().unwrap_or(255));
         let names: Vec<_> = regs.iter().map(|r| format!("{}", r)).collect();
-        write!(f, "{{{}}}", names.join(", "))
+        write!(f, "LiveOut {{ registers={{{}}} }}", names.join(", "))
     }
 }
+
+/// AArch64 live-out / live-in carrier.
+///
+/// Type alias for `RegisterSet<Register>` per ADR-0004 decision 5. The
+/// previous separate `LiveOut` wrapper struct and `LiveOutRegisters`
+/// register-only set were collapsed onto this alias (closes #85).
+pub type LiveOut = RegisterSet<Register>;
 
 #[cfg(test)]
 mod tests {
@@ -219,7 +149,7 @@ mod tests {
 
     #[test]
     fn test_live_out_registers_all_registers() {
-        let mask = LiveOutRegisters::all_registers();
+        let mask = LiveOut::all_registers();
         assert!(mask.contains(Register::X0));
         assert!(mask.contains(Register::X30));
         assert!(mask.contains(Register::SP));
@@ -228,7 +158,7 @@ mod tests {
 
     #[test]
     fn test_live_out_registers_from_registers() {
-        let mask = LiveOutRegisters::from_registers(vec![Register::X0, Register::X1, Register::X2]);
+        let mask = LiveOut::from_registers(vec![Register::X0, Register::X1, Register::X2]);
         assert!(mask.contains(Register::X0));
         assert!(mask.contains(Register::X1));
         assert!(mask.contains(Register::X2));
@@ -238,14 +168,14 @@ mod tests {
 
     #[test]
     fn test_live_out_registers_empty() {
-        let mask = LiveOutRegisters::empty();
+        let mask = LiveOut::empty();
         assert!(mask.is_empty());
         assert!(!mask.contains(Register::X0));
     }
 
     #[test]
     fn test_live_out_registers_add_remove() {
-        let mut mask = LiveOutRegisters::empty();
+        let mut mask = LiveOut::empty();
         mask.add(Register::X0);
         assert!(mask.contains(Register::X0));
 
@@ -255,23 +185,23 @@ mod tests {
 
     #[test]
     fn test_live_out_registers_xzr_ignored() {
-        let mut mask = LiveOutRegisters::empty();
+        let mut mask = LiveOut::empty();
         mask.add(Register::XZR);
         assert!(!mask.contains(Register::XZR));
         assert!(mask.is_empty());
     }
 
     #[test]
-    fn test_live_out_wraps_register_slice() {
+    fn test_live_out_alias_exposes_register_set_api() {
         let live_out = LiveOut::from_registers(vec![Register::X0]);
         assert!(live_out.contains_register(Register::X0));
-        assert_eq!(live_out.registers().len(), 1);
+        assert_eq!(live_out.len(), 1);
     }
 
-    // Issue #77 stage 1 step 7: generic LiveOutMask coverage.
+    // Issue #77 stage 1 step 7: generic RegisterSet coverage.
     #[test]
     fn test_live_out_mask_aarch64_basics() {
-        let mut mask: LiveOutMask<Register> = LiveOutMask::empty();
+        let mut mask: RegisterSet<Register> = RegisterSet::empty();
         assert!(mask.is_empty());
         assert!(!mask.flags_live());
 
@@ -307,10 +237,44 @@ mod tests {
 
     #[test]
     fn test_live_out_mask_from_registers() {
-        let mask: LiveOutMask<Register> =
-            LiveOutMask::from_registers(vec![Register::X0, Register::X5, Register::X30]);
+        let mask: RegisterSet<Register> =
+            RegisterSet::from_registers(vec![Register::X0, Register::X5, Register::X30]);
         assert_eq!(mask.len(), 3);
         assert!(mask.contains(Register::X5));
         assert!(!mask.flags_live());
+    }
+
+    #[test]
+    fn test_live_out_mask_with_flags_builder() {
+        let mask: RegisterSet<Register> = RegisterSet::empty().with_flags(true);
+        assert!(mask.flags_live());
+
+        let mask: RegisterSet<Register> =
+            RegisterSet::from_registers(vec![Register::X0]).with_flags(false);
+        assert!(!mask.flags_live());
+        assert!(mask.contains(Register::X0));
+    }
+
+    #[test]
+    fn test_live_out_mask_contains_register_alias() {
+        let mask: RegisterSet<Register> = RegisterSet::from_registers(vec![Register::X3]);
+        assert!(mask.contains_register(Register::X3));
+        assert!(!mask.contains_register(Register::X4));
+    }
+
+    #[test]
+    fn test_register_set_aarch64_all_registers() {
+        let mask = RegisterSet::<Register>::all_registers();
+        assert!(mask.contains(Register::X0));
+        assert!(mask.contains(Register::X30));
+        assert!(mask.contains(Register::SP));
+        assert!(!mask.contains(Register::XZR));
+    }
+
+    #[test]
+    fn test_register_set_aarch64_display_sorted() {
+        let mask: RegisterSet<Register> =
+            RegisterSet::from_registers(vec![Register::X5, Register::X1, Register::X3]);
+        assert_eq!(format!("{}", mask), "LiveOut { registers={x1, x3, x5} }");
     }
 }

@@ -1344,7 +1344,7 @@ fn run_llm_opt(
     // what the user requests here, so the `;nzcv` suffix is accepted (for
     // CLI vocabulary parity with `equiv`) but does not change behaviour on
     // this path. See ADR-0006.
-    let (live_out, _flags_live) = validation::live_out::parse_live_out_contract(live_out_str)
+    let live_out = validation::live_out::parse_live_out_contract(live_out_str)
         .map_err(|e| format!("invalid live-out: {}", e))?;
 
     let llm = LlmConfig::default()
@@ -1409,22 +1409,21 @@ fn run_equiv(
         }
     }
 
-    let (live_out, flags_live) = validation::live_out::parse_live_out_contract(live_out_str)
+    let live_out = validation::live_out::parse_live_out_contract(live_out_str)
         .map_err(|e| format!("invalid live-out: {}", e))?;
 
     if verbose {
-        let mut regs: Vec<_> = live_out.registers().iter().collect();
+        let mut regs: Vec<_> = live_out.iter().collect();
         regs.sort_by_key(|r| r.index().unwrap_or(u8::MAX));
         let names: Vec<String> = regs.iter().map(|r| format!("{}", r)).collect();
         println!("Live-out registers: {}", names.join(", "));
-        if flags_live {
+        if live_out.flags_live() {
             println!("Live-out flags: nzcv");
         }
     }
 
     let config = EquivalenceConfig::default()
         .live_out(live_out)
-        .with_flags(flags_live)
         .timeout(Duration::from_secs(timeout))
         .set_fast_only(fast_only);
 
