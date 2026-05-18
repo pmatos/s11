@@ -73,20 +73,63 @@ done
 MNEMONIC_RE="${MNEMONIC_RE%|})[[:space:]]"
 
 # 4. Run llc on each sample, emit .s blocks the s11 parser can consume.
+#
+# The body extractor is an awk state machine. It walks the llc output
+# one line at a time and accumulates a candidate straight-line block
+# composed only of supported-mnemonic instruction lines. A block ends
+# when any of these is hit:
+#   - a label                                    (start of next block)
+#   - a branch/return terminator (b/br/bl/blr/ret/cbz/cbnz/tbz/tbnz/b.cond)
+# Assembler directives and comments don't break a block (they're
+# noise inside a single function), but an unsupported instruction
+# disqualifies the currently-accumulating block — the harvester does
+# not silently splice supported lines across an unsupported one.
+#
+# The first qualifying block (2..32 supported instructions) is emitted
+# and awk exits. This guarantees one straight-line block per fixture,
+# preventing the previous behaviour of grep'ing across multiple basic
+# blocks / functions and gluing unrelated paths together (PR #269 review).
 echo "[3/4] running llc and extracting basic blocks..."
 kept=0
 for ll in "${SAMPLES[@]}"; do
     base="$(basename "${ll%.ll}")"
     asm="$(llc -mtriple=aarch64-linux-gnu -O2 -filetype=asm -o - "$ll" 2>/dev/null)" || continue
 
-    # Drop everything outside basic blocks: keep only lines whose first
-    # token is one of the supported mnemonics. This is conservative —
-    # genuine constants and directives are dropped, but the parser only
-    # handles instructions anyway.
-    body="$(printf '%s\n' "$asm" | grep -E "$MNEMONIC_RE" || true)"
-    # Skip empty or trivially short bodies.
-    insn_count="$(printf '%s\n' "$body" | grep -c '[^[:space:]]' || true)"
-    if (( insn_count < 2 || insn_count > 32 )); then
+    body="$(printf '%s\n' "$asm" | awk -v mnemonic_re="$MNEMONIC_RE" '
+        BEGIN { block = ""; count = 0; supported = 1; done = 0 }
+        function finish() {
+            if (supported && count >= 2 && count <= 32) {
+                print block
+                done = 1
+                exit 0
+            }
+            block = ""; count = 0; supported = 1
+        }
+        # Blank lines and stripped comments — keep accumulating.
+        /^[[:space:]]*$/ { next }
+        /^[[:space:]]*\/\// { next }
+        # Assembler directives (.text, .cfi_*, etc.) — keep accumulating.
+        /^[[:space:]]*\./ { next }
+        # Labels close the current block.
+        /^[[:space:]]*[A-Za-z_.][A-Za-z0-9_.]*:/ { finish(); next }
+        # Branch / return terminators close the current block.
+        /^[[:space:]]*(b|br|bl|blr|ret|cbz|cbnz|tbz|tbnz)([[:space:]]|$)/ { finish(); next }
+        /^[[:space:]]*b\.[a-z]+([[:space:]]|$)/ { finish(); next }
+        # Supported instruction — append to the in-flight block.
+        $0 ~ mnemonic_re {
+            block = (count == 0 ? $0 : block "\n" $0)
+            count++
+            next
+        }
+        # Any other instruction disqualifies the block.
+        { supported = 0 }
+        # END fires even after `exit 0`, so guard against double-emit.
+        END { if (!done) finish() }
+    ')"
+
+    # awk emits a block only on success; an empty body means no
+    # qualifying block was found in this .ll.
+    if [[ -z "$body" ]]; then
         continue
     fi
 
