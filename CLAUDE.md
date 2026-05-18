@@ -110,7 +110,7 @@ src/
 │   ├── cost.rs          # AArch64 cost model
 │   ├── cost_x86.rs      # x86 cost model (variable-length CodeSize)
 │   ├── equivalence.rs   # check_equivalence (AArch64) + check_equivalence_x86 (EFLAGS fast-path)
-│   └── state.rs         # Machine state: ConditionFlags (NZCV), Eflags, *MachineState, LiveOutMask
+│   └── state.rs         # Machine state: ConditionFlags (NZCV), Eflags, *MachineState, X86LiveOutMask. RegisterSet<R> lives in live_out.rs.
 ├── search/              # Search algorithms (AArch64-typed in v1)
 │   ├── candidate.rs     # AArch64 candidate generation
 │   ├── candidate_x86.rs # x86 candidate generation

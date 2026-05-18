@@ -37,11 +37,13 @@ Rationale: text-input flows (`s11 equiv`, `--algorithm llm`) are AArch64-only fo
 
 Rationale: the only consumer that round-trips full operand structure is the stochastic mutator, and mutators are already per-ISA. Generalising `OperandType` to cover every ISA's operand grammar (extended registers for AArch64, ModR/M-shaped operands for x86, future RISC-V operand encodings) would balloon the trait and provide no real abstraction win.
 
-### 5. `LiveOutMask<R>` replaces `LiveOut` and `X86LiveOutMask`; `flags_live` lives on the mask
+### 5. `RegisterSet<R>` replaces `LiveOut` and `X86LiveOutMask`; `flags_live` lives on the mask
 
-A new generic `pub struct LiveOutMask<R: RegisterType> { regs: HashSet<R>, flags_live: bool }` is added to `src/semantics/live_out.rs` in stage 1 step 7. AArch64's existing `LiveOut` becomes a type alias `pub type LiveOut = LiveOutMask<crate::ir::Register>;`. In stage 2 step 16, `X86LiveOutMask` (`src/semantics/state.rs:397-441`) is deleted and x86 callers move to `LiveOutMask<X86Register>`. RISC-V uses `LiveOutMask<RiscVRegister>` with `flags_live` always `false`.
+A generic `pub struct RegisterSet<R: RegisterType> { regs: HashSet<R>, flags_live: bool }` lives in `src/semantics/live_out.rs`. AArch64's `LiveOut` is the type alias `pub type LiveOut = RegisterSet<crate::ir::Register>;`. In stage 2 step 16, `X86LiveOutMask` (`src/semantics/state.rs:397-441`) is deleted and x86 callers move to `RegisterSet<X86Register>`. RISC-V uses `RegisterSet<RiscVRegister>` with `flags_live` always `false`.
 
-Today's asymmetry — x86 puts `flags_live` on the mask, AArch64 puts it on `EquivalenceConfig.flags_live` — resolves in x86's favour. The AArch64 `EquivalenceConfig.flags_live` field is removed in stage 1 step 9; consumers consult `live_out.flags_live` instead.
+The neutral name `RegisterSet` (closes #85) acknowledges that the same shape carries both live-in (`compute_live_in_registers`) and live-out sets — previously the AArch64 path used `LiveOutRegisters` for both, which surprised readers. The earlier working name `LiveOutMask<R>` from the original ADR draft was renamed during stage 1 step 9 to land both renames in a single PR.
+
+Today's asymmetry — x86 puts `flags_live` on the mask, AArch64 puts it on `EquivalenceConfig.flags_live` — resolves in x86's favour. The AArch64 `EquivalenceConfig.flags_live` field is removed in stage 1 step 9; consumers consult `live_out.flags_live()` instead.
 
 Rationale: `flags_live` is a property of the live-out contract, not of the equivalence configuration. The x86 location is the principled one. ADR-0002 ("LLM-assisted search MVP refuses targets with flags live-out") remains the authoritative statement about how `flags_live` is propagated for the LLM flow; this ADR only changes *where* the bit is stored.
 
@@ -90,5 +92,5 @@ Rationale: stage 1 and stage 2 are unaffected by this decision; deferring it doe
 **Reversibility:**
 - Decision 1 (width as associated type vs const generic) is the hardest to reverse — every generic function in the refactored consumer layer depends on it. Switching to const generics later means re-touching every `<I: ISA>` bound. Picked deliberately as the safer choice given today's Rust.
 - Decision 2 (`type Mutator` on `ISA` vs on `InstructionGenerator`) is moderately reversible. Moving the associated type later means updating every ISA impl block, but no consumer signature changes (consumers reach through the trait either way).
-- Decision 5 (`LiveOutMask<R>` with `flags_live` on the mask) is reversible by promoting `flags_live` back to `EquivalenceConfig` or to a third location; every consumer of `flags_live` is contained in `src/semantics/equivalence.rs` and `src/validation/live_out.rs`.
+- Decision 5 (`RegisterSet<R>` with `flags_live` on the mask) is reversible by promoting `flags_live` back to `EquivalenceConfig` or to a third location; every consumer of `flags_live` is contained in `src/semantics/equivalence.rs` and `src/validation/live_out.rs`.
 - Decisions 3, 4, 6, 7, 8 are all individually reversible without disturbing the rest of the plan. Decision 8 in particular is deliberately deferred.
