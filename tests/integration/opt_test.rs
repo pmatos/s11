@@ -24,34 +24,33 @@ fn get_binary_path() -> PathBuf {
     PathBuf::from(env!("CARGO_BIN_EXE_s11"))
 }
 
-fn assert_bytes_at_addr(elf_path: &Path, addr: u64, expected: &[u8], label: &str) {
-    let data = std::fs::read(elf_path).expect("read ELF for byte-pattern check");
+// Scan every executable, instruction-aligned slot in `elf_path` for the
+// 4-byte little-endian encoding `pattern` and return the virtual address of
+// the first match. Used by opt tests to dynamically resolve a window onto a
+// known supported (or known unsupported) AArch64 instruction without
+// hardcoding addresses against a specific build of the fixture binary.
+fn find_encoding(elf_path: &Path, pattern: &[u8], label: &str) -> u64 {
+    let data = std::fs::read(elf_path).expect("read ELF for pattern scan");
     let elf = elf::ElfBytes::<elf::endian::AnyEndian>::minimal_parse(&data)
-        .expect("parse ELF for byte-pattern check");
+        .expect("parse ELF for pattern scan");
     let section_headers = elf.section_headers().expect("ELF section headers");
 
     for section in section_headers.iter() {
         if section.sh_flags & elf::abi::SHF_EXECINSTR as u64 == 0 {
             continue;
         }
-        let sec_start = section.sh_addr;
-        let sec_end = sec_start + section.sh_size;
-        if addr < sec_start || addr + expected.len() as u64 > sec_end {
-            continue;
+        let file_start = section.sh_offset as usize;
+        let size = section.sh_size as usize;
+        let bytes = &data[file_start..file_start + size];
+        for off in (0..size.saturating_sub(pattern.len()) + 1).step_by(4) {
+            if &bytes[off..off + pattern.len()] == pattern {
+                return section.sh_addr + off as u64;
+            }
         }
-        let offset_in_section = (addr - sec_start) as usize;
-        let file_offset = section.sh_offset as usize + offset_in_section;
-        let actual = &data[file_offset..file_offset + expected.len()];
-        assert_eq!(
-            actual, expected,
-            "fixture {:?} drifted: bytes at 0x{:x} no longer match {} encoding {:02x?}; got {:02x?}",
-            elf_path, addr, label, expected, actual
-        );
-        return;
     }
     panic!(
-        "address 0x{:x} not in any executable section of {:?}",
-        addr, elf_path
+        "encoding {:02x?} ({}) not found in any executable section of {:?}",
+        pattern, label, elf_path
     );
 }
 
@@ -85,17 +84,13 @@ fn test_opt_basic_functionality() {
 
     check_test_binary(&test_elf);
 
-    // We do not use executable_window here because the start of .init in
-    // arrays_debug is `paciasp` (an unsupported HINT), which the AArch64
-    // optimization path now correctly rejects rather than silently dropping.
-    let start_addr: u64 = 0x5cc;
-    let end_addr: u64 = 0x5d0;
-    assert_bytes_at_addr(
-        &test_elf,
-        start_addr,
-        &[0x10, 0xe2, 0x3f, 0x91],
-        "add x16, x16, #0xff8",
-    );
+    // executable_window starts at the first executable section, which is .init
+    // and begins with `paciasp` (an unsupported HINT); the AArch64 optimization
+    // path now correctly rejects that window. Scan instead for the PLT's
+    // `add x16, x16, #0xff8` trampoline slot — a supported AArch64 instruction
+    // that always exists in the fixture regardless of build environment drift.
+    let start_addr = find_encoding(&test_elf, &[0x10, 0xe2, 0x3f, 0x91], "add x16, x16, #0xff8");
+    let end_addr = start_addr + 4;
 
     let output = Command::new(binary)
         .arg("opt")
@@ -334,16 +329,18 @@ fn test_opt_rejects_unsupported_instruction_window() {
         .join("binaries")
         .join("loops_debug");
     check_test_binary(&test_elf);
-    assert_bytes_at_addr(
+
+    // Scan loops_debug for the first `stp x29, x30, [sp, #-0x10]!` — an
+    // unsupported mnemonic for the AArch64 optimization path. Targeting a
+    // 4-byte window on that instruction must abort before any output file
+    // is written.
+    let start_addr = find_encoding(
         &test_elf,
-        0x59c,
         &[0xfd, 0x7b, 0xbf, 0xa9],
         "stp x29, x30, [sp, #-0x10]!",
     );
+    let end_addr = start_addr + 4;
 
-    // 0x59c in loops_debug is a `stp x29, x30, [sp, #-0x10]!` — an unsupported
-    // mnemonic for the AArch64 optimization path. Targeting a 4-byte window on
-    // this single instruction should abort before any output file is written.
     let optimized_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("binaries")
         .join("loops_debug_optimized");
@@ -353,9 +350,9 @@ fn test_opt_rejects_unsupported_instruction_window() {
         .arg("opt")
         .arg(&test_elf)
         .arg("--start-addr")
-        .arg("0x59c")
+        .arg(format!("0x{start_addr:x}"))
         .arg("--end-addr")
-        .arg("0x5a0")
+        .arg(format!("0x{end_addr:x}"))
         .output()
         .expect("Failed to execute s11");
 
@@ -372,8 +369,8 @@ fn test_opt_rejects_unsupported_instruction_window() {
         "stderr should identify the offending mnemonic; got: {stderr}",
     );
     assert!(
-        stderr.contains("0x59c"),
-        "stderr should report the offending address; got: {stderr}",
+        stderr.contains(&format!("0x{start_addr:x}")),
+        "stderr should report the offending address 0x{start_addr:x}; got: {stderr}",
     );
 
     assert!(
