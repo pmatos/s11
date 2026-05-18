@@ -608,7 +608,11 @@ impl Instruction {
             | Instruction::Orr { rd, rn, rm }
             | Instruction::Eor { rd, rn, rm } => match rm {
                 Operand::Register(_) => true,
-                Operand::Immediate(imm) => *rd != Register::XZR && logical_imm64_encodable(*imm),
+                // rd in the Xn|SP slot (SP allowed, XZR forbidden); rn in the
+                // plain Xn slot (XZR allowed via reg 31, SP forbidden).
+                Operand::Immediate(imm) => {
+                    *rd != Register::XZR && *rn != Register::SP && logical_imm64_encodable(*imm)
+                }
                 Operand::ShiftedRegister { reg, amount, .. } => {
                     *amount <= 63
                         && *reg != Register::SP
@@ -666,10 +670,11 @@ impl Instruction {
 
             // TST: register, encodable bitmask immediate (issue #65), or
             // shifted-register (all 4 kinds incl. ROR). No rd, so no XZR-slot
-            // guard needed for the immediate form.
+            // guard needed for the immediate form — but rn is the plain Xn slot
+            // (rejects SP).
             Instruction::Tst { rn, rm } => match rm {
                 Operand::Register(_) => true,
-                Operand::Immediate(imm) => logical_imm64_encodable(*imm),
+                Operand::Immediate(imm) => *rn != Register::SP && logical_imm64_encodable(*imm),
                 Operand::ShiftedRegister { reg, amount, .. } => {
                     *amount <= 63 && *reg != Register::SP && *rn != Register::SP
                 }
@@ -707,10 +712,13 @@ impl Instruction {
             },
             // ANDS: register or encodable bitmask immediate (issue #65).
             // ShiftedRegister out of scope (#59). The immediate form uses the
-            // plain X slot for Rd (unlike AND/ORR/EOR), so XZR-as-rd is fine.
-            Instruction::Ands { rm, .. } => match rm {
+            // plain X slot for both rd and rn (rejects SP); XZR is fine for rd
+            // (encodes as the TST shape).
+            Instruction::Ands { rd, rn, rm } => match rm {
                 Operand::Register(_) => true,
-                Operand::Immediate(imm) => logical_imm64_encodable(*imm),
+                Operand::Immediate(imm) => {
+                    *rd != Register::SP && *rn != Register::SP && logical_imm64_encodable(*imm)
+                }
                 Operand::ShiftedRegister { .. } => false,
                 Operand::ExtendedRegister { .. } => false,
             },
@@ -2593,6 +2601,75 @@ mod tests {
             Instruction::Ands {
                 rd: Register::XZR,
                 rn: Register::X1,
+                rm: Operand::Immediate(0xFF),
+            }
+            .is_encodable_aarch64()
+        );
+    }
+
+    #[test]
+    fn test_is_encodable_aarch64_rejects_sp_in_xn_slot_for_logical_imm() {
+        // AND/ORR/EOR (immediate): rn is the plain Xn slot — rejects SP. rd in
+        // Xn|SP slot accepts SP per ARM spec.
+        for ctor in [
+            |rn| Instruction::And {
+                rd: Register::X0,
+                rn,
+                rm: Operand::Immediate(0xFF),
+            },
+            |rn| Instruction::Orr {
+                rd: Register::X0,
+                rn,
+                rm: Operand::Immediate(0xFF),
+            },
+            |rn| Instruction::Eor {
+                rd: Register::X0,
+                rn,
+                rm: Operand::Immediate(0xFF),
+            },
+        ] {
+            assert!(
+                !ctor(Register::SP).is_encodable_aarch64(),
+                "rn=SP must be rejected for logical-imm (Xn slot)"
+            );
+            assert!(
+                ctor(Register::X1).is_encodable_aarch64(),
+                "rn=X1 must remain encodable"
+            );
+        }
+
+        // AND/ORR/EOR with rd=SP is legitimate (Xn|SP slot encodes SP).
+        assert!(
+            Instruction::And {
+                rd: Register::SP,
+                rn: Register::X1,
+                rm: Operand::Immediate(0xFF),
+            }
+            .is_encodable_aarch64()
+        );
+
+        // TST: rn in the plain Xn slot — SP rejected.
+        assert!(
+            !Instruction::Tst {
+                rn: Register::SP,
+                rm: Operand::Immediate(0xFF),
+            }
+            .is_encodable_aarch64()
+        );
+
+        // ANDS: both rd and rn in plain Xn slots — SP rejected for either.
+        assert!(
+            !Instruction::Ands {
+                rd: Register::SP,
+                rn: Register::X1,
+                rm: Operand::Immediate(0xFF),
+            }
+            .is_encodable_aarch64()
+        );
+        assert!(
+            !Instruction::Ands {
+                rd: Register::X0,
+                rn: Register::SP,
                 rm: Operand::Immediate(0xFF),
             }
             .is_encodable_aarch64()
