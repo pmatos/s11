@@ -136,7 +136,16 @@ pub struct BenchRecord {
     pub found_length: Option<usize>,
     pub original_cost: u64,
     pub best_cost: u64,
+    /// Truncated to milliseconds for the JSON-Lines record so the file
+    /// is easy to skim. Bench files MUST use [`BenchRecord::search_elapsed`]
+    /// (precise `Duration`) when feeding criterion's `iter_custom`, or
+    /// sub-millisecond samples round to zero — see PR #269 review.
     pub search_elapsed_ms: u64,
+    /// Full-precision wall time of the search. Excluded from the JSON
+    /// serialization because `search_elapsed_ms` is the documented
+    /// schema field; this is the value criterion's timing model needs.
+    #[serde(skip)]
+    pub search_elapsed: Duration,
     pub smt_elapsed_ms: u64,
     pub smt_queries: u64,
     pub smt_equivalent: u64,
@@ -250,6 +259,7 @@ pub fn run_bench(spec: &BenchSpec, sample_index: u32) -> BenchRecord {
         original_cost,
         best_cost,
         search_elapsed_ms: statistics.elapsed_time.as_millis() as u64,
+        search_elapsed: statistics.elapsed_time,
         smt_elapsed_ms: statistics.smt_elapsed.as_millis() as u64,
         smt_queries: statistics.smt_queries,
         smt_equivalent: statistics.smt_equivalent,
@@ -323,6 +333,7 @@ mod tests {
             original_cost: 2,
             best_cost: 1,
             search_elapsed_ms: 5,
+            search_elapsed: Duration::from_millis(5),
             smt_elapsed_ms: 1,
             smt_queries: 3,
             smt_equivalent: 1,
