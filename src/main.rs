@@ -1186,6 +1186,65 @@ fn run_x86_symbolic(
     optimized
 }
 
+/// Reassemble an x86 prefix and splice an ORIGINAL pinned Jcc
+/// terminator back at its original byte offset. Re-encoding the Jcc via
+/// dynasm would emit a placeholder zero displacement and overwrite the
+/// real branch target.
+///
+/// `pinned_terminator` is `None` when the source window had no trailing
+/// Jcc; in that case the function returns the assembled prefix verbatim.
+/// When `Some(jcc_bytes)`, the returned vector is exactly
+/// `original_prefix_byte_size + jcc_bytes.len()` long, with NOP padding
+/// inserted between the new prefix and the Jcc so the Jcc lands at its
+/// original offset (preserving its rel8 / rel32 displacement).
+///
+/// Returns `Err` if the optimized prefix encodes to more bytes than the
+/// original prefix occupied — shifting the Jcc earlier would change the
+/// branch target.
+fn reassemble_x86_prefix_with_pinned_terminator(
+    final_prefix_ir: &[isa::x86::X86Instruction],
+    arch: DetectedArch,
+    pinned_terminator: Option<&[u8]>,
+    original_prefix_byte_size: usize,
+) -> Result<Vec<u8>, String> {
+    let mut asm = match arch {
+        DetectedArch::X86_64 => assembler::x86::X86Assembler::new_64(),
+        DetectedArch::X86_32 => assembler::x86::X86Assembler::new_32(),
+        DetectedArch::Aarch64 => {
+            return Err("reassemble helper is x86-only".to_string());
+        }
+    };
+    let mut out = asm.assemble_instructions(final_prefix_ir)?;
+
+    let Some(jcc_bytes) = pinned_terminator else {
+        return Ok(out);
+    };
+
+    if out.len() > original_prefix_byte_size {
+        return Err(format!(
+            "optimized prefix ({} bytes) is larger than original prefix \
+             ({} bytes); cannot preserve the pinned Jcc terminator's \
+             displacement",
+            out.len(),
+            original_prefix_byte_size
+        ));
+    }
+
+    // Pad NOPs so the Jcc lands at the same offset as in the original
+    // window. `nop_sequence` may return fewer than the requested bytes;
+    // loop until the gap is filled.
+    let gap = original_prefix_byte_size - out.len();
+    let mut padded = 0;
+    while padded < gap {
+        let nop = arch.nop_sequence(gap - padded);
+        debug_assert!(!nop.is_empty(), "nop_sequence returned empty slice");
+        out.extend_from_slice(nop);
+        padded += nop.len();
+    }
+    out.extend_from_slice(jcc_bytes);
+    Ok(out)
+}
+
 fn optimize_elf_binary_x86(
     patcher: &ElfPatcher,
     path: &Path,
@@ -1292,12 +1351,41 @@ fn optimize_elf_binary_x86(
         println!("  {}", i);
     }
 
-    let mut asm = match arch {
-        DetectedArch::X86_64 => assembler::x86::X86Assembler::new_64(),
-        DetectedArch::X86_32 => assembler::x86::X86Assembler::new_32(),
-        DetectedArch::Aarch64 => unreachable!(),
+    // If the original window ended in a Jcc, the search holds that
+    // terminator fixed. Re-encoding it via dynasm would emit a placeholder
+    // zero displacement and overwrite the real branch target. Peel the
+    // Jcc from `final_ir` and splice the ORIGINAL Jcc bytes back at the
+    // same offset they had in the source window so the displacement
+    // stays valid (reviewer-flagged P1 on PR #268).
+    let (final_prefix_ir, final_terminator) =
+        crate::ir::instructions::split_terminator_x86(&final_ir);
+    let (_, original_terminator) = crate::ir::instructions::split_terminator_x86(&ir);
+    if final_terminator != original_terminator {
+        return Err(format!(
+            "search returned a terminator ({:?}) that does not match the \
+             original window's terminator ({:?}); refusing to patch",
+            final_terminator, original_terminator
+        )
+        .into());
+    }
+    let pinned_terminator_bytes: Option<Vec<u8>> = if original_terminator.is_some() {
+        let last = cs_instrs
+            .iter()
+            .last()
+            .ok_or("expected non-empty disassembly when peeling terminator")?;
+        Some(last.bytes().to_vec())
+    } else {
+        None
     };
-    let new_bytes = asm.assemble_instructions(&final_ir)?;
+    let original_prefix_byte_size =
+        bytes.len() - pinned_terminator_bytes.as_ref().map_or(0, |b| b.len());
+
+    let new_bytes = reassemble_x86_prefix_with_pinned_terminator(
+        final_prefix_ir,
+        arch,
+        pinned_terminator_bytes.as_deref(),
+        original_prefix_byte_size,
+    )?;
     println!("Reassembled to {} bytes", new_bytes.len());
 
     let output_path = {
@@ -2610,6 +2698,101 @@ mod cli_helper_tests {
         assert_eq!(
             check_equivalence_x86(&seq.clone(), &seq, &cfg),
             EquivalenceResult::Equivalent
+        );
+    }
+
+    // --- x86 Jcc-byte preservation across reassembly (PR #268 review) ---
+
+    #[test]
+    fn reassemble_x86_no_terminator_returns_assembled_bytes_unchanged() {
+        use isa::x86::{X86Instruction, X86Register};
+        let final_ir = [X86Instruction::MovReg {
+            rd: X86Register::RAX,
+            rs: X86Register::RBX,
+        }];
+        let bytes =
+            reassemble_x86_prefix_with_pinned_terminator(&final_ir, DetectedArch::X86_64, None, 3)
+                .expect("reassemble succeeds");
+        // No splice, no padding: just the assembled prefix.
+        assert_eq!(bytes.len(), 3);
+    }
+
+    #[test]
+    fn reassemble_x86_splices_original_terminator_bytes_at_original_offset() {
+        // Original window: [3-byte mov rax,rbx] [2-byte je 0x10] = 5 bytes total,
+        // jcc at offset 3.
+        // Optimized prefix: same 3-byte mov. Should produce: [mov, je] = 5 bytes,
+        // jcc still at offset 3 (no NOP padding needed since prefix didn't shrink).
+        use isa::x86::{X86Instruction, X86Register};
+        let original_jcc_bytes = [0x74u8, 0x10]; // je rel8=0x10
+        let final_ir = [X86Instruction::MovReg {
+            rd: X86Register::RAX,
+            rs: X86Register::RBX,
+        }];
+        let out = reassemble_x86_prefix_with_pinned_terminator(
+            &final_ir,
+            DetectedArch::X86_64,
+            Some(&original_jcc_bytes),
+            3,
+        )
+        .expect("reassemble succeeds");
+        // Original Jcc bytes must be the LAST 2 bytes, unchanged.
+        assert_eq!(&out[out.len() - 2..], &original_jcc_bytes);
+        assert_eq!(out.len(), 5);
+    }
+
+    #[test]
+    fn reassemble_x86_pads_with_nops_when_optimized_prefix_shrinks() {
+        // Original window: 7-byte prefix + 2-byte jcc = 9 bytes, jcc at offset 7.
+        // Optimized prefix shrinks to 3 bytes. We must NOP-pad 4 bytes so the
+        // Jcc still lands at offset 7 (preserving its rel8 displacement).
+        use isa::x86::{X86Instruction, X86Register};
+        let original_jcc_bytes = [0x75u8, 0x20]; // jne rel8=0x20
+        let final_ir = [X86Instruction::MovReg {
+            rd: X86Register::RAX,
+            rs: X86Register::RBX,
+        }];
+        let out = reassemble_x86_prefix_with_pinned_terminator(
+            &final_ir,
+            DetectedArch::X86_64,
+            Some(&original_jcc_bytes),
+            7,
+        )
+        .expect("reassemble succeeds");
+        // Total length matches the original window.
+        assert_eq!(out.len(), 9);
+        // Jcc bytes are at the original offset (7).
+        assert_eq!(&out[7..9], &original_jcc_bytes);
+        // First 3 bytes are the new prefix; bytes [3..7] are NOP padding.
+        // We don't assert specific NOP encodings here — `nop_sequence` is
+        // covered separately. We just assert they aren't zero (which would
+        // be the buggy `je BYTE 0` overwrite the reviewer flagged).
+        assert_ne!(&out[3..7], &[0u8; 4]);
+    }
+
+    #[test]
+    fn reassemble_x86_rejects_optimized_prefix_larger_than_original() {
+        // Pathological case: optimized prefix is LARGER than the original
+        // prefix room. Cannot pad backwards. Must surface as an error
+        // instead of silently corrupting the Jcc displacement.
+        use isa::x86::{X86Instruction, X86Register};
+        let original_jcc_bytes = [0x74u8, 0x10];
+        // 3-byte assembled prefix — but we claim original prefix room was 1.
+        let final_ir = [X86Instruction::MovReg {
+            rd: X86Register::RAX,
+            rs: X86Register::RBX,
+        }];
+        let err = reassemble_x86_prefix_with_pinned_terminator(
+            &final_ir,
+            DetectedArch::X86_64,
+            Some(&original_jcc_bytes),
+            1,
+        )
+        .expect_err("should reject");
+        assert!(
+            err.contains("larger") || err.contains("preserve"),
+            "expected explanatory error, got: {}",
+            err
         );
     }
 }
