@@ -131,7 +131,7 @@ impl From<LiveOutRegisters> for LiveOut {
 
 impl fmt::Display for LiveOut {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "registers={}", self.registers)
+        write!(f, "LiveOut {{ registers={} }}", self.registers)
     }
 }
 
@@ -285,6 +285,24 @@ mod tests {
 
         mask.set_flags_live(true);
         assert!(mask.flags_live());
+    }
+
+    #[test]
+    fn test_live_out_display_single_register() {
+        let live_out = LiveOut::from_registers(vec![Register::X0]);
+        assert_eq!(format!("{}", live_out), "LiveOut { registers={x0} }");
+    }
+
+    #[test]
+    fn test_live_out_display_multiple_registers_sorted() {
+        let live_out = LiveOut::from_registers(vec![Register::X1, Register::X0]);
+        assert_eq!(format!("{}", live_out), "LiveOut { registers={x0, x1} }");
+    }
+
+    #[test]
+    fn test_live_out_display_empty() {
+        let live_out = LiveOut::from_registers(vec![]);
+        assert_eq!(format!("{}", live_out), "LiveOut { registers={} }");
     }
 
     #[test]
