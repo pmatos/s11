@@ -1062,21 +1062,24 @@ fn find_shorter_equivalent_x86(
     let imms = vec![0i64, 1, -1];
 
     let candidates = generate_all_x86_instructions(&pool, &imms);
-    // Defense-in-depth: when the target reads EFLAGS (any CMOV/Jcc),
-    // the fast-path's 10 random trials might not cover every flag
-    // combination the reader actually depends on. Drop `.fast_only()` so
-    // the SMT path also runs for those targets. Combined with the
-    // run_fast_path_x86 input-flag randomization fix, this closes the
-    // soundness gap where a flag-clobbering proposal could pass.
-    let target_reads_flags = target.iter().any(|i| {
-        use crate::isa::x86::X86Instruction::*;
-        matches!(i, Cmov { .. } | Jcc { .. })
-    });
-    let mut cfg_builder = X86EquivalenceConfig::new(width).live_out(live_out.clone());
-    if !target_reads_flags {
-        cfg_builder = cfg_builder.fast_only();
-    }
-    let cfg = cfg_builder;
+    // Defense-in-depth: when EITHER side reads EFLAGS (CMOV/Jcc), the
+    // fast-path's 10 random trials may not cover every flag combination
+    // the reader depends on. Drop `.fast_only()` for those iterations so
+    // the SMT path also runs. The two configs differ only in fast_only;
+    // building them once outside the loop avoids per-iteration churn.
+    let reads_flags = |seq: &[isa::x86::X86Instruction]| -> bool {
+        seq.iter().any(|i| {
+            matches!(
+                i,
+                isa::x86::X86Instruction::Cmov { .. } | isa::x86::X86Instruction::Jcc { .. }
+            )
+        })
+    };
+    let target_reads_flags = reads_flags(target);
+    let cfg_fast = X86EquivalenceConfig::new(width)
+        .live_out(live_out.clone())
+        .fast_only();
+    let cfg_smt = X86EquivalenceConfig::new(width).live_out(live_out.clone());
     for cand in candidates {
         let seq = vec![cand];
         let cand_cost =
@@ -1084,7 +1087,12 @@ fn find_shorter_equivalent_x86(
         if cand_cost >= target_cost {
             continue;
         }
-        match check_equivalence_x86(target, &seq, &cfg) {
+        let cfg = if target_reads_flags || reads_flags(&seq) {
+            &cfg_smt
+        } else {
+            &cfg_fast
+        };
+        match check_equivalence_x86(target, &seq, cfg) {
             semantics::equivalence::EquivalenceResult::Equivalent => return Some(seq),
             _ => continue,
         }
