@@ -7,6 +7,7 @@
 //! 3. Assert cost bound: sketch_cost < max_cost
 //! 4. Use Z3 to find satisfying assignment or prove UNSAT
 
+pub mod backend;
 pub mod sketch;
 pub mod synthesis;
 
