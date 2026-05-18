@@ -637,8 +637,9 @@ fn run_optimization(
                 .with_registers(available_registers)
                 .with_immediates(available_immediates);
 
-            let mut search = StochasticSearch::new();
-            let result = search.search(prefix, &live_out, &config);
+            let mut search: StochasticSearch<isa::AArch64> = StochasticSearch::new();
+            let result: search::result::SearchResult =
+                search.search(prefix, &live_out, &config).into();
 
             print_search_statistics(&result.statistics);
 

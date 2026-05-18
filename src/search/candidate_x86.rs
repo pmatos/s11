@@ -8,7 +8,9 @@
 
 #![allow(dead_code)]
 
+use crate::assembler::x86::{X86Assembler, X86Mode};
 use crate::isa::x86::{X86Instruction, X86Register};
+use rand::RngExt;
 
 /// Enumerate every reg/reg and reg/imm form of the 14 minimal-core
 /// variants for the given register and immediate pools.
@@ -70,6 +72,78 @@ pub fn default_x86_immediates() -> Vec<i64> {
     vec![
         0, 1, 2, 3, 4, 5, 7, 8, 10, 15, 16, 31, 32, 63, 64, 100, 255, 256, 1000, 4095,
     ]
+}
+
+/// Generate a random single x86 instruction. In `Mode32`, R8-R15 are
+/// excluded automatically (the assembler at
+/// `src/assembler/x86.rs:68-74` rejects them anyway, but filtering
+/// here avoids wasting search cycles on unencodable proposals).
+pub fn generate_random_x86_instruction<R: RngExt>(
+    rng: &mut R,
+    registers: &[X86Register],
+    immediates: &[i64],
+    mode: X86Mode,
+) -> X86Instruction {
+    let pool: Vec<X86Register> = registers
+        .iter()
+        .copied()
+        .filter(|r| mode != X86Mode::Mode32 || matches!(r.index(), Some(i) if i < 8))
+        .collect();
+    let regs = if pool.is_empty() {
+        vec![X86Register::RAX]
+    } else {
+        pool
+    };
+    let imms = if immediates.is_empty() {
+        vec![0i64]
+    } else {
+        immediates.to_vec()
+    };
+
+    let opcode = rng.random_range(0..14u32);
+    let rd = regs[rng.random_range(0..regs.len())];
+    let rs = regs[rng.random_range(0..regs.len())];
+    let imm = imms[rng.random_range(0..imms.len())];
+    match opcode {
+        0 => X86Instruction::MovReg { rd, rs },
+        1 => X86Instruction::MovImm { rd, imm },
+        2 => X86Instruction::AddReg { rd, rs },
+        3 => X86Instruction::AddImm { rd, imm },
+        4 => X86Instruction::SubReg { rd, rs },
+        5 => X86Instruction::SubImm { rd, imm },
+        6 => X86Instruction::AndReg { rd, rs },
+        7 => X86Instruction::AndImm { rd, imm },
+        8 => X86Instruction::OrReg { rd, rs },
+        9 => X86Instruction::OrImm { rd, imm },
+        10 => X86Instruction::XorReg { rd, rs },
+        11 => X86Instruction::XorImm { rd, imm },
+        12 => X86Instruction::CmpReg { rn: rd, rs },
+        _ => X86Instruction::CmpImm { rn: rd, imm },
+    }
+}
+
+/// Generate a random x86 instruction sequence of length `len`.
+pub fn generate_random_x86_sequence<R: RngExt>(
+    rng: &mut R,
+    len: usize,
+    registers: &[X86Register],
+    immediates: &[i64],
+    mode: X86Mode,
+) -> Vec<X86Instruction> {
+    (0..len)
+        .map(|_| generate_random_x86_instruction(rng, registers, immediates, mode))
+        .collect()
+}
+
+/// Return `true` when the given sequence assembles cleanly under the
+/// supplied mode. Round-trips through `X86Assembler`, treating any
+/// encoder error as "not encodable" (e.g. R8-R15 in `Mode32`).
+pub fn is_x86_sequence_encodable(sequence: &[X86Instruction], mode: X86Mode) -> bool {
+    let mut asm = match mode {
+        X86Mode::Mode64 => X86Assembler::new_64(),
+        X86Mode::Mode32 => X86Assembler::new_32(),
+    };
+    asm.assemble_instructions(sequence).is_ok()
 }
 
 #[cfg(test)]

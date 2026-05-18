@@ -5,6 +5,7 @@
 //! and accepts/rejects mutations based on their cost using a temperature parameter.
 
 pub mod acceptance;
+pub mod backend;
 pub mod mcmc;
 pub mod mutation;
 

@@ -90,6 +90,98 @@ pub fn generate_edge_case_inputs(registers: &[Register]) -> Vec<ConcreteMachineS
     inputs
 }
 
+// ---- x86 random-input helpers (issue #73 Phase C) ----
+
+/// Configuration for x86 random-input generation. Parallels
+/// `RandomInputConfig` for AArch64. `width` controls how assigned
+/// values are masked by the x86 concrete state on write.
+#[derive(Debug, Clone)]
+pub struct RandomInputConfigX86 {
+    pub count: usize,
+    pub registers: Vec<crate::isa::x86::X86Register>,
+    pub width: u32,
+}
+
+impl Default for RandomInputConfigX86 {
+    fn default() -> Self {
+        Self {
+            count: 10,
+            registers: vec![
+                crate::isa::x86::X86Register::RAX,
+                crate::isa::x86::X86Register::RCX,
+                crate::isa::x86::X86Register::RDX,
+                crate::isa::x86::X86Register::RBX,
+            ],
+            width: 64,
+        }
+    }
+}
+
+/// Generate random x86 concrete machine states. Each state initialises
+/// the listed registers with random values; other registers stay zero.
+pub fn generate_random_inputs_x86(
+    config: &RandomInputConfigX86,
+) -> Vec<crate::semantics::state::X86ConcreteMachineState> {
+    let mut rng = rand::rng();
+    let mut inputs = Vec::with_capacity(config.count);
+    for _ in 0..config.count {
+        let mut state = crate::semantics::state::X86ConcreteMachineState::new_zeroed(config.width);
+        for reg in &config.registers {
+            state.set_register(
+                *reg,
+                crate::semantics::state::ConcreteValue::new(rng.random()),
+            );
+        }
+        inputs.push(state);
+    }
+    inputs
+}
+
+/// Generate edge-case x86 inputs. Mirrors `generate_edge_case_inputs`
+/// for AArch64.
+pub fn generate_edge_case_inputs_x86(
+    registers: &[crate::isa::x86::X86Register],
+    width: u32,
+) -> Vec<crate::semantics::state::X86ConcreteMachineState> {
+    let edge_values: Vec<u64> = vec![
+        0,
+        1,
+        u64::MAX,
+        i64::MAX as u64,
+        i64::MIN as u64,
+        0x8000_0000_0000_0000,
+        0x7FFF_FFFF_FFFF_FFFF,
+        0x0000_0000_FFFF_FFFF,
+        0xFFFF_FFFF_0000_0000,
+        0x5555_5555_5555_5555,
+        0xAAAA_AAAA_AAAA_AAAA,
+    ];
+
+    let mut inputs = Vec::new();
+    for &edge_val in &edge_values {
+        let mut state = crate::semantics::state::X86ConcreteMachineState::new_zeroed(width);
+        for reg in registers {
+            state.set_register(*reg, crate::semantics::state::ConcreteValue::new(edge_val));
+        }
+        inputs.push(state);
+    }
+    if registers.len() >= 2 {
+        for &v1 in &edge_values[..5] {
+            for &v2 in &edge_values[..5] {
+                let mut state = crate::semantics::state::X86ConcreteMachineState::new_zeroed(width);
+                if let Some(reg) = registers.first() {
+                    state.set_register(*reg, crate::semantics::state::ConcreteValue::new(v1));
+                }
+                if let Some(reg) = registers.get(1) {
+                    state.set_register(*reg, crate::semantics::state::ConcreteValue::new(v2));
+                }
+                inputs.push(state);
+            }
+        }
+    }
+    inputs
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -162,5 +254,38 @@ mod tests {
         for input in &inputs {
             assert_eq!(input.get_register(Register::X1).as_u64(), 0);
         }
+    }
+
+    // ---- x86 random-input helpers ----
+
+    #[test]
+    fn generate_random_inputs_x86_respects_count_and_width() {
+        let config = RandomInputConfigX86 {
+            count: 5,
+            registers: vec![crate::isa::x86::X86Register::RAX],
+            width: 32,
+        };
+        let inputs = generate_random_inputs_x86(&config);
+        assert_eq!(inputs.len(), 5);
+        for input in &inputs {
+            assert_eq!(input.width(), 32);
+            // Mode32 masks writes to low 32 bits.
+            let v = input
+                .get_register(crate::isa::x86::X86Register::RAX)
+                .as_u64();
+            assert!(v <= u32::MAX as u64, "value {} not masked to width", v);
+        }
+    }
+
+    #[test]
+    fn generate_edge_case_inputs_x86_includes_zero_and_all_ones() {
+        let inputs = generate_edge_case_inputs_x86(&[crate::isa::x86::X86Register::RAX], 64);
+        // Width-64: the edge_values set includes 0 and u64::MAX.
+        let rax_vals: std::collections::HashSet<u64> = inputs
+            .iter()
+            .map(|s| s.get_register(crate::isa::x86::X86Register::RAX).as_u64())
+            .collect();
+        assert!(rax_vals.contains(&0));
+        assert!(rax_vals.contains(&u64::MAX));
     }
 }

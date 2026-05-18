@@ -14,63 +14,76 @@
 //! 4. Return best found optimization
 
 use crate::ir::Instruction;
-use crate::search::candidate::generate_random_sequence;
+use crate::isa::{ISA, ISAMutator};
 use crate::search::config::SearchConfig;
 use crate::search::result::{SearchResult, SearchStatistics};
 use crate::search::stochastic::acceptance::AcceptanceCriterion;
-use crate::search::stochastic::mutation::Mutator;
+use crate::search::stochastic::backend::StochasticBackend;
 use crate::search::{Algorithm, SearchAlgorithm};
+use crate::semantics::EquivalenceResult;
 use crate::semantics::concrete::{apply_sequence_concrete, states_equal_for_live_out};
-use crate::semantics::cost::sequence_cost;
-use crate::semantics::live_out::{LiveOut, LiveOutRegisters};
+use crate::semantics::live_out::LiveOutRegisters;
 use crate::semantics::state::ConcreteMachineState;
-use crate::semantics::{EquivalenceConfig, EquivalenceResult, check_equivalence_with_config};
-use crate::validation::random::{
-    RandomInputConfig, generate_edge_case_inputs, generate_random_inputs,
-};
 use rand::{RngExt, SeedableRng};
 use rand_chacha::ChaCha8Rng;
-use std::time::Instant;
+use std::marker::PhantomData;
+use std::time::{Duration, Instant};
 
-/// Stochastic search using Metropolis-Hastings MCMC
-pub struct StochasticSearch {
+/// Stochastic search using Metropolis-Hastings MCMC, generic over ISA.
+///
+/// The body routes through the `StochasticBackend<I>` dispatch trait
+/// (`src/search/stochastic/backend.rs`) for every ISA-specific
+/// operation: random-input generation, sequence cost summation,
+/// encodability check against the assembler, equivalence dispatch,
+/// mutator construction. Both AArch64 and x86 implement
+/// `StochasticBackend`; the body is identical for both.
+pub struct StochasticSearch<I = crate::isa::AArch64> {
     statistics: SearchStatistics,
+    _marker: PhantomData<I>,
 }
 
-impl StochasticSearch {
+impl<I> StochasticSearch<I> {
     pub fn new() -> Self {
         Self {
             statistics: SearchStatistics::new(Algorithm::Stochastic),
+            _marker: PhantomData,
         }
     }
 }
 
-impl Default for StochasticSearch {
+impl<I> Default for StochasticSearch<I> {
     fn default() -> Self {
         Self::new()
     }
 }
 
-impl SearchAlgorithm<crate::isa::AArch64> for StochasticSearch {
-    type LiveOut = LiveOut;
-    type Result = SearchResult;
+impl<I> SearchAlgorithm<I> for StochasticSearch<I>
+where
+    I: ISA + StochasticBackend<I>,
+    <I as StochasticBackend<I>>::State: Clone,
+    <I as StochasticBackend<I>>::LiveOut: Clone,
+{
+    type LiveOut = <I as StochasticBackend<I>>::LiveOut;
+    type Result = SearchResultFor<I>;
 
     fn search(
         &mut self,
-        target: &[Instruction],
-        live_out: &LiveOut,
+        target: &[I::Instruction],
+        live_out: &Self::LiveOut,
         config: &SearchConfig,
-    ) -> SearchResult {
+    ) -> Self::Result {
         self.reset();
         let start_time = Instant::now();
+        let width = <I as StochasticBackend<I>>::width(config);
 
-        let original_cost = sequence_cost(target, &config.cost_metric);
+        let original_cost =
+            <I as StochasticBackend<I>>::sequence_cost(target, &config.cost_metric, width);
         self.statistics.original_cost = original_cost;
         self.statistics.best_cost_found = original_cost;
 
         if target.is_empty() {
             self.statistics.elapsed_time = start_time.elapsed();
-            return SearchResult::no_optimization(target.to_vec(), self.statistics.clone());
+            return SearchResultFor::no_optimization(target.to_vec(), self.statistics.clone());
         }
 
         // Set up RNG
@@ -81,63 +94,59 @@ impl SearchAlgorithm<crate::isa::AArch64> for StochasticSearch {
             }
         };
 
-        // Generate test cases
-        let live_out_registers = live_out.registers();
-        let input_regs: Vec<_> = live_out_registers.iter().cloned().collect();
-        let random_config = RandomInputConfig {
-            count: config.stochastic.test_count,
-            registers: input_regs.clone(),
-        };
-        let test_inputs = generate_random_inputs(&random_config);
-        let edge_inputs = generate_edge_case_inputs(&input_regs);
+        // Pull register / immediate pools out of the config via the backend.
+        let regs = <I as StochasticBackend<I>>::registers_from_config(config);
+        let imms = <I as StochasticBackend<I>>::immediates_from_config(config);
 
-        // Precompute target outputs for all test inputs
+        // Generate test cases: random + edge.
+        let test_inputs = <I as StochasticBackend<I>>::make_test_inputs(
+            &regs,
+            width,
+            config.stochastic.test_count,
+        );
+        let edge_inputs = <I as StochasticBackend<I>>::make_edge_inputs(&regs, width);
+
+        // Precompute target outputs.
         let target_outputs: Vec<_> = test_inputs
             .iter()
             .chain(edge_inputs.iter())
-            .map(|input| apply_sequence_concrete(input.clone(), target))
+            .map(|input| <I as StochasticBackend<I>>::apply_sequence(input.clone(), target))
             .collect();
         let all_inputs: Vec<_> = test_inputs.into_iter().chain(edge_inputs).collect();
 
-        // Initialize current state
-        let mutator = Mutator::new(
-            config.available_registers.clone(),
-            config.available_immediates.clone(),
-            config.stochastic.mutation_weights.clone(),
-        );
+        let mutator = <I as StochasticBackend<I>>::make_mutator(config);
         let acceptance = AcceptanceCriterion::new(config.stochastic.beta);
 
         // Start with target sequence or random sequence of same length
         let mut current = if rng.random_bool(0.5) {
             target.to_vec()
         } else {
-            // Generate encodable random sequence
             loop {
-                let seq = generate_random_sequence(
+                let seq = <I as StochasticBackend<I>>::random_sequence(
                     &mut rng,
                     target.len(),
-                    &config.available_registers,
-                    &config.available_immediates,
+                    &regs,
+                    &imms,
+                    config,
                 );
-                if crate::search::candidate::is_sequence_encodable(&seq) {
+                if <I as StochasticBackend<I>>::is_encodable(&seq) {
                     break seq;
                 }
             }
         };
-        let mut current_cost = sequence_cost(&current, &config.cost_metric);
+        let mut current_cost =
+            <I as StochasticBackend<I>>::sequence_cost(&current, &config.cost_metric, width);
 
-        // Track best equivalent sequence found
-        let mut best_equivalent: Option<Vec<Instruction>> = None;
+        let mut best_equivalent: Option<Vec<I::Instruction>> = None;
         let mut best_cost = original_cost;
 
-        // Also try shorter sequences
         let min_length = 1;
         let max_length = target.len();
+        let smt_timeout = Duration::from_secs(5);
 
         for iteration in 0..config.stochastic.iterations {
             self.statistics.iterations = iteration + 1;
 
-            // Check timeout
             if config.timeout.is_some_and(|t| start_time.elapsed() >= t) {
                 if config.verbose {
                     println!("Search timed out after {} iterations", iteration);
@@ -149,44 +158,42 @@ impl SearchAlgorithm<crate::isa::AArch64> for StochasticSearch {
             if rng.random_bool(0.1) && max_length > min_length {
                 let new_len = rng.random_range(min_length..=max_length);
                 if new_len != current.len() {
-                    // Generate encodable random sequence
                     loop {
-                        let seq = generate_random_sequence(
-                            &mut rng,
-                            new_len,
-                            &config.available_registers,
-                            &config.available_immediates,
+                        let seq = <I as StochasticBackend<I>>::random_sequence(
+                            &mut rng, new_len, &regs, &imms, config,
                         );
-                        if crate::search::candidate::is_sequence_encodable(&seq) {
+                        if <I as StochasticBackend<I>>::is_encodable(&seq) {
                             current = seq;
                             break;
                         }
                     }
-                    current_cost = sequence_cost(&current, &config.cost_metric);
+                    current_cost = <I as StochasticBackend<I>>::sequence_cost(
+                        &current,
+                        &config.cost_metric,
+                        width,
+                    );
                 }
             }
 
-            // Mutate current sequence
             let proposal = mutator.mutate(&mut rng, &current);
 
-            // Skip unencodable sequences early
-            if !crate::search::candidate::is_sequence_encodable(&proposal) {
+            if !<I as StochasticBackend<I>>::is_encodable(&proposal) {
                 continue;
             }
 
-            let proposal_cost = sequence_cost(&proposal, &config.cost_metric);
+            let proposal_cost =
+                <I as StochasticBackend<I>>::sequence_cost(&proposal, &config.cost_metric, width);
 
             self.statistics.candidates_evaluated += 1;
 
-            // Fast validation: check against test cases
             let mut passes_tests = true;
             for (input, target_output) in all_inputs.iter().zip(target_outputs.iter()) {
-                let proposal_output = apply_sequence_concrete(input.clone(), &proposal);
-                if !states_equal_for_live_out(
+                let proposal_output =
+                    <I as StochasticBackend<I>>::apply_sequence(input.clone(), &proposal);
+                if !<I as StochasticBackend<I>>::states_equal(
                     &proposal_output,
                     target_output,
-                    live_out_registers,
-                    false,
+                    live_out,
                 ) {
                     passes_tests = false;
                     break;
@@ -194,29 +201,21 @@ impl SearchAlgorithm<crate::isa::AArch64> for StochasticSearch {
             }
 
             if !passes_tests {
-                // Proposal fails tests - might still accept with probability based on cost
-                // But for correctness we only track proposals that could be valid
                 continue;
             }
 
             self.statistics.candidates_passed_fast += 1;
 
-            // Proposal passes all tests - now check if it's better and verify with SMT
             if proposal_cost < best_cost {
-                // Verify with SMT solver
                 self.statistics.smt_queries += 1;
 
-                // Treat NZCV as live-out so the solver cannot certify a
-                // flag-divergent rewrite (e.g. ADD;CMP vs ADDS). The
-                // softened pre-SMT guard relies on flags being part of the
-                // comparison; without `with_flags(true)` here the search
-                // could accept rewrites that disturb post-window NZCV.
-                let equiv_config = EquivalenceConfig::with_live_out(live_out.clone())
-                    .random_tests(0) // Already tested
-                    .timeout(std::time::Duration::from_secs(5))
-                    .with_flags(true);
-
-                match check_equivalence_with_config(target, &proposal, &equiv_config) {
+                match <I as StochasticBackend<I>>::check_equivalence(
+                    target,
+                    &proposal,
+                    live_out,
+                    width,
+                    smt_timeout,
+                ) {
                     EquivalenceResult::Equivalent => {
                         self.statistics.smt_equivalent += 1;
                         self.statistics.improvements_found += 1;
@@ -232,21 +231,16 @@ impl SearchAlgorithm<crate::isa::AArch64> for StochasticSearch {
                             );
                         }
                     }
-                    _ => {
-                        // SMT says not equivalent, even though tests passed
-                        // This is rare but can happen
-                    }
+                    _ => {}
                 }
             }
 
-            // Metropolis-Hastings acceptance
             if acceptance.accept(&mut rng, current_cost, proposal_cost) {
                 current = proposal;
                 current_cost = proposal_cost;
                 self.statistics.accepted_proposals += 1;
             }
 
-            // Progress reporting
             if config.verbose && iteration > 0 && iteration % 100_000 == 0 {
                 println!(
                     "Iteration {}: current_cost={}, best_cost={}, acceptance_rate={:.2}%",
@@ -261,9 +255,9 @@ impl SearchAlgorithm<crate::isa::AArch64> for StochasticSearch {
         self.statistics.elapsed_time = start_time.elapsed();
 
         if let Some(optimized) = best_equivalent {
-            SearchResult::with_optimization(target.to_vec(), optimized, self.statistics.clone())
+            SearchResultFor::with_optimization(target.to_vec(), optimized, self.statistics.clone())
         } else {
-            SearchResult::no_optimization(target.to_vec(), self.statistics.clone())
+            SearchResultFor::no_optimization(target.to_vec(), self.statistics.clone())
         }
     }
 
@@ -273,6 +267,67 @@ impl SearchAlgorithm<crate::isa::AArch64> for StochasticSearch {
 
     fn reset(&mut self) {
         self.statistics = SearchStatistics::new(Algorithm::Stochastic);
+    }
+}
+
+/// Generic search-result type. For AArch64, callers can ignore the
+/// type parameter (it defaults to `AArch64`) and treat
+/// `SearchResultFor<AArch64>` as the historical `SearchResult`.
+///
+/// Mirrors `crate::search::result::SearchResult` for `<I>`.
+#[derive(Debug, Clone)]
+pub struct SearchResultFor<I: ISA> {
+    pub optimized_sequence: Option<Vec<I::Instruction>>,
+    pub original_sequence: Vec<I::Instruction>,
+    pub found_optimization: bool,
+    pub statistics: SearchStatistics,
+}
+
+impl<I: ISA> SearchResultFor<I> {
+    /// Cost savings = original length minus optimized length, or 0 if
+    /// no optimization was found. Mirrors `SearchResult::cost_savings`.
+    pub fn cost_savings(&self) -> i64 {
+        if let Some(ref opt) = self.optimized_sequence {
+            self.original_sequence.len() as i64 - opt.len() as i64
+        } else {
+            0
+        }
+    }
+
+    pub fn no_optimization(original: Vec<I::Instruction>, statistics: SearchStatistics) -> Self {
+        Self {
+            optimized_sequence: None,
+            original_sequence: original,
+            found_optimization: false,
+            statistics,
+        }
+    }
+
+    pub fn with_optimization(
+        original: Vec<I::Instruction>,
+        optimized: Vec<I::Instruction>,
+        statistics: SearchStatistics,
+    ) -> Self {
+        Self {
+            optimized_sequence: Some(optimized),
+            original_sequence: original,
+            found_optimization: true,
+            statistics,
+        }
+    }
+}
+
+/// Backward-compatible conversion from the generic result type into the
+/// AArch64-specific `SearchResult`. Used by the parallel coordinator
+/// (which is still AArch64-typed) and any consumer that hasn't been
+/// migrated to the generic shape.
+impl From<SearchResultFor<crate::isa::AArch64>> for SearchResult {
+    fn from(r: SearchResultFor<crate::isa::AArch64>) -> Self {
+        if let Some(opt) = r.optimized_sequence {
+            SearchResult::with_optimization(r.original_sequence, opt, r.statistics)
+        } else {
+            SearchResult::no_optimization(r.original_sequence, r.statistics)
+        }
     }
 }
 
@@ -308,7 +363,9 @@ pub fn evaluate_with_tests(
 mod tests {
     use super::*;
     use crate::ir::{Operand, Register};
+    use crate::isa::AArch64;
     use crate::search::config::StochasticConfig;
+    use crate::semantics::live_out::LiveOut;
 
     fn mov_add_sequence() -> Vec<Instruction> {
         vec![
@@ -333,7 +390,7 @@ mod tests {
 
     #[test]
     fn test_stochastic_search_creation() {
-        let search = StochasticSearch::new();
+        let search: StochasticSearch<AArch64> = StochasticSearch::new();
         let stats = search.statistics();
         assert_eq!(stats.algorithm, Algorithm::Stochastic);
         assert_eq!(stats.iterations, 0);
@@ -341,7 +398,7 @@ mod tests {
 
     #[test]
     fn test_stochastic_search_empty_sequence() {
-        let mut search = StochasticSearch::new();
+        let mut search: StochasticSearch<AArch64> = StochasticSearch::new();
         let config = SearchConfig::default();
         let live_out = LiveOut::from_registers(vec![Register::X0]);
 
@@ -351,7 +408,7 @@ mod tests {
 
     #[test]
     fn test_stochastic_search_with_seed() {
-        let mut search = StochasticSearch::new();
+        let mut search: StochasticSearch<AArch64> = StochasticSearch::new();
         let config = SearchConfig::default().with_stochastic(
             StochasticConfig::default()
                 .with_seed(42)
@@ -368,7 +425,7 @@ mod tests {
 
     #[test]
     fn test_stochastic_finds_mov_zero_eor() {
-        let mut search = StochasticSearch::new();
+        let mut search: StochasticSearch<AArch64> = StochasticSearch::new();
 
         // Use smaller iteration count for test speed, but enough to find the optimization
         let config = SearchConfig::default()
@@ -389,7 +446,7 @@ mod tests {
 
     #[test]
     fn test_stochastic_finds_mov_add_fusion() {
-        let mut search = StochasticSearch::new();
+        let mut search: StochasticSearch<AArch64> = StochasticSearch::new();
 
         let config = SearchConfig::default()
             .with_stochastic(StochasticConfig::default().with_iterations(500_000))
@@ -455,7 +512,7 @@ mod tests {
 
     #[test]
     fn test_statistics_tracking() {
-        let mut search = StochasticSearch::new();
+        let mut search: StochasticSearch<AArch64> = StochasticSearch::new();
 
         let config = SearchConfig::default()
             .with_stochastic(StochasticConfig::default().with_iterations(1000))
@@ -475,7 +532,7 @@ mod tests {
 
     #[test]
     fn test_acceptance_rate_tracking() {
-        let mut search = StochasticSearch::new();
+        let mut search: StochasticSearch<AArch64> = StochasticSearch::new();
 
         let config = SearchConfig::default()
             .with_stochastic(
@@ -495,5 +552,53 @@ mod tests {
         let rate = stats.acceptance_rate();
         assert!(rate >= 0.0);
         assert!(rate <= 1.0);
+    }
+
+    // ---- x86 stochastic search (issue #73 Phase C step 5) ----
+
+    /// Tracer-bullet test that the generic `StochasticSearch<X86_64>`
+    /// instantiates, runs an MCMC loop end-to-end on a 2-instruction
+    /// x86 target, and finishes without panic. The target is the
+    /// canonical zeroing fusion `mov rax, 0; add rax, rbx` — the
+    /// search should at minimum *not crash*, and the iteration counter
+    /// should advance.
+    #[test]
+    fn x86_stochastic_runs_end_to_end() {
+        use crate::isa::X86_64;
+        use crate::isa::x86::{X86Instruction, X86Register};
+        use crate::semantics::state::X86LiveOutMask;
+
+        let mut search: StochasticSearch<X86_64> = StochasticSearch::new();
+        let config = SearchConfig::default()
+            .with_stochastic(
+                StochasticConfig::default()
+                    .with_iterations(500)
+                    .with_seed(7),
+            )
+            .with_x86_registers(vec![X86Register::RAX, X86Register::RBX, X86Register::RCX])
+            .with_immediates(vec![0, 1])
+            .with_x86_width(64);
+
+        let live_out = X86LiveOutMask::from_registers(vec![X86Register::RAX]).with_flags(false);
+
+        let target = vec![
+            X86Instruction::MovImm {
+                rd: X86Register::RAX,
+                imm: 0,
+            },
+            X86Instruction::AddReg {
+                rd: X86Register::RAX,
+                rs: X86Register::RBX,
+            },
+        ];
+
+        let result = search.search(&target, &live_out, &config);
+        let stats = result.statistics;
+
+        assert_eq!(stats.algorithm, Algorithm::Stochastic);
+        assert_eq!(stats.iterations, 500);
+        // The search may or may not find an optimisation in 500
+        // iterations; we only require that the loop made progress.
+        assert!(stats.candidates_evaluated > 0);
     }
 }

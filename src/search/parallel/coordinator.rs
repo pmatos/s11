@@ -280,11 +280,14 @@ fn run_stochastic_worker(
     config: &SearchConfig,
     channels: WorkerChannels,
 ) {
-    let mut search = StochasticSearch::new();
+    let mut search: StochasticSearch<crate::isa::AArch64> = StochasticSearch::new();
     let best_cost = crate::semantics::cost::sequence_cost(target, &config.cost_metric);
 
-    // Run stochastic search
-    let result = search.search(target, live_out, config);
+    // Run stochastic search. The generic search returns
+    // `SearchResultFor<AArch64>`; convert back to the AArch64-specific
+    // `SearchResult` the parallel coordinator still consumes.
+    let result: crate::search::result::SearchResult =
+        search.search(target, live_out, config).into();
     let candidates_evaluated = result.statistics.candidates_evaluated;
 
     if result.found_optimization
