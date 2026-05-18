@@ -1062,9 +1062,21 @@ fn find_shorter_equivalent_x86(
     let imms = vec![0i64, 1, -1];
 
     let candidates = generate_all_x86_instructions(&pool, &imms);
-    let cfg = X86EquivalenceConfig::new(width)
-        .live_out(live_out.clone())
-        .fast_only();
+    // Defense-in-depth: when the target reads EFLAGS (any CMOV/Jcc),
+    // the fast-path's 10 random trials might not cover every flag
+    // combination the reader actually depends on. Drop `.fast_only()` so
+    // the SMT path also runs for those targets. Combined with the
+    // run_fast_path_x86 input-flag randomization fix, this closes the
+    // soundness gap where a flag-clobbering proposal could pass.
+    let target_reads_flags = target.iter().any(|i| {
+        use crate::isa::x86::X86Instruction::*;
+        matches!(i, Cmov { .. } | Jcc { .. })
+    });
+    let mut cfg_builder = X86EquivalenceConfig::new(width).live_out(live_out.clone());
+    if !target_reads_flags {
+        cfg_builder = cfg_builder.fast_only();
+    }
+    let cfg = cfg_builder;
     for cand in candidates {
         let seq = vec![cand];
         let cand_cost =
