@@ -54,12 +54,9 @@ fn test_opt_basic_functionality() {
 
     check_test_binary(&test_elf);
 
-    // Target `add x16, x16, #0xff8` at 0x5cc — a single ADD-immediate with
-    // general-purpose registers, fully supported by the parser, assembler and
-    // optimizer. We do not use executable_window here because the start of
-    // .init in arrays_debug is `paciasp` (an unsupported HINT), which the
-    // AArch64 optimization path now correctly rejects rather than silently
-    // dropping.
+    // We do not use executable_window here because the start of .init in
+    // arrays_debug is `paciasp` (an unsupported HINT), which the AArch64
+    // optimization path now correctly rejects rather than silently dropping.
     let start_addr: u64 = 0x5cc;
     let end_addr: u64 = 0x5d0;
 
