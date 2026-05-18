@@ -321,7 +321,9 @@ impl Mutator {
                     _ => *rm = Operand::Register(self.random_register(rng)),
                 }
             }
-            // Flag-setting arith/logical: ADDS/SUBS allow imm; ANDS register-only
+            // Flag-setting arith/logical: ADDS/SUBS allow 12-bit imm; ANDS
+            // also accepts bitmask imms but we keep the mutator's `rm` table
+            // tuned to the 12-bit form (see candidate.rs notes).
             Instruction::Adds { rd, rn, rm } | Instruction::Subs { rd, rn, rm } => {
                 let choice = rng.random_range(0..3);
                 match choice {
@@ -726,13 +728,12 @@ impl Mutator {
             },
             // Flag-setting cluster: ADDS↔SUBS↔ANDS, and into/out of ADD/SUB/AND.
             //
-            // Note: ADDS/SUBS accept `Operand::Immediate` (12-bit), but ANDS
-            // and AND are register-only (bitmask-immediate encoding is not
-            // supported). Forwarding an Immediate `rm` directly into ANDS
-            // would produce an un-encodable instruction that is_encodable
-            // silently rejects, burning search iterations. When mutating
-            // into ANDS, clamp `rm` to a register; the same logic applies
-            // when mutating into AND.
+            // Note: ADDS/SUBS accept `Operand::Immediate` (12-bit). ANDS and
+            // AND now accept *bitmask* immediates (issue #65), but the table
+            // the mutator draws from is 12-bit-tuned — forwarding such an imm
+            // into ANDS/AND would almost always fail `is_encodable_aarch64`
+            // and burn iterations. When mutating into ANDS/AND, clamp `rm`
+            // to a register until a curated bitmask-immediate table lands.
             Instruction::Adds { rd, rn, rm } => match rng.random_range(0..4) {
                 0 => Instruction::Add { rd, rn, rm },
                 1 => Instruction::Subs { rd, rn, rm },
