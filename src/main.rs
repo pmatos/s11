@@ -1513,15 +1513,23 @@ fn main() {
             llm_max_calls,
             llm_model,
         } => {
-            // Architecture selection — when --arch is omitted, auto-detect
-            // from the ELF e_machine so x86 binaries route through the
-            // x86 pipeline instead of falling into the AArch64 default.
+            // Architecture selection — always read the ELF e_machine first so
+            // a stale or wrong --arch value cannot route bytes through the
+            // wrong optimization pipeline.
+            let detected_arch = detect_cli_arch_from_elf(&binary).unwrap_or_else(|e| {
+                eprintln!("Error reading ELF: {}", e);
+                std::process::exit(1);
+            });
             let cli_arch = match arch {
-                Some(a) => a,
-                None => detect_cli_arch_from_elf(&binary).unwrap_or_else(|e| {
-                    eprintln!("Error auto-detecting architecture: {}", e);
+                Some(a) if a == detected_arch => a,
+                Some(a) => {
+                    eprintln!(
+                        "Architecture mismatch: --arch {:?} but ELF reports {:?}",
+                        a, detected_arch
+                    );
                     std::process::exit(1);
-                }),
+                }
+                None => detected_arch,
             };
             match cli_arch {
                 CliArch::Aarch64 | CliArch::X86_64 | CliArch::X86_32 => {}

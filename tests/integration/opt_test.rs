@@ -45,6 +45,39 @@ fn executable_window(path: &Path, width: u64) -> (u64, u64) {
     panic!("no executable window of {width} bytes found in {path:?}");
 }
 
+fn assert_opt_arch_mismatch_rejected(test_elf: &Path, arch: &str) {
+    let output = Command::new(get_binary_path())
+        .arg("opt")
+        .arg(test_elf)
+        .arg("--arch")
+        .arg(arch)
+        .arg("--start-addr")
+        .arg("0x0")
+        .arg("--end-addr")
+        .arg("0x4")
+        .output()
+        .expect("Failed to execute s11");
+
+    assert!(
+        !output.status.success(),
+        "Command should fail with mismatched --arch"
+    );
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("Architecture mismatch"),
+        "Should reject before optimization, stderr: {}",
+        stderr
+    );
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        !stdout.contains("Optimizing ELF binary") && !stdout.contains("Optimizing x86 ELF binary"),
+        "Should reject before starting optimization, stdout: {}",
+        stdout
+    );
+}
+
 #[test]
 fn test_opt_basic_functionality() {
     let binary = get_binary_path();
@@ -221,6 +254,29 @@ fn test_opt_invalid_address_format() {
         stderr.contains("Error parsing"),
         "Should show parsing error"
     );
+}
+
+#[test]
+fn test_opt_rejects_arch_mismatch_before_optimization() {
+    let aarch64_elf = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("binaries")
+        .join("simple_debug");
+
+    check_test_binary(&aarch64_elf);
+    assert_opt_arch_mismatch_rejected(&aarch64_elf, "x86-64");
+
+    let x86_elf = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("binaries")
+        .join("x86_64")
+        .join("simple_debug");
+    if x86_elf.exists() {
+        assert_opt_arch_mismatch_rejected(&x86_elf, "aarch64");
+    } else {
+        eprintln!(
+            "Skipping x86-64 opt mismatch case: {:?} not present (run build_tests.sh)",
+            x86_elf
+        );
+    }
 }
 
 #[test]
