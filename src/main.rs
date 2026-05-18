@@ -979,6 +979,29 @@ fn validate_basic_block(ir: &[Instruction]) -> Result<(), String> {
 
 use parser::x86::x86_ir_from_mnemonic;
 
+/// Reject any non-terminal Jcc in an x86 optimization window. The
+/// optimizer only special-cases a trailing Jcc (peeled by
+/// `split_terminator_x86`, displacement preserved by
+/// `reassemble_x86_prefix_with_pinned_terminator`). A Jcc anywhere
+/// else in the window would be modelled as a data-state no-op by
+/// both the concrete and SMT executors, so the equivalence check
+/// could accept a rewrite that silently drops or rewrites the branch.
+fn validate_x86_window_terminator_placement(ir: &[isa::x86::X86Instruction]) -> Result<(), String> {
+    for (idx, instr) in ir.iter().enumerate() {
+        if matches!(instr, isa::x86::X86Instruction::Jcc { .. }) && idx != ir.len() - 1 {
+            return Err(format!(
+                "x86 window contains a non-terminal conditional branch at position {} \
+                 (last position is {}). The optimizer only supports Jcc as the trailing \
+                 terminator of a window. Narrow --start-addr/--end-addr to exclude the \
+                 mid-window branch.",
+                idx,
+                ir.len() - 1
+            ));
+        }
+    }
+    Ok(())
+}
+
 fn convert_to_x86_ir(
     instructions: &capstone::Instructions,
 ) -> Result<Vec<isa::x86::X86Instruction>, String> {
@@ -1365,6 +1388,14 @@ fn optimize_elf_binary_x86(
     for instr in &ir {
         println!("  {}", instr);
     }
+
+    // Reject any non-terminal Jcc. The optimizer only special-cases a
+    // trailing Jcc (peeled by `split_terminator_x86`, displacement
+    // preserved by the reassemble helper); a mid-window Jcc would be a
+    // data-state no-op in both the concrete executor and the SMT path,
+    // letting the equivalence check accept rewrites that silently
+    // corrupt control flow in the patched binary.
+    validate_x86_window_terminator_placement(&ir)?;
 
     let optimized = match options.algorithm {
         Algorithm::Enumerative => find_shorter_equivalent_x86(&ir, width),
@@ -2229,6 +2260,56 @@ mod cli_helper_tests {
     /// pool-narrowing change (issue #84 item 8) so any future
     /// reintroduction of unconditional scratch-register inflation is
     /// caught.
+    #[test]
+    fn validate_x86_window_rejects_mid_window_jcc() {
+        use isa::x86::{X86Condition, X86Instruction, X86Register};
+        let ir = vec![
+            X86Instruction::CmpReg {
+                rn: X86Register::RAX,
+                rs: X86Register::RBX,
+            },
+            X86Instruction::Jcc {
+                cond: X86Condition::E,
+            },
+            X86Instruction::MovImm {
+                rd: X86Register::RAX,
+                imm: 0,
+            },
+        ];
+        let err = validate_x86_window_terminator_placement(&ir)
+            .expect_err("mid-window Jcc must be rejected");
+        assert!(
+            err.contains("non-terminal conditional branch") && err.contains("position 1"),
+            "unhelpful error: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn validate_x86_window_accepts_trailing_jcc() {
+        use isa::x86::{X86Condition, X86Instruction, X86Register};
+        let ir = vec![
+            X86Instruction::CmpReg {
+                rn: X86Register::RAX,
+                rs: X86Register::RBX,
+            },
+            X86Instruction::Jcc {
+                cond: X86Condition::E,
+            },
+        ];
+        validate_x86_window_terminator_placement(&ir).expect("trailing Jcc must be accepted");
+    }
+
+    #[test]
+    fn validate_x86_window_accepts_no_jcc() {
+        use isa::x86::{X86Instruction, X86Register};
+        let ir = vec![X86Instruction::MovImm {
+            rd: X86Register::RAX,
+            imm: 0,
+        }];
+        validate_x86_window_terminator_placement(&ir).expect("Jcc-free window must be accepted");
+    }
+
     #[test]
     fn find_shorter_equivalent_x86_can_optimize_jcc_terminated_window() {
         use isa::x86::X86Condition;
