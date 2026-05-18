@@ -9,7 +9,7 @@ s11 is a superoptimizer written in Rust. It finds shorter or faster equivalent i
 **Key Features:**
 - ELF binary reading and disassembly using Capstone engine (auto-detects e_machine)
 - **AArch64** (42 instructions): MOV, ADD, SUB, AND, ORR, EOR, LSL, LSR, ASR, MUL, SDIV, UDIV, CMP, CMN, TST, CSEL, CSINC, CSINV, CSNEG, MADD, MSUB, MNEG, SMULH, UMULH, CCMP, CCMN, UBFX, SBFX, BFI, BFXIL, UBFIZ, SBFIZ, plus branches/control-flow B, B.cond, RET, CBZ, CBNZ, TBZ, TBNZ, BL, BR (issue #69 — terminators only; search holds them fixed and rewrites only the straight-line prefix). Full pipeline including stochastic/symbolic/hybrid/LLM search.
-- **x86-64 + x86-32** (14 variants, 7 mnemonics): MOV, ADD, SUB, AND, OR, XOR, CMP (each with reg/imm forms) — enumerative search only in v1
+- **x86-64 + x86-32** (14 variants, 7 mnemonics): MOV, ADD, SUB, AND, OR, XOR, CMP (each with reg/imm forms) — enumerative, stochastic (MCMC), and symbolic (SMT) search supported. Hybrid (parallel coordinator) and LLM remain AArch64-only.
 - SMT-based equivalence checking using Z3 (width-parameterised for x86-32 vs x86-64)
 - Multi-threaded parallel search with worker coordination
 - ISA abstraction supporting AArch64 (primary), x86-64/x86-32, RISC-V (scaffolded)
@@ -159,10 +159,11 @@ s11 opt <file> --start-addr <hex> --end-addr <hex>
 # Architecture selection
 s11 opt ... --arch [aarch64|x86-64|x86-32]    # riscv32/64 still rejected
 
-# Algorithm selection (AArch64 only)
+# Algorithm selection
 s11 opt ... --algorithm [enumerative|stochastic|symbolic|hybrid|llm]
 
-# x86 currently supports --algorithm enumerative only.
+# x86 supports enumerative, stochastic, and symbolic. Hybrid and LLM
+# remain AArch64-only.
 
 # Parallel execution
 s11 opt ... --cores <n> --timeout <seconds>
