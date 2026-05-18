@@ -1846,12 +1846,83 @@ mod cli_helper_tests {
             ("cbnz", "x5, #0x1000"),
             ("tbz", "w3, #5, #0x1000"),
             ("tbnz", "x3, #40, #0x1000"),
+            // Issue #68: memory ops. 9 single-register mnemonics × 5
+            // addressing modes = 45 rows; 3 pair mnemonics × 3 modes = 9
+            // rows. See ADR-0007.
+            // LDR (X/W form, immediate-offset / pre-index / post-index /
+            // register-offset / register-extend).
+            ("ldr", "x0, [x1]"),
+            ("ldr", "x0, [x1, #8]!"),
+            ("ldr", "x0, [x1], #8"),
+            ("ldr", "x0, [x1, x2]"),
+            ("ldr", "x0, [x1, w2, uxtw #3]"),
+            // LDRB.
+            ("ldrb", "w0, [x1]"),
+            ("ldrb", "w0, [x1, #1]!"),
+            ("ldrb", "w0, [x1], #1"),
+            ("ldrb", "w0, [x1, x2]"),
+            ("ldrb", "w0, [x1, w2, uxtw]"),
+            // LDRH.
+            ("ldrh", "w0, [x1]"),
+            ("ldrh", "w0, [x1, #2]!"),
+            ("ldrh", "w0, [x1], #2"),
+            ("ldrh", "w0, [x1, x2]"),
+            ("ldrh", "w0, [x1, w2, uxtw #1]"),
+            // LDRSB.
+            ("ldrsb", "x0, [x1]"),
+            ("ldrsb", "x0, [x1, #1]!"),
+            ("ldrsb", "x0, [x1], #1"),
+            ("ldrsb", "x0, [x1, x2]"),
+            ("ldrsb", "x0, [x1, w2, sxtw]"),
+            // LDRSH.
+            ("ldrsh", "x0, [x1]"),
+            ("ldrsh", "x0, [x1, #2]!"),
+            ("ldrsh", "x0, [x1], #2"),
+            ("ldrsh", "x0, [x1, x2]"),
+            ("ldrsh", "x0, [x1, w2, sxtw #1]"),
+            // LDRSW.
+            ("ldrsw", "x0, [x1]"),
+            ("ldrsw", "x0, [x1, #4]!"),
+            ("ldrsw", "x0, [x1], #4"),
+            ("ldrsw", "x0, [x1, x2]"),
+            ("ldrsw", "x0, [x1, w2, sxtw #2]"),
+            // STR.
+            ("str", "x0, [x1]"),
+            ("str", "x0, [x1, #8]!"),
+            ("str", "x0, [x1], #8"),
+            ("str", "x0, [x1, x2]"),
+            ("str", "x0, [x1, w2, uxtw #3]"),
+            // STRB.
+            ("strb", "w0, [x1]"),
+            ("strb", "w0, [x1, #1]!"),
+            ("strb", "w0, [x1], #1"),
+            ("strb", "w0, [x1, x2]"),
+            ("strb", "w0, [x1, w2, uxtw]"),
+            // STRH.
+            ("strh", "w0, [x1]"),
+            ("strh", "w0, [x1, #2]!"),
+            ("strh", "w0, [x1], #2"),
+            ("strh", "w0, [x1, x2]"),
+            ("strh", "w0, [x1, w2, uxtw #1]"),
+            // LDP (offset / pre-index / post-index — register-offset and
+            // register-extend are not part of the AArch64 pair grammar).
+            ("ldp", "x0, x1, [sp, #16]"),
+            ("ldp", "x0, x1, [sp, #-16]!"),
+            ("ldp", "x0, x1, [sp], #16"),
+            // STP.
+            ("stp", "x0, x1, [sp, #16]"),
+            ("stp", "x0, x1, [sp, #-16]!"),
+            ("stp", "x0, x1, [sp], #16"),
+            // LDPSW.
+            ("ldpsw", "x0, x1, [sp, #8]"),
+            ("ldpsw", "x0, x1, [sp, #-8]!"),
+            ("ldpsw", "x0, x1, [sp], #8"),
         ];
 
         // Tripwire: bump in lockstep when adding/removing rows. Catches
         // accidental row deletion and forces a re-read when adding a parser
         // mnemonic without a matching test row.
-        assert_eq!(cases.len(), 78);
+        assert_eq!(cases.len(), 132);
 
         for (mnem, ops) in cases {
             match convert_capstone_op(mnem, ops) {
@@ -1885,6 +1956,30 @@ mod cli_helper_tests {
                 assert!(line.contains("fadd"), "warning line should name mnemonic");
             }
             other => panic!("expected Unsupported, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn convert_capstone_op_keeps_related_memory_mnemonics_unsupported() {
+        // ADR-0007 §9 explicitly leaves these out of scope. Lock the outcome
+        // here so a future Capstone-syntax shift cannot silently start
+        // parsing them as supported instructions:
+        //   - LDUR / STUR: unscaled-signed-offset variants Capstone uses
+        //     for negative immediates that LDR-imm cannot encode.
+        //   - LDR (literal): PC-relative pool load — different operand
+        //     grammar than the bracketed forms supported by step 4.
+        for (mnem, ops) in [
+            ("ldur", "x0, [x1, #-1]"),
+            ("stur", "x0, [x1, #-1]"),
+            ("ldr", "x0, #0x1234"),
+        ] {
+            match convert_capstone_op(mnem, ops) {
+                ConvertOutcome::Unsupported(_) => {}
+                other => panic!(
+                    "expected Unsupported for `{} {}`, got {:?}",
+                    mnem, ops, other
+                ),
+            }
         }
     }
 
