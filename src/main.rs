@@ -666,8 +666,9 @@ fn run_optimization(
                 .with_registers(available_registers)
                 .with_immediates(available_immediates);
 
-            let mut search = SymbolicSearch::new();
-            let result = search.search(prefix, &live_out, &config);
+            let mut search: SymbolicSearch<isa::AArch64> = SymbolicSearch::new();
+            let result: search::result::SearchResult =
+                search.search(prefix, &live_out, &config).into();
 
             print_search_statistics(&result.statistics);
 

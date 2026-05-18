@@ -248,10 +248,13 @@ fn run_symbolic_worker(
     config: &SearchConfig,
     channels: WorkerChannels,
 ) {
-    let mut search = SymbolicSearch::new();
+    let mut search: SymbolicSearch<crate::isa::AArch64> = SymbolicSearch::new();
 
-    // Run search in chunks, checking for stop signal periodically
-    let result = search.search(target, live_out, config);
+    // Run search in chunks, checking for stop signal periodically.
+    // The generic search returns `SearchResultFor<AArch64>`; convert to
+    // the AArch64-typed `SearchResult` the coordinator consumes.
+    let result: crate::search::result::SearchResult =
+        search.search(target, live_out, config).into();
     let candidates_evaluated = result.statistics.candidates_evaluated;
 
     if result.found_optimization

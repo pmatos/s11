@@ -9,43 +9,56 @@
 //! This implementation uses a hybrid approach: enumerate concrete candidates
 //! and verify them with SMT, rather than synthesizing from purely symbolic sketches.
 
-use crate::ir::Instruction;
-use crate::search::candidate::generate_all_encodable_instructions;
+use crate::isa::ISA;
 use crate::search::config::{SearchConfig, SearchMode};
-use crate::search::result::{SearchResult, SearchStatistics};
+use crate::search::result::SearchStatistics;
+use crate::search::stochastic::mcmc::SearchResultFor;
+use crate::search::symbolic::backend::SymbolicBackend;
 use crate::search::{Algorithm, SearchAlgorithm};
-use crate::semantics::cost::sequence_cost;
-use crate::semantics::live_out::LiveOut;
-use crate::semantics::{EquivalenceConfig, EquivalenceResult, check_equivalence_with_config};
+use crate::semantics::EquivalenceResult;
+use std::marker::PhantomData;
 use std::time::{Duration, Instant};
 
-/// Symbolic search using SMT-based synthesis
-pub struct SymbolicSearch {
+/// Symbolic search using SMT-based synthesis, generic over ISA.
+///
+/// Routes through `SymbolicBackend<I>` for every ISA-specific operation:
+/// candidate enumeration, sequence-cost summation, equivalence check.
+/// AArch64 routes to `check_equivalence_with_config`; x86 routes to
+/// `check_equivalence_x86`.
+pub struct SymbolicSearch<I = crate::isa::AArch64> {
     statistics: SearchStatistics,
+    _marker: PhantomData<I>,
 }
 
-impl SymbolicSearch {
+impl<I> SymbolicSearch<I> {
     pub fn new() -> Self {
         Self {
             statistics: SearchStatistics::new(Algorithm::Symbolic),
+            _marker: PhantomData,
         }
     }
+}
 
+impl<I> SymbolicSearch<I>
+where
+    I: ISA + SymbolicBackend<I>,
+{
     /// Linear cost search: try each length from 1 to target length - 1
     fn linear_search(
         &mut self,
-        target: &[Instruction],
-        live_out: &LiveOut,
+        target: &[I::Instruction],
+        live_out: &<I as SymbolicBackend<I>>::LiveOut,
         config: &SearchConfig,
         start_time: Instant,
-    ) -> Option<Vec<Instruction>> {
-        let all_instructions = generate_all_encodable_instructions(
-            &config.available_registers,
-            &config.available_immediates,
-        );
+    ) -> Option<Vec<I::Instruction>> {
+        let regs = <I as SymbolicBackend<I>>::registers_from_config(config);
+        let imms = <I as SymbolicBackend<I>>::immediates_from_config(config);
+        let width = <I as SymbolicBackend<I>>::width(config);
+        let all_instructions = <I as SymbolicBackend<I>>::enumerate_all(&regs, &imms);
 
-        let original_cost = sequence_cost(target, &config.cost_metric);
-        let mut best_solution: Option<Vec<Instruction>> = None;
+        let original_cost =
+            <I as SymbolicBackend<I>>::sequence_cost(target, &config.cost_metric, width);
+        let mut best_solution: Option<Vec<I::Instruction>> = None;
         let mut best_cost = original_cost;
 
         // Try sequences of increasing length
@@ -87,15 +100,16 @@ impl SymbolicSearch {
     #[allow(clippy::too_many_arguments)]
     fn search_at_length(
         &mut self,
-        target: &[Instruction],
-        live_out: &LiveOut,
+        target: &[I::Instruction],
+        live_out: &<I as SymbolicBackend<I>>::LiveOut,
         config: &SearchConfig,
-        all_instructions: &[Instruction],
+        all_instructions: &[I::Instruction],
         length: usize,
         best_cost: &mut u64,
         start_time: Instant,
-    ) -> Option<Vec<Instruction>> {
-        let mut best_at_length: Option<Vec<Instruction>> = None;
+    ) -> Option<Vec<I::Instruction>> {
+        let width = <I as SymbolicBackend<I>>::width(config);
+        let mut best_at_length: Option<Vec<I::Instruction>> = None;
 
         if length == 1 {
             // Single instruction search
@@ -106,7 +120,11 @@ impl SymbolicSearch {
                 }
 
                 let candidate = vec![*instr];
-                let candidate_cost = sequence_cost(&candidate, &config.cost_metric);
+                let candidate_cost = <I as SymbolicBackend<I>>::sequence_cost(
+                    &candidate,
+                    &config.cost_metric,
+                    width,
+                );
 
                 if candidate_cost >= *best_cost {
                     continue;
@@ -120,7 +138,7 @@ impl SymbolicSearch {
                     self.statistics.improvements_found += 1;
 
                     if config.verbose {
-                        println!("Found equivalent: {} (cost {})", instr, candidate_cost);
+                        println!("Found equivalent: (cost {})", candidate_cost);
                     }
                 }
             }
@@ -134,7 +152,11 @@ impl SymbolicSearch {
 
                 for instr2 in all_instructions {
                     let candidate = vec![*instr1, *instr2];
-                    let candidate_cost = sequence_cost(&candidate, &config.cost_metric);
+                    let candidate_cost = <I as SymbolicBackend<I>>::sequence_cost(
+                        &candidate,
+                        &config.cost_metric,
+                        width,
+                    );
 
                     if candidate_cost >= *best_cost {
                         continue;
@@ -149,8 +171,8 @@ impl SymbolicSearch {
 
                         if config.verbose {
                             println!(
-                                "Found equivalent: {}; {} (cost {})",
-                                instr1, instr2, candidate_cost
+                                "Found equivalent 2-instr sequence (cost {})",
+                                candidate_cost
                             );
                         }
                     }
@@ -191,7 +213,11 @@ impl SymbolicSearch {
                             seq
                         };
 
-                        let candidate_cost = sequence_cost(&candidate, &config.cost_metric);
+                        let candidate_cost = <I as SymbolicBackend<I>>::sequence_cost(
+                            &candidate,
+                            &config.cost_metric,
+                            width,
+                        );
 
                         if candidate_cost >= *best_cost {
                             count += 1;
@@ -225,27 +251,22 @@ impl SymbolicSearch {
     /// Verify equivalence using SMT
     fn verify_equivalence(
         &mut self,
-        target: &[Instruction],
-        candidate: &[Instruction],
-        live_out: &LiveOut,
+        target: &[I::Instruction],
+        candidate: &[I::Instruction],
+        live_out: &<I as SymbolicBackend<I>>::LiveOut,
         config: &SearchConfig,
     ) -> bool {
         let timeout = config
             .symbolic
             .solver_timeout
             .unwrap_or(Duration::from_secs(5));
-
-        // Treat NZCV as live-out so the solver cannot certify a
-        // flag-divergent rewrite (see the equivalent note in
-        // `mcmc.rs::run_search`).
-        let equiv_config = EquivalenceConfig::with_live_out(live_out.clone())
-            .random_tests(5) // Quick pre-filter with tests
-            .timeout(timeout)
-            .with_flags(true);
+        let width = <I as SymbolicBackend<I>>::width(config);
 
         self.statistics.smt_queries += 1;
 
-        match check_equivalence_with_config(target, candidate, &equiv_config) {
+        match <I as SymbolicBackend<I>>::check_equivalence(
+            target, candidate, live_out, width, timeout,
+        ) {
             EquivalenceResult::Equivalent => {
                 self.statistics.smt_equivalent += 1;
                 self.statistics.candidates_passed_fast += 1;
@@ -264,43 +285,48 @@ impl SymbolicSearch {
     #[allow(dead_code)]
     fn binary_search(
         &mut self,
-        _target: &[Instruction],
-        _live_out: &LiveOut,
+        _target: &[I::Instruction],
+        _live_out: &<I as SymbolicBackend<I>>::LiveOut,
         _config: &SearchConfig,
         _start_time: Instant,
-    ) -> Option<Vec<Instruction>> {
+    ) -> Option<Vec<I::Instruction>> {
         // Binary search would use SMT with cost constraints
         // For now, fall back to linear search
         None
     }
 }
 
-impl Default for SymbolicSearch {
+impl<I> Default for SymbolicSearch<I> {
     fn default() -> Self {
         Self::new()
     }
 }
 
-impl SearchAlgorithm<crate::isa::AArch64> for SymbolicSearch {
-    type LiveOut = LiveOut;
-    type Result = SearchResult;
+impl<I> SearchAlgorithm<I> for SymbolicSearch<I>
+where
+    I: ISA + SymbolicBackend<I>,
+{
+    type LiveOut = <I as SymbolicBackend<I>>::LiveOut;
+    type Result = SearchResultFor<I>;
 
     fn search(
         &mut self,
-        target: &[Instruction],
-        live_out: &LiveOut,
+        target: &[I::Instruction],
+        live_out: &Self::LiveOut,
         config: &SearchConfig,
-    ) -> SearchResult {
+    ) -> Self::Result {
         self.reset();
         let start_time = Instant::now();
+        let width = <I as SymbolicBackend<I>>::width(config);
 
-        let original_cost = sequence_cost(target, &config.cost_metric);
+        let original_cost =
+            <I as SymbolicBackend<I>>::sequence_cost(target, &config.cost_metric, width);
         self.statistics.original_cost = original_cost;
         self.statistics.best_cost_found = original_cost;
 
         if target.is_empty() || target.len() == 1 {
             self.statistics.elapsed_time = start_time.elapsed();
-            return SearchResult::no_optimization(target.to_vec(), self.statistics.clone());
+            return SearchResultFor::no_optimization(target.to_vec(), self.statistics.clone());
         }
 
         let result = match config.symbolic.search_mode {
@@ -314,10 +340,11 @@ impl SearchAlgorithm<crate::isa::AArch64> for SymbolicSearch {
         self.statistics.elapsed_time = start_time.elapsed();
 
         if let Some(optimized) = result {
-            self.statistics.best_cost_found = sequence_cost(&optimized, &config.cost_metric);
-            SearchResult::with_optimization(target.to_vec(), optimized, self.statistics.clone())
+            self.statistics.best_cost_found =
+                <I as SymbolicBackend<I>>::sequence_cost(&optimized, &config.cost_metric, width);
+            SearchResultFor::with_optimization(target.to_vec(), optimized, self.statistics.clone())
         } else {
-            SearchResult::no_optimization(target.to_vec(), self.statistics.clone())
+            SearchResultFor::no_optimization(target.to_vec(), self.statistics.clone())
         }
     }
 
@@ -333,8 +360,10 @@ impl SearchAlgorithm<crate::isa::AArch64> for SymbolicSearch {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ir::{Operand, Register};
+    use crate::ir::{Instruction, Operand, Register};
+    use crate::isa::AArch64;
     use crate::search::config::SymbolicConfig;
+    use crate::semantics::live_out::LiveOut;
 
     fn mov_add_sequence() -> Vec<Instruction> {
         vec![
@@ -359,14 +388,14 @@ mod tests {
 
     #[test]
     fn test_symbolic_search_creation() {
-        let search = SymbolicSearch::new();
+        let search: SymbolicSearch<AArch64> = SymbolicSearch::new();
         let stats = search.statistics();
         assert_eq!(stats.algorithm, Algorithm::Symbolic);
     }
 
     #[test]
     fn test_symbolic_search_empty_sequence() {
-        let mut search = SymbolicSearch::new();
+        let mut search: SymbolicSearch<AArch64> = SymbolicSearch::new();
         let config = SearchConfig::default();
         let live_out = LiveOut::from_registers(vec![Register::X0]);
 
@@ -376,7 +405,7 @@ mod tests {
 
     #[test]
     fn test_symbolic_search_single_instruction() {
-        let mut search = SymbolicSearch::new();
+        let mut search: SymbolicSearch<AArch64> = SymbolicSearch::new();
         let config = SearchConfig::default();
         let live_out = LiveOut::from_registers(vec![Register::X0]);
 
@@ -387,7 +416,7 @@ mod tests {
 
     #[test]
     fn test_symbolic_finds_mov_add_fusion() {
-        let mut search = SymbolicSearch::new();
+        let mut search: SymbolicSearch<AArch64> = SymbolicSearch::new();
 
         let config = SearchConfig::default()
             .with_symbolic(SymbolicConfig::default().with_timeout(Duration::from_secs(10)))
@@ -414,7 +443,7 @@ mod tests {
 
     #[test]
     fn test_symbolic_statistics() {
-        let mut search = SymbolicSearch::new();
+        let mut search: SymbolicSearch<AArch64> = SymbolicSearch::new();
 
         let config = SearchConfig::default()
             .with_symbolic(SymbolicConfig::default())
@@ -433,7 +462,7 @@ mod tests {
 
     #[test]
     fn test_symbolic_respects_live_out() {
-        let mut search = SymbolicSearch::new();
+        let mut search: SymbolicSearch<AArch64> = SymbolicSearch::new();
 
         let config = SearchConfig::default()
             .with_registers(vec![Register::X0, Register::X1, Register::X2])
@@ -464,7 +493,7 @@ mod tests {
 
     #[test]
     fn test_verify_equivalence() {
-        let mut search = SymbolicSearch::new();
+        let mut search: SymbolicSearch<AArch64> = SymbolicSearch::new();
         let config = SearchConfig::default();
         let live_out = LiveOut::from_registers(vec![Register::X0]);
 
@@ -484,7 +513,7 @@ mod tests {
 
     #[test]
     fn test_verify_non_equivalence() {
-        let mut search = SymbolicSearch::new();
+        let mut search: SymbolicSearch<AArch64> = SymbolicSearch::new();
         let config = SearchConfig::default();
         let live_out = LiveOut::from_registers(vec![Register::X0]);
 
@@ -499,5 +528,48 @@ mod tests {
         }];
 
         assert!(!search.verify_equivalence(&target, &candidate, &live_out, &config));
+    }
+
+    // ---- x86 symbolic search (issue #73 Phase D step 7) ----
+
+    /// Tracer-bullet test that the generic `SymbolicSearch<X86_64>`
+    /// instantiates and runs an end-to-end synthesis on a 2-instruction
+    /// x86 target without panic.
+    #[test]
+    fn x86_symbolic_runs_end_to_end() {
+        use crate::isa::X86_64;
+        use crate::isa::x86::{X86Instruction, X86Register};
+        use crate::semantics::state::X86LiveOutMask;
+        use std::time::Duration;
+
+        let mut search: SymbolicSearch<X86_64> = SymbolicSearch::new();
+        let config = SearchConfig::default()
+            .with_x86_registers(vec![X86Register::RAX, X86Register::RBX])
+            .with_immediates(vec![0])
+            .with_x86_width(64)
+            .with_timeout_option(Some(Duration::from_secs(30)));
+
+        let live_out = X86LiveOutMask::from_registers(vec![X86Register::RAX]).with_flags(false);
+
+        // Target: `mov rax, 0; add rax, rbx` — equivalent to a single
+        // `mov rax, rbx` when flags aren't live (live_out.flags_live = false)
+        // and RAX initial value is `imm = 0`.
+        let target = vec![
+            X86Instruction::MovImm {
+                rd: X86Register::RAX,
+                imm: 0,
+            },
+            X86Instruction::AddReg {
+                rd: X86Register::RAX,
+                rs: X86Register::RBX,
+            },
+        ];
+
+        let result = search.search(&target, &live_out, &config);
+        assert_eq!(result.statistics.algorithm, Algorithm::Symbolic);
+        // We don't assert a specific optimization was found — the test
+        // just verifies the loop runs end-to-end through the generic
+        // backend without panicking.
+        assert!(result.statistics.elapsed_time.as_nanos() > 0);
     }
 }
