@@ -186,6 +186,10 @@ fn encode_64(ops: &mut dynasmrt::x64::Assembler, instr: &X86Instruction) -> Resu
             dynasm!(ops ; .arch x64 ; cmp Rq(rn), imm);
             Ok(())
         }
+        X86Instruction::Cmov { .. } => {
+            // Cycle 13 wires the dynasm cmovCC dispatch. Reject until then.
+            Err("Cmov encoding not wired yet (issue #74 cycle 13)".to_string())
+        }
     }
 }
 
@@ -281,6 +285,10 @@ fn encode_32(ops: &mut dynasmrt::x86::Assembler, instr: &X86Instruction) -> Resu
             let imm = imm_i32(*imm)?;
             dynasm!(ops ; .arch x86 ; cmp Rd(rn), imm);
             Ok(())
+        }
+        X86Instruction::Cmov { .. } => {
+            // Cycle 13 wires the dynasm cmovCC dispatch. Reject until then.
+            Err("Cmov encoding not wired yet (issue #74 cycle 13)".to_string())
         }
     }
 }

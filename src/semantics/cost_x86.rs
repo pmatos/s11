@@ -53,6 +53,8 @@ fn instruction_code_size(instr: &X86Instruction, width: u32) -> u64 {
         | X86Instruction::OrImm { .. }
         | X86Instruction::XorImm { .. }
         | X86Instruction::CmpImm { .. } => 6 + rex,
+        // CMOV is `0F 4x ModR/M` = 3 bytes plus REX.W on 64-bit.
+        X86Instruction::Cmov { .. } => 3 + rex,
     }
 }
 
