@@ -137,7 +137,7 @@ where
                     self.statistics.improvements_found += 1;
 
                     if config.verbose {
-                        println!("Found equivalent: (cost {})", candidate_cost);
+                        println!("Found equivalent: {} (cost {})", instr, candidate_cost);
                     }
                 }
             }
@@ -170,8 +170,8 @@ where
 
                         if config.verbose {
                             println!(
-                                "Found equivalent 2-instr sequence (cost {})",
-                                candidate_cost
+                                "Found equivalent: {}; {} (cost {})",
+                                instr1, instr2, candidate_cost
                             );
                         }
                     }

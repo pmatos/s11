@@ -449,6 +449,13 @@ impl SearchConfig {
 
     /// Set the x86 width (32 or 64) and matching assembler mode.
     pub fn with_x86_width(mut self, width: u32) -> Self {
+        // Only 32 and 64 are valid x86 widths; any other value would
+        // be silently coerced to Mode64 below, which is a misuse trap.
+        debug_assert!(
+            width == 32 || width == 64,
+            "with_x86_width: only 32 or 64 are valid; got {}",
+            width
+        );
         self.x86_width = width;
         self.x86_mode = if width == 32 {
             crate::assembler::x86::X86Mode::Mode32

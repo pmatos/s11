@@ -90,23 +90,6 @@ impl SymbolicBackend<crate::isa::AArch64> for crate::isa::AArch64 {
 
 // ---- x86 backends ----
 
-fn x86_check_equivalence(
-    target: &[crate::isa::x86::X86Instruction],
-    proposal: &[crate::isa::x86::X86Instruction],
-    live_out: &crate::semantics::state::X86LiveOutMask,
-    width: u32,
-    timeout: Duration,
-) -> EquivalenceResult {
-    let mut cfg = if width == 32 {
-        crate::semantics::equivalence::X86EquivalenceConfig::new_for_32()
-    } else {
-        crate::semantics::equivalence::X86EquivalenceConfig::new_for_64()
-    };
-    cfg.live_out = live_out.clone();
-    cfg.smt_timeout = Some(timeout);
-    crate::semantics::equivalence::check_equivalence_x86(target, proposal, &cfg)
-}
-
 impl SymbolicBackend<crate::isa::X86_64> for crate::isa::X86_64 {
     type LiveOut = crate::semantics::state::X86LiveOutMask;
 
@@ -140,7 +123,9 @@ impl SymbolicBackend<crate::isa::X86_64> for crate::isa::X86_64 {
         width: u32,
         timeout: Duration,
     ) -> EquivalenceResult {
-        x86_check_equivalence(target, proposal, live_out, width, timeout)
+        crate::semantics::equivalence::check_equivalence_x86_for_search(
+            target, proposal, live_out, width, timeout,
+        )
     }
 
     fn width(_config: &SearchConfig) -> u32 {
@@ -152,7 +137,18 @@ impl SymbolicBackend<crate::isa::X86_32> for crate::isa::X86_32 {
     type LiveOut = crate::semantics::state::X86LiveOutMask;
 
     fn registers_from_config(config: &SearchConfig) -> Vec<crate::isa::x86::X86Register> {
-        config.x86_available_registers.clone()
+        // Mode32 assembly rejects R8-R15 (`src/assembler/x86.rs:68-74`).
+        // Filter the pool here so `enumerate_all` cannot emit candidates
+        // that pass SMT verification but later fail at
+        // `X86Assembler::new_32().assemble_instructions`. The stochastic
+        // path filters at `X86Mutator::new`; this is the symbolic-search
+        // equivalent.
+        config
+            .x86_available_registers
+            .iter()
+            .copied()
+            .filter(|r| matches!(r.index(), Some(i) if i < 8))
+            .collect()
     }
 
     fn immediates_from_config(config: &SearchConfig) -> Vec<i64> {
@@ -181,7 +177,9 @@ impl SymbolicBackend<crate::isa::X86_32> for crate::isa::X86_32 {
         width: u32,
         timeout: Duration,
     ) -> EquivalenceResult {
-        x86_check_equivalence(target, proposal, live_out, width, timeout)
+        crate::semantics::equivalence::check_equivalence_x86_for_search(
+            target, proposal, live_out, width, timeout,
+        )
     }
 
     fn width(config: &SearchConfig) -> u32 {
