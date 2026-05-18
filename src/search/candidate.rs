@@ -1034,29 +1034,120 @@ mod tests {
     #[test]
     fn test_generate_random_reaches_mul_div_family() {
         let ids = random_opcode_ids(0x66, 5_000);
-        for id in [10u8 /* Mul */, 11 /* Sdiv */, 12 /* Udiv */] {
-            assert!(ids.contains(&id), "random never produced opcode_id {}", id);
+        for (label, instr) in [
+            (
+                "Mul",
+                Instruction::Mul {
+                    rd: Register::X0,
+                    rn: Register::X1,
+                    rm: Register::X2,
+                },
+            ),
+            (
+                "Sdiv",
+                Instruction::Sdiv {
+                    rd: Register::X0,
+                    rn: Register::X1,
+                    rm: Register::X2,
+                },
+            ),
+            (
+                "Udiv",
+                Instruction::Udiv {
+                    rd: Register::X0,
+                    rn: Register::X1,
+                    rm: Register::X2,
+                },
+            ),
+        ] {
+            assert!(
+                ids.contains(&opcode_id(&instr)),
+                "random never produced {}",
+                label
+            );
         }
     }
 
     #[test]
     fn test_generate_random_reaches_compare_family() {
         let ids = random_opcode_ids(0x66, 5_000);
-        for id in [13u8 /* Cmp */, 14 /* Cmn */, 15 /* Tst */] {
-            assert!(ids.contains(&id), "random never produced opcode_id {}", id);
+        for (label, instr) in [
+            (
+                "Cmp",
+                Instruction::Cmp {
+                    rn: Register::X0,
+                    rm: Operand::Register(Register::X1),
+                },
+            ),
+            (
+                "Cmn",
+                Instruction::Cmn {
+                    rn: Register::X0,
+                    rm: Operand::Register(Register::X1),
+                },
+            ),
+            (
+                "Tst",
+                Instruction::Tst {
+                    rn: Register::X0,
+                    rm: Operand::Register(Register::X1),
+                },
+            ),
+        ] {
+            assert!(
+                ids.contains(&opcode_id(&instr)),
+                "random never produced {}",
+                label
+            );
         }
     }
 
     #[test]
     fn test_generate_random_reaches_csel_family() {
         let ids = random_opcode_ids(0x66, 5_000);
-        for id in [
-            16u8, /* Csel */
-            17,   /* Csinc */
-            18,   /* Csinv */
-            19,   /* Csneg */
+        for (label, instr) in [
+            (
+                "Csel",
+                Instruction::Csel {
+                    rd: Register::X0,
+                    rn: Register::X1,
+                    rm: Register::X2,
+                    cond: crate::ir::types::Condition::EQ,
+                },
+            ),
+            (
+                "Csinc",
+                Instruction::Csinc {
+                    rd: Register::X0,
+                    rn: Register::X1,
+                    rm: Register::X2,
+                    cond: crate::ir::types::Condition::EQ,
+                },
+            ),
+            (
+                "Csinv",
+                Instruction::Csinv {
+                    rd: Register::X0,
+                    rn: Register::X1,
+                    rm: Register::X2,
+                    cond: crate::ir::types::Condition::EQ,
+                },
+            ),
+            (
+                "Csneg",
+                Instruction::Csneg {
+                    rd: Register::X0,
+                    rn: Register::X1,
+                    rm: Register::X2,
+                    cond: crate::ir::types::Condition::EQ,
+                },
+            ),
         ] {
-            assert!(ids.contains(&id), "random never produced opcode_id {}", id);
+            assert!(
+                ids.contains(&opcode_id(&instr)),
+                "random never produced {}",
+                label
+            );
         }
     }
 
