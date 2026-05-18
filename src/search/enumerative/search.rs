@@ -95,7 +95,6 @@ fn verify_candidate(
         .timeout(smt_timeout)
         .with_flags(true);
 
-    shared.smt_queries.fetch_add(1, Ordering::Relaxed);
     let (verdict, metrics) =
         check_equivalence_with_config_metrics(target, candidate, &equiv_config);
     let solver_nanos: u64 = metrics
@@ -106,6 +105,15 @@ fn verify_candidate(
     shared
         .smt_elapsed_nanos
         .fetch_add(solver_nanos, Ordering::Relaxed);
+    // Count only candidates that actually reached `solver.check()`. The
+    // pre-SMT guard (`flag_writers_diverge && flags_live`) returns
+    // `NotEquivalent` with `metrics.smt_called == false`, and the
+    // fast-path returns `NotEquivalentFast` the same way — using the
+    // metric is both correct and future-proof against new early-return
+    // paths (PR #269 review).
+    if metrics.smt_called {
+        shared.smt_queries.fetch_add(1, Ordering::Relaxed);
+    }
     match verdict {
         EquivalenceResult::Equivalent => {
             shared.smt_equivalent.fetch_add(1, Ordering::Relaxed);
@@ -113,11 +121,6 @@ fn verify_candidate(
                 .candidates_passed_fast
                 .fetch_add(1, Ordering::Relaxed);
             true
-        }
-        EquivalenceResult::NotEquivalentFast(_) => {
-            // Rejected by random-test pre-filter; not a real SMT query.
-            shared.smt_queries.fetch_sub(1, Ordering::Relaxed);
-            false
         }
         _ => false,
     }
