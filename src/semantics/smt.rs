@@ -905,6 +905,10 @@ pub fn states_not_equal(state1: &MachineState, state2: &MachineState) -> z3::ast
 
 /// Check if two machine states are not equal for the specified live-out
 /// registers, optionally including the NZCV flag bits.
+///
+/// TODO(#282): The explicit `flags_live` parameter duplicates
+/// `live_out.flags_live()` for every non-stochastic caller. Tracked for
+/// cleanup in issue #282.
 pub fn states_not_equal_for_live_out(
     state1: &MachineState,
     state2: &MachineState,
