@@ -226,6 +226,38 @@ pub struct EquivalenceMetrics {
     pub smt_formula_bytes: Option<usize>,
 }
 
+/// Build the fast-path input randomization set.
+///
+/// Returns the union of `live_out_registers` and the source registers of every
+/// instruction in `seq1` and `seq2`. Registers not in this set stay at the
+/// `ConcreteMachineState::new_zeroed` default across all random/edge-case
+/// inputs, which is a soundness gap for any sequence whose flag or register
+/// output depends on a source register that is neither live-out nor a
+/// destination of an earlier instruction in the sequence (e.g. `tst x1, #1`
+/// vs `tst x1, #2` under a flag-only contract — see the regression test in
+/// this module). The SMT path is unaffected; it operates on symbolic inputs.
+fn fast_path_input_registers(
+    live_out_registers: &crate::semantics::live_out::LiveOutRegisters,
+    seq1: &[Instruction],
+    seq2: &[Instruction],
+) -> Vec<crate::ir::Register> {
+    use std::collections::HashSet;
+    let mut regs: HashSet<crate::ir::Register> = HashSet::new();
+    for r in live_out_registers.iter() {
+        regs.insert(*r);
+    }
+    for instr in seq1.iter().chain(seq2.iter()) {
+        for src in instr.source_registers() {
+            regs.insert(src);
+        }
+    }
+    // Sort by register index for deterministic input ordering (so test
+    // failures and SMT-formula seeds are reproducible).
+    let mut v: Vec<_> = regs.into_iter().collect();
+    v.sort_by_key(|r| r.index().unwrap_or(u8::MAX));
+    v
+}
+
 /// Run the fast-path random + edge-case checks. Returns either a
 /// `NotEquivalentFast` refutation, `None` if the fast path passed, or
 /// `Some(Equivalent)` if `fast_only` short-circuits.
@@ -235,7 +267,7 @@ fn run_fast_path(
     config: &EquivalenceConfig,
 ) -> Option<EquivalenceResult> {
     let live_out_registers = config.live_out.registers();
-    let input_regs: Vec<_> = live_out_registers.iter().cloned().collect();
+    let input_regs = fast_path_input_registers(live_out_registers, seq1, seq2);
 
     let random_config = RandomInputConfig {
         count: config.random_test_count,
@@ -2028,6 +2060,38 @@ mod tests {
         assert!(
             matches!(result, EquivalenceResult::Equivalent),
             "got {:?}",
+            result
+        );
+    }
+
+    /// Soundness regression test for PR #172 review thread
+    /// PRRT_kwDOOuU3Hc6Cw2qx.
+    ///
+    /// `tst x1, #1` and `tst x1, #2` differ on NZCV when bit 0 vs bit 1 of
+    /// x1 is set, so a flag-aware live-out contract must classify them as
+    /// non-equivalent. Prior to the source-register randomization fix, the
+    /// fast path only varied registers in `config.live_out.registers()` —
+    /// empty for a flag-only contract — so x1 stayed at zero across all
+    /// random + edge-case inputs and both sequences reported flags as zero,
+    /// returning `Equivalent` under `--fast-only`. The fix unions the source
+    /// registers of both sequences into the random-input mask.
+    #[test]
+    fn fast_only_flags_only_contract_detects_tst_divergence() {
+        let seq1 = vec![Instruction::Tst {
+            rn: Register::X1,
+            rm: Operand::Immediate(1),
+        }];
+        let seq2 = vec![Instruction::Tst {
+            rn: Register::X1,
+            rm: Operand::Immediate(2),
+        }];
+        let config = EquivalenceConfig::fast_only()
+            .live_out(LiveOut::from_registers(vec![]))
+            .with_flags(true);
+        let result = check_equivalence_with_config(&seq1, &seq2, &config);
+        assert!(
+            matches!(result, EquivalenceResult::NotEquivalentFast(_)),
+            "expected NotEquivalentFast for flags-only fast-only contract, got {:?}",
             result
         );
     }
