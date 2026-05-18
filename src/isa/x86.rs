@@ -490,9 +490,12 @@ fn x86_modifies_flags(instr: &X86Instruction) -> bool {
     )
 }
 
-/// Issue #74: CMOV and Jcc read EFLAGS; every other variant in the
-/// current set is flag-agnostic on the read side.
-fn x86_reads_flags(instr: &X86Instruction) -> bool {
+/// CMOV and Jcc read EFLAGS; every other variant in the current set
+/// is flag-agnostic on the read side. Crate-visible so external
+/// callers (e.g. `find_shorter_equivalent_x86`) can route through one
+/// authoritative match arm — adding a future flag-reader like SETcc
+/// then updates exactly one place.
+pub(crate) fn x86_reads_flags(instr: &X86Instruction) -> bool {
     matches!(
         instr,
         X86Instruction::Cmov { .. } | X86Instruction::Jcc { .. }
