@@ -84,6 +84,22 @@ llm-demo: build
 mutants *ARGS:
     ./scripts/run-mutants.sh {{ARGS}}
 
+# Run every benchmark phase and append JSON Lines to benches/results/.
+# See benches/README.md for the schema and how to add a benchmark.
+bench: build
+    @mkdir -p benches/results
+    @echo "Running benchmarks (all phases)..."
+    cargo bench --bench hackers_delight --bench llvm_codegen --bench algebraic_fusion
+
+# Phase 1 only (Hacker's Delight micro-suite).
+bench-phase1: build
+    @mkdir -p benches/results
+    cargo bench --bench hackers_delight
+
+# Wipe criterion HTML reports and the JSONL accumulator.
+bench-clean:
+    rm -rf target/criterion benches/results
+
 # Generate an HTML coverage report locally (open target/llvm-cov/html/index.html).
 # Requires `cargo install cargo-llvm-cov` and the `llvm-tools-preview` rustup component.
 coverage: build-tests
