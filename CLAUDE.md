@@ -8,7 +8,7 @@ s11 is a superoptimizer written in Rust. It finds shorter or faster equivalent i
 
 **Key Features:**
 - ELF binary reading and disassembly using Capstone engine (auto-detects e_machine)
-- **AArch64** (42 instructions): MOV, ADD, SUB, AND, ORR, EOR, LSL, LSR, ASR, MUL, SDIV, UDIV, CMP, CMN, TST, CSEL, CSINC, CSINV, CSNEG, MADD, MSUB, MNEG, SMULH, UMULH, CCMP, CCMN, UBFX, SBFX, BFI, BFXIL, UBFIZ, SBFIZ, plus branches/control-flow B, B.cond, RET, CBZ, CBNZ, TBZ, TBNZ, BL, BR (issue #69 — terminators only; search holds them fixed and rewrites only the straight-line prefix). Full pipeline including stochastic/symbolic/hybrid/LLM search.
+- **AArch64** (54+ instructions): MOV, ADD, SUB, AND, ORR, EOR, LSL, LSR, ASR, MUL, SDIV, UDIV, CMP, CMN, TST, CSEL, CSINC, CSINV, CSNEG, MADD, MSUB, MNEG, SMULH, UMULH, CCMP, CCMN, UBFX, SBFX, BFI, BFXIL, UBFIZ, SBFIZ, plus branches/control-flow B, B.cond, RET, CBZ, CBNZ, TBZ, TBNZ, BL, BR (issue #69 — terminators only; search holds them fixed and rewrites only the straight-line prefix), plus memory ops LDR, LDRB, LDRH, LDRSB, LDRSH, LDRSW, STR, STRB, STRH, LDP, STP, LDPSW (issue #68 — byte-addressed Z3-array memory model with sound full aliasing, whole-memory live-out auto-derived; see ADR-0007). Full pipeline including stochastic/symbolic/hybrid/LLM search.
 - **x86-64 + x86-32** (14 variants, 7 mnemonics): MOV, ADD, SUB, AND, OR, XOR, CMP (each with reg/imm forms) — enumerative, stochastic (MCMC), and symbolic (SMT) search supported. Hybrid (parallel coordinator) and LLM remain AArch64-only.
 - SMT-based equivalence checking using Z3 (width-parameterised for x86-32 vs x86-64)
 - Multi-threaded parallel search with worker coordination
@@ -162,6 +162,8 @@ There are two text-to-IR entry points and they MUST cover the same mnemonic set:
 To prevent drift, `convert_to_ir` does NOT maintain its own mnemonic switch — it formats `"{mnemonic} {op_str}"` and delegates to `parser::parse_line`. **Adding a new mnemonic means adding it to the parser only**; the binary path picks it up automatically. Do not reintroduce a parallel match-on-mnemonic in `convert_to_ir`.
 
 The regression test `convert_capstone_op_handles_all_supported_aarch64_mnemonics` in `src/main.rs` pins one canonical operand string per supported mnemonic — extend it whenever you add an opcode so a future Capstone-syntax regression on that mnemonic fails loudly.
+
+For instructions with multiple destinations (LDP, pre/post-index writeback), use `Instruction::destinations() -> Vec<Register>` rather than the singleton `destination() -> Option<Register>`. Memory ops are non-terminator, do not modify NZCV, and have observable memory side effects — `has_side_effects()` and `EquivalenceConfig::memory_live` model the latter. See ADR-0007 for the design.
 
 ### Search Algorithms
 
