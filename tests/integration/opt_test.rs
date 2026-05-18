@@ -329,3 +329,187 @@ fn test_opt_hex_address_formats() {
         let _ = fs::remove_file(optimized_path);
     }
 }
+
+// ============================================================================
+// x86 algorithm dispatch smoke tests (issue #73 Phase F)
+// ============================================================================
+
+/// First executable byte address in an x86 binary. Mirrors
+/// `executable_window` above but takes the first byte of the first
+/// executable section since x86 has variable-length instructions.
+fn x86_first_executable_address(path: &Path) -> u64 {
+    let data = std::fs::read(path).expect("read test ELF");
+    let elf =
+        elf::ElfBytes::<elf::endian::AnyEndian>::minimal_parse(&data).expect("parse test ELF");
+    let section_headers = elf.section_headers().expect("read section headers");
+    for section in section_headers.iter() {
+        if section.sh_flags & elf::abi::SHF_EXECINSTR as u64 != 0 && section.sh_size > 0 {
+            return section.sh_addr;
+        }
+    }
+    panic!("no executable section in {path:?}");
+}
+
+#[test]
+fn test_opt_x86_hybrid_still_rejected() {
+    // Hybrid remains AArch64-only after issue #73: the parallel
+    // coordinator hasn't been genericised yet (#77 stage 2 step 12
+    // deferral). The CLI must still reject hybrid for x86 with a
+    // clear message naming hybrid+llm.
+    let binary = get_binary_path();
+    let test_elf = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("binaries")
+        .join("x86_64")
+        .join("simple_debug");
+    check_test_binary(&test_elf);
+    let start_addr = x86_first_executable_address(&test_elf);
+
+    let output = Command::new(binary)
+        .arg("opt")
+        .arg(&test_elf)
+        .arg("--arch")
+        .arg("x86-64")
+        .arg("--algorithm")
+        .arg("hybrid")
+        .arg("--start-addr")
+        .arg(format!("0x{start_addr:x}"))
+        .arg("--end-addr")
+        .arg(format!("0x{:x}", start_addr + 4))
+        .output()
+        .expect("Failed to execute s11");
+
+    assert!(
+        !output.status.success(),
+        "x86 hybrid should still be rejected"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("hybrid") || stderr.contains("AArch64-only"),
+        "rejection message should mention hybrid/llm; got: {}",
+        stderr
+    );
+}
+
+#[test]
+fn test_opt_x86_llm_still_rejected() {
+    // LLM remains AArch64-only per ADR-0004 decision 3.
+    let binary = get_binary_path();
+    let test_elf = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("binaries")
+        .join("x86_64")
+        .join("simple_debug");
+    check_test_binary(&test_elf);
+    let start_addr = x86_first_executable_address(&test_elf);
+
+    let output = Command::new(binary)
+        .arg("opt")
+        .arg(&test_elf)
+        .arg("--arch")
+        .arg("x86-64")
+        .arg("--algorithm")
+        .arg("llm")
+        .arg("--start-addr")
+        .arg(format!("0x{start_addr:x}"))
+        .arg("--end-addr")
+        .arg(format!("0x{:x}", start_addr + 4))
+        .output()
+        .expect("Failed to execute s11");
+
+    assert!(!output.status.success(), "x86 llm should still be rejected");
+}
+
+#[test]
+fn test_opt_x86_stochastic_is_no_longer_rejected_at_cli() {
+    // Regression: before issue #73 the CLI rejected
+    // `--arch x86-64 --algorithm stochastic` with
+    // "x86 only supports --algorithm enumerative in this release; ...".
+    // After this PR, the rejection message must not appear; the
+    // command may exit non-zero for other reasons (e.g. address
+    // alignment, no optimization found) but the specific x86-only
+    // rejection text must be gone.
+    let binary = get_binary_path();
+    let test_elf = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("binaries")
+        .join("x86_64")
+        .join("simple_debug");
+    check_test_binary(&test_elf);
+    let start_addr = x86_first_executable_address(&test_elf);
+
+    let output = Command::new(binary)
+        .arg("opt")
+        .arg(&test_elf)
+        .arg("--arch")
+        .arg("x86-64")
+        .arg("--algorithm")
+        .arg("stochastic")
+        .arg("--iterations")
+        .arg("50")
+        .arg("--timeout")
+        .arg("10")
+        .arg("--seed")
+        .arg("42")
+        .arg("--start-addr")
+        .arg(format!("0x{start_addr:x}"))
+        .arg("--end-addr")
+        .arg(format!("0x{:x}", start_addr + 4))
+        .output()
+        .expect("Failed to execute s11");
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        !stderr.contains("x86 only supports --algorithm enumerative"),
+        "old x86-only-enumerative rejection text must be gone; stderr was: {}",
+        stderr
+    );
+
+    // Clean up any optimized binary that might have been created
+    let optimized_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("binaries")
+        .join("x86_64")
+        .join("simple_debug_optimized");
+    let _ = fs::remove_file(optimized_path);
+}
+
+#[test]
+fn test_opt_x86_symbolic_is_no_longer_rejected_at_cli() {
+    // Companion to the stochastic regression test: symbolic must
+    // also be accepted now.
+    let binary = get_binary_path();
+    let test_elf = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("binaries")
+        .join("x86_64")
+        .join("simple_debug");
+    check_test_binary(&test_elf);
+    let start_addr = x86_first_executable_address(&test_elf);
+
+    let output = Command::new(binary)
+        .arg("opt")
+        .arg(&test_elf)
+        .arg("--arch")
+        .arg("x86-64")
+        .arg("--algorithm")
+        .arg("symbolic")
+        .arg("--timeout")
+        .arg("5")
+        .arg("--solver-timeout")
+        .arg("2")
+        .arg("--start-addr")
+        .arg(format!("0x{start_addr:x}"))
+        .arg("--end-addr")
+        .arg(format!("0x{:x}", start_addr + 4))
+        .output()
+        .expect("Failed to execute s11");
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        !stderr.contains("x86 only supports --algorithm enumerative"),
+        "old x86-only-enumerative rejection text must be gone; stderr was: {}",
+        stderr
+    );
+
+    let optimized_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("binaries")
+        .join("x86_64")
+        .join("simple_debug_optimized");
+    let _ = fs::remove_file(optimized_path);
+}
