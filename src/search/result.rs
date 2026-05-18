@@ -131,6 +131,10 @@ pub struct SearchStatistics {
     pub candidates_passed_fast: u64,
     /// Number of SMT queries made
     pub smt_queries: u64,
+    /// Cumulative wall-clock time spent inside Z3 `solver.check()` calls,
+    /// aggregated across every SMT-reaching candidate during the search.
+    /// `Duration::ZERO` when no candidate reached the solver.
+    pub smt_elapsed: Duration,
     /// Number of SMT queries that proved equivalence
     pub smt_equivalent: u64,
     /// Number of iterations (for stochastic search)

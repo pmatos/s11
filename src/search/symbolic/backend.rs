@@ -11,8 +11,8 @@
 
 use crate::isa::ISA;
 use crate::search::config::SearchConfig;
-use crate::semantics::EquivalenceResult;
 use crate::semantics::cost::CostMetric;
+use crate::semantics::{EquivalenceMetrics, EquivalenceResult};
 use std::time::Duration;
 
 /// Per-ISA dispatch surface for `SymbolicSearch`.
@@ -32,14 +32,15 @@ pub trait SymbolicBackend<I: ISA>: Sized {
     /// Sum the cost of every instruction in the sequence.
     fn sequence_cost(seq: &[I::Instruction], metric: &CostMetric, width: u32) -> u64;
 
-    /// Run the full equivalence check.
+    /// Run the full equivalence check. AArch64 returns populated
+    /// metrics (smt_elapsed, smt_called); x86 returns defaults.
     fn check_equivalence(
         target: &[I::Instruction],
         proposal: &[I::Instruction],
         live_out: &Self::LiveOut,
         width: u32,
         timeout: Duration,
-    ) -> EquivalenceResult;
+    ) -> (EquivalenceResult, EquivalenceMetrics);
 
     /// Width parameter for cost + state masking. AArch64 returns 64;
     /// x86 reads `SearchConfig::x86_width` (32 or 64).
@@ -73,14 +74,14 @@ impl SymbolicBackend<crate::isa::AArch64> for crate::isa::AArch64 {
         live_out: &Self::LiveOut,
         _width: u32,
         timeout: Duration,
-    ) -> EquivalenceResult {
+    ) -> (EquivalenceResult, EquivalenceMetrics) {
         // Treat NZCV as live-out so the solver cannot certify a
         // flag-divergent rewrite (see synthesis.rs's previous body).
         let cfg = crate::semantics::EquivalenceConfig::with_live_out(live_out.clone())
             .random_tests(5)
             .timeout(timeout)
             .with_flags(true);
-        crate::semantics::check_equivalence_with_config(target, proposal, &cfg)
+        crate::semantics::equivalence::check_equivalence_with_config_metrics(target, proposal, &cfg)
     }
 
     fn width(_config: &SearchConfig) -> u32 {
@@ -122,10 +123,11 @@ impl SymbolicBackend<crate::isa::X86_64> for crate::isa::X86_64 {
         live_out: &Self::LiveOut,
         width: u32,
         timeout: Duration,
-    ) -> EquivalenceResult {
-        crate::semantics::equivalence::check_equivalence_x86_for_search(
+    ) -> (EquivalenceResult, EquivalenceMetrics) {
+        let result = crate::semantics::equivalence::check_equivalence_x86_for_search(
             target, proposal, live_out, width, timeout,
-        )
+        );
+        (result, EquivalenceMetrics::default())
     }
 
     fn width(_config: &SearchConfig) -> u32 {
@@ -176,10 +178,11 @@ impl SymbolicBackend<crate::isa::X86_32> for crate::isa::X86_32 {
         live_out: &Self::LiveOut,
         width: u32,
         timeout: Duration,
-    ) -> EquivalenceResult {
-        crate::semantics::equivalence::check_equivalence_x86_for_search(
+    ) -> (EquivalenceResult, EquivalenceMetrics) {
+        let result = crate::semantics::equivalence::check_equivalence_x86_for_search(
             target, proposal, live_out, width, timeout,
-        )
+        );
+        (result, EquivalenceMetrics::default())
     }
 
     fn width(config: &SearchConfig) -> u32 {

@@ -19,8 +19,8 @@
 
 use crate::isa::ISA;
 use crate::search::config::SearchConfig;
-use crate::semantics::EquivalenceResult;
 use crate::semantics::cost::CostMetric;
+use crate::semantics::{EquivalenceMetrics, EquivalenceResult};
 use rand::RngExt;
 use std::time::Duration;
 
@@ -78,15 +78,16 @@ pub trait StochasticBackend<I: ISA>: Sized {
     fn is_encodable(seq: &[I::Instruction]) -> bool;
 
     /// Run the full equivalence check. AArch64 routes to
-    /// `check_equivalence_with_config`; x86 routes to
-    /// `check_equivalence_x86`.
+    /// `check_equivalence_with_config_metrics`; x86 routes to
+    /// `check_equivalence_x86` and returns default metrics (no x86
+    /// instrumentation yet — issue #70 only wires AArch64).
     fn check_equivalence(
         target: &[I::Instruction],
         proposal: &[I::Instruction],
         live_out: &Self::LiveOut,
         width: u32,
         timeout: Duration,
-    ) -> EquivalenceResult;
+    ) -> (EquivalenceResult, EquivalenceMetrics);
 
     /// Generate a random sequence of length `len` from the supplied
     /// pools.
@@ -169,7 +170,7 @@ impl StochasticBackend<crate::isa::AArch64> for crate::isa::AArch64 {
         live_out: &Self::LiveOut,
         _width: u32,
         timeout: Duration,
-    ) -> EquivalenceResult {
+    ) -> (EquivalenceResult, EquivalenceMetrics) {
         // Treat NZCV as live-out: the pre-refactor `mcmc.rs` body
         // built the EquivalenceConfig with `.with_flags(true)` so the
         // SMT solver cannot certify rewrites that diverge on flags
@@ -179,7 +180,7 @@ impl StochasticBackend<crate::isa::AArch64> for crate::isa::AArch64 {
             .random_tests(0)
             .timeout(timeout)
             .with_flags(true);
-        crate::semantics::check_equivalence_with_config(target, proposal, &cfg)
+        crate::semantics::equivalence::check_equivalence_with_config_metrics(target, proposal, &cfg)
     }
 
     fn random_sequence<R: RngExt>(
@@ -295,10 +296,11 @@ impl StochasticBackend<crate::isa::X86_64> for crate::isa::X86_64 {
         live_out: &Self::LiveOut,
         width: u32,
         timeout: Duration,
-    ) -> EquivalenceResult {
-        crate::semantics::equivalence::check_equivalence_x86_for_search(
+    ) -> (EquivalenceResult, EquivalenceMetrics) {
+        let result = crate::semantics::equivalence::check_equivalence_x86_for_search(
             target, proposal, live_out, width, timeout,
-        )
+        );
+        (result, EquivalenceMetrics::default())
     }
 
     fn random_sequence<R: RngExt>(
@@ -373,10 +375,11 @@ impl StochasticBackend<crate::isa::X86_32> for crate::isa::X86_32 {
         live_out: &Self::LiveOut,
         width: u32,
         timeout: Duration,
-    ) -> EquivalenceResult {
-        crate::semantics::equivalence::check_equivalence_x86_for_search(
+    ) -> (EquivalenceResult, EquivalenceMetrics) {
+        let result = crate::semantics::equivalence::check_equivalence_x86_for_search(
             target, proposal, live_out, width, timeout,
-        )
+        );
+        (result, EquivalenceMetrics::default())
     }
 
     fn random_sequence<R: RngExt>(
@@ -458,7 +461,7 @@ mod tests {
             64,
             Duration::from_secs(2),
         );
-        assert!(matches!(r, EquivalenceResult::Equivalent));
+        assert!(matches!(r.0, EquivalenceResult::Equivalent));
     }
 
     #[test]
@@ -475,6 +478,6 @@ mod tests {
             32,
             Duration::from_secs(2),
         );
-        assert!(matches!(r, EquivalenceResult::Equivalent));
+        assert!(matches!(r.0, EquivalenceResult::Equivalent));
     }
 }
