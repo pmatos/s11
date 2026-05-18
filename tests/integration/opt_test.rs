@@ -540,18 +540,22 @@ fn test_opt_accepts_ldp_postindex_window() {
 
 #[test]
 fn test_opt_accepts_ldr_positive_offset_window() {
-    // LDR with positive scaled offset `ldr x17, [x16, #8]` — covers the
-    // RefOffset / Uscaled encoding path (vs the LDUR Sbits path tested at
-    // the assembler unit-test layer).
+    // LDR X-form unsigned-offset family `ldr xN, [xM{, #imm}]` — covers
+    // the RefOffset / Uscaled encoding path (vs the LDUR Sbits path tested
+    // at the assembler unit-test layer). The exact (Rt, Rn, imm) tuple
+    // varies across `loops_debug` rebuilds (PLT layout depends on the
+    // toolchain), so the mask wildcards them and pins only the class bits:
+    // byte 3 = 11111001 (size=11, V=1, class=001, opc=01); byte 2 top
+    // bits 7-6 = 01 (LDR unsigned-offset variant).
     let source_elf = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("binaries")
         .join("loops_debug");
     check_test_binary(&source_elf);
     let start_addr = find_encoding_masked(
         &source_elf,
-        &[0x11, 0x06, 0x40, 0xf9],
-        &[0xff, 0xff, 0xff, 0xff],
-        "ldr x17, [x16, #8]",
+        &[0x00, 0x00, 0x40, 0xf9],
+        &[0x00, 0x00, 0xc0, 0xff],
+        "ldr xN, [xM{, #imm}]",
     );
     assert_opt_succeeds_on_window(&source_elf, "ldr_offset", start_addr);
 }
