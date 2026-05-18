@@ -449,7 +449,7 @@ mod tests {
         assert!(!states_equal_for_live_out_x86(&a, &b, &with_flags));
     }
 
-    // --- issue #74: CMOVcc concrete semantics ---
+    // --- CMOVcc concrete semantics ---
 
     #[test]
     fn cmov_when_condition_true_writes_source() {

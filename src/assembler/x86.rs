@@ -793,7 +793,7 @@ mod tests {
         assert!(err.contains("does not fit in 32 bits"));
     }
 
-    // --- issue #74: CMOV encoding round-trips through Capstone ---
+    // --- CMOV encoding round-trips through Capstone ---
 
     #[test]
     fn cmove_x86_64_round_trips() {
@@ -857,7 +857,7 @@ mod tests {
         );
     }
 
-    // --- issue #74: Jcc short-form encoding ---
+    // --- Jcc short-form encoding ---
 
     #[test]
     fn je_x86_64_encodes_to_short_form_je() {

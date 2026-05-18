@@ -18,7 +18,7 @@ use crate::isa::traits::{ISA, InstructionGenerator, InstructionType, OperandType
 use rand::{Rng, RngExt};
 use std::fmt;
 
-/// x86 condition codes consumed by CMOVcc / Jcc (issue #74).
+/// x86 condition codes consumed by CMOVcc / Jcc.
 ///
 /// The 16 canonical codes here cover every short-form jump / cmov GAS
 /// emits. Aliases (`NB` for `AE`, `Z` for `E`, etc.) are normalized to
@@ -239,7 +239,7 @@ pub enum X86Instruction {
     CmpReg { rn: X86Register, rs: X86Register },
     /// `cmp rn, imm` — `rn - imm` discarding the result; sets EFLAGS.
     CmpImm { rn: X86Register, imm: i64 },
-    /// `cmovCC rd, rs` — conditional move (issue #74). Reads EFLAGS;
+    /// `cmovCC rd, rs` — conditional move. Reads EFLAGS;
     /// when `cond` holds, writes `rd = rs`; otherwise `rd` is unchanged.
     /// Does not modify EFLAGS.
     Cmov {
@@ -247,7 +247,7 @@ pub enum X86Instruction {
         rs: X86Register,
         cond: X86Condition,
     },
-    /// `jCC <target>` — conditional branch (issue #74). Reads EFLAGS;
+    /// `jCC <target>` — conditional branch. Reads EFLAGS;
     /// modelled as an opaque terminator. The branch target is recovered
     /// from the surrounding ELF disassembly and is not carried in the IR
     /// — search holds terminators fixed (see `split_terminator_x86`).
@@ -477,7 +477,7 @@ impl ISA for X86_32 {
 
 /// Helper used by both `FlagsAnalysis<X86Instruction> for X86_64` and
 /// `for X86_32`. MOV / CMOV / Jcc do not write EFLAGS (the latter two
-/// read EFLAGS — issue #74); every other variant in the current set
+/// read EFLAGS — ); every other variant in the current set
 /// does.
 fn x86_modifies_flags(instr: &X86Instruction) -> bool {
     !matches!(
@@ -1712,7 +1712,7 @@ mod tests {
         }
     }
 
-    // --- issue #74: Jcc IR + is_terminator ---
+    // --- Jcc IR + is_terminator ---
 
     #[test]
     fn jcc_is_terminator() {
@@ -1766,7 +1766,7 @@ mod tests {
         assert!(!jcc.has_side_effects());
     }
 
-    // --- issue #74: FlagsAnalysis::reads_flags wired for Cmov / Jcc ---
+    // --- FlagsAnalysis::reads_flags wired for Cmov / Jcc ---
 
     #[test]
     fn x86_64_reads_flags_returns_true_for_cmov_and_jcc() {

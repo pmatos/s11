@@ -722,7 +722,7 @@ pub fn check_equivalence_x86_for_search(
 /// random inputs (and EFLAGS comparison when CMP is present or the mask
 /// declares flags live); slow path lowers to Z3 BVs and checks UNSAT of the
 /// not-equal assertion over live-out registers, plus the five tracked
-/// EFLAGS bits when `flags_live` is set (issue #74).
+/// EFLAGS bits when `flags_live` is set.
 pub fn check_equivalence_x86(
     seq1: &[crate::isa::x86::X86Instruction],
     seq2: &[crate::isa::x86::X86Instruction],
@@ -985,7 +985,7 @@ mod tests {
         );
     }
 
-    // --- issue #74: SMT path catches flag-only divergence when flags_live ---
+    // --- SMT path catches flag-only divergence when flags_live ---
 
     #[test]
     fn x86_smt_path_distinguishes_cmps_with_different_operands_when_flags_live() {

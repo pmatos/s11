@@ -222,7 +222,7 @@ mod tests {
         let all = generate_all_x86_instructions(&regs, &imms);
         // 7 reg-reg variants × N×N register pairs
         // + 7 reg-imm variants × N × M
-        // + 16 CMOV conditions × N×N register pairs (issue #74)
+        // + 16 CMOV conditions × N×N register pairs
         let expected = 7 * regs.len() * regs.len()
             + 7 * regs.len() * imms.len()
             + 16 * regs.len() * regs.len();
@@ -253,7 +253,7 @@ mod tests {
         }
     }
 
-    // --- issue #74: CMOV enumeration + Jcc exclusion ---
+    // --- CMOV enumeration + Jcc exclusion ---
 
     #[test]
     fn enumerator_includes_cmov_per_condition_and_register_pair() {
