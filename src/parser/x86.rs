@@ -218,9 +218,10 @@ pub fn x86_ir_from_mnemonic(
 /// for the AArch64 path.
 ///
 /// Recognised lines: empty, comments (`;`, `//`, `#`), labels
-/// (`name:`), directives (`.foo`), and 2-operand instructions whose
-/// mnemonic is one of the seven the minimal-core IR supports
-/// (mov, add, sub, and, or, xor, cmp). Anything else is a parse error.
+/// (`name:`), directives (`.foo`), and instructions whose mnemonic is
+/// one of the nine supported families (mov, add, sub, and, or, xor,
+/// cmp plus the conditional cmovCC and jCC variants). Anything else is
+/// a parse error.
 pub fn parse_x86_assembly_string(
     content: &str,
     source_name: String,

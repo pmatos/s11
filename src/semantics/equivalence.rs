@@ -676,6 +676,11 @@ pub struct X86EquivalenceConfig {
 }
 
 impl X86EquivalenceConfig {
+    /// Construct a baseline config. **Note:** `live_out` defaults to
+    /// `X86LiveOutMask::empty()` — equivalence over an empty live-out
+    /// set is vacuously true. Callers must populate the mask (typically
+    /// via `live_out(x86_live_out_from_target(target))`) before using
+    /// the config, or any two sequences will compare as equivalent.
     pub fn new(width: u32) -> Self {
         Self {
             live_out: crate::semantics::state::X86LiveOutMask::empty(),
