@@ -286,7 +286,7 @@ impl MachineState {
                 let shifted = if *shift == 0 {
                     idx_bv
                 } else {
-                    idx_bv.bvshl(&BV::from_u64(*shift as u64, 64))
+                    idx_bv.bvshl(BV::from_u64(*shift as u64, 64))
                 };
                 (base_bv.bvadd(&shifted), None)
             }
@@ -313,7 +313,7 @@ impl MachineState {
                 let shifted = if *shift == 0 {
                     extended
                 } else {
-                    extended.bvshl(&BV::from_u64(*shift as u64, 64))
+                    extended.bvshl(BV::from_u64(*shift as u64, 64))
                 };
                 (base_bv.bvadd(&shifted), None)
             }
@@ -997,7 +997,7 @@ pub fn apply_instruction(mut state: MachineState, instruction: &Instruction) -> 
         Instruction::Str { rt, addr, width } => {
             let (effective, writeback) = state.eval_address(addr);
             let value = state.get_register(*rt).clone();
-            let bits = (width.bytes() * 8) as u32;
+            let bits = width.bytes() * 8;
             let low = value.extract(bits - 1, 0);
             state.store_n(&effective, &low, width.bytes());
             if let Some((base, new_base)) = writeback {
@@ -1042,7 +1042,7 @@ pub fn apply_instruction(mut state: MachineState, instruction: &Instruction) -> 
         } => {
             let (effective, writeback) = state.eval_address(addr);
             let bytes = width.bytes();
-            let bits = (bytes * 8) as u32;
+            let bits = bytes * 8;
             let v1 = state.get_register(*rt1).clone();
             let v2 = state.get_register(*rt2).clone();
             let low1 = v1.extract(bits - 1, 0);
@@ -1061,7 +1061,7 @@ pub fn apply_instruction(mut state: MachineState, instruction: &Instruction) -> 
 
 /// Zero-extend the low `width.bytes() * 8` bits of `raw` to `target_width`.
 fn ldr_zero_extend(raw: &BV, width: AccessWidth, target_width: u32) -> BV {
-    let raw_bits = (width.bytes() * 8) as u32;
+    let raw_bits = width.bytes() * 8;
     let pad = target_width - raw_bits;
     if pad == 0 {
         raw.clone()
@@ -1072,7 +1072,7 @@ fn ldr_zero_extend(raw: &BV, width: AccessWidth, target_width: u32) -> BV {
 
 /// Sign-extend the low `width.bytes() * 8` bits of `raw` to `target_width`.
 fn ldr_sign_extend(raw: &BV, width: AccessWidth, target_width: u32) -> BV {
-    let raw_bits = (width.bytes() * 8) as u32;
+    let raw_bits = width.bytes() * 8;
     let pad = target_width - raw_bits;
     if pad == 0 {
         raw.clone()
@@ -3531,13 +3531,13 @@ mod tests {
         let solver = Solver::new();
         let x0_pre = pre.get_register(Register::X0);
         let zero = BV::from_u64(0, 64);
-        solver.assert(x0_pre.eq(&BV::from_u64(0xDEADBEEF_CAFEBABE, 64)));
+        solver.assert(x0_pre.eq(BV::from_u64(0xDEADBEEF_CAFEBABE, 64)));
         solver.assert(pre.get_register(Register::X1).eq(&zero));
         // Expected: low 2 bytes of x2 from x0 low 2 bytes = 0xBABE
         // Then bytes 2..3 from x0 low 2 bytes (re-stored) = 0xBABE
         // Then bytes 4..7 from x0 high 4 bytes = 0xDEADBEEF
         let x2_post = post.get_register(Register::X2);
-        let expected = BV::from_u64(0xDEADBEEF_BABE_BABE, 64);
+        let expected = BV::from_u64(0xDEAD_BEEF_BABE_BABE, 64);
         solver.assert(x2_post.eq(&expected));
         assert_eq!(solver.check(), SatResult::Sat);
     }

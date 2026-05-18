@@ -452,10 +452,11 @@ fn test_opt_rejects_unsupported_instruction_window() {
 /// Helper for memory-op integration tests: assert that `s11 opt` on the
 /// given single-instruction window succeeds.
 ///
-/// Each test copies the source ELF to a unique tmp path (`std::env::temp_dir`
-/// + the supplied `fixture_tag`) so concurrent `cargo test` runs don't
-/// collide on the `<input>_optimized` artifact the binary always writes
-/// alongside its input. The artifact is cleaned up before the test returns.
+/// Each test copies the source ELF to a unique tmp path
+/// (`std::env::temp_dir` joined with the supplied `fixture_tag`) so
+/// concurrent `cargo test` runs don't collide on the
+/// `<input>_optimized` artifact the binary always writes alongside its
+/// input. The artifact is cleaned up before the test returns.
 fn assert_opt_succeeds_on_window(source_elf: &Path, fixture_tag: &str, start_addr: u64) {
     let binary = get_binary_path();
     let end_addr = start_addr + 4;

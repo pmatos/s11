@@ -269,7 +269,7 @@ mod tests {
         // Every populated byte must lie inside [MEMORY_SEED_BASE,
         // MEMORY_SEED_BASE + MEMORY_SEED_SIZE).
         for s in &inputs {
-            for (&addr, _) in s.memory() {
+            for &addr in s.memory().keys() {
                 assert!(
                     (MEMORY_SEED_BASE..MEMORY_SEED_BASE + MEMORY_SEED_SIZE as u64).contains(&addr),
                     "address 0x{:x} outside seed region",
