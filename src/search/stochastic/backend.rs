@@ -133,9 +133,11 @@ impl StochasticBackend<crate::isa::AArch64> for crate::isa::AArch64 {
     }
 
     fn states_equal(s1: &Self::State, s2: &Self::State, live_out: &Self::LiveOut) -> bool {
-        // AArch64's `LiveOut` does not carry a flags_live bit (the
-        // over-approximate flag-writer guard lives in equivalence.rs
-        // pre-SMT). Mirror mcmc.rs's existing call which passes false.
+        // Pass `flags_live = false` deliberately: the over-approximate
+        // flag-writer guard in equivalence.rs pre-SMT already handles flag
+        // divergence before stochastic comparison is reached. The mask may
+        // carry `flags_live = true`, but it is honoured upstream, not here.
+        // Mirrors mcmc.rs's existing call site.
         crate::semantics::concrete::states_equal_for_live_out(s1, s2, live_out, false)
     }
 
