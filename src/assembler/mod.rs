@@ -461,10 +461,21 @@ impl AArch64Assembler {
                         );
                         Ok(())
                     }
-                    Operand::Immediate(_imm) => {
-                        // AND with immediate uses logical immediate encoding which is complex.
-                        // For now, only support register operands.
-                        Err("AND immediate encoding not yet supported".to_string())
+                    Operand::Immediate(imm) => {
+                        let val = *imm as u64;
+                        if dynasmrt::aarch64::encode_logical_immediate_64bit(val).is_none() {
+                            return Err(format!(
+                                "AND immediate 0x{:x} is not a valid AArch64 logical immediate",
+                                val
+                            ));
+                        }
+                        // AND (immediate) encodes Rd in the Xn|SP slot.
+                        let rd_reg_xsp = register_to_dynasm_xsp(*rd)?;
+                        dynasm!(ops
+                            ; .arch aarch64
+                            ; and XSP(rd_reg_xsp), X(rn_reg), #val
+                        );
+                        Ok(())
                     }
                     Operand::ShiftedRegister { reg, kind, amount } => {
                         let rm_reg_num = register_to_dynasm(*reg)?;
@@ -490,10 +501,20 @@ impl AArch64Assembler {
                         );
                         Ok(())
                     }
-                    Operand::Immediate(_imm) => {
-                        // ORR with immediate uses logical immediate encoding which is complex.
-                        // For now, only support register operands.
-                        Err("ORR immediate encoding not yet supported".to_string())
+                    Operand::Immediate(imm) => {
+                        let val = *imm as u64;
+                        if dynasmrt::aarch64::encode_logical_immediate_64bit(val).is_none() {
+                            return Err(format!(
+                                "ORR immediate 0x{:x} is not a valid AArch64 logical immediate",
+                                val
+                            ));
+                        }
+                        let rd_reg_xsp = register_to_dynasm_xsp(*rd)?;
+                        dynasm!(ops
+                            ; .arch aarch64
+                            ; orr XSP(rd_reg_xsp), X(rn_reg), #val
+                        );
+                        Ok(())
                     }
                     Operand::ShiftedRegister { reg, kind, amount } => {
                         let rm_reg_num = register_to_dynasm(*reg)?;
@@ -519,10 +540,20 @@ impl AArch64Assembler {
                         );
                         Ok(())
                     }
-                    Operand::Immediate(_imm) => {
-                        // EOR with immediate uses logical immediate encoding which is complex.
-                        // For now, only support register operands.
-                        Err("EOR immediate encoding not yet supported".to_string())
+                    Operand::Immediate(imm) => {
+                        let val = *imm as u64;
+                        if dynasmrt::aarch64::encode_logical_immediate_64bit(val).is_none() {
+                            return Err(format!(
+                                "EOR immediate 0x{:x} is not a valid AArch64 logical immediate",
+                                val
+                            ));
+                        }
+                        let rd_reg_xsp = register_to_dynasm_xsp(*rd)?;
+                        dynasm!(ops
+                            ; .arch aarch64
+                            ; eor XSP(rd_reg_xsp), X(rn_reg), #val
+                        );
+                        Ok(())
                     }
                     Operand::ShiftedRegister { reg, kind, amount } => {
                         let rm_reg_num = register_to_dynasm(*reg)?;
@@ -812,8 +843,19 @@ impl AArch64Assembler {
                         );
                         Ok(())
                     }
-                    Operand::Immediate(_imm) => {
-                        Err("TST immediate encoding not yet supported".to_string())
+                    Operand::Immediate(imm) => {
+                        let val = *imm as u64;
+                        if dynasmrt::aarch64::encode_logical_immediate_64bit(val).is_none() {
+                            return Err(format!(
+                                "TST immediate 0x{:x} is not a valid AArch64 logical immediate",
+                                val
+                            ));
+                        }
+                        dynasm!(ops
+                            ; .arch aarch64
+                            ; tst X(rn_reg), #val
+                        );
+                        Ok(())
                     }
                     Operand::ShiftedRegister { reg, kind, amount } => {
                         let rm_reg_num = register_to_dynasm(*reg)?;
@@ -1177,8 +1219,19 @@ impl AArch64Assembler {
                         dynasm!(ops ; .arch aarch64 ; ands X(rd_reg), X(rn_reg), X(rm_reg));
                         Ok(())
                     }
-                    Operand::Immediate(_) => {
-                        Err("ANDS immediate encoding not supported".to_string())
+                    Operand::Immediate(imm) => {
+                        let val = *imm as u64;
+                        if dynasmrt::aarch64::encode_logical_immediate_64bit(val).is_none() {
+                            return Err(format!(
+                                "ANDS immediate 0x{:x} is not a valid AArch64 logical immediate",
+                                val
+                            ));
+                        }
+                        dynasm!(ops
+                            ; .arch aarch64
+                            ; ands X(rd_reg), X(rn_reg), #val
+                        );
+                        Ok(())
                     }
                     Operand::ShiftedRegister { .. } => {
                         Err("ANDS shifted-register form not yet supported".to_string())
@@ -1734,6 +1787,158 @@ mod tests {
             .assemble_instructions(&instructions, 0)
             .expect("EOR encoding should succeed");
         disassemble_and_verify(&bytes, "eor", &["x0", "x0", "x0"]);
+    }
+
+    #[test]
+    fn test_and_immediate_correctness() {
+        let mut assembler = AArch64Assembler::new();
+        let instructions = vec![Instruction::And {
+            rd: Register::X0,
+            rn: Register::X1,
+            rm: Operand::Immediate(0xFF),
+        }];
+
+        let bytes = assembler
+            .assemble_instructions(&instructions, 0)
+            .expect("AND immediate encoding should succeed");
+        disassemble_and_verify(&bytes, "and", &["x0", "x1", "0xff"]);
+    }
+
+    #[test]
+    fn test_orr_immediate_correctness() {
+        let mut assembler = AArch64Assembler::new();
+        let instructions = vec![Instruction::Orr {
+            rd: Register::X0,
+            rn: Register::X1,
+            rm: Operand::Immediate(0xFFFF),
+        }];
+
+        let bytes = assembler
+            .assemble_instructions(&instructions, 0)
+            .expect("ORR immediate encoding should succeed");
+        disassemble_and_verify(&bytes, "orr", &["x0", "x1", "0xffff"]);
+    }
+
+    #[test]
+    fn test_eor_immediate_correctness() {
+        let mut assembler = AArch64Assembler::new();
+        let instructions = vec![Instruction::Eor {
+            rd: Register::X0,
+            rn: Register::X1,
+            rm: Operand::Immediate(0xF0F0F0F0F0F0F0F0_u64 as i64),
+        }];
+
+        let bytes = assembler
+            .assemble_instructions(&instructions, 0)
+            .expect("EOR immediate encoding should succeed");
+        disassemble_and_verify(&bytes, "eor", &["x0", "x1", "0xf0f0f0f0f0f0f0f0"]);
+    }
+
+    #[test]
+    fn test_tst_immediate_correctness() {
+        let mut assembler = AArch64Assembler::new();
+        let instructions = vec![Instruction::Tst {
+            rn: Register::X1,
+            rm: Operand::Immediate(0xFF),
+        }];
+
+        let bytes = assembler
+            .assemble_instructions(&instructions, 0)
+            .expect("TST immediate encoding should succeed");
+        disassemble_and_verify(&bytes, "tst", &["x1", "0xff"]);
+    }
+
+    #[test]
+    fn test_ands_immediate_correctness() {
+        let mut assembler = AArch64Assembler::new();
+        let instructions = vec![Instruction::Ands {
+            rd: Register::X0,
+            rn: Register::X1,
+            rm: Operand::Immediate(0xFF),
+        }];
+
+        let bytes = assembler
+            .assemble_instructions(&instructions, 0)
+            .expect("ANDS immediate encoding should succeed");
+        disassemble_and_verify(&bytes, "ands", &["x0", "x1", "0xff"]);
+    }
+
+    #[test]
+    fn test_logical_imm_rejects_unencodable() {
+        let mut assembler = AArch64Assembler::new();
+
+        // All-zeros: bitmask immediate spec excludes 0.
+        let r = assembler.assemble_instructions(
+            &[Instruction::And {
+                rd: Register::X0,
+                rn: Register::X1,
+                rm: Operand::Immediate(0),
+            }],
+            0,
+        );
+        let err = r.expect_err("AND #0 must be rejected");
+        assert!(
+            err.contains("is not a valid AArch64 logical immediate"),
+            "unexpected error: {err}",
+        );
+
+        // All-ones: -1 i64 reinterprets to 0xFFFF_FFFF_FFFF_FFFF, also excluded.
+        let r = assembler.assemble_instructions(
+            &[Instruction::And {
+                rd: Register::X0,
+                rn: Register::X1,
+                rm: Operand::Immediate(-1),
+            }],
+            0,
+        );
+        assert!(
+            r.is_err_and(|e| e.contains("is not a valid AArch64 logical immediate")),
+            "AND #-1 must be rejected",
+        );
+
+        // 0b101: non-replicating pattern.
+        let r = assembler.assemble_instructions(
+            &[Instruction::And {
+                rd: Register::X0,
+                rn: Register::X1,
+                rm: Operand::Immediate(5),
+            }],
+            0,
+        );
+        assert!(
+            r.is_err_and(|e| e.contains("is not a valid AArch64 logical immediate")),
+            "AND #5 must be rejected",
+        );
+
+        // TST shares the encoder path.
+        let r = assembler.assemble_instructions(
+            &[Instruction::Tst {
+                rn: Register::X1,
+                rm: Operand::Immediate(0),
+            }],
+            0,
+        );
+        assert!(
+            r.is_err_and(|e| e.contains("is not a valid AArch64 logical immediate")),
+            "TST #0 must be rejected",
+        );
+    }
+
+    #[test]
+    fn test_high_bit_logical_imm_encodable() {
+        // Single high bit (0x8000_0000_0000_0000) is a valid AArch64 bitmask
+        // immediate — pattern length 64, one bit set. Issue #65 canonical case.
+        let mut assembler = AArch64Assembler::new();
+        let instructions = vec![Instruction::And {
+            rd: Register::X0,
+            rn: Register::X1,
+            rm: Operand::Immediate(0x8000_0000_0000_0000_u64 as i64),
+        }];
+
+        let bytes = assembler
+            .assemble_instructions(&instructions, 0)
+            .expect("AND with single high bit should encode");
+        disassemble_and_verify(&bytes, "and", &["x0", "x1", "0x8000000000000000"]);
     }
 
     #[test]
@@ -2680,20 +2885,22 @@ mod tests {
                 rn: Register::X1,
                 rm: Operand::Immediate(-1),
             },
+            // imm 5 (0b101) is not a valid AArch64 logical bitmask immediate
+            // — exercise the encoder's rejection path for AND/ORR/EOR imm.
             Instruction::And {
                 rd: Register::X0,
                 rn: Register::X1,
-                rm: Operand::Immediate(1),
+                rm: Operand::Immediate(5),
             },
             Instruction::Orr {
                 rd: Register::X0,
                 rn: Register::X1,
-                rm: Operand::Immediate(1),
+                rm: Operand::Immediate(5),
             },
             Instruction::Eor {
                 rd: Register::X0,
                 rn: Register::X1,
-                rm: Operand::Immediate(1),
+                rm: Operand::Immediate(5),
             },
             Instruction::Lsl {
                 rd: Register::X0,
@@ -2720,7 +2927,7 @@ mod tests {
             },
             Instruction::Tst {
                 rn: Register::X1,
-                rm: Operand::Immediate(1),
+                rm: Operand::Immediate(5),
             },
             Instruction::MovN {
                 rd: Register::X0,
@@ -2780,7 +2987,7 @@ mod tests {
             Instruction::Ands {
                 rd: Register::X0,
                 rn: Register::X1,
-                rm: Operand::Immediate(1),
+                rm: Operand::Immediate(5),
             },
             Instruction::Ror {
                 rd: Register::X0,

@@ -9,6 +9,13 @@ use std::fmt;
 /// out of sync across the codebase.
 pub const MOVW_LEGAL_SHIFTS: [u8; 4] = [0, 16, 32, 48];
 
+/// True iff `imm` (reinterpreted as `u64`) is representable as an AArch64
+/// 64-bit logical bitmask immediate (the `N:immr:imms` encoding used by
+/// AND/ORR/EOR/TST/ANDS immediate forms). Delegates to dynasmrt's encoder.
+fn logical_imm64_encodable(imm: i64) -> bool {
+    dynasmrt::aarch64::encode_logical_immediate_64bit(imm as u64).is_some()
+}
+
 /// AArch64 instructions supported by the IR
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[allow(dead_code)]
@@ -551,8 +558,9 @@ impl Instruction {
     /// - ADD/SUB immediate: 0 to 0xFFF (12-bit unsigned)
     /// - CMP/CMN immediate: 0 to 0xFFF (12-bit unsigned)
     /// - LSL/LSR/ASR immediate: 0 to 63
-    /// - AND/ORR/EOR immediate: register only (bitmask encoding not supported)
-    /// - TST immediate: register only (bitmask encoding not supported)
+    /// - AND/ORR/EOR immediate: register, or encodable bitmask immediate
+    ///   (rd ≠ XZR for the imm form — Xn|SP slot rejects the zero register)
+    /// - TST immediate: register, or encodable bitmask immediate
     pub fn is_encodable_aarch64(&self) -> bool {
         match self {
             // MovReg is always encodable
@@ -591,13 +599,16 @@ impl Instruction {
                 }
             },
 
-            // AND/ORR/EOR: register operand or shifted-register (all 4 kinds, ROR allowed).
-            // Shifted-register form forbids SP for any operand.
+            // AND/ORR/EOR: register, encodable bitmask immediate (issue #65), or
+            // shifted-register (all 4 kinds incl. ROR; shifted-register form
+            // forbids SP for any operand). The immediate form encodes Rd in
+            // the Xn|SP slot, which forbids XZR (would alias to SP and
+            // silently miscompile).
             Instruction::And { rd, rn, rm }
             | Instruction::Orr { rd, rn, rm }
             | Instruction::Eor { rd, rn, rm } => match rm {
                 Operand::Register(_) => true,
-                Operand::Immediate(_) => false,
+                Operand::Immediate(imm) => *rd != Register::XZR && logical_imm64_encodable(*imm),
                 Operand::ShiftedRegister { reg, amount, .. } => {
                     *amount <= 63
                         && *reg != Register::SP
@@ -653,10 +664,12 @@ impl Instruction {
                 }
             },
 
-            // TST: register operand or shifted-register (all 4 kinds, ROR allowed).
+            // TST: register, encodable bitmask immediate (issue #65), or
+            // shifted-register (all 4 kinds incl. ROR). No rd, so no XZR-slot
+            // guard needed for the immediate form.
             Instruction::Tst { rn, rm } => match rm {
                 Operand::Register(_) => true,
-                Operand::Immediate(_) => false,
+                Operand::Immediate(imm) => logical_imm64_encodable(*imm),
                 Operand::ShiftedRegister { reg, amount, .. } => {
                     *amount <= 63 && *reg != Register::SP && *rn != Register::SP
                 }
@@ -692,8 +705,15 @@ impl Instruction {
                 Operand::ShiftedRegister { .. } => false,
                 Operand::ExtendedRegister { .. } => false,
             },
-            // ANDS: register-only (same as AND). ShiftedRegister out of scope (#59).
-            Instruction::Ands { rm, .. } => matches!(rm, Operand::Register(_)),
+            // ANDS: register or encodable bitmask immediate (issue #65).
+            // ShiftedRegister out of scope (#59). The immediate form uses the
+            // plain X slot for Rd (unlike AND/ORR/EOR), so XZR-as-rd is fine.
+            Instruction::Ands { rm, .. } => match rm {
+                Operand::Register(_) => true,
+                Operand::Immediate(imm) => logical_imm64_encodable(*imm),
+                Operand::ShiftedRegister { .. } => false,
+                Operand::ExtendedRegister { .. } => false,
+            },
 
             // CSET / CSETM: reject AL (always true ⇒ unconditional 1/-1) and
             // NV (reserved). All other 14 conditions are encodable.
@@ -1437,9 +1457,9 @@ mod tests {
             .is_encodable_aarch64()
         );
 
-        // Immediate operand not supported for AND/ORR/EOR
+        // Encodable bitmask immediates are accepted (issue #65).
         assert!(
-            !Instruction::And {
+            Instruction::And {
                 rd: Register::X0,
                 rn: Register::X1,
                 rm: Operand::Immediate(0xFF)
@@ -1447,13 +1467,15 @@ mod tests {
             .is_encodable_aarch64()
         );
         assert!(
-            !Instruction::Orr {
+            Instruction::Orr {
                 rd: Register::X0,
                 rn: Register::X1,
                 rm: Operand::Immediate(1)
             }
             .is_encodable_aarch64()
         );
+
+        // Non-bitmask immediates are still rejected.
         assert!(
             !Instruction::Eor {
                 rd: Register::X0,
@@ -1696,7 +1718,7 @@ mod tests {
             .is_encodable_aarch64()
         );
 
-        // TST only supports register operands
+        // TST: register form and encodable bitmask immediates both accepted.
         assert!(
             Instruction::Tst {
                 rn: Register::X0,
@@ -1705,9 +1727,17 @@ mod tests {
             .is_encodable_aarch64()
         );
         assert!(
-            !Instruction::Tst {
+            Instruction::Tst {
                 rn: Register::X0,
                 rm: Operand::Immediate(1)
+            }
+            .is_encodable_aarch64()
+        );
+        // Non-bitmask immediates are rejected.
+        assert!(
+            !Instruction::Tst {
+                rn: Register::X0,
+                rm: Operand::Immediate(5)
             }
             .is_encodable_aarch64()
         );
@@ -2427,5 +2457,145 @@ mod tests {
             rm: Operand::Register(Register::X1),
         };
         assert!(!cmp.is_terminator());
+    }
+
+    #[test]
+    fn test_is_encodable_aarch64_logical_imm_accepts_valid() {
+        // Canonical valid bitmask immediates from issue #65.
+        for imm in [
+            0xFF_i64,
+            0xFFFF,
+            0xF0F0F0F0F0F0F0F0_u64 as i64,
+            0x5555_5555_5555_5555,
+        ] {
+            assert!(
+                Instruction::And {
+                    rd: Register::X0,
+                    rn: Register::X1,
+                    rm: Operand::Immediate(imm),
+                }
+                .is_encodable_aarch64(),
+                "AND with valid imm 0x{:x} should be encodable",
+                imm as u64
+            );
+            assert!(
+                Instruction::Orr {
+                    rd: Register::X0,
+                    rn: Register::X1,
+                    rm: Operand::Immediate(imm),
+                }
+                .is_encodable_aarch64(),
+                "ORR with valid imm 0x{:x} should be encodable",
+                imm as u64
+            );
+            assert!(
+                Instruction::Eor {
+                    rd: Register::X0,
+                    rn: Register::X1,
+                    rm: Operand::Immediate(imm),
+                }
+                .is_encodable_aarch64(),
+                "EOR with valid imm 0x{:x} should be encodable",
+                imm as u64
+            );
+            assert!(
+                Instruction::Tst {
+                    rn: Register::X1,
+                    rm: Operand::Immediate(imm),
+                }
+                .is_encodable_aarch64(),
+                "TST with valid imm 0x{:x} should be encodable",
+                imm as u64
+            );
+            assert!(
+                Instruction::Ands {
+                    rd: Register::X0,
+                    rn: Register::X1,
+                    rm: Operand::Immediate(imm),
+                }
+                .is_encodable_aarch64(),
+                "ANDS with valid imm 0x{:x} should be encodable",
+                imm as u64
+            );
+        }
+    }
+
+    #[test]
+    fn test_is_encodable_aarch64_logical_imm_rejects_invalid() {
+        // 0 (all-zeros), -1 (all-ones reinterpret), 5 (non-replicating pattern).
+        for imm in [0_i64, -1, 5] {
+            for ctor in [
+                |r: i64| Instruction::And {
+                    rd: Register::X0,
+                    rn: Register::X1,
+                    rm: Operand::Immediate(r),
+                },
+                |r| Instruction::Orr {
+                    rd: Register::X0,
+                    rn: Register::X1,
+                    rm: Operand::Immediate(r),
+                },
+                |r| Instruction::Eor {
+                    rd: Register::X0,
+                    rn: Register::X1,
+                    rm: Operand::Immediate(r),
+                },
+                |r| Instruction::Tst {
+                    rn: Register::X1,
+                    rm: Operand::Immediate(r),
+                },
+                |r| Instruction::Ands {
+                    rd: Register::X0,
+                    rn: Register::X1,
+                    rm: Operand::Immediate(r),
+                },
+            ] {
+                let instr = ctor(imm);
+                assert!(
+                    !instr.is_encodable_aarch64(),
+                    "{} with non-bitmask imm 0x{:x} must NOT be encodable",
+                    instr,
+                    imm as u64,
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_is_encodable_aarch64_rejects_xzr_dest_for_and_orr_eor_imm() {
+        // AND/ORR/EOR (immediate) put Rd in the Xn|SP slot — XZR aliases to SP
+        // there, so the assembler will reject it. is_encodable must agree.
+        for ctor in [
+            |rd, imm| Instruction::And {
+                rd,
+                rn: Register::X1,
+                rm: Operand::Immediate(imm),
+            },
+            |rd, imm| Instruction::Orr {
+                rd,
+                rn: Register::X1,
+                rm: Operand::Immediate(imm),
+            },
+            |rd, imm| Instruction::Eor {
+                rd,
+                rn: Register::X1,
+                rm: Operand::Immediate(imm),
+            },
+        ] {
+            // Same encoder accepts 0xFF for X0…
+            assert!(ctor(Register::X0, 0xFF).is_encodable_aarch64());
+            // …but XZR-as-dest is rejected even with the otherwise-valid imm.
+            assert!(!ctor(Register::XZR, 0xFF).is_encodable_aarch64());
+        }
+
+        // ANDS uses the plain X slot for Rd, so XZR is fine there.
+        assert!(
+            Instruction::Ands {
+                rd: Register::XZR,
+                rn: Register::X1,
+                rm: Operand::Immediate(0xFF),
+            }
+            .is_encodable_aarch64()
+        );
     }
 }

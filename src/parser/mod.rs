@@ -1722,8 +1722,10 @@ mod tests {
         // Invalid ADD immediate (out of range)
         assert!(parse_line("add x0, x1, #4096").is_err());
 
-        // AND with immediate not encodable (we don't support bitmask encoding)
-        assert!(parse_line("and x0, x1, #1").is_err());
+        // AND with a non-bitmask immediate (e.g., #5 = 0b101) is rejected by
+        // the encodability check. Valid bitmask values (e.g., #1) are accepted.
+        assert!(parse_line("and x0, x1, #1").is_ok());
+        assert!(parse_line("and x0, x1, #5").is_err());
     }
 
     // Full assembly parsing tests

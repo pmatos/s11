@@ -203,7 +203,9 @@ pub fn generate_all_instructions(registers: &[Register], immediates: &[i64]) -> 
                 instrs.push(Instruction::Ands { rd, rn, rm: rm_op });
             }
             // ADDS / SUBS also accept the same 12-bit-class immediate table
-            // ADD / SUB does — keep them in sync. ANDS is register-only.
+            // ADD / SUB does — keep them in sync. ANDS accepts bitmask
+            // immediates, but the curated 12-bit table here would mostly
+            // miss-encode, so we omit it for enumerative parity with AND.
             for &imm in immediates {
                 let imm_op = Operand::Immediate(imm);
                 instrs.push(Instruction::Adds { rd, rn, rm: imm_op });
@@ -426,15 +428,14 @@ pub fn generate_random_instruction<R: rand::RngExt>(
             let rm = random_operand(rng, registers, immediates);
             Instruction::Sub { rd, rn, rm }
         }
-        // AND / ORR / EOR are deliberately register-only here. AArch64's
-        // bitmask-immediate encoding for these is not supported by the
-        // assembler — the `Instruction::And { rm: Operand::Immediate(_) }`
-        // arm in `src/assembler/mod.rs` returns
-        // `Err("AND immediate encoding not yet supported")` (and likewise
-        // for ORR/EOR), so any `Operand::Immediate` candidate would be
-        // silently rejected at encoding time. Picking only register-form
-        // here keeps the stochastic search emitting candidates the encoder
-        // actually accepts.
+        // AND / ORR / EOR are deliberately register-only here. The assembler
+        // now accepts encodable AArch64 bitmask immediates (issue #65), but
+        // the generic `immediates` table passed in is a 12-bit-class set tuned
+        // for ADD/SUB and would mostly miss the bitmask form — most picks
+        // would round-trip through `is_encodable_aarch64` as `false` and burn
+        // iterations. Wiring a curated bitmask-immediate table for these
+        // opcodes is left to a follow-up; for now stochastic search keeps
+        // emitting register-only AND/ORR/EOR candidates.
         4 => {
             let rn = pick_reg(rng);
             let rm = Operand::Register(pick_reg(rng));
