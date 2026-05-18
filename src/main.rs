@@ -205,7 +205,7 @@ enum Commands {
         /// Path to an .s file containing the target sequence (GAS syntax)
         #[arg(long)]
         asm: PathBuf,
-        /// Live-out contract (comma-separated regs; optional ';nzcv' suffix declares flags live, e.g. "x0,x1;nzcv")
+        /// Live-out contract (comma-separated regs; ';nzcv' suffix is accepted for syntax compatibility with `equiv` but has no effect here — the LLM verifier always treats NZCV as live; see ADR-0006)
         #[arg(long)]
         live_out: String,
         /// Maximum number of `codex exec` invocations
