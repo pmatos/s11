@@ -884,13 +884,17 @@ fn ensure_window_fully_decoded(
     start_addr: u64,
     end_addr: u64,
 ) -> Result<(), String> {
-    if decoded_bytes == window_bytes {
-        Ok(())
-    } else {
-        Err(format!(
+    use std::cmp::Ordering;
+    match decoded_bytes.cmp(&window_bytes) {
+        Ordering::Equal => Ok(()),
+        Ordering::Less => Err(format!(
             "AArch64 window 0x{:x}-0x{:x} ({} bytes) was not fully decoded by Capstone; decoded only {} bytes",
             start_addr, end_addr, window_bytes, decoded_bytes
-        ))
+        )),
+        Ordering::Greater => Err(format!(
+            "AArch64 window 0x{:x}-0x{:x} ({} bytes) decoded {} bytes by Capstone — more than the window holds",
+            start_addr, end_addr, window_bytes, decoded_bytes
+        )),
     }
 }
 
@@ -2039,6 +2043,17 @@ mod cli_helper_tests {
         assert!(err.contains("0x1008"));
         assert!(err.contains("8 bytes"));
         assert!(err.contains("decoded only 4 bytes"));
+    }
+
+    #[test]
+    fn ensure_window_fully_decoded_rejects_over_count() {
+        let err = ensure_window_fully_decoded(12, 8, 0x1000, 0x1008)
+            .expect_err("a window Capstone reported more bytes than holds must be rejected");
+
+        assert!(err.contains("0x1000"));
+        assert!(err.contains("0x1008"));
+        assert!(err.contains("decoded 12 bytes"));
+        assert!(err.contains("more than the window holds"));
     }
 
     #[test]
