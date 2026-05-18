@@ -64,6 +64,12 @@ pub trait StochasticBackend<I: ISA>: Sized {
     /// flag-divergent candidates before stochastic comparison runs. If the
     /// call path is ever rearranged so stochastic compares states without
     /// passing through the upstream guard, this invariant has to be revisited.
+    ///
+    /// This is the only known caller in the codebase that intentionally
+    /// passes `flags_live=false` to `concrete::states_equal_for_live_out`
+    /// regardless of the mask's `flags_live()` value; the cleanup tracked in
+    /// issue #282 must preserve this exception (e.g. by routing every other
+    /// caller through `live_out.flags_live()` and leaving this one explicit).
     fn states_equal(s1: &Self::State, s2: &Self::State, live_out: &Self::LiveOut) -> bool;
 
     /// Sum the cost of every instruction in the sequence.
