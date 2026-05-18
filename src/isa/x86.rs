@@ -364,8 +364,9 @@ impl InstructionType for X86Instruction {
     }
 
     fn has_side_effects(&self) -> bool {
-        // MOV / CMOV / Jcc do not touch EFLAGS. Every other variant in
-        // the current set sets or clobbers flag bits, which is observable
+        // MOV / CMOV / Jcc do not write EFLAGS (CMOV and Jcc read them,
+        // but reading is not a side effect on observable state). Every
+        // other variant sets or clobbers flag bits, which is observable
         // state beyond the destination register.
         !matches!(
             self,
@@ -476,9 +477,9 @@ impl ISA for X86_32 {
 }
 
 /// Helper used by both `FlagsAnalysis<X86Instruction> for X86_64` and
-/// `for X86_32`. MOV / CMOV / Jcc do not write EFLAGS (the latter two
-/// read EFLAGS — ); every other variant in the current set
-/// does.
+/// `for X86_32`. MOV / CMOV / Jcc do not write EFLAGS — CMOV and Jcc
+/// read them via `x86_reads_flags` but do not modify any flag bit.
+/// Every other variant in the current set writes EFLAGS.
 fn x86_modifies_flags(instr: &X86Instruction) -> bool {
     !matches!(
         instr,
