@@ -26,6 +26,7 @@ mutants.out.old/
 
 .ultraplan/
 .clawpatch/
+.claude/
 
 # criterion benchmark output and JSONL accumulator (issue #70)
 benches/results/
