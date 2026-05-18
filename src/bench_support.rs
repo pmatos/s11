@@ -93,6 +93,36 @@ pub struct BenchRecord {
     pub timestamp_utc: Option<String>,
 }
 
+/// Append one `BenchRecord` as a JSON line to `path`, creating the
+/// file (and any missing parent directories) on first use. A process-
+/// wide `Mutex` serialises concurrent appenders so multi-threaded
+/// criterion runs cannot interleave half-records into the file.
+pub fn append_json(record: &BenchRecord, path: &Path) {
+    use std::io::Write;
+    use std::sync::{Mutex, OnceLock};
+
+    static OUTPUT_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    let guard = OUTPUT_LOCK
+        .get_or_init(|| Mutex::new(()))
+        .lock()
+        .expect("bench JSONL output lock poisoned");
+
+    if let Some(parent) = path.parent()
+        && !parent.as_os_str().is_empty()
+    {
+        std::fs::create_dir_all(parent)
+            .unwrap_or_else(|e| panic!("create_dir_all {}: {e}", parent.display()));
+    }
+    let mut file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+        .unwrap_or_else(|e| panic!("open bench JSONL {}: {e}", path.display()));
+    let line = serde_json::to_string(record).expect("BenchRecord must serialise");
+    writeln!(file, "{line}").unwrap_or_else(|e| panic!("write bench JSONL: {e}"));
+    drop(guard);
+}
+
 /// Spec for one benchmark — derived from the fixture path and the
 /// surrounding bench file. `sample_index` is supplied separately by
 /// `run_bench` so the same spec can drive criterion's per-sample loop.
@@ -221,6 +251,46 @@ mod tests {
     fn load_sequence_panics_without_header() {
         let f = write_fixture("mov x0, #0\n");
         let _ = load_sequence(f.path());
+    }
+
+    #[test]
+    fn append_json_writes_one_jsonl_record_per_call() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("results.jsonl");
+        let record = BenchRecord {
+            benchmark_id: "demo".to_string(),
+            sample_index: 0,
+            phase: 1,
+            algorithm: "enumerative".to_string(),
+            seed: 7,
+            cost_metric: "instructioncount".to_string(),
+            original_length: 2,
+            found_length: Some(1),
+            original_cost: 2,
+            best_cost: 1,
+            search_elapsed_ms: 5,
+            smt_elapsed_ms: 1,
+            smt_queries: 3,
+            smt_equivalent: 1,
+            candidates_evaluated: 20,
+            success: true,
+            timeout: false,
+            git_sha: None,
+            timestamp_utc: None,
+        };
+        append_json(&record, &path);
+        let mut second = record.clone();
+        second.sample_index = 1;
+        append_json(&second, &path);
+
+        let body = std::fs::read_to_string(&path).expect("read jsonl");
+        let lines: Vec<&str> = body.lines().collect();
+        assert_eq!(lines.len(), 2, "two appends → two lines");
+        for line in &lines {
+            let parsed: serde_json::Value =
+                serde_json::from_str(line).expect("each line must be valid JSON");
+            assert_eq!(parsed["benchmark_id"], "demo");
+        }
     }
 
     #[test]
