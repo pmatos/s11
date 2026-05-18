@@ -530,7 +530,7 @@ fn live_out_for_optimization_prefix(
 ) -> LiveOut {
     let mut live_registers: Vec<Register> = prefix
         .iter()
-        .filter_map(|instr| instr.destination())
+        .flat_map(|instr| instr.destinations())
         .collect();
 
     if let Some(terminator) = terminator {

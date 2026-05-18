@@ -1449,6 +1449,14 @@ impl AArch64Assembler {
                 dynasm!(ops ; .arch aarch64 ; tbnz X(rt_reg), bit, offset);
                 Ok(())
             }
+            // Memory ops (issue #68). dynasm encoding lands in step 13.
+            Instruction::Ldr { .. }
+            | Instruction::Ldrs { .. }
+            | Instruction::Str { .. }
+            | Instruction::Ldp { .. }
+            | Instruction::Stp { .. } => {
+                Err("Memory-op encoding arrives in step 13 (issue #68)".into())
+            }
         }
     }
 }

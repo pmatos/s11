@@ -882,6 +882,13 @@ pub fn opcode_id(instr: &Instruction) -> u8 {
         Instruction::Tbnz { .. } => 61,
         Instruction::Bl { .. } => 62,
         Instruction::Br { .. } => 63,
+        // Memory ops (issue #68). Mirrors `src/isa/aarch64.rs` so the two
+        // tables stay aligned. See ADR-0007.
+        Instruction::Ldr { .. } => 64,
+        Instruction::Ldrs { .. } => 65,
+        Instruction::Str { .. } => 66,
+        Instruction::Ldp { .. } => 67,
+        Instruction::Stp { .. } => 68,
     }
 }
 
