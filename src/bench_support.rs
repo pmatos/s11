@@ -81,7 +81,7 @@ pub fn discover_specs_in(dir: &Path, phase: u8) -> Vec<BenchSpec> {
 ///
 /// Panics if no `// Live-out:` header is found — bench fixtures are
 /// author-controlled, so a missing header is a fixture defect.
-pub fn load_sequence(path: &Path) -> (Vec<Instruction>, LiveOut, bool) {
+pub fn load_sequence(path: &Path) -> (Vec<Instruction>, LiveOut) {
     let source = std::fs::read_to_string(path)
         .unwrap_or_else(|e| panic!("failed to read fixture {}: {e}", path.display()));
 
@@ -99,7 +99,7 @@ pub fn load_sequence(path: &Path) -> (Vec<Instruction>, LiveOut, bool) {
             )
         });
 
-    let (live_out, flags_live) = parse_live_out_contract(live_spec).unwrap_or_else(|e| {
+    let live_out = parse_live_out_contract(live_spec).unwrap_or_else(|e| {
         panic!(
             "fixture {}: malformed live-out contract {live_spec:?}: {e:?}",
             path.display()
@@ -125,7 +125,7 @@ pub fn load_sequence(path: &Path) -> (Vec<Instruction>, LiveOut, bool) {
         path.display()
     );
 
-    (sequence, live_out, flags_live)
+    (sequence, live_out)
 }
 
 /// One canonical record per `(benchmark_id, cargo bench invocation)`.
@@ -225,13 +225,14 @@ pub struct BenchSpec {
 pub fn run_bench(spec: &BenchSpec) -> BenchRecord {
     // NOTE: The AArch64 backends invoked below hardcode `.with_flags(true)`
     // (`src/search/enumerative/search.rs`, `src/search/stochastic/backend.rs`,
-    // `src/search/symbolic/backend.rs`). The fixture's `flags_live` bit is
-    // therefore not consulted here: every benched candidate is verified
-    // under "NZCV is observable" semantics regardless of the header. This
-    // is conservative (pessimises rewrites that drop flag-setters when the
-    // fixture declares NZCV dead) but never unsound. Tracked for proper
-    // plumbing in #287.
-    let (target, live_out, _flags_live) = load_sequence(&spec.fixture);
+    // `src/search/symbolic/backend.rs`). The fixture's `flags_live` bit
+    // (carried on the returned `LiveOut`) is therefore not consulted here:
+    // every benched candidate is verified under "NZCV is observable"
+    // semantics regardless of the header. This is conservative
+    // (pessimises rewrites that drop flag-setters when the fixture
+    // declares NZCV dead) but never unsound. Tracked for proper plumbing
+    // in #287.
+    let (target, live_out) = load_sequence(&spec.fixture);
     let original_length = target.len();
     let original_cost = sequence_cost(&target, &spec.cost_metric);
 
@@ -316,20 +317,26 @@ mod tests {
              mov x0, x1\n\
              add x0, x0, #1\n",
         );
-        let (seq, live_out, flags_live) = load_sequence(f.path());
+        let (seq, live_out) = load_sequence(f.path());
         assert_eq!(seq.len(), 2, "expected MOV + ADD");
         assert!(
             live_out.contains_register(crate::ir::Register::X0),
             "live-out must include X0"
         );
-        assert!(!flags_live, "header without ;nzcv should be flags-dead");
+        assert!(
+            !live_out.flags_live(),
+            "header without ;nzcv should be flags-dead"
+        );
     }
 
     #[test]
     fn load_sequence_picks_up_flags_live() {
         let f = write_fixture("// Live-out: x0;nzcv\nmov x0, #1\n");
-        let (_, _, flags_live) = load_sequence(f.path());
-        assert!(flags_live, "header with ;nzcv must report flags_live=true");
+        let (_, live_out) = load_sequence(f.path());
+        assert!(
+            live_out.flags_live(),
+            "header with ;nzcv must report flags_live=true"
+        );
     }
 
     #[test]
@@ -403,7 +410,7 @@ mod tests {
             );
             for entry in entries {
                 let path = entry.path();
-                let (seq, _live_out, _flags_live) = load_sequence(&path);
+                let (seq, _live_out) = load_sequence(&path);
                 assert!(
                     !seq.is_empty(),
                     "fixture {} parsed to an empty sequence",
