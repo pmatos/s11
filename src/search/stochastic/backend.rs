@@ -135,6 +135,7 @@ impl StochasticBackend<crate::isa::AArch64> for crate::isa::AArch64 {
             &crate::validation::random::RandomInputConfig {
                 count,
                 registers: regs.to_vec(),
+                memory_seed_size: 0,
             },
         )
     }
