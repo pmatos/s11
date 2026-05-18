@@ -1480,7 +1480,7 @@ mod tests {
 
     #[test]
     fn x86_mutator_mode32_never_emits_extended_registers() {
-        use crate::isa::traits::{ISAMutator, InstructionType};
+        use crate::isa::traits::ISAMutator;
         use crate::search::config::MutationWeights;
         use rand::SeedableRng;
         use rand_chacha::ChaCha8Rng;
@@ -1531,7 +1531,7 @@ mod tests {
         // For every destructive variant (non-MOV, non-CMP that writes
         // rd), `rd` must appear in `source_registers()` per
         // src/isa/x86.rs:228-245. The mutator must preserve that.
-        use crate::isa::traits::{ISAMutator, InstructionType};
+        use crate::isa::traits::ISAMutator;
         use crate::search::candidate_x86::{default_x86_immediates, default_x86_registers};
         use crate::search::config::MutationWeights;
         use rand::SeedableRng;

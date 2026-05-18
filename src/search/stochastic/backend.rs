@@ -154,9 +154,15 @@ impl StochasticBackend<crate::isa::AArch64> for crate::isa::AArch64 {
         _width: u32,
         timeout: Duration,
     ) -> EquivalenceResult {
+        // Treat NZCV as live-out: the pre-refactor `mcmc.rs` body
+        // built the EquivalenceConfig with `.with_flags(true)` so the
+        // SMT solver cannot certify rewrites that diverge on flags
+        // (e.g. `ADD;CMP` → `ADDS`). Symmetry with
+        // `SymbolicBackend<AArch64>::check_equivalence`.
         let cfg = crate::semantics::EquivalenceConfig::with_live_out(live_out.clone())
             .random_tests(0)
-            .timeout(timeout);
+            .timeout(timeout)
+            .with_flags(true);
         crate::semantics::check_equivalence_with_config(target, proposal, &cfg)
     }
 

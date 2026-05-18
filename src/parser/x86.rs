@@ -4,8 +4,8 @@
 //! `X86Instruction` IR. Mirrors `src/parser/mod.rs::parse_assembly_string`
 //! for the AArch64 path. `parse_x86_assembly_string` and the line-
 //! classification helpers are unused today; they exist as the future
-//! consumer surface for the deferred x86 LLM path (ADR-0004 decision 3
-//! + #77 stage 1 step 13 deferral). Tests cover them so they stay
+//! consumer surface for the deferred x86 LLM path (ADR-0004 decision 3,
+//! plus #77 stage 1 step 13 deferral). Tests cover them so they stay
 //! correct until the LLM x86 follow-up lands.
 
 #![allow(dead_code)]
@@ -112,14 +112,6 @@ pub fn x86_ir_from_mnemonic(
             X86Operand::Immediate(imm) => imm_form(rd, imm),
         }))
     };
-    let make_cmp = |reg_form: fn(X86Register, X86Register) -> X86Instruction,
-                    imm_form: fn(X86Register, i64) -> X86Instruction|
-     -> Result<Option<X86Instruction>, String> {
-        Ok(Some(match src_op {
-            X86Operand::Register(rs) => reg_form(rd, rs),
-            X86Operand::Immediate(imm) => imm_form(rd, imm),
-        }))
-    };
     match mnemonic.as_str() {
         "mov" | "movabs" => make(
             |rd, rs| X86Instruction::MovReg { rd, rs },
@@ -145,7 +137,7 @@ pub fn x86_ir_from_mnemonic(
             |rd, rs| X86Instruction::XorReg { rd, rs },
             |rd, imm| X86Instruction::XorImm { rd, imm },
         ),
-        "cmp" => make_cmp(
+        "cmp" => make(
             |rn, rs| X86Instruction::CmpReg { rn, rs },
             |rn, imm| X86Instruction::CmpImm { rn, imm },
         ),

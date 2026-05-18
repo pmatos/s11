@@ -11,8 +11,7 @@
 
 use crate::isa::ISA;
 use crate::search::config::{SearchConfig, SearchMode};
-use crate::search::result::SearchStatistics;
-use crate::search::stochastic::mcmc::SearchResultFor;
+use crate::search::result::{SearchResultFor, SearchStatistics};
 use crate::search::symbolic::backend::SymbolicBackend;
 use crate::search::{Algorithm, SearchAlgorithm};
 use crate::semantics::EquivalenceResult;
