@@ -465,16 +465,7 @@ fn optimize_elf_binary(
     }
 
     let decoded_bytes: usize = instructions.iter().map(|i| i.bytes().len()).sum();
-    if decoded_bytes != original_bytes.len() {
-        return Err(format!(
-            "AArch64 window 0x{:x}-0x{:x} ({} bytes) was not fully decoded by Capstone; decoded only {} bytes",
-            start_addr,
-            end_addr,
-            original_bytes.len(),
-            decoded_bytes
-        )
-        .into());
-    }
+    ensure_window_fully_decoded(decoded_bytes, original_bytes.len(), start_addr, end_addr)?;
 
     // Convert to IR
     let ir_instructions = convert_to_ir(&instructions)?;
@@ -884,6 +875,22 @@ fn convert_capstone_op(mnemonic: &str, op_str: &str) -> ConvertOutcome {
         Err(parser::ParseLineError::Other(err)) => {
             ConvertOutcome::Unsupported(format!("{} ({})", line, err))
         }
+    }
+}
+
+fn ensure_window_fully_decoded(
+    decoded_bytes: usize,
+    window_bytes: usize,
+    start_addr: u64,
+    end_addr: u64,
+) -> Result<(), String> {
+    if decoded_bytes == window_bytes {
+        Ok(())
+    } else {
+        Err(format!(
+            "AArch64 window 0x{:x}-0x{:x} ({} bytes) was not fully decoded by Capstone; decoded only {} bytes",
+            start_addr, end_addr, window_bytes, decoded_bytes
+        ))
     }
 }
 
@@ -2015,6 +2022,23 @@ mod cli_helper_tests {
         assert!(err.contains("ldr x0, [x1]"));
         assert!(err.contains("0x1234"));
         assert!(err.contains("cannot optimize"));
+    }
+
+    #[test]
+    fn ensure_window_fully_decoded_accepts_exact_match() {
+        ensure_window_fully_decoded(8, 8, 0x1000, 0x1008)
+            .expect("equal decoded and window byte counts must pass");
+    }
+
+    #[test]
+    fn ensure_window_fully_decoded_rejects_partial_decode() {
+        let err = ensure_window_fully_decoded(4, 8, 0x1000, 0x1008)
+            .expect_err("a window Capstone only partially decoded must be rejected");
+
+        assert!(err.contains("0x1000"));
+        assert!(err.contains("0x1008"));
+        assert!(err.contains("8 bytes"));
+        assert!(err.contains("decoded only 4 bytes"));
     }
 
     #[test]
