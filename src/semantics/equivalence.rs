@@ -588,20 +588,13 @@ pub struct X86EquivalenceConfig {
 }
 
 impl X86EquivalenceConfig {
-    pub fn new_for_64() -> Self {
+    pub fn new(width: u32) -> Self {
         Self {
             live_out: crate::semantics::state::X86LiveOutMask::empty(),
-            width: 64,
+            width,
             random_test_count: 10,
             smt_timeout: Some(Duration::from_secs(30)),
             fast_only: false,
-        }
-    }
-
-    pub fn new_for_32() -> Self {
-        Self {
-            width: 32,
-            ..Self::new_for_64()
         }
     }
 
@@ -629,11 +622,7 @@ pub fn check_equivalence_x86_for_search(
     width: u32,
     timeout: std::time::Duration,
 ) -> EquivalenceResult {
-    let mut cfg = if width == 32 {
-        X86EquivalenceConfig::new_for_32()
-    } else {
-        X86EquivalenceConfig::new_for_64()
-    };
+    let mut cfg = X86EquivalenceConfig::new(width);
     cfg.live_out = live_out.clone();
     cfg.smt_timeout = Some(timeout);
     check_equivalence_x86(target, proposal, &cfg)
@@ -764,7 +753,7 @@ mod tests {
             rd: X86Register::RAX,
             rs: X86Register::RAX,
         }];
-        let cfg = X86EquivalenceConfig::new_for_64()
+        let cfg = X86EquivalenceConfig::new(64)
             .live_out(X86LiveOutMask::from_registers(vec![X86Register::RAX]));
         assert_eq!(
             check_equivalence_x86(&seq_mov, &seq_xor, &cfg),
@@ -784,7 +773,7 @@ mod tests {
             rd: X86Register::RAX,
             rs: X86Register::RAX,
         }];
-        let cfg = X86EquivalenceConfig::new_for_64()
+        let cfg = X86EquivalenceConfig::new(64)
             .live_out(X86LiveOutMask::from_registers(vec![X86Register::RAX]).with_flags(true))
             .fast_only();
         assert!(matches!(
@@ -805,7 +794,7 @@ mod tests {
             rn: X86Register::RAX,
             rs: X86Register::RCX,
         }];
-        let cfg = X86EquivalenceConfig::new_for_64()
+        let cfg = X86EquivalenceConfig::new(64)
             .live_out(X86LiveOutMask::empty())
             .fast_only();
         // CMP is present, so EFLAGS comparison auto-engages.
@@ -825,7 +814,7 @@ mod tests {
             rd: X86Register::RAX,
             imm: 42,
         }];
-        let cfg = X86EquivalenceConfig::new_for_64()
+        let cfg = X86EquivalenceConfig::new(64)
             .live_out(X86LiveOutMask::from_registers(vec![X86Register::RAX]));
         assert_eq!(
             check_equivalence_x86(&seq1, &seq2, &cfg),

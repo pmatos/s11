@@ -732,7 +732,7 @@ mod tests {
             rs: X86Register::RBX,
         }];
         let mask = x86_live_out_from_target(&target);
-        assert_eq!(mask.len(), 0, "CMP writes no destination register");
+        assert!(mask.is_empty(), "CMP writes no destination register");
         assert!(mask.flags_live());
     }
 }

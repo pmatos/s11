@@ -450,10 +450,6 @@ impl X86LiveOutMask {
         self.registers.iter()
     }
 
-    pub fn len(&self) -> usize {
-        self.registers.len()
-    }
-
     pub fn is_empty(&self) -> bool {
         self.registers.is_empty()
     }

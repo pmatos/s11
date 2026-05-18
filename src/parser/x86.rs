@@ -99,6 +99,10 @@ pub fn x86_ir_from_mnemonic(
         return Ok(None);
     }
     let parts: Vec<&str> = op_str.split(',').map(|s| s.trim()).collect();
+    // Every mnemonic in the minimal-core set above is two-operand
+    // (reg/reg or reg/imm). A non-two-operand operand string is treated
+    // as an unsupported shape and surfaces as `Ok(None)`, the same way
+    // an unknown mnemonic does on the early-return above.
     if parts.len() != 2 {
         return Ok(None);
     }

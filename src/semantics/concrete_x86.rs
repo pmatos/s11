@@ -14,9 +14,7 @@
 //! `state.width()` — writes to registers are already masked by the
 //! state, and flag computation receives the correct width.
 
-#![allow(dead_code)]
-
-use crate::isa::x86::{X86Instruction, X86Operand};
+use crate::isa::x86::X86Instruction;
 use crate::semantics::state::{ConcreteValue, Eflags, X86ConcreteMachineState};
 
 /// Apply a single x86 instruction to a concrete machine state.
@@ -130,9 +128,6 @@ fn apply_binop(
     state.set_register(rd, ConcreteValue::new(result));
     state.set_flags(flags);
 }
-
-/// Convenience for tests / callers that don't have an operand wrapper.
-fn _operand_unused(_op: X86Operand) {}
 
 /// Apply a sequence of x86 instructions to a concrete machine state.
 /// Mirrors `apply_sequence_concrete` for AArch64; used by
