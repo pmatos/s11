@@ -152,8 +152,10 @@ impl StochasticBackend<crate::isa::AArch64> for crate::isa::AArch64 {
         // flag-writer guard in equivalence.rs pre-SMT already handles flag
         // divergence before stochastic comparison is reached. The mask may
         // carry `flags_live = true`, but it is honoured upstream, not here.
+        // `memory_live = false` here for the same reason — equivalence.rs
+        // force-enables it via `touches_memory()` before calling this path.
         // Mirrors mcmc.rs's existing call site.
-        crate::semantics::concrete::states_equal_for_live_out(s1, s2, live_out, false)
+        crate::semantics::concrete::states_equal_for_live_out(s1, s2, live_out, false, false)
     }
 
     fn sequence_cost(seq: &[crate::ir::Instruction], metric: &CostMetric, _width: u32) -> u64 {

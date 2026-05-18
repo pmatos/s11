@@ -282,7 +282,7 @@ pub fn evaluate_with_tests(
 
     for (input, target_output) in test_inputs.iter().zip(target_outputs.iter()) {
         let proposal_output = apply_sequence_concrete(input.clone(), proposal);
-        if !states_equal_for_live_out(&proposal_output, target_output, live_out, false) {
+        if !states_equal_for_live_out(&proposal_output, target_output, live_out, false, false) {
             passes_all = false;
             break;
         }

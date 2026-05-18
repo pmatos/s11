@@ -104,6 +104,11 @@ pub struct EquivalenceConfig {
     pub smt_timeout: Option<Duration>,
     /// Skip SMT verification (fast path only)
     pub fast_only: bool,
+    /// Treat the entire memory image as live-out — every cell must agree
+    /// between the two sequences' final states. Auto-derived in
+    /// `check_equivalence_with_config` whenever either sequence touches
+    /// memory (see ADR-0007).
+    pub memory_live: bool,
 }
 
 impl Default for EquivalenceConfig {
@@ -113,6 +118,7 @@ impl Default for EquivalenceConfig {
             random_test_count: 10,
             smt_timeout: Some(Duration::from_secs(30)),
             fast_only: false,
+            memory_live: false,
         }
     }
 }
@@ -186,6 +192,16 @@ impl EquivalenceConfig {
     /// formula. Stores the bit on the live-out mask itself (ADR-0004 §5).
     pub fn with_flags(mut self, flags_live: bool) -> Self {
         self.live_out = self.live_out.with_flags(flags_live);
+        self
+    }
+
+    /// Builder method to mark whole memory as live-out. Search algorithms
+    /// pin `with_memory(true)` analogously to `with_flags(true)`; the
+    /// `check_equivalence_with_config` entry point auto-derives this from
+    /// `touches_memory()` on the candidate / target sequences. See
+    /// ADR-0007.
+    pub fn with_memory(mut self, memory_live: bool) -> Self {
+        self.memory_live = memory_live;
         self
     }
 }
@@ -343,6 +359,7 @@ fn run_fast_path(
             &state2,
             live_out_registers,
             config.live_out.flags_live(),
+            config.memory_live,
         ) {
             return Some(EquivalenceResult::NotEquivalentFast(input.clone()));
         }
@@ -358,6 +375,7 @@ fn run_fast_path(
             &state2,
             live_out_registers,
             config.live_out.flags_live(),
+            config.memory_live,
         ) {
             return Some(EquivalenceResult::NotEquivalentFast(input.clone()));
         }
@@ -383,6 +401,7 @@ fn run_fast_path(
                 &state2,
                 live_out_registers,
                 config.live_out.flags_live(),
+                config.memory_live,
             ) {
                 return Some(EquivalenceResult::NotEquivalentFast(input.clone()));
             }
