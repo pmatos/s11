@@ -24,6 +24,37 @@ fn get_binary_path() -> PathBuf {
     PathBuf::from(env!("CARGO_BIN_EXE_s11"))
 }
 
+fn assert_bytes_at_addr(elf_path: &Path, addr: u64, expected: &[u8], label: &str) {
+    let data = std::fs::read(elf_path).expect("read ELF for byte-pattern check");
+    let elf = elf::ElfBytes::<elf::endian::AnyEndian>::minimal_parse(&data)
+        .expect("parse ELF for byte-pattern check");
+    let section_headers = elf.section_headers().expect("ELF section headers");
+
+    for section in section_headers.iter() {
+        if section.sh_flags & elf::abi::SHF_EXECINSTR as u64 == 0 {
+            continue;
+        }
+        let sec_start = section.sh_addr;
+        let sec_end = sec_start + section.sh_size;
+        if addr < sec_start || addr + expected.len() as u64 > sec_end {
+            continue;
+        }
+        let offset_in_section = (addr - sec_start) as usize;
+        let file_offset = section.sh_offset as usize + offset_in_section;
+        let actual = &data[file_offset..file_offset + expected.len()];
+        assert_eq!(
+            actual, expected,
+            "fixture {:?} drifted: bytes at 0x{:x} no longer match {} encoding {:02x?}; got {:02x?}",
+            elf_path, addr, label, expected, actual
+        );
+        return;
+    }
+    panic!(
+        "address 0x{:x} not in any executable section of {:?}",
+        addr, elf_path
+    );
+}
+
 fn executable_window(path: &Path, width: u64) -> (u64, u64) {
     let data = std::fs::read(path).expect("read test ELF");
     let elf =
@@ -59,6 +90,12 @@ fn test_opt_basic_functionality() {
     // optimization path now correctly rejects rather than silently dropping.
     let start_addr: u64 = 0x5cc;
     let end_addr: u64 = 0x5d0;
+    assert_bytes_at_addr(
+        &test_elf,
+        start_addr,
+        &[0x10, 0xe2, 0x3f, 0x91],
+        "add x16, x16, #0xff8",
+    );
 
     let output = Command::new(binary)
         .arg("opt")
@@ -297,6 +334,12 @@ fn test_opt_rejects_unsupported_instruction_window() {
         .join("binaries")
         .join("loops_debug");
     check_test_binary(&test_elf);
+    assert_bytes_at_addr(
+        &test_elf,
+        0x59c,
+        &[0xfd, 0x7b, 0xbf, 0xa9],
+        "stp x29, x30, [sp, #-0x10]!",
+    );
 
     // 0x59c in loops_debug is a `stp x29, x30, [sp, #-0x10]!` — an unsupported
     // mnemonic for the AArch64 optimization path. Targeting a 4-byte window on
