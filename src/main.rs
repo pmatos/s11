@@ -25,8 +25,8 @@ use search::config::{
 };
 use search::parallel::{ParallelConfig, run_parallel_search};
 use search::{EnumerativeSearch, SearchAlgorithm, StochasticSearch, SymbolicSearch};
+use semantics::LiveOut;
 use semantics::cost::CostMetric;
-use semantics::{LiveOut, LiveOutRegisters};
 
 // --- Command Line Arguments ---
 
@@ -205,7 +205,7 @@ enum Commands {
         /// Path to an .s file containing the target sequence (GAS syntax)
         #[arg(long)]
         asm: PathBuf,
-        /// Live-out registers (comma-separated, e.g. "x0,x1")
+        /// Live-out contract (comma-separated regs; optional ';nzcv' suffix declares flags live, e.g. "x0,x1;nzcv")
         #[arg(long)]
         live_out: String,
         /// Maximum number of `codex exec` invocations
@@ -227,7 +227,7 @@ enum Commands {
         file1: PathBuf,
         /// Second assembly file
         file2: PathBuf,
-        /// Registers that must match (comma-separated, e.g., "x0,x1")
+        /// Live-out contract (comma-separated regs; optional ';nzcv' suffix declares flags live, e.g. "x0,x1;nzcv")
         #[arg(long, default_value = "x0,x1,x2,x3,x4,x5,x6,x7")]
         live_out: String,
         /// Timeout in seconds for SMT solver
@@ -1295,10 +1295,12 @@ fn run_llm_opt(
         }
     }
 
-    let live_out_registers: LiveOutRegisters = live_out_str
-        .parse()
-        .map_err(|e: validation::live_out::ParseLiveOutRegistersError| e.to_string())?;
-    let live_out = LiveOut::from_register_set(live_out_registers);
+    // The LLM verifier in `outcome.rs` pins `flags_live=true` regardless of
+    // what the user requests here, so the `;nzcv` suffix is accepted (for
+    // CLI vocabulary parity with `equiv`) but does not change behaviour on
+    // this path. See ADR-0006.
+    let (live_out, _flags_live) = validation::live_out::parse_live_out_contract(live_out_str)
+        .map_err(|e| format!("invalid live-out: {}", e))?;
 
     let llm = LlmConfig::default()
         .with_max_codex_calls(max_calls)
@@ -1362,31 +1364,22 @@ fn run_equiv(
         }
     }
 
-    // Parse live-out registers
-    let live_out_regs: Vec<Register> = live_out_str
-        .split(',')
-        .map(|s| s.trim())
-        .filter(|s| !s.is_empty())
-        .map(parser::parse_register)
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(|e| format!("invalid live-out register: {}", e))?;
+    let (live_out, flags_live) = validation::live_out::parse_live_out_contract(live_out_str)
+        .map_err(|e| format!("invalid live-out: {}", e))?;
 
     if verbose {
-        println!(
-            "Live-out registers: {}",
-            live_out_regs
-                .iter()
-                .map(|r| format!("{}", r))
-                .collect::<Vec<_>>()
-                .join(", ")
-        );
+        let mut regs: Vec<_> = live_out.registers().iter().collect();
+        regs.sort_by_key(|r| r.index().unwrap_or(u8::MAX));
+        let names: Vec<String> = regs.iter().map(|r| format!("{}", r)).collect();
+        println!("Live-out registers: {}", names.join(", "));
+        if flags_live {
+            println!("Live-out flags: nzcv");
+        }
     }
 
-    let live_out = LiveOut::from_registers(live_out_regs);
-
-    // Build config
     let config = EquivalenceConfig::default()
         .live_out(live_out)
+        .with_flags(flags_live)
         .timeout(Duration::from_secs(timeout))
         .set_fast_only(fast_only);
 
