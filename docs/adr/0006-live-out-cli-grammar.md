@@ -21,7 +21,7 @@ ADR-0004 §5 commits to replacing `LiveOut` and `X86LiveOutMask` with the generi
 
 2. Route both `run_equiv` (`src/main.rs`) and `run_llm_opt` through `parse_live_out_contract`, using a uniform `"invalid live-out: ..."` error prefix.
 
-3. In `run_equiv`, pass the parsed `LiveOut` (with its `flags_live` bit already set) to `EquivalenceConfig::with_live_out(...)`. The verbose printout gains `Live-out flags: nzcv` when `live_out.flags_live()` is true.
+3. In `run_equiv`, pass the parsed `LiveOut` (with its `flags_live` bit already set) into the `EquivalenceConfig` builder via `.live_out(...)`. The verbose printout gains `Live-out flags: nzcv` when `live_out.flags_live()` is true.
 
 4. In `run_llm_opt`, accept the same grammar but discard the bit. The LLM verification path pins `flags_live=true` internally at `src/search/llm/outcome.rs:67`, so the CLI bit is informational only on that subcommand. Keeping the parser consistent across both subcommands avoids a CLI-vocabulary fork.
 
