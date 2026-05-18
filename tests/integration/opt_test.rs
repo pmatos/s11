@@ -264,6 +264,7 @@ fn test_opt_rejects_arch_mismatch_before_optimization() {
 
     check_test_binary(&aarch64_elf);
     assert_opt_arch_mismatch_rejected(&aarch64_elf, "x86-64");
+    assert_opt_arch_mismatch_rejected(&aarch64_elf, "x86-32");
 
     let x86_elf = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("binaries")
