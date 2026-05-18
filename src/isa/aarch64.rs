@@ -2171,12 +2171,13 @@ mod tests {
     }
 
     /// Regression test for issue #93: ANDS/CSET/CSETM/ROR used to share
-    /// slot 23 via a 4-way sub-multiplexer, giving each ~1/120 sample
-    /// probability vs ~1/30 for every other opcode. Each should now hold
-    /// its own top-level slot so the sampler is roughly uniform across
-    /// opcodes (~1/33). With N = 30_000 ChaCha8-seeded draws each is
-    /// expected near 909 hits; the old sub-mux would give ~250. The 600
-    /// threshold sits ~10σ below the new expected and ~22σ above the old.
+    /// slot 23 via a 4-way sub-multiplexer, giving each ~1/120 vs ~1/30
+    /// for the rest of the old 30-slot table. Each should now hold its
+    /// own top-level slot so the sampler is roughly uniform across the
+    /// new 33-slot table (~1/33). With N = 30_000 ChaCha8-seeded draws
+    /// each is expected near 909 hits; the old sub-mux would give ~250.
+    /// The 600 threshold sits ~10σ below the new expected and ~22σ above
+    /// the old.
     #[test]
     fn slot_23_sub_multiplexer_removed_for_issue_93() {
         use std::collections::HashMap;
