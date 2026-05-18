@@ -149,4 +149,30 @@ mod tests {
         // 2 + 2 = 4 bytes on x86-32.
         assert_eq!(sequence_cost(&seq, &CostMetric::CodeSize, 32), 4);
     }
+
+    // --- issue #74: CMOV / Jcc cost ---
+
+    #[test]
+    fn cmov_code_size_includes_rex_on_64_bit() {
+        use crate::isa::x86::X86Condition;
+        let cmov = X86Instruction::Cmov {
+            rd: X86Register::RAX,
+            rs: X86Register::RBX,
+            cond: X86Condition::E,
+        };
+        // CMOV is `0F 4x ModR/M` = 3 bytes, +1 for REX.W on x86-64.
+        assert_eq!(instruction_cost(&cmov, &CostMetric::CodeSize, 64), 4);
+        assert_eq!(instruction_cost(&cmov, &CostMetric::CodeSize, 32), 3);
+    }
+
+    #[test]
+    fn jcc_short_form_costs_two_bytes() {
+        use crate::isa::x86::X86Condition;
+        let jcc = X86Instruction::Jcc {
+            cond: X86Condition::NE,
+        };
+        // 0x7x + rel8 = 2 bytes regardless of mode.
+        assert_eq!(instruction_cost(&jcc, &CostMetric::CodeSize, 64), 2);
+        assert_eq!(instruction_cost(&jcc, &CostMetric::CodeSize, 32), 2);
+    }
 }
