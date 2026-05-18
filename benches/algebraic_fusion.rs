@@ -1,7 +1,7 @@
 //! Phase 3 — algebraic identities & fusion catalog.
 
 use criterion::{Criterion, criterion_group, criterion_main};
-use s11::bench_support::{BenchRecord, append_json, discover_specs_in, run_bench, run_provenance};
+use s11::bench_support::{append_json, discover_specs_in, run_bench, run_provenance};
 use std::path::PathBuf;
 use std::time::Duration;
 
@@ -20,22 +20,17 @@ fn phase3(c: &mut Criterion) {
     group.measurement_time(Duration::from_secs(10));
 
     for spec in &specs {
+        let mut record = run_bench(spec);
+        record.git_sha = git_sha.clone();
+        record.timestamp_utc = timestamp_utc.clone();
+        append_json(&record, &out);
+
         let spec_owned = spec.clone();
-        let sha = git_sha.clone();
-        let ts = timestamp_utc.clone();
-        let out = out.clone();
         group.bench_function(spec_owned.id.clone(), |b| {
-            let mut next_sample = 0u32;
             b.iter_custom(|iters| {
                 let mut total = Duration::ZERO;
                 for _ in 0..iters {
-                    let mut record: BenchRecord = run_bench(&spec_owned, next_sample);
-                    record.git_sha = sha.clone();
-                    record.timestamp_utc = ts.clone();
-                    let elapsed = record.search_elapsed;
-                    append_json(&record, &out);
-                    total += elapsed;
-                    next_sample = next_sample.wrapping_add(1);
+                    total += run_bench(&spec_owned).search_elapsed;
                 }
                 total
             });
