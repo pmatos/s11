@@ -17,6 +17,60 @@ use serde::Serialize;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
+/// Short git SHA + a unix-epoch-seconds timestamp, captured once per
+/// process and stamped onto every `BenchRecord` emitted in this run.
+pub fn run_provenance() -> (Option<String>, Option<String>) {
+    let sha = std::process::Command::new("git")
+        .args(["rev-parse", "--short", "HEAD"])
+        .output()
+        .ok()
+        .and_then(|o| {
+            if o.status.success() {
+                Some(String::from_utf8_lossy(&o.stdout).trim().to_string())
+            } else {
+                None
+            }
+        });
+    let ts = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()
+        .map(|d| format!("{}s", d.as_secs()));
+    (sha, ts)
+}
+
+/// Discover every `.s` file under `dir` and turn each into a
+/// `BenchSpec`. Specs are returned sorted by id for deterministic
+/// criterion output ordering. Returns an empty vector if `dir` is
+/// missing or has no `.s` files.
+pub fn discover_specs_in(dir: &Path, phase: u8) -> Vec<BenchSpec> {
+    let Ok(read) = std::fs::read_dir(dir) else {
+        return Vec::new();
+    };
+    let mut specs: Vec<_> = read
+        .filter_map(Result::ok)
+        .map(|e| e.path())
+        .filter(|p| p.extension().is_some_and(|x| x == "s"))
+        .map(|fixture| {
+            let id = fixture
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .unwrap_or("unknown")
+                .to_string();
+            BenchSpec {
+                id,
+                fixture,
+                phase,
+                algorithm: Algorithm::Enumerative,
+                cost_metric: CostMetric::InstructionCount,
+                seed: 42,
+                timeout: Duration::from_secs(30),
+            }
+        })
+        .collect();
+    specs.sort_by(|a, b| a.id.cmp(&b.id));
+    specs
+}
+
 /// Parse a benchmark `.s` fixture into its target sequence plus the
 /// live-out contract declared in its `// Live-out:` header.
 ///
