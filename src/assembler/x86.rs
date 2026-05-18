@@ -186,13 +186,55 @@ fn encode_64(ops: &mut dynasmrt::x64::Assembler, instr: &X86Instruction) -> Resu
             dynasm!(ops ; .arch x64 ; cmp Rq(rn), imm);
             Ok(())
         }
-        X86Instruction::Cmov { .. } => {
-            // Cycle 13 wires the dynasm cmovCC dispatch. Reject until then.
-            Err("Cmov encoding not wired yet (issue #74 cycle 13)".to_string())
+        X86Instruction::Cmov { rd, rs, cond } => {
+            let rd = reg_index(*rd)?;
+            let rs = reg_index(*rs)?;
+            use crate::isa::x86::X86Condition;
+            match cond {
+                X86Condition::E => dynasm!(ops ; .arch x64 ; cmove Rq(rd), Rq(rs)),
+                X86Condition::NE => dynasm!(ops ; .arch x64 ; cmovne Rq(rd), Rq(rs)),
+                X86Condition::B => dynasm!(ops ; .arch x64 ; cmovb Rq(rd), Rq(rs)),
+                X86Condition::AE => dynasm!(ops ; .arch x64 ; cmovae Rq(rd), Rq(rs)),
+                X86Condition::BE => dynasm!(ops ; .arch x64 ; cmovbe Rq(rd), Rq(rs)),
+                X86Condition::A => dynasm!(ops ; .arch x64 ; cmova Rq(rd), Rq(rs)),
+                X86Condition::L => dynasm!(ops ; .arch x64 ; cmovl Rq(rd), Rq(rs)),
+                X86Condition::GE => dynasm!(ops ; .arch x64 ; cmovge Rq(rd), Rq(rs)),
+                X86Condition::LE => dynasm!(ops ; .arch x64 ; cmovle Rq(rd), Rq(rs)),
+                X86Condition::G => dynasm!(ops ; .arch x64 ; cmovg Rq(rd), Rq(rs)),
+                X86Condition::S => dynasm!(ops ; .arch x64 ; cmovs Rq(rd), Rq(rs)),
+                X86Condition::NS => dynasm!(ops ; .arch x64 ; cmovns Rq(rd), Rq(rs)),
+                X86Condition::O => dynasm!(ops ; .arch x64 ; cmovo Rq(rd), Rq(rs)),
+                X86Condition::NO => dynasm!(ops ; .arch x64 ; cmovno Rq(rd), Rq(rs)),
+                X86Condition::P => dynasm!(ops ; .arch x64 ; cmovp Rq(rd), Rq(rs)),
+                X86Condition::NP => dynasm!(ops ; .arch x64 ; cmovnp Rq(rd), Rq(rs)),
+            }
+            Ok(())
         }
-        X86Instruction::Jcc { .. } => {
-            // Cycle 14 wires the short-form Jcc dispatch. Reject until then.
-            Err("Jcc encoding not wired yet (issue #74 cycle 14)".to_string())
+        X86Instruction::Jcc { cond } => {
+            // Short-form Jcc to a 0-byte displacement. The optimizer
+            // never patches Jcc bytes into the binary (terminators are
+            // pinned), so the placeholder is only exercised by the
+            // encoder round-trip tests.
+            use crate::isa::x86::X86Condition;
+            match cond {
+                X86Condition::E => dynasm!(ops ; .arch x64 ; je BYTE 0),
+                X86Condition::NE => dynasm!(ops ; .arch x64 ; jne BYTE 0),
+                X86Condition::B => dynasm!(ops ; .arch x64 ; jb BYTE 0),
+                X86Condition::AE => dynasm!(ops ; .arch x64 ; jae BYTE 0),
+                X86Condition::BE => dynasm!(ops ; .arch x64 ; jbe BYTE 0),
+                X86Condition::A => dynasm!(ops ; .arch x64 ; ja BYTE 0),
+                X86Condition::L => dynasm!(ops ; .arch x64 ; jl BYTE 0),
+                X86Condition::GE => dynasm!(ops ; .arch x64 ; jge BYTE 0),
+                X86Condition::LE => dynasm!(ops ; .arch x64 ; jle BYTE 0),
+                X86Condition::G => dynasm!(ops ; .arch x64 ; jg BYTE 0),
+                X86Condition::S => dynasm!(ops ; .arch x64 ; js BYTE 0),
+                X86Condition::NS => dynasm!(ops ; .arch x64 ; jns BYTE 0),
+                X86Condition::O => dynasm!(ops ; .arch x64 ; jo BYTE 0),
+                X86Condition::NO => dynasm!(ops ; .arch x64 ; jno BYTE 0),
+                X86Condition::P => dynasm!(ops ; .arch x64 ; jp BYTE 0),
+                X86Condition::NP => dynasm!(ops ; .arch x64 ; jnp BYTE 0),
+            }
+            Ok(())
         }
     }
 }
@@ -290,13 +332,51 @@ fn encode_32(ops: &mut dynasmrt::x86::Assembler, instr: &X86Instruction) -> Resu
             dynasm!(ops ; .arch x86 ; cmp Rd(rn), imm);
             Ok(())
         }
-        X86Instruction::Cmov { .. } => {
-            // Cycle 13 wires the dynasm cmovCC dispatch. Reject until then.
-            Err("Cmov encoding not wired yet (issue #74 cycle 13)".to_string())
+        X86Instruction::Cmov { rd, rs, cond } => {
+            let rd = reg_index_32(*rd)?;
+            let rs = reg_index_32(*rs)?;
+            use crate::isa::x86::X86Condition;
+            match cond {
+                X86Condition::E => dynasm!(ops ; .arch x86 ; cmove Rd(rd), Rd(rs)),
+                X86Condition::NE => dynasm!(ops ; .arch x86 ; cmovne Rd(rd), Rd(rs)),
+                X86Condition::B => dynasm!(ops ; .arch x86 ; cmovb Rd(rd), Rd(rs)),
+                X86Condition::AE => dynasm!(ops ; .arch x86 ; cmovae Rd(rd), Rd(rs)),
+                X86Condition::BE => dynasm!(ops ; .arch x86 ; cmovbe Rd(rd), Rd(rs)),
+                X86Condition::A => dynasm!(ops ; .arch x86 ; cmova Rd(rd), Rd(rs)),
+                X86Condition::L => dynasm!(ops ; .arch x86 ; cmovl Rd(rd), Rd(rs)),
+                X86Condition::GE => dynasm!(ops ; .arch x86 ; cmovge Rd(rd), Rd(rs)),
+                X86Condition::LE => dynasm!(ops ; .arch x86 ; cmovle Rd(rd), Rd(rs)),
+                X86Condition::G => dynasm!(ops ; .arch x86 ; cmovg Rd(rd), Rd(rs)),
+                X86Condition::S => dynasm!(ops ; .arch x86 ; cmovs Rd(rd), Rd(rs)),
+                X86Condition::NS => dynasm!(ops ; .arch x86 ; cmovns Rd(rd), Rd(rs)),
+                X86Condition::O => dynasm!(ops ; .arch x86 ; cmovo Rd(rd), Rd(rs)),
+                X86Condition::NO => dynasm!(ops ; .arch x86 ; cmovno Rd(rd), Rd(rs)),
+                X86Condition::P => dynasm!(ops ; .arch x86 ; cmovp Rd(rd), Rd(rs)),
+                X86Condition::NP => dynasm!(ops ; .arch x86 ; cmovnp Rd(rd), Rd(rs)),
+            }
+            Ok(())
         }
-        X86Instruction::Jcc { .. } => {
-            // Cycle 14 wires the short-form Jcc dispatch. Reject until then.
-            Err("Jcc encoding not wired yet (issue #74 cycle 14)".to_string())
+        X86Instruction::Jcc { cond } => {
+            use crate::isa::x86::X86Condition;
+            match cond {
+                X86Condition::E => dynasm!(ops ; .arch x86 ; je BYTE 0),
+                X86Condition::NE => dynasm!(ops ; .arch x86 ; jne BYTE 0),
+                X86Condition::B => dynasm!(ops ; .arch x86 ; jb BYTE 0),
+                X86Condition::AE => dynasm!(ops ; .arch x86 ; jae BYTE 0),
+                X86Condition::BE => dynasm!(ops ; .arch x86 ; jbe BYTE 0),
+                X86Condition::A => dynasm!(ops ; .arch x86 ; ja BYTE 0),
+                X86Condition::L => dynasm!(ops ; .arch x86 ; jl BYTE 0),
+                X86Condition::GE => dynasm!(ops ; .arch x86 ; jge BYTE 0),
+                X86Condition::LE => dynasm!(ops ; .arch x86 ; jle BYTE 0),
+                X86Condition::G => dynasm!(ops ; .arch x86 ; jg BYTE 0),
+                X86Condition::S => dynasm!(ops ; .arch x86 ; js BYTE 0),
+                X86Condition::NS => dynasm!(ops ; .arch x86 ; jns BYTE 0),
+                X86Condition::O => dynasm!(ops ; .arch x86 ; jo BYTE 0),
+                X86Condition::NO => dynasm!(ops ; .arch x86 ; jno BYTE 0),
+                X86Condition::P => dynasm!(ops ; .arch x86 ; jp BYTE 0),
+                X86Condition::NP => dynasm!(ops ; .arch x86 ; jnp BYTE 0),
+            }
+            Ok(())
         }
     }
 }
@@ -711,5 +791,132 @@ mod tests {
             }])
             .expect_err("x86-32 mov imm requires imm32");
         assert!(err.contains("does not fit in 32 bits"));
+    }
+
+    // --- issue #74: CMOV encoding round-trips through Capstone ---
+
+    #[test]
+    fn cmove_x86_64_round_trips() {
+        use crate::isa::x86::X86Condition;
+        check_x86_64(
+            X86Instruction::Cmov {
+                rd: X86Register::RAX,
+                rs: X86Register::RBX,
+                cond: X86Condition::E,
+            },
+            "cmove",
+            &["rax", "rbx"],
+        );
+    }
+
+    #[test]
+    fn all_cmov_suffixes_round_trip_x86_64() {
+        use crate::isa::x86::X86Condition;
+        let cases = [
+            (X86Condition::E, "cmove"),
+            (X86Condition::NE, "cmovne"),
+            (X86Condition::B, "cmovb"),
+            (X86Condition::AE, "cmovae"),
+            (X86Condition::BE, "cmovbe"),
+            (X86Condition::A, "cmova"),
+            (X86Condition::L, "cmovl"),
+            (X86Condition::GE, "cmovge"),
+            (X86Condition::LE, "cmovle"),
+            (X86Condition::G, "cmovg"),
+            (X86Condition::S, "cmovs"),
+            (X86Condition::NS, "cmovns"),
+            (X86Condition::O, "cmovo"),
+            (X86Condition::NO, "cmovno"),
+            (X86Condition::P, "cmovp"),
+            (X86Condition::NP, "cmovnp"),
+        ];
+        for (cond, mn) in cases {
+            check_x86_64(
+                X86Instruction::Cmov {
+                    rd: X86Register::RAX,
+                    rs: X86Register::RBX,
+                    cond,
+                },
+                mn,
+                &["rax", "rbx"],
+            );
+        }
+    }
+
+    #[test]
+    fn cmove_x86_32_round_trips() {
+        use crate::isa::x86::X86Condition;
+        check_x86_32(
+            X86Instruction::Cmov {
+                rd: X86Register::RAX,
+                rs: X86Register::RBX,
+                cond: X86Condition::E,
+            },
+            "cmove",
+            &["eax", "ebx"],
+        );
+    }
+
+    // --- issue #74: Jcc short-form encoding ---
+
+    #[test]
+    fn je_x86_64_encodes_to_short_form_je() {
+        // Short je with rel8=0 is bytes 0x74 0x00.
+        use crate::isa::x86::X86Condition;
+        let mut asm = X86Assembler::new_64();
+        let bytes = asm
+            .assemble_instructions(&[X86Instruction::Jcc {
+                cond: X86Condition::E,
+            }])
+            .expect("encode je");
+        let disasm = disasm_x86_64(&bytes);
+        assert_eq!(disasm.len(), 1);
+        assert_eq!(disasm[0].0, "je", "got {} {}", disasm[0].0, disasm[0].1);
+    }
+
+    #[test]
+    fn all_jcc_suffixes_round_trip_x86_64() {
+        use crate::isa::x86::X86Condition;
+        let cases = [
+            (X86Condition::E, "je"),
+            (X86Condition::NE, "jne"),
+            (X86Condition::B, "jb"),
+            (X86Condition::AE, "jae"),
+            (X86Condition::BE, "jbe"),
+            (X86Condition::A, "ja"),
+            (X86Condition::L, "jl"),
+            (X86Condition::GE, "jge"),
+            (X86Condition::LE, "jle"),
+            (X86Condition::G, "jg"),
+            (X86Condition::S, "js"),
+            (X86Condition::NS, "jns"),
+            (X86Condition::O, "jo"),
+            (X86Condition::NO, "jno"),
+            (X86Condition::P, "jp"),
+            (X86Condition::NP, "jnp"),
+        ];
+        for (cond, mn) in cases {
+            let mut asm = X86Assembler::new_64();
+            let bytes = asm
+                .assemble_instructions(&[X86Instruction::Jcc { cond }])
+                .unwrap_or_else(|e| panic!("encode {}: {}", mn, e));
+            let disasm = disasm_x86_64(&bytes);
+            assert_eq!(disasm.len(), 1, "expected one instr for {}", mn);
+            assert_eq!(disasm[0].0, mn);
+        }
+    }
+
+    #[test]
+    fn je_x86_32_round_trips() {
+        use crate::isa::x86::X86Condition;
+        let mut asm = X86Assembler::new_32();
+        let bytes = asm
+            .assemble_instructions(&[X86Instruction::Jcc {
+                cond: X86Condition::E,
+            }])
+            .expect("encode je 32-bit");
+        let disasm = disasm_x86_32(&bytes);
+        assert_eq!(disasm.len(), 1);
+        assert_eq!(disasm[0].0, "je");
     }
 }
