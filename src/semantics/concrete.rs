@@ -577,6 +577,10 @@ pub fn apply_sequence_concrete(
 
 /// Check if two concrete states are equal for the specified live-out registers,
 /// optionally including the NZCV condition flags.
+///
+/// TODO(#282): The explicit `flags_live` parameter is now redundant with
+/// `live_out.flags_live()` for every caller except the stochastic backend
+/// (which deliberately passes `false`). Tracked for cleanup in issue #282.
 pub fn states_equal_for_live_out(
     state1: &ConcreteMachineState,
     state2: &ConcreteMachineState,
@@ -597,6 +601,9 @@ pub fn states_equal_for_live_out(
 /// Find the first differing register between two states for live-out registers.
 /// Flag divergence (when `flags_live` is set) is reported via the `XZR`
 /// sentinel since the function signature is register-typed.
+///
+/// TODO(#282): see `states_equal_for_live_out` — the same `flags_live`
+/// redundancy applies here. Tracked for follow-up cleanup.
 pub fn find_first_difference(
     state1: &ConcreteMachineState,
     state2: &ConcreteMachineState,
