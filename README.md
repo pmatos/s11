@@ -89,6 +89,9 @@ on a chosen live-out set:
 s11 equiv a.s b.s --live-out x0,x1 --timeout 30
 ```
 
+Append `;nzcv` to declare AArch64 condition flags as part of the contract
+(e.g. `--live-out "x0,x1;nzcv"`).
+
 `llm-opt` — experimental driver that asks an LLM (via the `codex` CLI) to
 propose candidates that are then verified the same way as any other
 search result.

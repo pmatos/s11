@@ -3,7 +3,7 @@
 #![allow(dead_code)]
 
 use crate::ir::{Instruction, Register};
-use crate::semantics::live_out::LiveOutRegisters;
+use crate::semantics::live_out::{LiveOut, LiveOutRegisters};
 use std::str::FromStr;
 
 /// Error type for parsing live-out register sets.
@@ -68,6 +68,55 @@ impl FromStr for LiveOutRegisters {
 
         Ok(mask)
     }
+}
+
+/// Parse the CLI `--live-out` contract string.
+///
+/// Grammar: `<regs>` or `<regs>;<flags>`. The register half follows
+/// `LiveOutRegisters::from_str` (comma- or space-separated, case-insensitive,
+/// accepts `x0..x30`, `sp`, `xzr`). The flag half currently accepts only the
+/// group token `nzcv`; per-flag tokens `n`/`z`/`c`/`v` are reserved for a
+/// future per-flag liveness extension and rejected today. A bareword `nzcv`
+/// with no leading `;` is rejected to keep that reservation unambiguous.
+///
+/// Returns `(LiveOut, flags_live)`. Callers pass `flags_live` to
+/// `EquivalenceConfig::with_flags(...)` (see ADR-0006).
+pub fn parse_live_out_contract(s: &str) -> Result<(LiveOut, bool), ParseLiveOutRegistersError> {
+    let trimmed = s.trim();
+    let semicolon_count = trimmed.matches(';').count();
+    if semicolon_count > 1 {
+        return Err(ParseLiveOutRegistersError {
+            message: format!("--live-out accepts at most one ';' (got: '{}')", s),
+        });
+    }
+    if semicolon_count == 0 {
+        if trimmed.eq_ignore_ascii_case("nzcv") {
+            return Err(ParseLiveOutRegistersError {
+                message: format!(
+                    "flag-only live-out requires a leading ';' (e.g. \";nzcv\"); got '{}'",
+                    s
+                ),
+            });
+        }
+        let regs = LiveOutRegisters::from_str(trimmed)?;
+        return Ok((LiveOut::from_register_set(regs), false));
+    }
+    let (regs_part, flags_part) = trimmed.split_once(';').unwrap();
+    let regs = LiveOutRegisters::from_str(regs_part.trim())?;
+    let flags_tok = flags_part.trim().to_ascii_lowercase();
+    let flags_live = match flags_tok.as_str() {
+        "" => false,
+        "nzcv" => true,
+        other => {
+            return Err(ParseLiveOutRegistersError {
+                message: format!(
+                    "unknown flag token '{}', expected 'nzcv' (per-flag tokens n/z/c/v reserved)",
+                    other
+                ),
+            });
+        }
+    };
+    Ok((LiveOut::from_register_set(regs), flags_live))
 }
 
 /// Compute the set of registers written by a sequence of instructions
@@ -469,5 +518,115 @@ mod tests {
         let mask = compute_written_registers(&instructions);
         assert!(!mask.contains(Register::XZR));
         assert!(mask.is_empty());
+    }
+
+    #[test]
+    fn test_parse_live_out_contract_regs_and_flags() {
+        let (live_out, flags_live) = parse_live_out_contract("x0,x1;nzcv").unwrap();
+        assert!(live_out.contains_register(Register::X0));
+        assert!(live_out.contains_register(Register::X1));
+        assert!(flags_live);
+    }
+
+    #[test]
+    fn test_parse_live_out_contract_regs_only_flags_off() {
+        let (live_out, flags_live) = parse_live_out_contract("x0,x1").unwrap();
+        assert!(live_out.contains_register(Register::X0));
+        assert!(live_out.contains_register(Register::X1));
+        assert!(!flags_live);
+    }
+
+    #[test]
+    fn test_parse_live_out_contract_flags_only() {
+        let (live_out, flags_live) = parse_live_out_contract(";nzcv").unwrap();
+        assert_eq!(live_out.registers().len(), 0);
+        assert!(flags_live);
+    }
+
+    #[test]
+    fn test_parse_live_out_contract_trailing_semicolon() {
+        let (live_out, flags_live) = parse_live_out_contract("x0,x1;").unwrap();
+        assert!(live_out.contains_register(Register::X0));
+        assert!(!flags_live);
+    }
+
+    #[test]
+    fn test_parse_live_out_contract_uppercase_passes() {
+        let (live_out, flags_live) = parse_live_out_contract("X0,X1;NZCV").unwrap();
+        assert!(live_out.contains_register(Register::X0));
+        assert!(live_out.contains_register(Register::X1));
+        assert!(flags_live);
+    }
+
+    #[test]
+    fn test_parse_live_out_contract_empty_input() {
+        let (live_out, flags_live) = parse_live_out_contract("").unwrap();
+        assert_eq!(live_out.registers().len(), 0);
+        assert!(!flags_live);
+    }
+
+    #[test]
+    fn test_parse_live_out_contract_whitespace_around_semicolon() {
+        let (live_out, flags_live) = parse_live_out_contract("x0 ; nzcv").unwrap();
+        assert!(live_out.contains_register(Register::X0));
+        assert!(flags_live);
+    }
+
+    #[test]
+    fn test_parse_live_out_contract_lone_semicolon() {
+        let (live_out, flags_live) = parse_live_out_contract(";").unwrap();
+        assert_eq!(live_out.registers().len(), 0);
+        assert!(!flags_live);
+    }
+
+    #[test]
+    fn test_parse_live_out_contract_whitespace_only_sides() {
+        let (live_out, flags_live) = parse_live_out_contract("  ;  ").unwrap();
+        assert_eq!(live_out.registers().len(), 0);
+        assert!(!flags_live);
+    }
+
+    #[test]
+    fn test_parse_live_out_contract_bareword_nzcv_rejected() {
+        let err = parse_live_out_contract("nzcv").unwrap_err();
+        assert!(
+            err.message
+                .contains("flag-only live-out requires a leading ';'"),
+            "got: {}",
+            err.message
+        );
+    }
+
+    #[test]
+    fn test_parse_live_out_contract_multi_section_rejected() {
+        assert!(parse_live_out_contract("x0;nzcv;extra").is_err());
+        assert!(parse_live_out_contract(";nzcv;").is_err());
+    }
+
+    #[test]
+    fn test_parse_live_out_contract_unknown_flag_rejected() {
+        let err = parse_live_out_contract("x0;bogus").unwrap_err();
+        assert!(
+            err.message.contains("unknown flag token"),
+            "got: {}",
+            err.message
+        );
+    }
+
+    #[test]
+    fn test_parse_live_out_contract_per_flag_tokens_reserved() {
+        for tok in ["n", "z", "c", "v"] {
+            let s = format!("x0;{}", tok);
+            assert!(
+                parse_live_out_contract(&s).is_err(),
+                "expected '{}' to be rejected (reserved)",
+                s
+            );
+        }
+    }
+
+    #[test]
+    fn test_parse_live_out_contract_invalid_register_still_errors() {
+        assert!(parse_live_out_contract("x0,bogus;nzcv").is_err());
     }
 }

@@ -175,7 +175,7 @@ EQUIVALENT: The two sequences are semantically equivalent.
 
 ### Options
 
-- `--live-out <REGS>`: Registers that must match (comma-separated). Default: `x0,x1,x2,x3,x4,x5,x6,x7`
+- `--live-out <CONTRACT>`: Observable architectural state that must match. Comma-separated registers (e.g. `x0,x1`), optionally followed by `;nzcv` to declare AArch64 condition flags live (e.g. `x0,x1;nzcv` or `;nzcv` for flags only). Default: `x0,x1,x2,x3,x4,x5,x6,x7`
 - `--timeout <SECS>`: SMT solver timeout in seconds. Default: 30
 - `--fast-only`: Use random testing only, skip SMT verification
 - `-v, --verbose`: Show detailed output
