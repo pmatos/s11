@@ -223,6 +223,14 @@ pub struct BenchSpec {
 /// (PR #269 review). Inside `iter_custom`, drivers re-call `run_bench`
 /// just to read `search_elapsed` for criterion's timing model.
 pub fn run_bench(spec: &BenchSpec) -> BenchRecord {
+    // NOTE: The AArch64 backends invoked below hardcode `.with_flags(true)`
+    // (`src/search/enumerative/search.rs`, `src/search/stochastic/backend.rs`,
+    // `src/search/symbolic/backend.rs`). The fixture's `flags_live` bit is
+    // therefore not consulted here: every benched candidate is verified
+    // under "NZCV is observable" semantics regardless of the header. This
+    // is conservative (pessimises rewrites that drop flag-setters when the
+    // fixture declares NZCV dead) but never unsound. Tracked for proper
+    // plumbing in #287.
     let (target, live_out, _flags_live) = load_sequence(&spec.fixture);
     let original_length = target.len();
     let original_cost = sequence_cost(&target, &spec.cost_metric);

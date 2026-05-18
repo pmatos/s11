@@ -155,3 +155,10 @@ done
 
 echo "[4/4] wrote $kept fixtures to $OUT_DIR"
 echo "Review them with:   git -C $(git rev-parse --show-toplevel) status -- benches/llvm_codegen"
+echo
+echo "WARNING: every fixture inherits a hardcoded \`// Live-out: x0\` header."
+echo "         If the underlying basic block writes its result to a different"
+echo "         register (e.g. x8, x9, or a callee-saved reg), hand-edit the"
+echo "         header before committing — otherwise the benchmark will be"
+echo "         observing the wrong state. Per-block live-out inference is"
+echo "         tracked in https://github.com/pmatos/s11/issues/287."
