@@ -75,5 +75,11 @@ mod tests {
         assert_impl::<crate::isa::AArch64, stochastic::StochasticSearch>();
         assert_impl::<crate::isa::AArch64, symbolic::SymbolicSearch>();
         assert_impl::<crate::isa::AArch64, llm::LlmSearch>();
+        // x86_64 and x86_32 instantiations land via this PR (issue #73).
+        // A future drop of either backend impl trips this at compile time.
+        assert_impl::<crate::isa::X86_64, stochastic::StochasticSearch<crate::isa::X86_64>>();
+        assert_impl::<crate::isa::X86_64, symbolic::SymbolicSearch<crate::isa::X86_64>>();
+        assert_impl::<crate::isa::X86_32, stochastic::StochasticSearch<crate::isa::X86_32>>();
+        assert_impl::<crate::isa::X86_32, symbolic::SymbolicSearch<crate::isa::X86_32>>();
     }
 }

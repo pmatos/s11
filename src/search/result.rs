@@ -3,6 +3,7 @@
 #![allow(dead_code)]
 
 use crate::ir::Instruction;
+use crate::isa::ISA;
 use crate::search::config::Algorithm;
 use std::time::Duration;
 
@@ -50,6 +51,69 @@ impl SearchResult {
             self.original_sequence.len() as i64 - optimized.len() as i64
         } else {
             0
+        }
+    }
+}
+
+/// Generic search-result type. For AArch64, callers can ignore the
+/// type parameter (it defaults to `AArch64`) and treat
+/// `SearchResultFor<AArch64>` as the historical `SearchResult`.
+///
+/// Mirrors `SearchResult` for `<I>`. Lives in this module so both
+/// stochastic and symbolic search consume the same shape without
+/// either depending on the other.
+#[derive(Debug, Clone)]
+pub struct SearchResultFor<I: ISA> {
+    pub optimized_sequence: Option<Vec<I::Instruction>>,
+    pub original_sequence: Vec<I::Instruction>,
+    pub found_optimization: bool,
+    pub statistics: SearchStatistics,
+}
+
+impl<I: ISA> SearchResultFor<I> {
+    /// Cost savings = original length minus optimized length, or 0 if
+    /// no optimization was found. Mirrors `SearchResult::cost_savings`.
+    pub fn cost_savings(&self) -> i64 {
+        if let Some(ref opt) = self.optimized_sequence {
+            self.original_sequence.len() as i64 - opt.len() as i64
+        } else {
+            0
+        }
+    }
+
+    pub fn no_optimization(original: Vec<I::Instruction>, statistics: SearchStatistics) -> Self {
+        Self {
+            optimized_sequence: None,
+            original_sequence: original,
+            found_optimization: false,
+            statistics,
+        }
+    }
+
+    pub fn with_optimization(
+        original: Vec<I::Instruction>,
+        optimized: Vec<I::Instruction>,
+        statistics: SearchStatistics,
+    ) -> Self {
+        Self {
+            optimized_sequence: Some(optimized),
+            original_sequence: original,
+            found_optimization: true,
+            statistics,
+        }
+    }
+}
+
+/// Backward-compatible conversion from the generic result type into the
+/// AArch64-specific `SearchResult`. Used by the parallel coordinator
+/// (still AArch64-typed) and any consumer that hasn't been migrated to
+/// the generic shape.
+impl From<SearchResultFor<crate::isa::AArch64>> for SearchResult {
+    fn from(r: SearchResultFor<crate::isa::AArch64>) -> Self {
+        if let Some(opt) = r.optimized_sequence {
+            SearchResult::with_optimization(r.original_sequence, opt, r.statistics)
+        } else {
+            SearchResult::no_optimization(r.original_sequence, r.statistics)
         }
     }
 }
