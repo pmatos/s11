@@ -985,7 +985,7 @@ mod tests {
             rs: X86Register::RCX,
         }];
         let mut cfg =
-            X86EquivalenceConfig::new_for_64().live_out(X86LiveOutMask::empty().with_flags(true));
+            X86EquivalenceConfig::new(64).live_out(X86LiveOutMask::empty().with_flags(true));
         cfg.random_test_count = 0;
         assert!(matches!(
             check_equivalence_x86(&seq1, &seq2, &cfg),
@@ -1002,7 +1002,7 @@ mod tests {
             rs: X86Register::RBX,
         };
         let seq_je = vec![
-            prefix.clone(),
+            prefix,
             X86Instruction::Jcc {
                 cond: X86Condition::E,
             },
@@ -1013,7 +1013,7 @@ mod tests {
                 cond: X86Condition::NE,
             },
         ];
-        let cfg = X86EquivalenceConfig::new_for_64().live_out(X86LiveOutMask::empty());
+        let cfg = X86EquivalenceConfig::new(64).live_out(X86LiveOutMask::empty());
         assert!(matches!(
             check_equivalence_x86(&seq_je, &seq_jne, &cfg),
             EquivalenceResult::NotEquivalent
@@ -1030,9 +1030,9 @@ mod tests {
         let jcc = X86Instruction::Jcc {
             cond: X86Condition::E,
         };
-        let seq1 = vec![prefix.clone(), jcc.clone()];
+        let seq1 = vec![prefix, jcc];
         let seq2 = vec![prefix, jcc];
-        let cfg = X86EquivalenceConfig::new_for_64().live_out(X86LiveOutMask::empty());
+        let cfg = X86EquivalenceConfig::new(64).live_out(X86LiveOutMask::empty());
         assert_eq!(
             check_equivalence_x86(&seq1, &seq2, &cfg),
             EquivalenceResult::Equivalent
@@ -1047,13 +1047,13 @@ mod tests {
             rs: X86Register::RBX,
         };
         let seq_with_jcc = vec![
-            prefix.clone(),
+            prefix,
             X86Instruction::Jcc {
                 cond: X86Condition::E,
             },
         ];
         let seq_without = vec![prefix];
-        let cfg = X86EquivalenceConfig::new_for_64().live_out(X86LiveOutMask::empty());
+        let cfg = X86EquivalenceConfig::new(64).live_out(X86LiveOutMask::empty());
         assert!(matches!(
             check_equivalence_x86(&seq_with_jcc, &seq_without, &cfg),
             EquivalenceResult::NotEquivalent
@@ -1074,7 +1074,7 @@ mod tests {
             rn: X86Register::RAX,
             rs: X86Register::RCX,
         }];
-        let mut cfg = X86EquivalenceConfig::new_for_64().live_out(X86LiveOutMask::empty());
+        let mut cfg = X86EquivalenceConfig::new(64).live_out(X86LiveOutMask::empty());
         cfg.random_test_count = 0;
         assert_eq!(
             check_equivalence_x86(&seq1, &seq2, &cfg),
@@ -1091,7 +1091,7 @@ mod tests {
             rs: X86Register::RBX,
         }];
         let mut cfg =
-            X86EquivalenceConfig::new_for_64().live_out(X86LiveOutMask::empty().with_flags(true));
+            X86EquivalenceConfig::new(64).live_out(X86LiveOutMask::empty().with_flags(true));
         cfg.random_test_count = 0;
         assert_eq!(
             check_equivalence_x86(&cmp.clone(), &cmp, &cfg),

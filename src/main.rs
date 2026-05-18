@@ -2416,7 +2416,7 @@ mod cli_helper_tests {
                 rd: Register::X2,
                 imm: 5,
             },
-            terminator.clone(),
+            terminator,
         ];
         let candidate_clobbers_x0 = vec![
             Instruction::MovImm {
@@ -2578,7 +2578,7 @@ mod cli_helper_tests {
                 cond: X86Condition::E,
             },
         ];
-        let cfg = X86EquivalenceConfig::new_for_64()
+        let cfg = X86EquivalenceConfig::new(64)
             .live_out(X86LiveOutMask::from_registers(vec![X86Register::RAX]).with_flags(true));
         assert!(matches!(
             check_equivalence_x86(&target, &proposal, &cfg),
@@ -2605,7 +2605,7 @@ mod cli_helper_tests {
                 cond: X86Condition::NE,
             },
         ];
-        let cfg = X86EquivalenceConfig::new_for_64()
+        let cfg = X86EquivalenceConfig::new(64)
             .live_out(X86LiveOutMask::from_registers(vec![X86Register::RAX]).with_flags(true));
         assert_eq!(
             check_equivalence_x86(&seq.clone(), &seq, &cfg),
