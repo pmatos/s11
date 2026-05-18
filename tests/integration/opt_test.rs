@@ -24,12 +24,12 @@ fn get_binary_path() -> PathBuf {
     PathBuf::from(env!("CARGO_BIN_EXE_s11"))
 }
 
-// Scan every executable, instruction-aligned slot in `elf_path` for a 4-byte
-// little-endian AArch64 encoding matching `expected` under `mask` (i.e.
-// `bytes[i] & mask[i] == expected[i] & mask[i]` for each of the 4 bytes).
-// A `mask` of all 0xff means exact match; a partial mask lets opt tests
-// match any `add x16, x16, #N` PLT trampoline regardless of the build's GOT
-// layout, etc.
+// AArch64 only: scans at 4-byte-aligned offsets in every executable section
+// of `elf_path` for a little-endian AArch64 encoding matching `expected`
+// under `mask` (i.e. `bytes[i] & mask[i] == expected[i] & mask[i]` for each
+// of the 4 bytes). A `mask` of all 0xff means exact match; a partial mask
+// lets opt tests match any `add x16, x16, #N` PLT trampoline regardless of
+// the build's GOT layout, etc.
 fn find_encoding_masked(elf_path: &Path, expected: &[u8; 4], mask: &[u8; 4], label: &str) -> u64 {
     let data = std::fs::read(elf_path).expect("read ELF for pattern scan");
     let elf = elf::ElfBytes::<elf::endian::AnyEndian>::minimal_parse(&data)
