@@ -23,6 +23,7 @@ use crate::semantics::smt::{
     states_not_equal_for_live_out,
 };
 use crate::semantics::state::ConcreteMachineState;
+use crate::validation::live_out::reads_flags_before_writing;
 use crate::validation::random::{
     RandomInputConfig, generate_edge_case_inputs, generate_random_inputs,
 };
@@ -258,6 +259,34 @@ fn fast_path_input_registers(
     v
 }
 
+/// Build 16 inputs covering every initial NZCV combination with source
+/// registers randomized. Used to plug a soundness gap when either sequence
+/// reads flags before writing (e.g. CCMP, CSEL) and the contract treats
+/// NZCV as live-out: the standard random/edge-case inputs leave initial
+/// NZCV at `ConditionFlags::default()` (all zero), so a CCMP under a
+/// condition predicate that depends on an incoming flag (e.g. `mi`) only
+/// gets exercised on the condition-false branch. PR #172 review thread
+/// PRRT_kwDOOuU3Hc6CxjC4.
+fn fast_path_initial_nzcv_variants(
+    input_regs: &[crate::ir::Register],
+) -> Vec<ConcreteMachineState> {
+    use crate::semantics::state::ConditionFlags;
+    let variant_regs_config = RandomInputConfig {
+        count: 16,
+        registers: input_regs.to_vec(),
+    };
+    let mut variants = generate_random_inputs(&variant_regs_config);
+    for (i, input) in variants.iter_mut().enumerate() {
+        input.set_flags(ConditionFlags {
+            n: (i & 0b1000) != 0,
+            z: (i & 0b0100) != 0,
+            c: (i & 0b0010) != 0,
+            v: (i & 0b0001) != 0,
+        });
+    }
+    variants
+}
+
 /// Run the fast-path random + edge-case checks. Returns either a
 /// `NotEquivalentFast` refutation, `None` if the fast path passed, or
 /// `Some(Equivalent)` if `fast_only` short-circuits.
@@ -291,6 +320,19 @@ fn run_fast_path(
 
         if !states_equal_for_live_out(&state1, &state2, live_out_registers, config.flags_live) {
             return Some(EquivalenceResult::NotEquivalentFast(input.clone()));
+        }
+    }
+
+    // When the live-out contract treats NZCV as observable AND either
+    // sequence reads flags before writing them, also test all 16 initial
+    // NZCV combinations. Skipped otherwise to keep per-call cost bounded.
+    if config.flags_live && (reads_flags_before_writing(seq1) || reads_flags_before_writing(seq2)) {
+        for input in &fast_path_initial_nzcv_variants(&input_regs) {
+            let state1 = apply_sequence_concrete(input.clone(), seq1);
+            let state2 = apply_sequence_concrete(input.clone(), seq2);
+            if !states_equal_for_live_out(&state1, &state2, live_out_registers, config.flags_live) {
+                return Some(EquivalenceResult::NotEquivalentFast(input.clone()));
+            }
         }
     }
 
@@ -2092,6 +2134,44 @@ mod tests {
         assert!(
             matches!(result, EquivalenceResult::NotEquivalentFast(_)),
             "expected NotEquivalentFast for flags-only fast-only contract, got {:?}",
+            result
+        );
+    }
+
+    /// Soundness regression test for PR #172 review thread
+    /// PRRT_kwDOOuU3Hc6CxjC4.
+    ///
+    /// `ccmp x0, #0, #0, mi` and `ccmp x1, #1, #0, mi` both fall through to
+    /// the immediate-NZCV `#0` branch when initial N is false, so all flags
+    /// land at zero regardless of x0/x1. When initial N is true, the MI
+    /// branch fires: seq1 computes `x0 cmp 0`, seq2 computes `x1 cmp 1` —
+    /// flags then depend on x0/x1 and diverge for most randomized values.
+    /// Prior to the initial-NZCV variants in `run_fast_path`, the fast path
+    /// only tested with NZCV defaulted to zero, so this pair returned
+    /// `Equivalent` under `--fast-only`. The fix is to also generate inputs
+    /// with each of the 16 initial NZCV combinations when either sequence
+    /// reads flags before writing.
+    #[test]
+    fn fast_only_flags_only_contract_detects_ccmp_initial_nzcv_divergence() {
+        let seq1 = vec![Instruction::Ccmp {
+            rn: Register::X0,
+            rm: Operand::Immediate(0),
+            nzcv: 0,
+            cond: Condition::MI,
+        }];
+        let seq2 = vec![Instruction::Ccmp {
+            rn: Register::X1,
+            rm: Operand::Immediate(1),
+            nzcv: 0,
+            cond: Condition::MI,
+        }];
+        let config = EquivalenceConfig::fast_only()
+            .live_out(LiveOut::from_registers(vec![]))
+            .with_flags(true);
+        let result = check_equivalence_with_config(&seq1, &seq2, &config);
+        assert!(
+            matches!(result, EquivalenceResult::NotEquivalentFast(_)),
+            "expected NotEquivalentFast for ccmp pair under flags-only fast-only, got {:?}",
             result
         );
     }
