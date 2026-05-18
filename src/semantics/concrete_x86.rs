@@ -49,6 +49,10 @@ pub fn apply_instruction_concrete_x86(
             }
             // CMOV does not write EFLAGS regardless of the branch taken.
         }
+        // Jcc transfers control; PC is unmodelled and the search peels
+        // it off via `split_terminator_x86`. Treat as a no-op for
+        // safety if a stray Jcc reaches the concrete executor.
+        X86Instruction::Jcc { .. } => {}
     }
     state
 }

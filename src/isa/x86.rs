@@ -247,6 +247,11 @@ pub enum X86Instruction {
         rs: X86Register,
         cond: X86Condition,
     },
+    /// `jCC <target>` — conditional branch (issue #74). Reads EFLAGS;
+    /// modelled as an opaque terminator. The branch target is recovered
+    /// from the surrounding ELF disassembly and is not carried in the IR
+    /// — search holds terminators fixed (see `split_terminator_x86`).
+    Jcc { cond: X86Condition },
 }
 
 impl X86Instruction {
@@ -265,7 +270,9 @@ impl X86Instruction {
             | X86Instruction::XorReg { rd, .. }
             | X86Instruction::XorImm { rd, .. }
             | X86Instruction::Cmov { rd, .. } => Some(*rd),
-            X86Instruction::CmpReg { .. } | X86Instruction::CmpImm { .. } => None,
+            X86Instruction::CmpReg { .. }
+            | X86Instruction::CmpImm { .. }
+            | X86Instruction::Jcc { .. } => None,
         }
     }
 
@@ -279,6 +286,7 @@ impl X86Instruction {
             X86Instruction::XorReg { .. } | X86Instruction::XorImm { .. } => "xor",
             X86Instruction::CmpReg { .. } | X86Instruction::CmpImm { .. } => "cmp",
             X86Instruction::Cmov { .. } => "cmov",
+            X86Instruction::Jcc { .. } => "jcc",
         }
     }
 
@@ -306,7 +314,15 @@ impl X86Instruction {
             X86Instruction::CmpImm { rn, .. } => vec![*rn],
             // Cmov reads both rd (kept on false branch) and rs.
             X86Instruction::Cmov { rd, rs, .. } => vec![*rd, *rs],
+            X86Instruction::Jcc { .. } => vec![],
         }
+    }
+
+    /// Whether this instruction transfers control out of the
+    /// optimization window. Jcc terminators are held fixed by
+    /// `split_terminator_x86`; the search never synthesizes them.
+    pub fn is_terminator(&self) -> bool {
+        matches!(self, X86Instruction::Jcc { .. })
     }
 }
 
@@ -339,6 +355,7 @@ impl InstructionType for X86Instruction {
             X86Instruction::CmpReg { .. } => 12,
             X86Instruction::CmpImm { .. } => 13,
             X86Instruction::Cmov { .. } => 14,
+            X86Instruction::Jcc { .. } => 15,
         }
     }
 
@@ -347,7 +364,7 @@ impl InstructionType for X86Instruction {
     }
 
     fn has_side_effects(&self) -> bool {
-        // x86 MOV and CMOV do not touch EFLAGS. Every other variant in
+        // MOV / CMOV / Jcc do not touch EFLAGS. Every other variant in
         // the current set sets or clobbers flag bits, which is observable
         // state beyond the destination register.
         !matches!(
@@ -355,6 +372,7 @@ impl InstructionType for X86Instruction {
             X86Instruction::MovReg { .. }
                 | X86Instruction::MovImm { .. }
                 | X86Instruction::Cmov { .. }
+                | X86Instruction::Jcc { .. }
         )
     }
 }
@@ -379,6 +397,8 @@ impl fmt::Display for X86Instruction {
             X86Instruction::CmpImm { rn, imm } => write!(f, "{} {}, {}", mn, rn, imm),
             // Render as e.g. `cmove rax, rbx` (mnemonic + condition suffix).
             X86Instruction::Cmov { rd, rs, cond } => write!(f, "cmov{} {}, {}", cond, rd, rs),
+            // Target is opaque to the IR; render with a placeholder.
+            X86Instruction::Jcc { cond } => write!(f, "j{} <target>", cond),
         }
     }
 }
@@ -456,13 +476,16 @@ impl ISA for X86_32 {
 }
 
 /// Helper used by both `FlagsAnalysis<X86Instruction> for X86_64` and
-/// `for X86_32`: every x86 mnemonic in the current set writes EFLAGS
-/// except for `Mov*` and `Cmov` (the latter reads but does not write
-/// EFLAGS — issue #74).
+/// `for X86_32`. MOV / CMOV / Jcc do not write EFLAGS (the latter two
+/// read EFLAGS — issue #74); every other variant in the current set
+/// does.
 fn x86_modifies_flags(instr: &X86Instruction) -> bool {
     !matches!(
         instr,
-        X86Instruction::MovReg { .. } | X86Instruction::MovImm { .. } | X86Instruction::Cmov { .. }
+        X86Instruction::MovReg { .. }
+            | X86Instruction::MovImm { .. }
+            | X86Instruction::Cmov { .. }
+            | X86Instruction::Jcc { .. }
     )
 }
 
@@ -641,6 +664,7 @@ impl crate::isa::traits::Assembler<X86Instruction> for X86_32 {
             X86Instruction::CmpReg { rn, rs } => reg_ok_32(*rn) && reg_ok_32(*rs),
             X86Instruction::CmpImm { rn, .. } => reg_ok_32(*rn),
             X86Instruction::Cmov { rd, rs, .. } => reg_ok_32(*rd) && reg_ok_32(*rs),
+            X86Instruction::Jcc { .. } => true,
         }
     }
 }
@@ -794,6 +818,10 @@ impl X86Mutator {
                     *rs = self.pick_register(rng);
                 }
             }
+            // Jcc is a terminator; mutation never reaches it because the
+            // search pool excludes terminators. Keep the arm as a no-op
+            // so an accidental call doesn't panic.
+            X86Instruction::Jcc { .. } => {}
         }
     }
 
@@ -837,6 +865,8 @@ impl X86Mutator {
             // Cmov has a unique shape (rd, rs, cond) with no opcode-shape
             // siblings; keep it unchanged in the opcode-bridge mutator.
             X86Instruction::Cmov { .. } => current,
+            // Jcc is a terminator and should never reach mutation; preserve it.
+            X86Instruction::Jcc { .. } => current,
         };
     }
 
@@ -1019,6 +1049,8 @@ fn with_destination(instr: X86Instruction, new_rd: X86Register) -> X86Instructio
             rs,
             cond,
         },
+        // Jcc has no register operand; ignore the requested rd swap.
+        X86Instruction::Jcc { cond } => X86Instruction::Jcc { cond },
     }
 }
 
@@ -1044,6 +1076,7 @@ fn with_sources(instr: X86Instruction, new_rs: X86Register, new_imm: i64) -> X86
             rs: new_rs,
             cond,
         },
+        X86Instruction::Jcc { cond } => X86Instruction::Jcc { cond },
     }
 }
 
@@ -1669,5 +1702,59 @@ mod tests {
                 }
             }
         }
+    }
+
+    // --- issue #74: Jcc IR + is_terminator ---
+
+    #[test]
+    fn jcc_is_terminator() {
+        let jcc = X86Instruction::Jcc {
+            cond: X86Condition::E,
+        };
+        assert!(jcc.is_terminator());
+    }
+
+    #[test]
+    fn non_jcc_x86_instructions_are_not_terminators() {
+        assert!(
+            !X86Instruction::MovImm {
+                rd: X86Register::RAX,
+                imm: 0
+            }
+            .is_terminator()
+        );
+        assert!(
+            !X86Instruction::CmpReg {
+                rn: X86Register::RAX,
+                rs: X86Register::RBX
+            }
+            .is_terminator()
+        );
+        assert!(
+            !X86Instruction::Cmov {
+                rd: X86Register::RAX,
+                rs: X86Register::RBX,
+                cond: X86Condition::E
+            }
+            .is_terminator()
+        );
+    }
+
+    #[test]
+    fn jcc_has_no_destination_and_no_source_registers() {
+        let jcc = X86Instruction::Jcc {
+            cond: X86Condition::NE,
+        };
+        assert_eq!(jcc.destination(), None);
+        assert!(jcc.source_registers().is_empty());
+    }
+
+    #[test]
+    fn jcc_does_not_modify_flags_and_has_no_side_effects() {
+        let jcc = X86Instruction::Jcc {
+            cond: X86Condition::B,
+        };
+        assert!(!x86_modifies_flags(&jcc));
+        assert!(!jcc.has_side_effects());
     }
 }

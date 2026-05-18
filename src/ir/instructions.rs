@@ -644,6 +644,21 @@ pub fn split_terminator(seq: &[Instruction]) -> (&[Instruction], Option<&Instruc
     }
 }
 
+/// Issue #74: x86 mirror of `split_terminator`. Peels a trailing Jcc
+/// off the sequence so the optimizer can reason about the straight-line
+/// prefix while leaving the branch terminator pinned in the binary.
+pub fn split_terminator_x86(
+    seq: &[crate::isa::x86::X86Instruction],
+) -> (
+    &[crate::isa::x86::X86Instruction],
+    Option<&crate::isa::x86::X86Instruction>,
+) {
+    match seq.last() {
+        Some(last) if last.is_terminator() => (&seq[..seq.len() - 1], Some(last)),
+        _ => (seq, None),
+    }
+}
+
 impl Instruction {
     /// Returns true if this instruction modifies NZCV flags.
     ///
@@ -3683,5 +3698,44 @@ mod tests {
             }
             .is_encodable_aarch64()
         );
+    }
+
+    // --- issue #74: split_terminator_x86 ---
+
+    #[test]
+    fn split_terminator_x86_peels_trailing_jcc() {
+        use crate::isa::x86::{X86Condition, X86Instruction, X86Register};
+        let seq = vec![
+            X86Instruction::CmpReg {
+                rn: X86Register::RAX,
+                rs: X86Register::RBX,
+            },
+            X86Instruction::Jcc {
+                cond: X86Condition::E,
+            },
+        ];
+        let (prefix, term) = split_terminator_x86(&seq);
+        assert_eq!(prefix.len(), 1);
+        assert!(matches!(prefix[0], X86Instruction::CmpReg { .. }));
+        assert!(matches!(term, Some(X86Instruction::Jcc { .. })));
+    }
+
+    #[test]
+    fn split_terminator_x86_returns_none_when_no_terminator() {
+        use crate::isa::x86::{X86Instruction, X86Register};
+        let seq = vec![X86Instruction::MovReg {
+            rd: X86Register::RAX,
+            rs: X86Register::RBX,
+        }];
+        let (prefix, term) = split_terminator_x86(&seq);
+        assert_eq!(prefix.len(), 1);
+        assert!(term.is_none());
+    }
+
+    #[test]
+    fn split_terminator_x86_handles_empty_sequence() {
+        let (prefix, term) = split_terminator_x86(&[]);
+        assert!(prefix.is_empty());
+        assert!(term.is_none());
     }
 }

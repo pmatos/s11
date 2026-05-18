@@ -727,8 +727,17 @@ pub fn check_equivalence_x86(
     seq2: &[crate::isa::x86::X86Instruction],
     config: &X86EquivalenceConfig,
 ) -> EquivalenceResult {
-    // Fast path: 10 random inputs.
-    if let Some(refutation) = run_fast_path_x86(seq1, seq2, config) {
+    // Issue #74: peel Jcc terminators and require both sides to share
+    // the exact same terminator (struct equality on the condition code).
+    // Mirrors the AArch64 precheck in `check_equivalence`.
+    let (prefix1, terminator1) = crate::ir::instructions::split_terminator_x86(seq1);
+    let (prefix2, terminator2) = crate::ir::instructions::split_terminator_x86(seq2);
+    if terminator1 != terminator2 {
+        return EquivalenceResult::NotEquivalent;
+    }
+
+    // Fast path: 10 random inputs over the prefixes only.
+    if let Some(refutation) = run_fast_path_x86(prefix1, prefix2, config) {
         return refutation;
     }
     if config.fast_only {
@@ -741,8 +750,8 @@ pub fn check_equivalence_x86(
     };
     let solver = create_solver_with_config(&solver_config);
     let initial = crate::semantics::smt_x86::MachineStateX86::new_symbolic("init", config.width);
-    let final1 = crate::semantics::smt_x86::apply_sequence(initial.clone(), seq1);
-    let final2 = crate::semantics::smt_x86::apply_sequence(initial, seq2);
+    let final1 = crate::semantics::smt_x86::apply_sequence(initial.clone(), prefix1);
+    let final2 = crate::semantics::smt_x86::apply_sequence(initial, prefix2);
 
     let mut disjuncts: Vec<z3::ast::Bool> = Vec::new();
     for reg in config.live_out.iter() {
@@ -979,6 +988,73 @@ mod tests {
         cfg.random_test_count = 0;
         assert!(matches!(
             check_equivalence_x86(&seq1, &seq2, &cfg),
+            EquivalenceResult::NotEquivalent
+        ));
+    }
+
+    #[test]
+    fn x86_rejects_sequences_with_differing_jcc_terminators() {
+        use crate::isa::x86::X86Condition;
+        // Same prefix, different Jcc conditions => not equivalent.
+        let prefix = X86Instruction::CmpReg {
+            rn: X86Register::RAX,
+            rs: X86Register::RBX,
+        };
+        let seq_je = vec![
+            prefix.clone(),
+            X86Instruction::Jcc {
+                cond: X86Condition::E,
+            },
+        ];
+        let seq_jne = vec![
+            prefix,
+            X86Instruction::Jcc {
+                cond: X86Condition::NE,
+            },
+        ];
+        let cfg = X86EquivalenceConfig::new_for_64().live_out(X86LiveOutMask::empty());
+        assert!(matches!(
+            check_equivalence_x86(&seq_je, &seq_jne, &cfg),
+            EquivalenceResult::NotEquivalent
+        ));
+    }
+
+    #[test]
+    fn x86_accepts_sequences_with_matching_jcc_terminators() {
+        use crate::isa::x86::X86Condition;
+        let prefix = X86Instruction::CmpReg {
+            rn: X86Register::RAX,
+            rs: X86Register::RBX,
+        };
+        let jcc = X86Instruction::Jcc {
+            cond: X86Condition::E,
+        };
+        let seq1 = vec![prefix.clone(), jcc.clone()];
+        let seq2 = vec![prefix, jcc];
+        let cfg = X86EquivalenceConfig::new_for_64().live_out(X86LiveOutMask::empty());
+        assert_eq!(
+            check_equivalence_x86(&seq1, &seq2, &cfg),
+            EquivalenceResult::Equivalent
+        );
+    }
+
+    #[test]
+    fn x86_rejects_terminator_present_on_only_one_side() {
+        use crate::isa::x86::X86Condition;
+        let prefix = X86Instruction::CmpReg {
+            rn: X86Register::RAX,
+            rs: X86Register::RBX,
+        };
+        let seq_with_jcc = vec![
+            prefix.clone(),
+            X86Instruction::Jcc {
+                cond: X86Condition::E,
+            },
+        ];
+        let seq_without = vec![prefix];
+        let cfg = X86EquivalenceConfig::new_for_64().live_out(X86LiveOutMask::empty());
+        assert!(matches!(
+            check_equivalence_x86(&seq_with_jcc, &seq_without, &cfg),
             EquivalenceResult::NotEquivalent
         ));
     }
