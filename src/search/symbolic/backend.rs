@@ -77,10 +77,14 @@ impl SymbolicBackend<crate::isa::AArch64> for crate::isa::AArch64 {
     ) -> (EquivalenceResult, EquivalenceMetrics) {
         // Treat NZCV as live-out so the solver cannot certify a
         // flag-divergent rewrite (see synthesis.rs's previous body).
+        // `with_memory(true)` is informational here — the entry point in
+        // `check_equivalence_with_config` re-derives it from
+        // `touches_memory()` on the candidate / target. See ADR-0007.
         let cfg = crate::semantics::EquivalenceConfig::with_live_out(live_out.clone())
             .random_tests(5)
             .timeout(timeout)
-            .with_flags(true);
+            .with_flags(true)
+            .with_memory(true);
         crate::semantics::equivalence::check_equivalence_with_config_metrics(target, proposal, &cfg)
     }
 
