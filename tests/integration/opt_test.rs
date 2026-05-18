@@ -41,6 +41,9 @@ fn find_encoding(elf_path: &Path, pattern: &[u8], label: &str) -> u64 {
         }
         let file_start = section.sh_offset as usize;
         let size = section.sh_size as usize;
+        if size < pattern.len() {
+            continue;
+        }
         let bytes = &data[file_start..file_start + size];
         for off in (0..size.saturating_sub(pattern.len()) + 1).step_by(4) {
             if &bytes[off..off + pattern.len()] == pattern {
