@@ -1796,64 +1796,101 @@ mod tests {
         disassemble_and_verify(&bytes, "lsl", &["x0", "x1", "x2"]);
     }
 
+    fn assert_csel_family_disasm(bytes: &[u8], mnem: &str, cond: Condition, expected_cond: &str) {
+        use capstone::prelude::*;
+        let cs = Capstone::new()
+            .arm64()
+            .mode(arch::arm64::ArchMode::Arm)
+            .build()
+            .expect("Capstone init");
+        let insns = cs
+            .disasm_all(bytes, 0)
+            .unwrap_or_else(|e| panic!("{mnem} cond={cond:?}: disasm failed: {e}"));
+        assert_eq!(
+            insns.len(),
+            1,
+            "{mnem} cond={cond:?}: expected 1 instruction, got {}",
+            insns.len()
+        );
+        let insn = insns.iter().next().expect("one instruction");
+        let got_mnem = insn.mnemonic().expect("mnemonic");
+        let got_ops = insn.op_str().expect("op_str");
+        assert_eq!(
+            got_mnem, mnem,
+            "{mnem} cond={cond:?}: wrong mnemonic '{got_mnem}' (ops='{got_ops}')"
+        );
+        for needle in ["x0", "x1", "x2", expected_cond] {
+            assert!(
+                got_ops.contains(needle),
+                "{mnem} cond={cond:?}: ops '{got_ops}' missing '{needle}'"
+            );
+        }
+    }
+
+    /// Acceptance criterion for issue #64: every CSEL-family mnemonic encodes
+    /// for every condition code in `Condition` and round-trips through Capstone.
+    /// Capstone canonicalises CS→hs and CC→lo (preferred AArch64 mnemonics).
     #[test]
-    fn test_csel_correctness() {
-        let mut assembler = AArch64Assembler::new();
-        let instructions = vec![Instruction::Csel {
+    fn csel_family_round_trip_all_conditions() {
+        let conds: &[(Condition, &str)] = &[
+            (Condition::EQ, "eq"),
+            (Condition::NE, "ne"),
+            (Condition::CS, "hs"),
+            (Condition::CC, "lo"),
+            (Condition::MI, "mi"),
+            (Condition::PL, "pl"),
+            (Condition::VS, "vs"),
+            (Condition::VC, "vc"),
+            (Condition::HI, "hi"),
+            (Condition::LS, "ls"),
+            (Condition::GE, "ge"),
+            (Condition::LT, "lt"),
+            (Condition::GT, "gt"),
+            (Condition::LE, "le"),
+            (Condition::AL, "al"),
+            (Condition::NV, "nv"),
+        ];
+
+        let build_csel: fn(Condition) -> Instruction = |c| Instruction::Csel {
             rd: Register::X0,
             rn: Register::X1,
             rm: Register::X2,
-            cond: Condition::EQ,
-        }];
-        let bytes = assembler
-            .assemble_instructions(&instructions, 0)
-            .expect("CSEL encoding should succeed");
-        disassemble_and_verify(&bytes, "csel", &["x0", "x1", "x2", "eq"]);
-    }
+            cond: c,
+        };
+        let build_csinc: fn(Condition) -> Instruction = |c| Instruction::Csinc {
+            rd: Register::X0,
+            rn: Register::X1,
+            rm: Register::X2,
+            cond: c,
+        };
+        let build_csinv: fn(Condition) -> Instruction = |c| Instruction::Csinv {
+            rd: Register::X0,
+            rn: Register::X1,
+            rm: Register::X2,
+            cond: c,
+        };
+        let build_csneg: fn(Condition) -> Instruction = |c| Instruction::Csneg {
+            rd: Register::X0,
+            rn: Register::X1,
+            rm: Register::X2,
+            cond: c,
+        };
+        let mnemonics: &[(&str, fn(Condition) -> Instruction)] = &[
+            ("csel", build_csel),
+            ("csinc", build_csinc),
+            ("csinv", build_csinv),
+            ("csneg", build_csneg),
+        ];
 
-    #[test]
-    fn test_csinc_correctness() {
         let mut assembler = AArch64Assembler::new();
-        let instructions = vec![Instruction::Csinc {
-            rd: Register::X3,
-            rn: Register::X4,
-            rm: Register::X5,
-            cond: Condition::NE,
-        }];
-        let bytes = assembler
-            .assemble_instructions(&instructions, 0)
-            .expect("CSINC encoding should succeed");
-        disassemble_and_verify(&bytes, "csinc", &["x3", "x4", "x5", "ne"]);
-    }
-
-    #[test]
-    fn test_csinv_correctness() {
-        let mut assembler = AArch64Assembler::new();
-        let instructions = vec![Instruction::Csinv {
-            rd: Register::X10,
-            rn: Register::X11,
-            rm: Register::X12,
-            cond: Condition::LT,
-        }];
-        let bytes = assembler
-            .assemble_instructions(&instructions, 0)
-            .expect("CSINV encoding should succeed");
-        disassemble_and_verify(&bytes, "csinv", &["x10", "x11", "x12", "lt"]);
-    }
-
-    #[test]
-    fn test_csneg_correctness() {
-        let mut assembler = AArch64Assembler::new();
-        let instructions = vec![Instruction::Csneg {
-            rd: Register::X20,
-            rn: Register::X21,
-            rm: Register::X22,
-            cond: Condition::GE,
-        }];
-        let bytes = assembler
-            .assemble_instructions(&instructions, 0)
-            .expect("CSNEG encoding should succeed");
-        disassemble_and_verify(&bytes, "csneg", &["x20", "x21", "x22", "ge"]);
+        for &(cond, cond_str) in conds {
+            for &(mnem, build) in mnemonics {
+                let bytes = assembler
+                    .assemble_instructions(&[build(cond)], 0)
+                    .unwrap_or_else(|e| panic!("{mnem} cond={cond:?}: encode failed: {e}"));
+                assert_csel_family_disasm(&bytes, mnem, cond, cond_str);
+            }
+        }
     }
 
     #[test]
