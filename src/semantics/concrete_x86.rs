@@ -42,6 +42,13 @@ pub fn apply_instruction_concrete_x86(
         X86Instruction::XorImm { rd, imm } => apply_binop_imm(&mut state, *rd, *imm, Binop::Xor),
         X86Instruction::CmpReg { rn, rs } => apply_cmp_reg(&mut state, *rn, *rs),
         X86Instruction::CmpImm { rn, imm } => apply_cmp_imm(&mut state, *rn, *imm),
+        X86Instruction::Cmov { rd, rs, cond } => {
+            if state.get_flags().evaluate(*cond) {
+                let v = state.get_register(*rs);
+                state.set_register(*rd, v);
+            }
+            // CMOV does not write EFLAGS regardless of the branch taken.
+        }
     }
     state
 }
@@ -436,5 +443,51 @@ mod tests {
 
         let with_flags = no_flags.with_flags(true);
         assert!(!states_equal_for_live_out_x86(&a, &b, &with_flags));
+    }
+
+    // --- issue #74: CMOVcc concrete semantics ---
+
+    #[test]
+    fn cmov_when_condition_true_writes_source() {
+        use crate::isa::x86::X86Condition;
+        // ZF=1, so CMOVE rax, rbx should copy rbx into rax.
+        let mut state = X86ConcreteMachineState::new_zeroed(64);
+        state.set_register(X86Register::RAX, ConcreteValue::new(0xaa));
+        state.set_register(X86Register::RBX, ConcreteValue::new(0xbb));
+        let mut flags = Eflags::new();
+        flags.zf = true;
+        state.set_flags(flags);
+
+        let after = apply_instruction_concrete_x86(
+            state,
+            &X86Instruction::Cmov {
+                rd: X86Register::RAX,
+                rs: X86Register::RBX,
+                cond: X86Condition::E,
+            },
+        );
+        assert_eq!(after.get_register(X86Register::RAX).as_u64(), 0xbb);
+        // CMOV does not modify flags.
+        assert!(after.get_flags().zf);
+    }
+
+    #[test]
+    fn cmov_when_condition_false_preserves_dest() {
+        use crate::isa::x86::X86Condition;
+        // ZF=0, so CMOVE rax, rbx must NOT update rax.
+        let mut state = X86ConcreteMachineState::new_zeroed(64);
+        state.set_register(X86Register::RAX, ConcreteValue::new(0xaa));
+        state.set_register(X86Register::RBX, ConcreteValue::new(0xbb));
+        // zf stays false.
+
+        let after = apply_instruction_concrete_x86(
+            state,
+            &X86Instruction::Cmov {
+                rd: X86Register::RAX,
+                rs: X86Register::RBX,
+                cond: X86Condition::E,
+            },
+        );
+        assert_eq!(after.get_register(X86Register::RAX).as_u64(), 0xaa);
     }
 }

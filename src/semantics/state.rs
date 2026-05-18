@@ -161,6 +161,34 @@ impl Eflags {
         }
     }
 
+    /// Evaluate an x86 condition code against the current flag bits
+    /// (issue #74). Mirrors `ConditionFlags::evaluate` for AArch64.
+    ///
+    /// Intentionally does not read `self.af`; none of the 16 canonical
+    /// x86 condition codes consult AF, and `MachineStateX86` does not
+    /// model AF symbolically (see `src/semantics/smt_x86.rs`).
+    pub fn evaluate(&self, cond: crate::isa::x86::X86Condition) -> bool {
+        use crate::isa::x86::X86Condition;
+        match cond {
+            X86Condition::E => self.zf,
+            X86Condition::NE => !self.zf,
+            X86Condition::B => self.cf,
+            X86Condition::AE => !self.cf,
+            X86Condition::BE => self.cf || self.zf,
+            X86Condition::A => !self.cf && !self.zf,
+            X86Condition::L => self.sf != self.of,
+            X86Condition::GE => self.sf == self.of,
+            X86Condition::LE => self.zf || (self.sf != self.of),
+            X86Condition::G => !self.zf && (self.sf == self.of),
+            X86Condition::S => self.sf,
+            X86Condition::NS => !self.sf,
+            X86Condition::O => self.of,
+            X86Condition::NO => !self.of,
+            X86Condition::P => self.pf,
+            X86Condition::NP => !self.pf,
+        }
+    }
+
     /// Flags from `lhs - rhs == result` (CMP and SUB at width `width`).
     /// CF is set if a borrow occurred (lhs < rhs at the operand width) —
     /// opposite of AArch64.
@@ -853,5 +881,113 @@ mod tests {
         let b = ConcreteMachineState::new_zeroed();
         a.write_bytes(0x100, 0, AccessWidth::Word);
         assert_eq!(a, b, "writing zeroes must not perturb structural equality");
+    }
+
+    // ---- Eflags::evaluate(X86Condition) (issue #74) ----
+
+    #[test]
+    fn eflags_evaluate_e_reads_zf() {
+        use crate::isa::x86::X86Condition;
+        let mut f = Eflags::new();
+        f.zf = true;
+        assert!(f.evaluate(X86Condition::E));
+        assert!(!f.evaluate(X86Condition::NE));
+        f.zf = false;
+        assert!(!f.evaluate(X86Condition::E));
+        assert!(f.evaluate(X86Condition::NE));
+    }
+
+    #[test]
+    fn eflags_evaluate_b_reads_cf_unsigned_below() {
+        use crate::isa::x86::X86Condition;
+        let mut f = Eflags::new();
+        f.cf = true;
+        assert!(f.evaluate(X86Condition::B));
+        assert!(!f.evaluate(X86Condition::AE));
+        f.cf = false;
+        assert!(!f.evaluate(X86Condition::B));
+        assert!(f.evaluate(X86Condition::AE));
+    }
+
+    #[test]
+    fn eflags_evaluate_l_compares_sf_vs_of_signed_less() {
+        use crate::isa::x86::X86Condition;
+        let mut f = Eflags::new();
+        // L is true iff SF != OF.
+        f.sf = true;
+        f.of = false;
+        assert!(f.evaluate(X86Condition::L));
+        assert!(!f.evaluate(X86Condition::GE));
+        f.of = true;
+        assert!(!f.evaluate(X86Condition::L));
+        assert!(f.evaluate(X86Condition::GE));
+    }
+
+    #[test]
+    fn eflags_evaluate_ble_combines_zf_and_signed_less() {
+        use crate::isa::x86::X86Condition;
+        // BE: cf || zf; LE: zf || (sf != of).
+        let mut f = Eflags::new();
+        f.cf = true;
+        assert!(f.evaluate(X86Condition::BE));
+        f.cf = false;
+        f.zf = true;
+        assert!(f.evaluate(X86Condition::BE));
+        assert!(f.evaluate(X86Condition::LE));
+        f.zf = false;
+        f.sf = true;
+        f.of = false;
+        assert!(f.evaluate(X86Condition::LE));
+        assert!(!f.evaluate(X86Condition::G));
+    }
+
+    #[test]
+    fn eflags_evaluate_p_reads_pf_only() {
+        use crate::isa::x86::X86Condition;
+        let mut f = Eflags::new();
+        f.pf = true;
+        assert!(f.evaluate(X86Condition::P));
+        assert!(!f.evaluate(X86Condition::NP));
+        f.pf = false;
+        assert!(!f.evaluate(X86Condition::P));
+        assert!(f.evaluate(X86Condition::NP));
+    }
+
+    #[test]
+    fn eflags_evaluate_never_reads_af() {
+        // x86 condition codes do not consult AF — enforce by toggling AF
+        // across all 16 codes and asserting the result is invariant. Acts
+        // as a tripwire if a future condition arm accidentally reads af.
+        use crate::isa::x86::X86Condition;
+        let mut f = Eflags::new();
+        f.cf = true;
+        f.pf = true;
+        f.zf = true;
+        f.sf = true;
+        f.of = true;
+        for cond in [
+            X86Condition::E,
+            X86Condition::NE,
+            X86Condition::B,
+            X86Condition::AE,
+            X86Condition::BE,
+            X86Condition::A,
+            X86Condition::L,
+            X86Condition::GE,
+            X86Condition::LE,
+            X86Condition::G,
+            X86Condition::S,
+            X86Condition::NS,
+            X86Condition::O,
+            X86Condition::NO,
+            X86Condition::P,
+            X86Condition::NP,
+        ] {
+            f.af = false;
+            let v0 = f.evaluate(cond);
+            f.af = true;
+            let v1 = f.evaluate(cond);
+            assert_eq!(v0, v1, "evaluate({:?}) must not depend on AF", cond);
+        }
     }
 }

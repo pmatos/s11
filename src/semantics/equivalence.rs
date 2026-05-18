@@ -750,6 +750,13 @@ pub fn check_equivalence_x86(
         let v2 = final2.get_register(*reg);
         disjuncts.push(v1.eq(v2).not());
     }
+    // Issue #74: when the caller declares flags live, any of the five
+    // tracked EFLAGS bits diverging is enough to refute equivalence.
+    if config.live_out.flags_live() {
+        disjuncts.push(crate::semantics::smt_x86::flags_not_equal_x86(
+            &final1, &final2,
+        ));
+    }
     let any_diff = if disjuncts.is_empty() {
         z3::ast::Bool::from_bool(false)
     } else {
@@ -944,6 +951,73 @@ mod tests {
             .live_out(X86LiveOutMask::from_registers(vec![X86Register::RAX]));
         assert_eq!(
             check_equivalence_x86(&seq1, &seq2, &cfg),
+            EquivalenceResult::Equivalent
+        );
+    }
+
+    // --- issue #74: SMT path catches flag-only divergence when flags_live ---
+
+    #[test]
+    fn x86_smt_path_distinguishes_cmps_with_different_operands_when_flags_live() {
+        // `cmp rax, rbx` and `cmp rax, rcx` both write EFLAGS symbolically
+        // (cycle 3) but their flag effects diverge whenever rbx != rcx.
+        // The SMT flag disjunct (cycle 4) must let Z3 find that model and
+        // refute equivalence under flags_live=true.
+        //
+        // Zero `random_test_count` to force-skip the fast path so the
+        // assertion lands squarely on the SMT solver path.
+        let seq1 = vec![X86Instruction::CmpReg {
+            rn: X86Register::RAX,
+            rs: X86Register::RBX,
+        }];
+        let seq2 = vec![X86Instruction::CmpReg {
+            rn: X86Register::RAX,
+            rs: X86Register::RCX,
+        }];
+        let mut cfg =
+            X86EquivalenceConfig::new_for_64().live_out(X86LiveOutMask::empty().with_flags(true));
+        cfg.random_test_count = 0;
+        assert!(matches!(
+            check_equivalence_x86(&seq1, &seq2, &cfg),
+            EquivalenceResult::NotEquivalent
+        ));
+    }
+
+    #[test]
+    fn x86_smt_path_treats_cmps_with_different_operands_as_equivalent_without_flags_live() {
+        // Without flags_live=true, the same CMP pair must still pass on
+        // the SMT path — the disjunct is gated on `flags_live`, and the
+        // register-disjunct list is empty (no live-out registers), so
+        // equivalence is vacuously true.
+        let seq1 = vec![X86Instruction::CmpReg {
+            rn: X86Register::RAX,
+            rs: X86Register::RBX,
+        }];
+        let seq2 = vec![X86Instruction::CmpReg {
+            rn: X86Register::RAX,
+            rs: X86Register::RCX,
+        }];
+        let mut cfg = X86EquivalenceConfig::new_for_64().live_out(X86LiveOutMask::empty());
+        cfg.random_test_count = 0;
+        assert_eq!(
+            check_equivalence_x86(&seq1, &seq2, &cfg),
+            EquivalenceResult::Equivalent
+        );
+    }
+
+    #[test]
+    fn x86_smt_path_equates_two_cmps_with_same_operands_under_flags_live() {
+        // Identical CMPs must remain equivalent on the SMT path even with
+        // flags_live=true — the flag-disjunct should be UNSAT.
+        let cmp = vec![X86Instruction::CmpReg {
+            rn: X86Register::RAX,
+            rs: X86Register::RBX,
+        }];
+        let mut cfg =
+            X86EquivalenceConfig::new_for_64().live_out(X86LiveOutMask::empty().with_flags(true));
+        cfg.random_test_count = 0;
+        assert_eq!(
+            check_equivalence_x86(&cmp.clone(), &cmp, &cfg),
             EquivalenceResult::Equivalent
         );
     }
