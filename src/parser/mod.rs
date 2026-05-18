@@ -205,9 +205,14 @@ pub fn parse_immediate(s: &str) -> Result<i64, String> {
         return Err("empty immediate value".to_string());
     }
 
-    // Handle hex
+    // Handle hex. Positive hex parses as u64 then reinterprets as i64 so that
+    // high-bit logical-immediate masks (e.g., 0x8000_0000_0000_0000) round-trip
+    // from Capstone text into the IR — i64::from_str_radix would reject them as
+    // overflow.
     if let Some(hex) = s.strip_prefix("0x").or_else(|| s.strip_prefix("0X")) {
-        i64::from_str_radix(hex, 16).map_err(|e| format!("invalid hex immediate '{}': {}", s, e))
+        u64::from_str_radix(hex, 16)
+            .map(|v| v as i64)
+            .map_err(|e| format!("invalid hex immediate '{}': {}", s, e))
     } else if let Some(hex) = s.strip_prefix("-0x").or_else(|| s.strip_prefix("-0X")) {
         i64::from_str_radix(hex, 16)
             .map(|v| -v)
@@ -1728,6 +1733,11 @@ mod tests {
         // disassembly of an ELF region containing `ands x?, x?, #imm` round-trips.
         assert!(parse_line("ands x0, x1, #0xff").is_ok());
         assert!(parse_line("ands x0, x1, #5").is_err());
+
+        // High-bit logical immediates (>= 2^63) must parse from positive hex.
+        // i64::from_str_radix would overflow; we wrap through u64.
+        assert!(parse_line("and x0, x1, #0x8000000000000000").is_ok());
+        assert!(parse_line("tst x1, #0x8000000000000000").is_ok());
     }
 
     // Full assembly parsing tests
