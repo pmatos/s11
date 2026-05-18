@@ -170,13 +170,11 @@ pub fn flags_live_out(instructions: &[Instruction]) -> bool {
 /// Returns true if any instruction reads NZCV flags before any instruction writes them.
 ///
 /// In live-in terms: NZCV is part of the live-in set iff this returns true.
-/// Used by the prompt builder when flags-live-in support is added (ADR-0001
-/// defines the helper; ADR-0003 omits flags from the prompt for the MVP, so
-/// the function has no consumer yet).
-///
-/// Issue #77 stage 1 step 14: same FlagsAnalysis routing as `flags_live_out`
-/// above, for parity with the upcoming x86 wire-up.
-#[allow(dead_code)]
+/// Consumed by the equivalence fast path to decide whether initial NZCV must
+/// be varied across random/edge-case inputs (see `fast_path_initial_nzcv_variants`
+/// in `src/semantics/equivalence.rs`). ADR-0001 defines the helper shape;
+/// ADR-0003 omits flags from the LLM prompt for the MVP. Routed through
+/// `FlagsAnalysis<I>` (ADR-0004 decision 7) for parity with the x86 wire-up.
 pub fn reads_flags_before_writing(instructions: &[Instruction]) -> bool {
     use crate::isa::{AArch64, FlagsAnalysis};
     for instr in instructions {
