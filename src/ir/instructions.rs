@@ -3700,7 +3700,7 @@ mod tests {
         );
     }
 
-    // --- issue #74: split_terminator_x86 ---
+    // --- split_terminator_x86 ---
 
     #[test]
     fn split_terminator_x86_peels_trailing_jcc() {

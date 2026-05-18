@@ -1356,7 +1356,7 @@ fn optimize_elf_binary_x86(
     // zero displacement and overwrite the real branch target. Peel the
     // Jcc from `final_ir` and splice the ORIGINAL Jcc bytes back at the
     // same offset they had in the source window so the displacement
-    // stays valid (reviewer-flagged P1 on PR #268).
+    // stays valid.
     let (final_prefix_ir, final_terminator) =
         crate::ir::instructions::split_terminator_x86(&final_ir);
     let (_, original_terminator) = crate::ir::instructions::split_terminator_x86(&ir);
@@ -2564,7 +2564,7 @@ mod cli_helper_tests {
         );
     }
 
-    // --- issue #74: end-to-end CMP + CMOV / Jcc pipeline ---
+    // --- end-to-end CMP + CMOV / Jcc pipeline ---
 
     #[test]
     fn issue_74_cmp_cmov_round_trips_through_asm_disasm_parse() {
@@ -2701,7 +2701,7 @@ mod cli_helper_tests {
         );
     }
 
-    // --- x86 Jcc-byte preservation across reassembly (PR #268 review) ---
+    // --- x86 Jcc-byte preservation across reassembly ---
 
     #[test]
     fn reassemble_x86_no_terminator_returns_assembled_bytes_unchanged() {

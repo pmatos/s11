@@ -530,7 +530,7 @@ mod tests {
         );
     }
 
-    // --- issue #74: CMOV / Jcc mnemonic parsing ---
+    // --- CMOV / Jcc mnemonic parsing ---
 
     #[test]
     fn parses_cmove_rax_rbx() {

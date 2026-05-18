@@ -150,7 +150,7 @@ mod tests {
         assert_eq!(sequence_cost(&seq, &CostMetric::CodeSize, 32), 4);
     }
 
-    // --- issue #74: CMOV / Jcc cost ---
+    // --- CMOV / Jcc cost ---
 
     #[test]
     fn cmov_code_size_includes_rex_on_64_bit() {

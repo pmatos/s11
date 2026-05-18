@@ -3,7 +3,7 @@
 //! Width-parameterised: `MachineStateX86` carries the bitvector width so
 //! the same module handles both x86-64 (width=64) and x86-32 (width=32).
 //!
-//! Symbolic EFLAGS (issue #74) tracks five 1-bit flag BVs: CF, PF, ZF,
+//! Symbolic EFLAGS tracks five 1-bit flag BVs: CF, PF, ZF,
 //! SF, OF. AF is intentionally not modelled — none of the canonical x86
 //! condition codes (see `Eflags::evaluate`) reads AF, and the concrete
 //! interpreter leaves AF as `false`. If a future feature requires AF
@@ -85,7 +85,7 @@ impl MachineStateX86 {
     }
 }
 
-// --- symbolic EFLAGS helpers (issue #74) ---
+// --- symbolic EFLAGS helpers ---
 
 fn bv_one() -> BV {
     BV::from_u64(1, 1)
@@ -205,7 +205,7 @@ pub fn compute_eflags_logical(result: &BV, width: u32) -> EflagsBvs {
 
 /// Apply a single x86 instruction symbolically. Arithmetic / logic /
 /// CMP arms bind the five tracked flag BVs via `compute_eflags_*`;
-/// CMOV reads them via `x86_condition_to_smt` (issue #74).
+/// CMOV reads them via `x86_condition_to_smt`.
 pub fn apply_instruction(
     mut state: MachineStateX86,
     instruction: &X86Instruction,
@@ -299,7 +299,7 @@ pub fn apply_instruction(
             state.set_register(*rd, result);
             state.set_flags(flags);
         }
-        // CMP sets EFLAGS without writing a register (issue #74).
+        // CMP sets EFLAGS without writing a register.
         X86Instruction::CmpReg { rn, rs } => {
             let lhs = state.get_register(*rn).clone();
             let rhs = state.get_register(*rs).clone();
@@ -443,7 +443,7 @@ mod tests {
         );
     }
 
-    // --- issue #74: CMP writes symbolic EFLAGS ---
+    // --- CMP writes symbolic EFLAGS ---
 
     #[test]
     fn cmp_reg_binds_zf_to_subtraction_equality() {
@@ -501,7 +501,7 @@ mod tests {
         );
     }
 
-    // --- issue #74: symbolic CMOV ---
+    // --- symbolic CMOV ---
 
     #[test]
     fn cmov_ites_rd_on_condition() {
@@ -606,7 +606,7 @@ mod tests {
         assert_eq!(solver.check(), SatResult::Unsat);
     }
 
-    // --- issue #74: concrete↔SMT parity for x86 flag computation ---
+    // --- concrete↔SMT parity for x86 flag computation ---
 
     fn assert_x86_concrete_smt_parity(instr: &X86Instruction, lhs: u64, rhs: u64) {
         use crate::semantics::concrete_x86::apply_instruction_concrete_x86;

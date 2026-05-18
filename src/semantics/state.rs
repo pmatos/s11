@@ -162,7 +162,7 @@ impl Eflags {
     }
 
     /// Evaluate an x86 condition code against the current flag bits
-    /// (issue #74). Mirrors `ConditionFlags::evaluate` for AArch64.
+    ///. Mirrors `ConditionFlags::evaluate` for AArch64.
     ///
     /// Intentionally does not read `self.af`; none of the 16 canonical
     /// x86 condition codes consult AF, and `MachineStateX86` does not
@@ -811,7 +811,7 @@ mod tests {
         assert!(!f.zf);
     }
 
-    // ---- Memory model (issue #68 step 5) ----
+    // ---- Memory model ----
 
     #[test]
     fn read_bytes_returns_zero_on_fresh_state() {
@@ -883,7 +883,7 @@ mod tests {
         assert_eq!(a, b, "writing zeroes must not perturb structural equality");
     }
 
-    // ---- Eflags::evaluate(X86Condition) (issue #74) ----
+    // --- Eflags::evaluate(X86Condition) ---
 
     #[test]
     fn eflags_evaluate_e_reads_zf() {
