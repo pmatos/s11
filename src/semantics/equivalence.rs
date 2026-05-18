@@ -839,6 +839,18 @@ fn run_fast_path_x86(
                 );
             }
         }
+        // Also randomize the five tracked input EFLAGS bits from the
+        // same seed. Otherwise CMOV/Jcc-flag-reading instructions would
+        // see ZF=CF=SF=OF=PF=0 across every trial and a proposal that
+        // ignores incoming flags could pass the fast path (e.g.
+        // `cmovne rax, rbx` accepted as equivalent to `mov rax, rbx`).
+        let mut flags = crate::semantics::state::Eflags::new();
+        flags.cf = (seed & 1) != 0;
+        flags.pf = (seed & 2) != 0;
+        flags.zf = (seed & 4) != 0;
+        flags.sf = (seed & 8) != 0;
+        flags.of = (seed & 16) != 0;
+        state.set_flags(flags);
         let mut s1 = state.clone();
         for instr in seq1 {
             s1 = apply_instruction_concrete_x86(s1, instr);
@@ -1057,6 +1069,32 @@ mod tests {
             check_equivalence_x86(&seq1, &seq2, &cfg),
             EquivalenceResult::Equivalent
         );
+    }
+
+    #[test]
+    fn x86_fast_path_distinguishes_cmov_from_unconditional_mov_under_random_flags() {
+        // Reviewer-supplied counterexample: `cmovne rax, rbx` should NOT
+        // be accepted as equivalent to `mov rax, rbx` because the
+        // original preserves rax when incoming ZF=1. The fast path must
+        // randomize incoming EFLAGS — not just registers — for any trial
+        // to hit a ZF=1 case and refute the rewrite.
+        use crate::isa::x86::X86Condition;
+        let target = vec![X86Instruction::Cmov {
+            rd: X86Register::RAX,
+            rs: X86Register::RBX,
+            cond: X86Condition::NE,
+        }];
+        let proposal = vec![X86Instruction::MovReg {
+            rd: X86Register::RAX,
+            rs: X86Register::RBX,
+        }];
+        let cfg = X86EquivalenceConfig::new(64)
+            .live_out(X86LiveOutMask::from_registers(vec![X86Register::RAX]))
+            .fast_only();
+        assert!(matches!(
+            check_equivalence_x86(&target, &proposal, &cfg),
+            EquivalenceResult::NotEquivalent
+        ));
     }
 
     #[test]
