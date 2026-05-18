@@ -17,7 +17,7 @@ mod test_utils;
 mod validation;
 
 use assembler::AArch64Assembler;
-use elf_patcher::{AddressWindow, ElfPatcher, parse_hex_address};
+use elf_patcher::{AddressWindow, DetectedArch, ElfPatcher, parse_hex_address};
 use ir::instructions::split_terminator;
 use ir::{Instruction, Register};
 use search::config::{
@@ -121,6 +121,19 @@ pub enum CliArch {
     X86_64,
     /// x86-32 (i386) architecture
     X86_32,
+}
+
+impl From<DetectedArch> for CliArch {
+    fn from(arch: DetectedArch) -> Self {
+        // DetectedArch is the closed set of architectures ElfPatcher accepts
+        // (it rejects everything else at construction), so this mapping is
+        // total — there is no RISC-V case to handle here.
+        match arch {
+            DetectedArch::Aarch64 => CliArch::Aarch64,
+            DetectedArch::X86_64 => CliArch::X86_64,
+            DetectedArch::X86_32 => CliArch::X86_32,
+        }
+    }
 }
 
 #[derive(Subcommand)]
@@ -420,6 +433,7 @@ struct OptimizationOptions {
 // mechanical: `match detect_cli_arch_from_elf(...) { Aarch64 => ::<AArch64>,
 // X86_64 => ::<X86_64>, X86_32 => ::<X86_32>, Riscv* => stage 3 }`.
 fn optimize_elf_binary(
+    elf_patcher: &ElfPatcher,
     path: &Path,
     start_addr: u64,
     end_addr: u64,
@@ -435,8 +449,6 @@ fn optimize_elf_binary(
         end: end_addr,
     };
 
-    // Load and validate the ELF file
-    let elf_patcher = ElfPatcher::new(path)?;
     let section = elf_patcher.validate_address_window(&window)?;
     println!("Window is within section: {}", section.name);
 
@@ -1187,13 +1199,12 @@ fn run_x86_symbolic(
 }
 
 fn optimize_elf_binary_x86(
+    patcher: &ElfPatcher,
     path: &Path,
     start_addr: u64,
     end_addr: u64,
     options: &OptimizationOptions,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    use elf_patcher::{AddressWindow, DetectedArch};
-
     println!("Optimizing x86 ELF binary: {}", path.display());
     println!("Address window: 0x{:x} - 0x{:x}", start_addr, end_addr);
 
@@ -1201,7 +1212,6 @@ fn optimize_elf_binary_x86(
         start: start_addr,
         end: end_addr,
     };
-    let patcher = elf_patcher::ElfPatcher::new(path)?;
     let arch = patcher.arch();
     let width = match arch {
         DetectedArch::X86_64 => 64u32,
@@ -1557,11 +1567,14 @@ fn main() {
         } => {
             // Architecture selection — always read the ELF e_machine first so
             // a stale or wrong --arch value cannot route bytes through the
-            // wrong optimization pipeline.
-            let detected_arch = detect_cli_arch_from_elf(&binary).unwrap_or_else(|e| {
+            // wrong optimization pipeline. Build the ElfPatcher once here
+            // (issue #88) and thread it into both helpers so the file isn't
+            // read + parsed twice.
+            let patcher = ElfPatcher::new(&binary).unwrap_or_else(|e| {
                 eprintln!("Error reading ELF: {}", e);
                 std::process::exit(1);
             });
+            let detected_arch: CliArch = patcher.arch().into();
             let cli_arch = match arch {
                 Some(a) if a == detected_arch => a,
                 Some(a) => {
@@ -1650,9 +1663,9 @@ fn main() {
             };
 
             let opt_result = if is_x86 {
-                optimize_elf_binary_x86(&binary, start_addr, end_addr, &options)
+                optimize_elf_binary_x86(&patcher, &binary, start_addr, end_addr, &options)
             } else {
-                optimize_elf_binary(&binary, start_addr, end_addr, &options)
+                optimize_elf_binary(&patcher, &binary, start_addr, end_addr, &options)
             };
             match opt_result {
                 Ok(()) => println!("\nOptimization completed successfully."),
