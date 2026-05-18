@@ -489,14 +489,22 @@ fn x86_modifies_flags(instr: &X86Instruction) -> bool {
     )
 }
 
+/// Issue #74: CMOV and Jcc read EFLAGS; every other variant in the
+/// current set is flag-agnostic on the read side.
+fn x86_reads_flags(instr: &X86Instruction) -> bool {
+    matches!(
+        instr,
+        X86Instruction::Cmov { .. } | X86Instruction::Jcc { .. }
+    )
+}
+
 impl crate::isa::traits::FlagsAnalysis<X86Instruction> for X86_64 {
     fn modifies_flags(instr: &X86Instruction) -> bool {
         x86_modifies_flags(instr)
     }
 
-    fn reads_flags(_instr: &X86Instruction) -> bool {
-        // No conditional ops in the current x86 mnemonic set.
-        false
+    fn reads_flags(instr: &X86Instruction) -> bool {
+        x86_reads_flags(instr)
     }
 }
 
@@ -505,8 +513,8 @@ impl crate::isa::traits::FlagsAnalysis<X86Instruction> for X86_32 {
         x86_modifies_flags(instr)
     }
 
-    fn reads_flags(_instr: &X86Instruction) -> bool {
-        false
+    fn reads_flags(instr: &X86Instruction) -> bool {
+        x86_reads_flags(instr)
     }
 }
 
@@ -1756,5 +1764,60 @@ mod tests {
         };
         assert!(!x86_modifies_flags(&jcc));
         assert!(!jcc.has_side_effects());
+    }
+
+    // --- issue #74: FlagsAnalysis::reads_flags wired for Cmov / Jcc ---
+
+    #[test]
+    fn x86_64_reads_flags_returns_true_for_cmov_and_jcc() {
+        use crate::isa::traits::FlagsAnalysis;
+        let cmov = X86Instruction::Cmov {
+            rd: X86Register::RAX,
+            rs: X86Register::RBX,
+            cond: X86Condition::E,
+        };
+        let jcc = X86Instruction::Jcc {
+            cond: X86Condition::NE,
+        };
+        assert!(<X86_64 as FlagsAnalysis<X86Instruction>>::reads_flags(
+            &cmov
+        ));
+        assert!(<X86_64 as FlagsAnalysis<X86Instruction>>::reads_flags(&jcc));
+    }
+
+    #[test]
+    fn x86_32_reads_flags_returns_true_for_cmov_and_jcc() {
+        use crate::isa::traits::FlagsAnalysis;
+        let cmov = X86Instruction::Cmov {
+            rd: X86Register::RAX,
+            rs: X86Register::RBX,
+            cond: X86Condition::E,
+        };
+        let jcc = X86Instruction::Jcc {
+            cond: X86Condition::NE,
+        };
+        assert!(<X86_32 as FlagsAnalysis<X86Instruction>>::reads_flags(
+            &cmov
+        ));
+        assert!(<X86_32 as FlagsAnalysis<X86Instruction>>::reads_flags(&jcc));
+    }
+
+    #[test]
+    fn x86_reads_flags_returns_false_for_non_condition_ops() {
+        use crate::isa::traits::FlagsAnalysis;
+        let mov = X86Instruction::MovImm {
+            rd: X86Register::RAX,
+            imm: 0,
+        };
+        let add = X86Instruction::AddReg {
+            rd: X86Register::RAX,
+            rs: X86Register::RBX,
+        };
+        assert!(!<X86_64 as FlagsAnalysis<X86Instruction>>::reads_flags(
+            &mov
+        ));
+        assert!(!<X86_64 as FlagsAnalysis<X86Instruction>>::reads_flags(
+            &add
+        ));
     }
 }
