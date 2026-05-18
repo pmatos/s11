@@ -53,12 +53,16 @@ mapfile -t SAMPLES < <(
 OUT_DIR="$(git rev-parse --show-toplevel)/benches/llvm_codegen"
 mkdir -p "$OUT_DIR"
 
-# Supported AArch64 mnemonics — keep in sync with CLAUDE.md:11.
+# Supported AArch64 mnemonics — keep in sync with CLAUDE.md:11 and the
+# top-level mnemonic dispatch in src/parser/mod.rs. `uxtw` is intentionally
+# omitted: the parser handles it as an extend-operand modifier only, not
+# as a standalone instruction, so a harvested block containing it would
+# panic in load_sequence at bench time.
 SUPPORTED_MNEMONICS=(
     mov add sub and orr eor lsl lsr asr mul sdiv udiv cmp cmn tst
     csel csinc csinv csneg madd msub mneg smulh umulh ccmp ccmn
     ubfx sbfx bfi bfxil ubfiz sbfiz
-    sxtb sxth sxtw uxtb uxth uxtw
+    sxtb sxth sxtw uxtb uxth
 )
 
 # Build a regex matching exactly one supported mnemonic at line start.
