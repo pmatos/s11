@@ -401,6 +401,104 @@ pub fn generate_all_instructions(registers: &[Register], immediates: &[i64]) -> 
         }
     }
 
+    // Memory ops (issue #68, step 15). Sparse enumeration covering the
+    // common addressing modes for LDR/STR/LDP/STP. Width=Extended only
+    // (W-form variants land via stochastic mutation in step 16) so the
+    // candidate budget stays bounded — full width × addressing-mode ×
+    // signed coverage would explode the pool by ~30x. See ADR-0007 for
+    // the soundness argument; the SMT layer reasons over all widths
+    // regardless of which forms search enumerates.
+    {
+        use crate::ir::types::{AccessWidth, AddressOperand, IndexMode};
+        const MEM_IMM_SAMPLES: [i64; 5] = [0, 8, 16, 32, -8];
+        for &rt in registers {
+            if rt == Register::SP || rt == Register::XZR {
+                continue;
+            }
+            for &base in registers {
+                if base == Register::XZR {
+                    continue;
+                }
+                // Imm + Offset
+                for &offset in &MEM_IMM_SAMPLES {
+                    let addr = AddressOperand::Imm {
+                        base,
+                        offset,
+                        mode: IndexMode::Offset,
+                    };
+                    instrs.push(Instruction::Ldr {
+                        rt,
+                        addr,
+                        width: AccessWidth::Extended,
+                    });
+                    instrs.push(Instruction::Str {
+                        rt,
+                        addr,
+                        width: AccessWidth::Extended,
+                    });
+                }
+                // Reg-offset, X-form index, LSL #0 and #3
+                for &shift in &[0u8, 3] {
+                    for &idx in registers {
+                        if idx == Register::SP {
+                            continue;
+                        }
+                        let addr = AddressOperand::Reg { base, idx, shift };
+                        instrs.push(Instruction::Ldr {
+                            rt,
+                            addr,
+                            width: AccessWidth::Extended,
+                        });
+                        instrs.push(Instruction::Str {
+                            rt,
+                            addr,
+                            width: AccessWidth::Extended,
+                        });
+                    }
+                }
+            }
+        }
+        // Pair forms (LDP/STP) — exhaust (rt1, rt2, base) over a tiny offset
+        // set. Constrain rt1 < rt2 numeric index to avoid duplicates; the
+        // is_encodable_pair filter downstream still drops rt1==rt2.
+        const MEM_PAIR_IMM_SAMPLES: [i64; 3] = [0, 16, -16];
+        for &rt1 in registers {
+            if rt1 == Register::SP || rt1 == Register::XZR {
+                continue;
+            }
+            for &rt2 in registers {
+                if rt2 == Register::SP || rt2 == Register::XZR || rt1 == rt2 {
+                    continue;
+                }
+                for &base in registers {
+                    if base == Register::XZR {
+                        continue;
+                    }
+                    for &offset in &MEM_PAIR_IMM_SAMPLES {
+                        let addr = AddressOperand::Imm {
+                            base,
+                            offset,
+                            mode: IndexMode::Offset,
+                        };
+                        instrs.push(Instruction::Ldp {
+                            rt1,
+                            rt2,
+                            addr,
+                            width: AccessWidth::Extended,
+                            signed: false,
+                        });
+                        instrs.push(Instruction::Stp {
+                            rt1,
+                            rt2,
+                            addr,
+                            width: AccessWidth::Extended,
+                        });
+                    }
+                }
+            }
+        }
+    }
+
     // Bit-field manipulation (UBFX/SBFX/BFI/BFXIL/UBFIZ/SBFIZ): sparse
     // (lsb, width) samples to keep the enumerative budget bounded. With
     // 31 non-SP registers × 31 rn × ~24 valid (lsb,width) pairs × 6 variants
