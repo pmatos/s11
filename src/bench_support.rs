@@ -293,31 +293,36 @@ mod tests {
         }
     }
 
-    /// Smoke-test every shipped Hacker's Delight fixture: each must
-    /// parse via `load_sequence` without panicking. Catches typos in
-    /// the fixture set without depending on running the optimizer.
+    /// Smoke-test every shipped fixture (Phase 1 + Phase 3): each
+    /// must parse via `load_sequence` without panicking. Catches typos
+    /// in the fixture set without depending on running the optimizer.
+    /// Phase 2 (benches/llvm_codegen/) is intentionally skipped — that
+    /// directory is empty in HEAD and only populated by the
+    /// harvester.
     #[test]
-    fn every_phase1_fixture_parses() {
+    fn every_committed_fixture_parses() {
         let manifest_dir = env!("CARGO_MANIFEST_DIR");
-        let dir = std::path::Path::new(manifest_dir).join("benches/hackers_delight");
-        let entries: Vec<_> = std::fs::read_dir(&dir)
-            .expect("benches/hackers_delight must exist")
-            .filter_map(Result::ok)
-            .filter(|e| e.path().extension().is_some_and(|x| x == "s"))
-            .collect();
-        assert!(
-            entries.len() >= 15,
-            "expected at least 15 Phase 1 fixtures, found {}",
-            entries.len()
-        );
-        for entry in entries {
-            let path = entry.path();
-            let (seq, _live_out, _flags_live) = load_sequence(&path);
+        for sub in ["benches/hackers_delight", "benches/algebraic_fusion"] {
+            let dir = std::path::Path::new(manifest_dir).join(sub);
+            let entries: Vec<_> = std::fs::read_dir(&dir)
+                .unwrap_or_else(|e| panic!("read {}: {e}", dir.display()))
+                .filter_map(Result::ok)
+                .filter(|e| e.path().extension().is_some_and(|x| x == "s"))
+                .collect();
             assert!(
-                !seq.is_empty(),
-                "fixture {} parsed to an empty sequence",
-                path.display()
+                entries.len() >= 10,
+                "expected at least 10 fixtures under {sub}, found {}",
+                entries.len()
             );
+            for entry in entries {
+                let path = entry.path();
+                let (seq, _live_out, _flags_live) = load_sequence(&path);
+                assert!(
+                    !seq.is_empty(),
+                    "fixture {} parsed to an empty sequence",
+                    path.display()
+                );
+            }
         }
     }
 
