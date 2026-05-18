@@ -571,4 +571,39 @@ mod tests {
         // backend without panicking.
         assert!(result.statistics.elapsed_time.as_nanos() > 0);
     }
+
+    /// Mirror of `x86_symbolic_runs_end_to_end` for x86-32. Covers the
+    /// `SymbolicBackend<X86_32>` impl methods, including the width-32
+    /// branch in `x86_check_equivalence` and the `width()` accessor
+    /// reading `config.x86_width`.
+    #[test]
+    fn x86_symbolic_mode32_runs_end_to_end() {
+        use crate::isa::X86_32;
+        use crate::isa::x86::{X86Instruction, X86Register};
+        use crate::semantics::state::X86LiveOutMask;
+        use std::time::Duration;
+
+        let mut search: SymbolicSearch<X86_32> = SymbolicSearch::new();
+        let config = SearchConfig::default()
+            .with_x86_registers(vec![X86Register::RAX, X86Register::RBX])
+            .with_immediates(vec![0])
+            .with_x86_width(32)
+            .with_timeout_option(Some(Duration::from_secs(5)));
+
+        let live_out = X86LiveOutMask::from_registers(vec![X86Register::RAX]).with_flags(false);
+        let target = vec![
+            X86Instruction::MovImm {
+                rd: X86Register::RAX,
+                imm: 0,
+            },
+            X86Instruction::AddReg {
+                rd: X86Register::RAX,
+                rs: X86Register::RBX,
+            },
+        ];
+
+        let result = search.search(&target, &live_out, &config);
+        assert_eq!(result.statistics.algorithm, Algorithm::Symbolic);
+        assert!(result.statistics.elapsed_time.as_nanos() > 0);
+    }
 }

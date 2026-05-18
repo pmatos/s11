@@ -390,3 +390,76 @@ impl StochasticBackend<crate::isa::X86_32> for crate::isa::X86_32 {
         config.x86_width
     }
 }
+
+#[cfg(test)]
+mod tests {
+    //! Direct unit tests for the x86 backend `check_equivalence` paths
+    //! and helpers. These bypass the full MCMC loop so the SMT-side of
+    //! `<X86_64 as StochasticBackend>::check_equivalence` and the
+    //! width-32 branch of `x86_check_equivalence` are exercised
+    //! deterministically (the stochastic tests in `mcmc.rs` only reach
+    //! the SMT path when the search happens to find a shorter
+    //! candidate, which depends on RNG and isn't a reliable coverage
+    //! signal).
+    use super::*;
+    use crate::isa::x86::{X86Instruction, X86Register};
+    use crate::semantics::state::X86LiveOutMask;
+
+    #[test]
+    fn x86_check_equivalence_helper_handles_width64() {
+        let target = vec![X86Instruction::MovImm {
+            rd: X86Register::RAX,
+            imm: 0,
+        }];
+        let mask = X86LiveOutMask::from_registers(vec![X86Register::RAX]);
+        // Self-equivalent at width 64.
+        let r = x86_check_equivalence(&target, &target, &mask, 64, Duration::from_secs(2));
+        assert!(matches!(r, EquivalenceResult::Equivalent));
+    }
+
+    #[test]
+    fn x86_check_equivalence_helper_handles_width32() {
+        let target = vec![X86Instruction::MovImm {
+            rd: X86Register::RAX,
+            imm: 0,
+        }];
+        let mask = X86LiveOutMask::from_registers(vec![X86Register::RAX]);
+        // Self-equivalent at width 32 — exercises the new_for_32() arm.
+        let r = x86_check_equivalence(&target, &target, &mask, 32, Duration::from_secs(2));
+        assert!(matches!(r, EquivalenceResult::Equivalent));
+    }
+
+    #[test]
+    fn x86_64_backend_check_equivalence_routes_through_helper() {
+        let target = vec![X86Instruction::MovImm {
+            rd: X86Register::RAX,
+            imm: 0,
+        }];
+        let mask = X86LiveOutMask::from_registers(vec![X86Register::RAX]);
+        let r = <crate::isa::X86_64 as StochasticBackend<crate::isa::X86_64>>::check_equivalence(
+            &target,
+            &target,
+            &mask,
+            64,
+            Duration::from_secs(2),
+        );
+        assert!(matches!(r, EquivalenceResult::Equivalent));
+    }
+
+    #[test]
+    fn x86_32_backend_check_equivalence_routes_through_helper() {
+        let target = vec![X86Instruction::MovImm {
+            rd: X86Register::RAX,
+            imm: 0,
+        }];
+        let mask = X86LiveOutMask::from_registers(vec![X86Register::RAX]);
+        let r = <crate::isa::X86_32 as StochasticBackend<crate::isa::X86_32>>::check_equivalence(
+            &target,
+            &target,
+            &mask,
+            32,
+            Duration::from_secs(2),
+        );
+        assert!(matches!(r, EquivalenceResult::Equivalent));
+    }
+}

@@ -540,4 +540,44 @@ mod tests {
         // iterations; we only require that the loop made progress.
         assert!(stats.candidates_evaluated > 0);
     }
+
+    /// Mirror of `x86_stochastic_runs_end_to_end` for x86-32 (Mode32 /
+    /// width 32). Covers the `StochasticBackend<X86_32>` impl methods
+    /// — register pool extraction, edge inputs at width 32, the
+    /// width-32 branch in `x86_check_equivalence`, and the mutator
+    /// construction with `X86Mode::Mode32`.
+    #[test]
+    fn x86_stochastic_mode32_runs_end_to_end() {
+        use crate::isa::X86_32;
+        use crate::isa::x86::{X86Instruction, X86Register};
+        use crate::semantics::state::X86LiveOutMask;
+
+        let mut search: StochasticSearch<X86_32> = StochasticSearch::new();
+        let config = SearchConfig::default()
+            .with_stochastic(
+                StochasticConfig::default()
+                    .with_iterations(200)
+                    .with_seed(11),
+            )
+            // Mode32 restricts to the low-8 GPRs.
+            .with_x86_registers(vec![X86Register::RAX, X86Register::RBX, X86Register::RCX])
+            .with_immediates(vec![0, 1])
+            .with_x86_width(32);
+
+        let live_out = X86LiveOutMask::from_registers(vec![X86Register::RAX]).with_flags(false);
+        let target = vec![
+            X86Instruction::MovImm {
+                rd: X86Register::RAX,
+                imm: 0,
+            },
+            X86Instruction::AddReg {
+                rd: X86Register::RAX,
+                rs: X86Register::RBX,
+            },
+        ];
+
+        let result = search.search(&target, &live_out, &config);
+        assert_eq!(result.statistics.iterations, 200);
+        assert!(result.statistics.candidates_evaluated > 0);
+    }
 }
