@@ -5,28 +5,23 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-mod assembler;
-mod elf_patcher;
-mod ir;
-mod isa;
-mod parser;
-mod search;
-mod semantics;
 #[cfg(test)]
+#[path = "test_utils.rs"]
 mod test_utils;
-mod validation;
 
-use assembler::AArch64Assembler;
-use elf_patcher::{AddressWindow, DetectedArch, ElfPatcher, parse_hex_address};
-use ir::instructions::split_terminator;
-use ir::{Instruction, Register};
-use search::config::{
+use s11::assembler::AArch64Assembler;
+use s11::elf_patcher::{AddressWindow, DetectedArch, ElfPatcher, parse_hex_address};
+use s11::ir::instructions::split_terminator;
+use s11::ir::{Instruction, Register};
+use s11::search::config::{
     Algorithm, LlmConfig, SearchConfig, SearchMode, StochasticConfig, SymbolicConfig,
 };
-use search::parallel::{ParallelConfig, run_parallel_search};
-use search::{EnumerativeSearch, SearchAlgorithm, StochasticSearch, SymbolicSearch};
-use semantics::LiveOut;
-use semantics::cost::CostMetric;
+use s11::search::parallel::{ParallelConfig, run_parallel_search};
+use s11::search::{EnumerativeSearch, SearchAlgorithm, StochasticSearch, SymbolicSearch};
+use s11::semantics::LiveOut;
+use s11::semantics::cost::CostMetric;
+#[allow(unused_imports)]
+use s11::{assembler, elf_patcher, ir, isa, parser, search, semantics, validation};
 
 // --- Command Line Arguments ---
 
@@ -2175,7 +2170,7 @@ mod cli_helper_tests {
             (
                 Instruction::Cbz {
                     rn: Register::X0,
-                    target: crate::ir::LabelId(0x1000),
+                    target: s11::ir::LabelId(0x1000),
                 },
                 Register::X0,
             ),
@@ -2183,7 +2178,7 @@ mod cli_helper_tests {
                 Instruction::Tbz {
                     rt: Register::X2,
                     bit: 5,
-                    target: crate::ir::LabelId(0x1000),
+                    target: s11::ir::LabelId(0x1000),
                 },
                 Register::X2,
             ),
@@ -2223,7 +2218,7 @@ mod cli_helper_tests {
         let last = ir.last().unwrap();
         match last {
             Instruction::BCond { cond, .. } => {
-                assert_eq!(*cond, crate::ir::types::Condition::EQ);
+                assert_eq!(*cond, s11::ir::types::Condition::EQ);
             }
             other => panic!("expected BCond terminator, got {:?}", other),
         }
@@ -2234,7 +2229,7 @@ mod cli_helper_tests {
     fn issue_69_acceptance_equivalence_rejects_different_branch_decisions() {
         // Same prefix, different conditional branch → NotEquivalent
         // (the branch decision differs, so equivalence must fail).
-        use crate::semantics::equivalence::{EquivalenceResult, check_equivalence};
+        use s11::semantics::equivalence::{EquivalenceResult, check_equivalence};
         let ir_eq =
             parser::parse_assembly_string("mov x0, x1\nb.eq 0x1000\n", "a".to_string()).unwrap();
         let ir_ne =
@@ -2256,8 +2251,8 @@ mod cli_helper_tests {
         //   1. `split_terminator` peels off the trailing `ret`.
         //   2. The search runs on the prefix only.
         //   3. The terminator is re-attached to the optimized prefix.
-        use crate::search::SearchAlgorithm;
-        use crate::search::config::SearchConfig;
+        use s11::search::SearchAlgorithm;
+        use s11::search::config::SearchConfig;
 
         let terminator = Instruction::Ret { rn: Register::X30 };
         let seq = vec![
@@ -2312,12 +2307,12 @@ mod cli_helper_tests {
         // — so the optimizer must reject it. With the live-out built by
         // `live_out_for_optimization_prefix`, x0 is included and the
         // clobbering candidate is correctly rejected.
-        use crate::semantics::EquivalenceConfig;
-        use crate::semantics::equivalence::{EquivalenceResult, check_equivalence_with_config};
+        use s11::semantics::EquivalenceConfig;
+        use s11::semantics::equivalence::{EquivalenceResult, check_equivalence_with_config};
 
         let terminator = Instruction::Cbz {
             rn: Register::X0,
-            target: crate::ir::LabelId(0x1000),
+            target: s11::ir::LabelId(0x1000),
         };
         let target = vec![
             Instruction::MovImm {
@@ -2368,7 +2363,7 @@ mod cli_helper_tests {
                 imm: 1,
             },
             Instruction::B {
-                target: crate::ir::LabelId(0x1000),
+                target: s11::ir::LabelId(0x1000),
             },
             Instruction::Add {
                 rd: Register::X1,
