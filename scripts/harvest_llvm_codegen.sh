@@ -5,6 +5,10 @@
 # Maintainer-run, NOT bench-time. Output `.s` files are committed
 # alongside the bench target.
 #
+# Requires GNU coreutils — `shuf --random-source` is a GNU extension
+# and is not available on stock macOS / BSD shuf. On macOS install
+# coreutils via Homebrew and use `gshuf`, or run this on Linux.
+#
 # Usage:
 #   scripts/harvest_llvm_codegen.sh [SEED] [SAMPLE_SIZE]
 #
@@ -22,6 +26,12 @@ LLVM_CACHE="${LLVM_CACHE:-/tmp/s11-llvm}"
 if ! llc --version 2>/dev/null | grep -qE '^\s*aarch64\b'; then
     echo "error: llc lacks the AArch64 backend" >&2
     echo "       reinstall LLVM with AArch64 enabled or set PATH to a build that includes it." >&2
+    exit 2
+fi
+# Precheck: GNU shuf with --random-source. BSD shuf rejects the flag.
+if ! shuf --help 2>&1 | grep -q -- '--random-source'; then
+    echo "error: this script needs GNU coreutils shuf (--random-source for deterministic sampling)" >&2
+    echo "       on macOS:  brew install coreutils  and substitute gshuf, or run on Linux." >&2
     exit 2
 fi
 

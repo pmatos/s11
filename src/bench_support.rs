@@ -118,6 +118,13 @@ pub fn load_sequence(path: &Path) -> (Vec<Instruction>, LiveOut, bool) {
         }
     }
 
+    assert!(
+        !sequence.is_empty(),
+        "fixture {} parsed to zero instructions — bench fixtures must declare a body \
+         after the // Live-out: header (see benches/README.md)",
+        path.display()
+    );
+
     (sequence, live_out, flags_live)
 }
 
@@ -153,7 +160,12 @@ pub struct BenchRecord {
     pub smt_queries: u64,
     pub smt_equivalent: u64,
     pub candidates_evaluated: u64,
-    pub success: bool,
+    /// `true` if the search returned a strictly cheaper sequence than
+    /// the target. Note: this does NOT mean "search ran without error" —
+    /// a timeout that finds no improvement also reports `improved: false`.
+    /// Combine with `timeout` to distinguish "explored fully, no win"
+    /// from "ran out of time."
+    pub improved: bool,
     pub timeout: bool,
     pub git_sha: Option<String>,
     pub timestamp_utc: Option<String>,
@@ -247,7 +259,7 @@ pub fn run_bench(spec: &BenchSpec) -> BenchRecord {
         .as_ref()
         .map(|s| sequence_cost(s, &spec.cost_metric))
         .unwrap_or(original_cost);
-    let success = optimized.is_some();
+    let improved = optimized.is_some();
     let timed_out = statistics.elapsed_time >= spec.timeout;
 
     BenchRecord {
@@ -266,7 +278,7 @@ pub fn run_bench(spec: &BenchSpec) -> BenchRecord {
         smt_queries: statistics.smt_queries,
         smt_equivalent: statistics.smt_equivalent,
         candidates_evaluated: statistics.candidates_evaluated,
-        success,
+        improved,
         timeout: timed_out,
         git_sha: None,
         timestamp_utc: None,
@@ -339,7 +351,7 @@ mod tests {
             smt_queries: 3,
             smt_equivalent: 1,
             candidates_evaluated: 20,
-            success: true,
+            improved: true,
             timeout: false,
             git_sha: None,
             timestamp_utc: None,
@@ -397,7 +409,7 @@ mod tests {
     fn run_bench_enumerative_records_metrics_for_fusible_target() {
         // `mov x0, x1; add x0, x0, #1` collapses into `add x0, x1, #1`
         // under enumerative search — original_length=2 must shrink to
-        // found_length=1, success=true, and metrics must be populated.
+        // found_length=1, improved=true, and metrics must be populated.
         let f = write_fixture(
             "// Live-out: x0\n\
              mov x0, x1\n\
@@ -421,7 +433,10 @@ mod tests {
         assert_eq!(record.seed, 42);
         assert_eq!(record.original_length, 2);
         assert_eq!(record.original_cost, 2);
-        assert!(record.success, "fusion target should succeed");
+        assert!(
+            record.improved,
+            "fusion target should produce an improvement"
+        );
         assert_eq!(record.found_length, Some(1));
         assert_eq!(record.best_cost, 1);
         assert!(record.smt_queries > 0, "enumerative search must hit SMT");
