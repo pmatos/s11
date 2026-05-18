@@ -85,9 +85,13 @@ impl LlmSearch {
 // response parser routes through `parser::parse_line` which is AArch64-only.
 // When stage 2 step 17 makes `SearchAlgorithm` generic over `<I: ISA>`, this
 // impl will be constrained to `SearchAlgorithm<AArch64>` so the LLM flow
-// cannot accidentally be invoked for x86 / RISC-V. Today the trait is
-// non-generic, so the constraint is implicit.
-impl SearchAlgorithm for LlmSearch {
+// cannot accidentally be invoked for x86 / RISC-V. The trait is now generic
+// (issue #73), so the constraint is explicit via the type parameter:
+// `impl SearchAlgorithm<AArch64> for LlmSearch`.
+impl SearchAlgorithm<crate::isa::AArch64> for LlmSearch {
+    type LiveOut = LiveOut;
+    type Result = SearchResult;
+
     fn search(
         &mut self,
         target: &[Instruction],

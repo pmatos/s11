@@ -51,7 +51,10 @@ impl Default for StochasticSearch {
     }
 }
 
-impl SearchAlgorithm for StochasticSearch {
+impl SearchAlgorithm<crate::isa::AArch64> for StochasticSearch {
+    type LiveOut = LiveOut;
+    type Result = SearchResult;
+
     fn search(
         &mut self,
         target: &[Instruction],
