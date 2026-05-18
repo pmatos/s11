@@ -1027,8 +1027,8 @@ fn find_shorter_equivalent_x86(
     use semantics::equivalence::{X86EquivalenceConfig, check_equivalence_x86};
     use semantics::state::X86LiveOutMask;
 
-    if target.is_empty() || target.len() < 2 {
-        // Already length 1; nothing strictly shorter exists.
+    if target.len() < 2 {
+        // Already length 1 (or empty); nothing strictly shorter exists.
         return None;
     }
     let target_cost =
@@ -1046,25 +1046,23 @@ fn find_shorter_equivalent_x86(
     let live_out = X86LiveOutMask::from_registers(live_regs.clone()).with_flags(flags_live);
 
     // Build a register pool from the registers actually used in the
-    // target, plus a couple of scratch regs.
+    // target. The candidate enumeration over this pool is bounded by the
+    // target's own register references — any scratch register not in
+    // `live_regs` cannot appear in a length-1 equivalent rewrite of a
+    // length-≥2 target, because the rewrite's write to that register is
+    // either unobservable (so it's wasted work) or contradicts live-out.
     let mut pool: Vec<X86Register> = live_regs.clone();
     for reg in target.iter().flat_map(|i| i.source_registers()) {
         if !pool.contains(&reg) {
             pool.push(reg);
         }
     }
-    for extra in [X86Register::RAX, X86Register::RDI] {
-        if !pool.contains(&extra) {
-            pool.push(extra);
-        }
-    }
     let imms = vec![0i64, 1, -1];
 
     let candidates = generate_all_x86_instructions(&pool, &imms);
-    let cfg = X86EquivalenceConfig::new_for_64()
+    let cfg = X86EquivalenceConfig::new(width)
         .live_out(live_out.clone())
         .fast_only();
-    let cfg = X86EquivalenceConfig { width, ..cfg };
     for cand in candidates {
         let seq = vec![cand];
         let cand_cost =
@@ -1997,6 +1995,37 @@ mod cli_helper_tests {
         )
         .expect("two identical writes can be shortened");
         assert_eq!(optimized.len(), 1);
+    }
+
+    /// Regression: `find_shorter_equivalent_x86` must collapse a target
+    /// that references only non-RAX/RDI registers. Pins the
+    /// pool-narrowing change (issue #84 item 8) so any future
+    /// reintroduction of unconditional scratch-register inflation is
+    /// caught.
+    #[test]
+    fn find_shorter_equivalent_x86_collapses_without_rax_or_rdi_in_target() {
+        let optimized = find_shorter_equivalent_x86(
+            &[
+                X86Instruction::MovImm {
+                    rd: X86Register::RBX,
+                    imm: 1,
+                },
+                X86Instruction::MovImm {
+                    rd: X86Register::RBX,
+                    imm: 1,
+                },
+            ],
+            64,
+        )
+        .expect("two identical RBX writes can be shortened");
+        assert_eq!(optimized.len(), 1);
+        match optimized[0] {
+            X86Instruction::MovImm { rd, imm } => {
+                assert_eq!(rd, X86Register::RBX);
+                assert_eq!(imm, 1);
+            }
+            ref other => panic!("expected MovImm RBX, 1, got {:?}", other),
+        }
     }
 
     #[test]

@@ -7,7 +7,6 @@
 //! **Initial instruction set**: MOV, ADD, SUB, AND, OR, XOR, CMP — each with
 //! register and immediate forms (14 variants total: 7 mnemonics × 2 forms).
 
-#![allow(dead_code)]
 // x86 register names are conventionally uppercase (RAX, RBX, ...) in every
 // Intel/AMD manual, Capstone disassembly output, GAS/Intel syntax, and gdb
 // `info registers`. Lowercasing to `Rax`/`Rbx` per Rust's default
@@ -589,7 +588,6 @@ pub struct X86Mutator {
     registers: Vec<X86Register>,
     immediates: Vec<i64>,
     weights: crate::search::config::MutationWeights,
-    mode: crate::assembler::x86::X86Mode,
 }
 
 impl X86Mutator {
@@ -613,7 +611,6 @@ impl X86Mutator {
             registers,
             immediates,
             weights,
-            mode,
         }
     }
 

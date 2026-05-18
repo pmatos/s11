@@ -10,7 +10,6 @@
 //! for every variant: encode → disassemble → assert mnemonic + operand
 //! strings match.
 
-#![allow(dead_code)]
 // The dynasm! macro auto-inserts `.into()` calls when accepting register
 // indices, which clippy flags as `useless_conversion` whenever the supplied
 // value is already the target type (here, `u8`). The conversion is dynasm's
@@ -43,10 +42,6 @@ impl X86Assembler {
         Self {
             mode: X86Mode::Mode32,
         }
-    }
-
-    pub fn mode(&self) -> X86Mode {
-        self.mode
     }
 
     pub fn assemble_instructions(
@@ -571,12 +566,6 @@ mod tests {
             "operands: {}",
             disasm[0].1
         );
-    }
-
-    #[test]
-    fn mode_accessors_report_selected_backend() {
-        assert_eq!(X86Assembler::new_64().mode(), X86Mode::Mode64);
-        assert_eq!(X86Assembler::new_32().mode(), X86Mode::Mode32);
     }
 
     #[test]

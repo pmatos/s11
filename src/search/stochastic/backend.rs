@@ -417,7 +417,7 @@ mod tests {
             imm: 0,
         }];
         let mask = X86LiveOutMask::from_registers(vec![X86Register::RAX]);
-        // Self-equivalent at width 32 — exercises the new_for_32() arm.
+        // Self-equivalent at width 32 — exercises the width=32 path.
         let r = crate::semantics::equivalence::check_equivalence_x86_for_search(
             &target,
             &target,

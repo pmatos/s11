@@ -6,8 +6,6 @@
 //! on what bytes a given variant emits; out-of-range immediates surface
 //! as encoder errors at use-site.
 
-#![allow(dead_code)]
-
 use crate::assembler::x86::{X86Assembler, X86Mode};
 use crate::isa::x86::{X86Instruction, X86Register};
 use rand::RngExt;
