@@ -614,15 +614,18 @@ impl InstructionGenerator<Instruction> for AArch64InstructionGenerator {
         registers: &[Register],
         immediates: &[i64],
     ) -> Instruction {
-        // 30 opcode slots: 0..13 original, 13..23 Tier 1 (slot 23 is a
-        // 4-way sub-multiplexer for ANDS/CSET/CSETM/ROR), 24 = MOVZ,
-        // 25 = MOVK, 26 = single-source bit-manipulation (CLZ/CLS/RBIT/REV*)
-        // 6-way sub-multiplexer, 27 = multiply-accumulate family (issue
-        // #56: 5-way sub-multiplexer for MADD/MSUB/MNEG/SMULH/UMULH),
-        // 28 = conditional-compare family (issue #57: 2-way
-        // sub-multiplexer for CCMP/CCMN), 29 = bit-field aliases (issue
-        // #61: 6-way sub-multiplexer for UBFX/SBFX/BFI/BFXIL/UBFIZ/SBFIZ).
-        let opcode = rng.random_range(0..30);
+        // 33 opcode slots: 0..13 original, 13..23 Tier 1, 23 = ANDS,
+        // 24 = MOVZ, 25 = MOVK, 26 = single-source bit-manipulation
+        // (CLZ/CLS/RBIT/REV*) 6-way sub-multiplexer, 27 = multiply-
+        // accumulate family (issue #56: 5-way sub-multiplexer for
+        // MADD/MSUB/MNEG/SMULH/UMULH), 28 = conditional-compare family
+        // (issue #57: 2-way sub-multiplexer for CCMP/CCMN), 29 =
+        // bit-field aliases (issue #61: 6-way sub-multiplexer for
+        // UBFX/SBFX/BFI/BFXIL/UBFIZ/SBFIZ), 30 = CSET, 31 = CSETM,
+        // 32 = ROR (issue #93: each of these four held the old slot 23
+        // sub-multiplexer; promoted to top-level slots so their sampling
+        // probability matches the rest of the table).
+        let opcode = rng.random_range(0..33);
         let rd = registers[rng.random_range(0..registers.len())];
         let rn = registers[rng.random_range(0..registers.len())];
         let pick_reg = |rng: &mut R| registers[rng.random_range(0..registers.len())];
@@ -734,36 +737,11 @@ impl InstructionGenerator<Instruction> for AArch64InstructionGenerator {
                 };
                 Instruction::Subs { rd, rn, rm }
             }
-            // ANDS: choose register-only.
-            // CSET / CSETM share the next slot pair.
-            23 => {
-                // Branch between ANDS, CSET, CSETM, ROR — three "small" Tier 1
-                // families fit here. Even split.
-                match rng.random_range(0..4) {
-                    0 => Instruction::Ands {
-                        rd,
-                        rn,
-                        rm: Operand::Register(pick_reg(rng)),
-                    },
-                    1 => Instruction::Cset {
-                        rd,
-                        cond: Condition::random_normal(rng),
-                    },
-                    2 => Instruction::Csetm {
-                        rd,
-                        cond: Condition::random_normal(rng),
-                    },
-                    _ => {
-                        let shift = if rng.random_bool(0.5) {
-                            let amounts = [0i64, 1, 2, 4, 8, 16, 32];
-                            Operand::Immediate(amounts[rng.random_range(0..amounts.len())])
-                        } else {
-                            Operand::Register(pick_reg(rng))
-                        };
-                        Instruction::Ror { rd, rn, shift }
-                    }
-                }
-            }
+            23 => Instruction::Ands {
+                rd,
+                rn,
+                rm: Operand::Register(pick_reg(rng)),
+            },
             24 => {
                 let imm = (rng.random::<u32>() & 0xFFFF) as u16;
                 let shifts = MOVW_LEGAL_SHIFTS;
@@ -917,6 +895,25 @@ impl InstructionGenerator<Instruction> for AArch64InstructionGenerator {
                         width,
                     },
                 }
+            }
+            // Issue #93: CSET / CSETM / ROR each get their own top-level
+            // slot (previously folded into slot 23's 4-way sub-multiplexer).
+            30 => Instruction::Cset {
+                rd,
+                cond: Condition::random_normal(rng),
+            },
+            31 => Instruction::Csetm {
+                rd,
+                cond: Condition::random_normal(rng),
+            },
+            32 => {
+                let shift = if rng.random_bool(0.5) {
+                    let amounts = [0i64, 1, 2, 4, 8, 16, 32];
+                    Operand::Immediate(amounts[rng.random_range(0..amounts.len())])
+                } else {
+                    Operand::Register(pick_reg(rng))
+                };
+                Instruction::Ror { rd, rn, shift }
             }
             _ => unreachable!(),
         }
@@ -1498,7 +1495,7 @@ impl InstructionGenerator<Instruction> for AArch64InstructionGenerator {
 
     /// Total number of distinct opcode *families* (the upper bound on
     /// `opcode_id()`). Not the same as `generate_random`'s slot count —
-    /// `generate_random` samples 30 top-level slots and folds several
+    /// `generate_random` samples 33 top-level slots and folds several
     /// families into sub-multiplexers (e.g. CLZ/CLS/RBIT/REV*/REV16 on
     /// slot 26, the five multiply-accumulate ops on slot 27, the two
     /// conditional-compare ops on slot 28, and the six bit-field aliases
@@ -2170,6 +2167,61 @@ mod tests {
         for _ in 0..10_000 {
             let instr = generator.generate_random(&mut rng, &regs, &imms);
             assert!(instr.opcode_id() < generator.opcode_count());
+        }
+    }
+
+    /// Regression test for issue #93: ANDS/CSET/CSETM/ROR used to share
+    /// slot 23 via a 4-way sub-multiplexer, giving each ~1/120 sample
+    /// probability vs ~1/30 for every other opcode. Each should now hold
+    /// its own top-level slot so the sampler is roughly uniform across
+    /// opcodes (~1/33). With N = 30_000 ChaCha8-seeded draws each is
+    /// expected near 909 hits; the old sub-mux would give ~250. The 600
+    /// threshold sits ~10σ below the new expected and ~22σ above the old.
+    #[test]
+    fn slot_23_sub_multiplexer_removed_for_issue_93() {
+        use std::collections::HashMap;
+        let generator = AArch64InstructionGenerator;
+        let regs = vec![Register::X0, Register::X1, Register::X2];
+        let imms = vec![0, 1, 2, 16, 32];
+        let mut rng = ChaCha8Rng::seed_from_u64(0x9300);
+        let mut counts: HashMap<u8, u32> = HashMap::new();
+        const N: u32 = 30_000;
+        for _ in 0..N {
+            let id = generator
+                .generate_random(&mut rng, &regs, &imms)
+                .opcode_id();
+            *counts.entry(id).or_default() += 1;
+        }
+        for instr in [
+            Instruction::Ands {
+                rd: Register::X0,
+                rn: Register::X1,
+                rm: Operand::Register(Register::X2),
+            },
+            Instruction::Cset {
+                rd: Register::X0,
+                cond: Condition::EQ,
+            },
+            Instruction::Csetm {
+                rd: Register::X0,
+                cond: Condition::EQ,
+            },
+            Instruction::Ror {
+                rd: Register::X0,
+                rn: Register::X1,
+                shift: Operand::Immediate(1),
+            },
+        ] {
+            let id = instr.opcode_id();
+            let count = counts.get(&id).copied().unwrap_or(0);
+            assert!(
+                count >= 600,
+                "expected >= 600 samples for {} (id {}) in {} draws, got {}",
+                instr,
+                id,
+                N,
+                count,
+            );
         }
     }
 
