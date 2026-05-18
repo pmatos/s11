@@ -234,6 +234,16 @@ pub fn generate_all_instructions(registers: &[Register], immediates: &[i64]) -> 
             instrs.push(Instruction::Sxtw { rd, rn });
         }
 
+        // Multiply / divide (register-only; rm is `Register`, not `Operand`).
+        // The closely-related multiply-accumulate family follows.
+        for &rn in registers {
+            for &rm in registers {
+                instrs.push(Instruction::Mul { rd, rn, rm });
+                instrs.push(Instruction::Sdiv { rd, rn, rm });
+                instrs.push(Instruction::Udiv { rd, rn, rm });
+            }
+        }
+
         // Multiply-accumulate family. MADD/MSUB take a 4th register slot
         // (`ra`); MNEG/SMULH/UMULH are 3-operand register-only.
         for &rn in registers {
@@ -267,6 +277,20 @@ pub fn generate_all_instructions(registers: &[Register], immediates: &[i64]) -> 
         for cond in crate::ir::types::NORMAL_CONDITIONS {
             instrs.push(Instruction::Cset { rd, cond });
             instrs.push(Instruction::Csetm { rd, cond });
+        }
+
+        // CSEL / CSINC / CSINV / CSNEG (issue #66): register-only with a
+        // 14-condition sweep matching CSET/CSETM. AL collapses to MOV rd,rn
+        // and NV is reserved — both excluded by `NORMAL_CONDITIONS`.
+        for &rn in registers {
+            for &rm in registers {
+                for cond in crate::ir::types::NORMAL_CONDITIONS {
+                    instrs.push(Instruction::Csel { rd, rn, rm, cond });
+                    instrs.push(Instruction::Csinc { rd, rn, rm, cond });
+                    instrs.push(Instruction::Csinv { rd, rn, rm, cond });
+                    instrs.push(Instruction::Csneg { rd, rn, rm, cond });
+                }
+            }
         }
     }
 
@@ -318,6 +342,27 @@ pub fn generate_all_instructions(registers: &[Register], immediates: &[i64]) -> 
                     });
                 }
             }
+        }
+    }
+
+    // CMP / CMN / TST plain forms (issue #66). These instructions have no
+    // destination register, so they live outside the `rd` loop (same
+    // rationale as the ExtendedRegister CMP/CMN block below). CMP/CMN
+    // accept reg and imm operands; TST is register-only per
+    // `is_encodable_aarch64`. Negative immediates are emitted unconditionally
+    // and filtered downstream by `generate_all_encodable_instructions`,
+    // matching the ADD/SUB precedent inside the `rd` loop.
+    for &rn in registers {
+        for &rm in registers {
+            let rm_op = Operand::Register(rm);
+            instrs.push(Instruction::Cmp { rn, rm: rm_op });
+            instrs.push(Instruction::Cmn { rn, rm: rm_op });
+            instrs.push(Instruction::Tst { rn, rm: rm_op });
+        }
+        for &imm in immediates {
+            let imm_op = Operand::Immediate(imm);
+            instrs.push(Instruction::Cmp { rn, rm: imm_op });
+            instrs.push(Instruction::Cmn { rn, rm: imm_op });
         }
     }
 
@@ -403,7 +448,7 @@ pub fn generate_random_instruction<R: rand::RngExt>(
     let rd = registers[rng.random_range(0..registers.len())];
     let pick_reg = |rng: &mut R| registers[rng.random_range(0..registers.len())];
 
-    match rng.random_range(0..31) {
+    match rng.random_range(0..33) {
         0 => {
             let imm = if immediates.is_empty() {
                 0
@@ -658,7 +703,7 @@ pub fn generate_random_instruction<R: rand::RngExt>(
             }
         }
         // Multiply-accumulate family: MADD/MSUB (4-operand) and MNEG/SMULH/UMULH (3-operand).
-        _ => {
+        29 => {
             let rn = pick_reg(rng);
             let rm = pick_reg(rng);
             match rng.random_range(0..5) {
@@ -675,6 +720,50 @@ pub fn generate_random_instruction<R: rand::RngExt>(
                 _ => Instruction::Umulh { rd, rn, rm },
             }
         }
+        // Issue #66 multiply / divide: MUL/SDIV/UDIV. All register-only.
+        30 => {
+            let rn = pick_reg(rng);
+            let rm = pick_reg(rng);
+            match rng.random_range(0..3) {
+                0 => Instruction::Mul { rd, rn, rm },
+                1 => Instruction::Sdiv { rd, rn, rm },
+                _ => Instruction::Udiv { rd, rn, rm },
+            }
+        }
+        // Issue #66 compares: CMP/CMN accept reg or imm; TST is register-only
+        // at the encoder, so its `rm` is clamped to a register draw.
+        31 => {
+            let rn = pick_reg(rng);
+            match rng.random_range(0..3) {
+                0 => Instruction::Cmp {
+                    rn,
+                    rm: random_operand(rng, registers, immediates),
+                },
+                1 => Instruction::Cmn {
+                    rn,
+                    rm: random_operand(rng, registers, immediates),
+                },
+                _ => Instruction::Tst {
+                    rn,
+                    rm: Operand::Register(pick_reg(rng)),
+                },
+            }
+        }
+        // Issue #66 conditional selects: CSEL/CSINC/CSINV/CSNEG. Register-only,
+        // condition sampled from NORMAL_CONDITIONS (AL/NV excluded — AL
+        // collapses to MOV rd,rn and NV is reserved).
+        32 => {
+            let rn = pick_reg(rng);
+            let rm = pick_reg(rng);
+            let cond = crate::ir::types::Condition::random_normal(rng);
+            match rng.random_range(0..4) {
+                0 => Instruction::Csel { rd, rn, rm, cond },
+                1 => Instruction::Csinc { rd, rn, rm, cond },
+                2 => Instruction::Csinv { rd, rn, rm, cond },
+                _ => Instruction::Csneg { rd, rn, rm, cond },
+            }
+        }
+        _ => unreachable!(),
     }
 }
 
@@ -902,6 +991,138 @@ mod tests {
         let instrs = generate_all_instructions(&default_registers(), &default_immediates());
         let has_eor = instrs.iter().any(|i| matches!(i, Instruction::Eor { .. }));
         assert!(has_eor);
+    }
+
+    #[test]
+    fn test_generate_all_instructions_contains_mul_div_family() {
+        let instrs = generate_all_instructions(&default_registers(), &default_immediates());
+        assert!(instrs.iter().any(|i| matches!(i, Instruction::Mul { .. })));
+        assert!(instrs.iter().any(|i| matches!(i, Instruction::Sdiv { .. })));
+        assert!(instrs.iter().any(|i| matches!(i, Instruction::Udiv { .. })));
+    }
+
+    #[test]
+    fn test_generate_all_instructions_covers_issue_66_opcodes() {
+        // Regression guard: every IR opcode family enumerated by issue #66
+        // (Mul/Sdiv/Udiv/Cmp/Cmn/Tst/Csel/Csinc/Csinv/Csneg, opcode_ids
+        // 10..=19) must appear in the exhaustive enumeration. Narrower scope
+        // than every-opcode coverage because origin/main has a pre-existing
+        // opcode_id collision between Sxt* and Ubfx/Sbfx/Bfi/Bfxil/Ubfiz that
+        // isn't in scope here.
+        let instrs = generate_all_instructions(&default_registers(), &default_immediates());
+        let ids: std::collections::BTreeSet<u8> = instrs.iter().map(opcode_id).collect();
+        for id in 10u8..=19 {
+            assert!(
+                ids.contains(&id),
+                "missing issue-66 opcode_id {} in generate_all",
+                id
+            );
+        }
+    }
+
+    fn random_opcode_ids(seed: u64, draws: usize) -> std::collections::BTreeSet<u8> {
+        use rand::SeedableRng;
+        use rand_chacha::ChaCha8Rng;
+        let regs = default_registers();
+        let imms = default_immediates();
+        let mut rng = ChaCha8Rng::seed_from_u64(seed);
+        (0..draws)
+            .map(|_| opcode_id(&generate_random_instruction(&mut rng, &regs, &imms)))
+            .collect()
+    }
+
+    #[test]
+    fn test_generate_random_reaches_mul_div_family() {
+        let ids = random_opcode_ids(0x66, 5_000);
+        for id in [10u8 /* Mul */, 11 /* Sdiv */, 12 /* Udiv */] {
+            assert!(ids.contains(&id), "random never produced opcode_id {}", id);
+        }
+    }
+
+    #[test]
+    fn test_generate_random_reaches_compare_family() {
+        let ids = random_opcode_ids(0x66, 5_000);
+        for id in [13u8 /* Cmp */, 14 /* Cmn */, 15 /* Tst */] {
+            assert!(ids.contains(&id), "random never produced opcode_id {}", id);
+        }
+    }
+
+    #[test]
+    fn test_generate_random_reaches_csel_family() {
+        let ids = random_opcode_ids(0x66, 5_000);
+        for id in [
+            16u8, /* Csel */
+            17,   /* Csinc */
+            18,   /* Csinv */
+            19,   /* Csneg */
+        ] {
+            assert!(ids.contains(&id), "random never produced opcode_id {}", id);
+        }
+    }
+
+    #[test]
+    fn test_generate_all_instructions_contains_csel_family() {
+        let instrs = generate_all_instructions(&default_registers(), &default_immediates());
+        assert!(instrs.iter().any(|i| matches!(i, Instruction::Csel { .. })));
+        assert!(
+            instrs
+                .iter()
+                .any(|i| matches!(i, Instruction::Csinc { .. }))
+        );
+        assert!(
+            instrs
+                .iter()
+                .any(|i| matches!(i, Instruction::Csinv { .. }))
+        );
+        assert!(
+            instrs
+                .iter()
+                .any(|i| matches!(i, Instruction::Csneg { .. }))
+        );
+    }
+
+    #[test]
+    fn test_generate_all_instructions_contains_plain_compare_family() {
+        // Cmp/Cmn must appear in plain Register and Immediate forms (the
+        // ExtendedRegister form is handled separately by the #60 block).
+        // Tst must appear in plain Register form (TST has no immediate
+        // encoding per `is_encodable_aarch64`).
+        let instrs = generate_all_instructions(&default_registers(), &default_immediates());
+        assert!(instrs.iter().any(|i| matches!(
+            i,
+            Instruction::Cmp {
+                rm: Operand::Register(_),
+                ..
+            }
+        )));
+        assert!(instrs.iter().any(|i| matches!(
+            i,
+            Instruction::Cmp {
+                rm: Operand::Immediate(_),
+                ..
+            }
+        )));
+        assert!(instrs.iter().any(|i| matches!(
+            i,
+            Instruction::Cmn {
+                rm: Operand::Register(_),
+                ..
+            }
+        )));
+        assert!(instrs.iter().any(|i| matches!(
+            i,
+            Instruction::Cmn {
+                rm: Operand::Immediate(_),
+                ..
+            }
+        )));
+        assert!(instrs.iter().any(|i| matches!(
+            i,
+            Instruction::Tst {
+                rm: Operand::Register(_),
+                ..
+            }
+        )));
     }
 
     #[test]
