@@ -24,12 +24,13 @@ fn get_binary_path() -> PathBuf {
     PathBuf::from(env!("CARGO_BIN_EXE_s11"))
 }
 
-// Scan every executable, instruction-aligned slot in `elf_path` for the
-// 4-byte little-endian encoding `pattern` and return the virtual address of
-// the first match. Used by opt tests to dynamically resolve a window onto a
-// known supported (or known unsupported) AArch64 instruction without
-// hardcoding addresses against a specific build of the fixture binary.
-fn find_encoding(elf_path: &Path, pattern: &[u8], label: &str) -> u64 {
+// Scan every executable, instruction-aligned slot in `elf_path` for a 4-byte
+// little-endian AArch64 encoding matching `expected` under `mask` (i.e.
+// `bytes[i] & mask[i] == expected[i] & mask[i]` for each of the 4 bytes).
+// A `mask` of all 0xff means exact match; a partial mask lets opt tests
+// match any `add x16, x16, #N` PLT trampoline regardless of the build's GOT
+// layout, etc.
+fn find_encoding_masked(elf_path: &Path, expected: &[u8; 4], mask: &[u8; 4], label: &str) -> u64 {
     let data = std::fs::read(elf_path).expect("read ELF for pattern scan");
     let elf = elf::ElfBytes::<elf::endian::AnyEndian>::minimal_parse(&data)
         .expect("parse ELF for pattern scan");
@@ -41,19 +42,19 @@ fn find_encoding(elf_path: &Path, pattern: &[u8], label: &str) -> u64 {
         }
         let file_start = section.sh_offset as usize;
         let size = section.sh_size as usize;
-        if size < pattern.len() {
+        if size < expected.len() {
             continue;
         }
         let bytes = &data[file_start..file_start + size];
-        for off in (0..size.saturating_sub(pattern.len()) + 1).step_by(4) {
-            if &bytes[off..off + pattern.len()] == pattern {
+        for off in (0..size - expected.len() + 1).step_by(4) {
+            if (0..4).all(|i| bytes[off + i] & mask[i] == expected[i] & mask[i]) {
                 return section.sh_addr + off as u64;
             }
         }
     }
     panic!(
-        "encoding {:02x?} ({}) not found in any executable section of {:?}",
-        pattern, label, elf_path
+        "encoding matching {:02x?} (mask {:02x?}, {}) not found in any executable section of {:?}",
+        expected, mask, label, elf_path
     );
 }
 
@@ -122,10 +123,16 @@ fn test_opt_basic_functionality() {
 
     // executable_window starts at the first executable section, which is .init
     // and begins with `paciasp` (an unsupported HINT); the AArch64 optimization
-    // path now correctly rejects that window. Scan instead for the PLT's
-    // `add x16, x16, #0xff8` trampoline slot — a supported AArch64 instruction
-    // that always exists in the fixture regardless of build environment drift.
-    let start_addr = find_encoding(&test_elf, &[0x10, 0xe2, 0x3f, 0x91], "add x16, x16, #0xff8");
+    // path now correctly rejects that window. Scan instead for any PLT
+    // trampoline slot `add x16, x16, #N` — encoding constraints sf=1, sh=0,
+    // Rd=Rn=16, immediate N free. Mask leaves the 12 imm bits as wildcards
+    // so we match every build's GOT-offset variation.
+    let start_addr = find_encoding_masked(
+        &test_elf,
+        &[0x10, 0x02, 0x00, 0x91],
+        &[0xff, 0x03, 0xc0, 0xff],
+        "add x16, x16, #N (PLT trampoline)",
+    );
     let end_addr = start_addr + 4;
 
     let output = Command::new(binary)
@@ -394,9 +401,10 @@ fn test_opt_rejects_unsupported_instruction_window() {
     // unsupported mnemonic for the AArch64 optimization path. Targeting a
     // 4-byte window on that instruction must abort before any output file
     // is written.
-    let start_addr = find_encoding(
+    let start_addr = find_encoding_masked(
         &test_elf,
         &[0xfd, 0x7b, 0xbf, 0xa9],
+        &[0xff, 0xff, 0xff, 0xff],
         "stp x29, x30, [sp, #-0x10]!",
     );
     let end_addr = start_addr + 4;
