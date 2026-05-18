@@ -464,8 +464,20 @@ fn optimize_elf_binary(
         );
     }
 
+    let decoded_bytes: usize = instructions.iter().map(|i| i.bytes().len()).sum();
+    if decoded_bytes != original_bytes.len() {
+        return Err(format!(
+            "AArch64 window 0x{:x}-0x{:x} ({} bytes) was not fully decoded by Capstone; decoded only {} bytes",
+            start_addr,
+            end_addr,
+            original_bytes.len(),
+            decoded_bytes
+        )
+        .into());
+    }
+
     // Convert to IR
-    let ir_instructions = convert_to_ir(&instructions);
+    let ir_instructions = convert_to_ir(&instructions)?;
     println!("Converted {} instructions to IR:", ir_instructions.len());
 
     for instr in &ir_instructions {
@@ -885,23 +897,38 @@ fn convert_capstone_op(mnemonic: &str, op_str: &str) -> ConvertOutcome {
     }
 }
 
-fn convert_to_ir(instructions: &capstone::Instructions) -> Vec<Instruction> {
+fn convert_capstone_op_for_optimization(
+    mnemonic: &str,
+    op_str: &str,
+    address: u64,
+) -> Result<Option<Instruction>, String> {
+    match convert_capstone_op(mnemonic, op_str) {
+        ConvertOutcome::Instruction(instr) => Ok(Some(instr)),
+        ConvertOutcome::Skip => Ok(None),
+        ConvertOutcome::Unsupported(line) => Err(format!(
+            "AArch64 window contains unsupported instruction '{}' at 0x{:x}; \
+             cannot optimize. Narrow the --start-addr/--end-addr range to \
+             exclude it, or add the mnemonic to the supported set.",
+            line, address
+        )),
+    }
+}
+
+fn convert_to_ir(instructions: &capstone::Instructions) -> Result<Vec<Instruction>, String> {
     let mut ir_instructions = Vec::new();
 
     for instruction in instructions.iter() {
         let mnemonic = instruction.mnemonic().unwrap_or("");
         let op_str = instruction.op_str().unwrap_or("");
 
-        match convert_capstone_op(mnemonic, op_str) {
-            ConvertOutcome::Instruction(instr) => ir_instructions.push(instr),
-            ConvertOutcome::Skip => {}
-            ConvertOutcome::Unsupported(line) => {
-                eprintln!("Warning: Skipping unsupported instruction: {}", line);
-            }
+        if let Some(instr) =
+            convert_capstone_op_for_optimization(mnemonic, op_str, instruction.address())?
+        {
+            ir_instructions.push(instr);
         }
     }
 
-    ir_instructions
+    Ok(ir_instructions)
 }
 
 /// Validate that an IR sequence forms a single basic block: at most one
@@ -1992,10 +2019,20 @@ mod cli_helper_tests {
     }
 
     #[test]
+    fn convert_capstone_op_for_optimization_rejects_unsupported_instruction() {
+        let err = convert_capstone_op_for_optimization("ldr", "x0, [x1]", 0x1234)
+            .expect_err("optimization conversion must reject unsupported non-NOP instructions");
+
+        assert!(err.contains("ldr x0, [x1]"));
+        assert!(err.contains("0x1234"));
+        assert!(err.contains("cannot optimize"));
+    }
+
+    #[test]
     fn convert_capstone_op_reports_operand_errors_against_supported_mnemonic() {
-        // Mnemonic recognised, but operand fails to parse — should be reported
-        // as Unsupported (warn + skip) with the parser's error appended so the
-        // user can see why.
+        // Mnemonic recognised, but operand fails to parse — should be
+        // classified as Unsupported with the parser's error appended so the
+        // optimization path can reject the window with useful context.
         match convert_capstone_op("add", "x0, x1, #wat") {
             ConvertOutcome::Unsupported(line) => {
                 assert!(line.contains("add"));

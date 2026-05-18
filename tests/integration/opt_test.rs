@@ -86,7 +86,15 @@ fn test_opt_basic_functionality() {
         .join("arrays_debug");
 
     check_test_binary(&test_elf);
-    let (start_addr, end_addr) = executable_window(&test_elf, 4);
+
+    // Target `add x16, x16, #0xff8` at 0x5cc — a single ADD-immediate with
+    // general-purpose registers, fully supported by the parser, assembler and
+    // optimizer. We do not use executable_window here because the start of
+    // .init in arrays_debug is `paciasp` (an unsupported HINT), which the
+    // AArch64 optimization path now correctly rejects rather than silently
+    // dropping.
+    let start_addr: u64 = 0x5cc;
+    let end_addr: u64 = 0x5d0;
 
     let output = Command::new(binary)
         .arg("opt")
@@ -339,6 +347,56 @@ fn test_opt_address_alignment() {
     assert!(
         stderr.contains("4-byte aligned"),
         "Should show alignment error"
+    );
+}
+
+#[test]
+fn test_opt_rejects_unsupported_instruction_window() {
+    let binary = get_binary_path();
+    let test_elf = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("binaries")
+        .join("loops_debug");
+    check_test_binary(&test_elf);
+
+    // 0x59c in loops_debug is a `stp x29, x30, [sp, #-0x10]!` — an unsupported
+    // mnemonic for the AArch64 optimization path. Targeting a 4-byte window on
+    // this single instruction should abort before any output file is written.
+    let optimized_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("binaries")
+        .join("loops_debug_optimized");
+    let _ = fs::remove_file(&optimized_path);
+
+    let output = Command::new(binary)
+        .arg("opt")
+        .arg(&test_elf)
+        .arg("--start-addr")
+        .arg("0x59c")
+        .arg("--end-addr")
+        .arg("0x5a0")
+        .output()
+        .expect("Failed to execute s11");
+
+    assert!(
+        !output.status.success(),
+        "opt must reject an AArch64 window containing an unsupported instruction.\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr),
+    );
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("unsupported instruction") && stderr.contains("stp"),
+        "stderr should identify the offending mnemonic; got: {stderr}",
+    );
+    assert!(
+        stderr.contains("0x59c"),
+        "stderr should report the offending address; got: {stderr}",
+    );
+
+    assert!(
+        !optimized_path.exists(),
+        "no optimized binary should be written when conversion fails: {:?}",
+        optimized_path,
     );
 }
 
