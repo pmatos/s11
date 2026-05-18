@@ -417,21 +417,16 @@ struct OptimizationOptions {
 
 // --- Optimization Function ---
 
-// Issue #77 stage 1 step 15 note: this AArch64 optimization path consumes the
-// new trait-surface scaffolding (`<AArch64 as ConcreteExecutor<Instruction>>`,
-// `<AArch64 as SymbolicExecutor<Instruction>>`, `<AArch64 as Assembler<...>>`)
-// indirectly through the existing free functions, which step 8 wired to the
-// trait impls. Stage 2 step 20 merges this function with
-// `optimize_elf_binary_x86` into a single `optimize_elf_binary_generic<I: ISA>`
-// once x86 has its own SearchAlgorithm impl. For now the AArch64-typed
-// signature is preserved so existing callers do not need turbofish.
+// AArch64 dispatch target for `s11 opt`. Receives a pre-built `ElfPatcher`
+// from the CLI arm so the file is read exactly once (issue #88).
 //
-// Step 20 status: BLOCKED on the SearchAlgorithm<I> follow-up to step 11.
-// `optimize_elf_binary_x86` uses `find_shorter_equivalent_x86` which directly
-// drives the candidate enumerator over X86Instruction — there is no x86
-// SearchAlgorithm impl to dispatch to. Once that lands, the merge is
-// mechanical: `match detect_cli_arch_from_elf(...) { Aarch64 => ::<AArch64>,
-// X86_64 => ::<X86_64>, X86_32 => ::<X86_32>, Riscv* => stage 3 }`.
+// Issue #77 stage 2 step 20 will merge this with `optimize_elf_binary_x86`
+// into a single `optimize_elf_binary_generic<I: ISA>` once x86 has its own
+// `SearchAlgorithm` impl; the merge dispatch will branch on
+// `patcher.arch()` (now that the Opt arm already has a patcher in scope).
+// Currently blocked on the `SearchAlgorithm<I>` follow-up to step 11 —
+// `optimize_elf_binary_x86` still drives `find_shorter_equivalent_x86`
+// over `X86Instruction` directly.
 fn optimize_elf_binary(
     elf_patcher: &ElfPatcher,
     path: &Path,
