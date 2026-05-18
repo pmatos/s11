@@ -154,7 +154,9 @@ impl Mutator {
                     0 => *rd = self.random_register(rng),
                     1 => *rn = self.random_register(rng),
                     // Add/Sub do not allow ROR in the shifted-register form.
-                    _ => *rm = self.random_operand_3op(rng, false),
+                    // Immediates must fit `is_encodable_aarch64`'s 12-bit
+                    // range (issue #87).
+                    _ => *rm = Self::clamp_imm12(self.random_operand_3op(rng, false)),
                 }
             }
             Instruction::And { rd, rn, rm }
@@ -215,7 +217,8 @@ impl Mutator {
                 if rng.random_bool(0.5) {
                     *rn = self.random_register(rng);
                 } else {
-                    *rm = self.random_operand_3op(rng, false);
+                    // Same 12-bit clamp as Add/Sub (issue #87).
+                    *rm = Self::clamp_imm12(self.random_operand_3op(rng, false));
                 }
             }
             Instruction::Tst { rn, rm } => {
@@ -237,6 +240,8 @@ impl Mutator {
             // operands are clamped to imm5 via rem_euclid(32) to match the
             // candidate generator (candidate.rs::generate_random_instruction)
             // and avoid avoidable is_encodable_aarch64 rejection churn.
+            // (See `clamp_imm12` for the 12-bit analogue used by
+            // ADD/SUB/ADDS/SUBS/CMP/CMN, issue #87.)
             Instruction::Ccmp { rn, rm, nzcv, cond } | Instruction::Ccmn { rn, rm, nzcv, cond } => {
                 match rng.random_range(0..4) {
                     0 => *rn = self.random_register(rng),
@@ -329,7 +334,8 @@ impl Mutator {
                 match choice {
                     0 => *rd = self.random_register(rng),
                     1 => *rn = self.random_register(rng),
-                    _ => *rm = self.random_operand(rng),
+                    // Same 12-bit clamp as Add/Sub (issue #87).
+                    _ => *rm = Self::clamp_imm12(self.random_operand(rng)),
                 }
             }
             Instruction::Ands { rd, rn, rm } => {
@@ -924,6 +930,18 @@ impl Mutator {
         }
     }
 
+    /// Issue #87. ADD/SUB/ADDS/SUBS/CMP/CMN immediates must fit the 12-bit
+    /// unsigned range `0..=0xFFF` (see `Instruction::is_encodable_aarch64`).
+    /// Mirrors the CCMP/CCMN clamp at L240-258 — the operand is only
+    /// rewritten when it's an `Immediate`; register/shifted forms pass
+    /// through unchanged.
+    fn clamp_imm12(operand: Operand) -> Operand {
+        match operand {
+            Operand::Immediate(v) => Operand::Immediate(v.rem_euclid(0x1000)),
+            other => other,
+        }
+    }
+
     /// Random rm operand for the in-scope arithmetic/logical/comparison
     /// shifted-register opcodes (issue #59). With low probability returns a
     /// `ShiftedRegister`; otherwise falls back to the plain register/immediate
@@ -1338,6 +1356,73 @@ mod tests {
             swapped_to_peer,
             "opcode mutation must reach a peer bit-field variant within 200 trials"
         );
+    }
+
+    /// Issue #87. If `available_immediates` includes values outside the
+    /// per-variant encodable range, mutate_operand must clamp them so the
+    /// MCMC search never wastes iterations on candidates that
+    /// `is_encodable_aarch64` will reject.
+    #[test]
+    fn test_mutate_operand_clamps_arith_imm_to_encodable_range() {
+        let regs = vec![Register::X0, Register::X1, Register::X2];
+        let imms = vec![0, 1, 0xFFF, 0x1000, 8192, 0x1_0000, 1_000_000, -1];
+        let mutator = Mutator::new(regs, imms, MutationWeights::default());
+
+        let starts = [
+            Instruction::Add {
+                rd: Register::X0,
+                rn: Register::X1,
+                rm: Operand::Immediate(0),
+            },
+            Instruction::Sub {
+                rd: Register::X0,
+                rn: Register::X1,
+                rm: Operand::Immediate(0),
+            },
+            Instruction::Adds {
+                rd: Register::X0,
+                rn: Register::X1,
+                rm: Operand::Immediate(0),
+            },
+            Instruction::Subs {
+                rd: Register::X0,
+                rn: Register::X1,
+                rm: Operand::Immediate(0),
+            },
+            Instruction::Cmp {
+                rn: Register::X1,
+                rm: Operand::Immediate(0),
+            },
+            Instruction::Cmn {
+                rn: Register::X1,
+                rm: Operand::Immediate(0),
+            },
+            Instruction::Ccmp {
+                rn: Register::X1,
+                rm: Operand::Immediate(0),
+                nzcv: 0,
+                cond: Condition::EQ,
+            },
+            Instruction::Ccmn {
+                rn: Register::X1,
+                rm: Operand::Immediate(0),
+                nzcv: 0,
+                cond: Condition::EQ,
+            },
+        ];
+
+        for seed in 0u64..200 {
+            let mut rng = StdRng::seed_from_u64(seed);
+            for start in &starts {
+                let mut seq = vec![*start];
+                mutator.mutate_operand(&mut rng, &mut seq);
+                assert!(
+                    seq[0].is_encodable_aarch64(),
+                    "seed {seed}, start {start:?} produced non-encodable {:?}",
+                    seq[0]
+                );
+            }
+        }
     }
 
     #[test]
