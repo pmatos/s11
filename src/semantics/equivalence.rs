@@ -143,6 +143,14 @@ impl EquivalenceConfig {
     /// `flags_live` moved from `EquivalenceConfig` onto the mask (ADR-0004
     /// §5). The OR-merge makes the builder order-independent: flags are
     /// live if either the existing config OR the new mask says so.
+    ///
+    /// **One-way ratchet:** once a previous builder step set `flags_live`
+    /// to true (via `.with_flags(true)` or a `LiveOut` with that bit
+    /// already set), this method cannot clear it — callers who genuinely
+    /// want a flags-dead replacement must mutate `config.live_out`
+    /// directly. The trade-off is deliberate; silently *losing* flag
+    /// liveness in a chained builder is a much more dangerous failure
+    /// mode than retaining it.
     pub fn live_out(mut self, live_out: LiveOut) -> Self {
         let merged_flags = self.live_out.flags_live() || live_out.flags_live();
         self.live_out = live_out.with_flags(merged_flags);
