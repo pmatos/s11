@@ -8,9 +8,14 @@
 
 use crate::ir::Instruction;
 use crate::parser::{LineResult, parse_line};
+use crate::search::SearchAlgorithm;
+use crate::search::config::{Algorithm, SearchConfig};
+use crate::semantics::cost::{CostMetric, sequence_cost};
 use crate::semantics::live_out::LiveOut;
 use crate::validation::live_out::parse_live_out_contract;
-use std::path::Path;
+use serde::Serialize;
+use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 /// Parse a benchmark `.s` fixture into its target sequence plus the
 /// live-out contract declared in its `// Live-out:` header.
@@ -62,6 +67,116 @@ pub fn load_sequence(path: &Path) -> (Vec<Instruction>, LiveOut, bool) {
     (sequence, live_out, flags_live)
 }
 
+/// One row of the benchmark JSON-Lines output. See
+/// `benches/common/schema.md` (added in step 8) for the canonical
+/// field listing.
+#[derive(Debug, Clone, Serialize)]
+pub struct BenchRecord {
+    pub benchmark_id: String,
+    pub sample_index: u32,
+    pub phase: u8,
+    pub algorithm: String,
+    pub seed: u64,
+    pub cost_metric: String,
+    pub original_length: usize,
+    pub found_length: Option<usize>,
+    pub original_cost: u64,
+    pub best_cost: u64,
+    pub search_elapsed_ms: u64,
+    pub smt_elapsed_ms: u64,
+    pub smt_queries: u64,
+    pub smt_equivalent: u64,
+    pub candidates_evaluated: u64,
+    pub success: bool,
+    pub timeout: bool,
+    pub git_sha: Option<String>,
+    pub timestamp_utc: Option<String>,
+}
+
+/// Spec for one benchmark — derived from the fixture path and the
+/// surrounding bench file. `sample_index` is supplied separately by
+/// `run_bench` so the same spec can drive criterion's per-sample loop.
+#[derive(Debug, Clone)]
+pub struct BenchSpec {
+    pub id: String,
+    pub fixture: PathBuf,
+    pub phase: u8,
+    pub algorithm: Algorithm,
+    pub cost_metric: CostMetric,
+    pub seed: u64,
+    pub timeout: Duration,
+}
+
+/// Run the optimizer against one fixture and synthesise a `BenchRecord`.
+///
+/// `sample_index` is mixed into the stochastic seed so multiple
+/// criterion samples explore independent RNG trajectories while staying
+/// deterministic given `(spec.seed, sample_index)`. Non-stochastic
+/// algorithms ignore the seed entirely.
+pub fn run_bench(spec: &BenchSpec, sample_index: u32) -> BenchRecord {
+    let (target, live_out, _flags_live) = load_sequence(&spec.fixture);
+    let original_length = target.len();
+    let original_cost = sequence_cost(&target, &spec.cost_metric);
+
+    let effective_seed = spec.seed.wrapping_add(sample_index as u64);
+    let mut config = SearchConfig::default()
+        .with_algorithm(spec.algorithm)
+        .with_cost_metric(spec.cost_metric)
+        .with_timeout(spec.timeout);
+    config.stochastic.seed = Some(effective_seed);
+
+    let (statistics, optimized) = match spec.algorithm {
+        Algorithm::Enumerative => {
+            let mut search = crate::search::EnumerativeSearch::new();
+            let result = search.search(&target, &live_out, &config);
+            (result.statistics, result.optimized_sequence)
+        }
+        Algorithm::Stochastic => {
+            let mut search = crate::search::StochasticSearch::<crate::isa::AArch64>::new();
+            let result = search.search(&target, &live_out, &config);
+            (result.statistics, result.optimized_sequence)
+        }
+        Algorithm::Symbolic => {
+            let mut search = crate::search::SymbolicSearch::<crate::isa::AArch64>::new();
+            let result = search.search(&target, &live_out, &config);
+            (result.statistics, result.optimized_sequence)
+        }
+        // Hybrid/LLM not wired into the bench harness — issue #70 keeps
+        // those out of scope. Caller should pre-filter.
+        other => panic!("run_bench: unsupported algorithm {other:?}"),
+    };
+
+    let found_length = optimized.as_ref().map(|s| s.len());
+    let best_cost = optimized
+        .as_ref()
+        .map(|s| sequence_cost(s, &spec.cost_metric))
+        .unwrap_or(original_cost);
+    let success = optimized.is_some();
+    let timed_out = statistics.elapsed_time >= spec.timeout;
+
+    BenchRecord {
+        benchmark_id: spec.id.clone(),
+        sample_index,
+        phase: spec.phase,
+        algorithm: spec.algorithm.to_string(),
+        seed: effective_seed,
+        cost_metric: format!("{:?}", spec.cost_metric).to_ascii_lowercase(),
+        original_length,
+        found_length,
+        original_cost,
+        best_cost,
+        search_elapsed_ms: statistics.elapsed_time.as_millis() as u64,
+        smt_elapsed_ms: statistics.smt_elapsed.as_millis() as u64,
+        smt_queries: statistics.smt_queries,
+        smt_equivalent: statistics.smt_equivalent,
+        candidates_evaluated: statistics.candidates_evaluated,
+        success,
+        timeout: timed_out,
+        git_sha: None,
+        timestamp_utc: None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -106,5 +221,42 @@ mod tests {
     fn load_sequence_panics_without_header() {
         let f = write_fixture("mov x0, #0\n");
         let _ = load_sequence(f.path());
+    }
+
+    #[test]
+    fn run_bench_enumerative_records_metrics_for_fusible_target() {
+        // `mov x0, x1; add x0, x0, #1` collapses into `add x0, x1, #1`
+        // under enumerative search — original_length=2 must shrink to
+        // found_length=1, success=true, and metrics must be populated.
+        let f = write_fixture(
+            "// Live-out: x0\n\
+             mov x0, x1\n\
+             add x0, x0, #1\n",
+        );
+        let spec = BenchSpec {
+            id: "mov_add_fuse".to_string(),
+            fixture: f.path().to_path_buf(),
+            phase: 1,
+            algorithm: Algorithm::Enumerative,
+            cost_metric: CostMetric::InstructionCount,
+            seed: 42,
+            timeout: Duration::from_secs(30),
+        };
+
+        let record = run_bench(&spec, 0);
+
+        assert_eq!(record.benchmark_id, "mov_add_fuse");
+        assert_eq!(record.sample_index, 0);
+        assert_eq!(record.phase, 1);
+        assert_eq!(record.algorithm, "enumerative");
+        assert_eq!(record.seed, 42);
+        assert_eq!(record.original_length, 2);
+        assert_eq!(record.original_cost, 2);
+        assert!(record.success, "fusion target should succeed");
+        assert_eq!(record.found_length, Some(1));
+        assert_eq!(record.best_cost, 1);
+        assert!(record.smt_queries > 0, "enumerative search must hit SMT");
+        assert!(record.candidates_evaluated > 0);
+        assert!(!record.timeout);
     }
 }
