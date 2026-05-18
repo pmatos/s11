@@ -449,6 +449,98 @@ fn test_opt_rejects_unsupported_instruction_window() {
     );
 }
 
+/// Helper for memory-op integration tests: assert that `s11 opt` on the
+/// given single-instruction window succeeds, then clean up the artifact.
+fn assert_opt_succeeds_on_window(test_elf: &Path, optimized_name: &str, start_addr: u64) {
+    let binary = get_binary_path();
+    let end_addr = start_addr + 4;
+    let optimized_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("binaries")
+        .join(optimized_name);
+    let _ = fs::remove_file(&optimized_path);
+
+    let output = Command::new(&binary)
+        .arg("opt")
+        .arg(test_elf)
+        .arg("--start-addr")
+        .arg(format!("0x{start_addr:x}"))
+        .arg("--end-addr")
+        .arg(format!("0x{end_addr:x}"))
+        .output()
+        .expect("Failed to execute s11");
+
+    if !output.status.success() {
+        let _ = fs::remove_file(&optimized_path);
+        panic!(
+            "opt failed on memory-op window 0x{start_addr:x}.\nstdout: {}\nstderr: {}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr),
+        );
+    }
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("Optimization completed successfully"),
+        "memory-op window must round-trip end-to-end; stdout: {stdout}",
+    );
+
+    let _ = fs::remove_file(&optimized_path);
+}
+
+#[test]
+fn test_opt_accepts_stp_writeback_window() {
+    // STP pre-index `stp x29, x30, [sp, #-16]!` — the standard AArch64
+    // function-prologue spill. Issue #68 moves this from "unsupported" to
+    // "supported"; this test pins that decision at the CLI boundary.
+    let test_elf = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("binaries")
+        .join("loops_debug");
+    check_test_binary(&test_elf);
+    let start_addr = find_encoding_masked(
+        &test_elf,
+        &[0xfd, 0x7b, 0xbf, 0xa9],
+        &[0xff, 0xff, 0xff, 0xff],
+        "stp x29, x30, [sp, #-16]!",
+    );
+    assert_opt_succeeds_on_window(&test_elf, "loops_debug_optimized", start_addr);
+}
+
+#[test]
+fn test_opt_accepts_ldp_postindex_window() {
+    // LDP post-index `ldp x29, x30, [sp], #16` — function-epilogue
+    // restore. Verifies the post-index addressing mode runs cleanly
+    // through disasm → IR → SMT → reassemble.
+    let test_elf = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("binaries")
+        .join("loops_debug");
+    check_test_binary(&test_elf);
+    let start_addr = find_encoding_masked(
+        &test_elf,
+        &[0xfd, 0x7b, 0xc1, 0xa8],
+        &[0xff, 0xff, 0xff, 0xff],
+        "ldp x29, x30, [sp], #16",
+    );
+    assert_opt_succeeds_on_window(&test_elf, "loops_debug_optimized", start_addr);
+}
+
+#[test]
+fn test_opt_accepts_ldr_positive_offset_window() {
+    // LDR with positive scaled offset `ldr x17, [x16, #8]` — covers the
+    // RefOffset / Uscaled encoding path (vs the LDUR Sbits path tested at
+    // the assembler unit-test layer).
+    let test_elf = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("binaries")
+        .join("loops_debug");
+    check_test_binary(&test_elf);
+    let start_addr = find_encoding_masked(
+        &test_elf,
+        &[0x11, 0x06, 0x40, 0xf9],
+        &[0xff, 0xff, 0xff, 0xff],
+        "ldr x17, [x16, #8]",
+    );
+    assert_opt_succeeds_on_window(&test_elf, "loops_debug_optimized", start_addr);
+}
+
 #[test]
 fn test_opt_hex_address_formats() {
     let binary = get_binary_path();
