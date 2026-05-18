@@ -1165,6 +1165,15 @@ fn is_encodable_ldr_like(rt: Register, addr: &AddressOperand, width: AccessWidth
 
 /// Encodability gate for the LDP / STP family. See `is_encodable_ldr_like`
 /// for the shared base/XZR rules; pair-specific rules layered below.
+///
+/// Reject paths (codex P2 + claude review #8):
+///   * Non-immediate addressing — LDP/STP only accept `[base{, #imm}]`,
+///     `[base, #imm]!`, `[base], #imm`. `AddressOperand::Reg` / `Ext`
+///     parse cleanly today but the assembler errors at emit time, so
+///     drop them at the IR layer for parity with `parse_line`'s gate.
+///   * Out-of-range scaled-7-bit signed immediate — the LDP/STP imm7
+///     field encodes `-64..=63` scaled by the access width. Offsets
+///     outside that range pass IR validation but panic at dynasm.
 fn is_encodable_pair(
     rt1: Register,
     rt2: Register,
@@ -1183,6 +1192,21 @@ fn is_encodable_pair(
     // load-pair caller.
     if signed && width != AccessWidth::Word {
         // LDPSW is the only "signed pair" form; it is always 32→64.
+        return false;
+    }
+    // LDP/STP have no register-offset / register-extend addressing form.
+    let imm_offset = match addr {
+        AddressOperand::Imm { offset, .. } => *offset,
+        AddressOperand::Reg { .. } | AddressOperand::Ext { .. } => return false,
+    };
+    // Offset must fit the 7-bit signed scaled immediate. Pair access
+    // width is the per-register transfer width (4 or 8 bytes).
+    let scale = width.bytes() as i64;
+    if scale == 0 || imm_offset % scale != 0 {
+        return false;
+    }
+    let scaled = imm_offset / scale;
+    if !(-64..=63).contains(&scaled) {
         return false;
     }
     // Writeback `base == rtN` is rejected.
@@ -1678,6 +1702,103 @@ mod tests {
             signed: false,
         };
         assert_eq!(format!("{}", ldp), "ldp x0, x1, [sp, #16]");
+    }
+
+    #[test]
+    fn pair_reg_offset_mode_rejected_at_encodability() {
+        let ldp = Instruction::Ldp {
+            rt1: Register::X0,
+            rt2: Register::X1,
+            addr: AddressOperand::Reg {
+                base: Register::X2,
+                idx: Register::X3,
+                shift: 0,
+            },
+            width: AccessWidth::Extended,
+            signed: false,
+        };
+        assert!(!ldp.is_encodable_aarch64());
+        let stp = Instruction::Stp {
+            rt1: Register::X0,
+            rt2: Register::X1,
+            addr: AddressOperand::Reg {
+                base: Register::X2,
+                idx: Register::X3,
+                shift: 3,
+            },
+            width: AccessWidth::Word,
+        };
+        assert!(!stp.is_encodable_aarch64());
+    }
+
+    #[test]
+    fn pair_ext_mode_rejected_at_encodability() {
+        use crate::ir::ExtendKind;
+        let ldp = Instruction::Ldp {
+            rt1: Register::X0,
+            rt2: Register::X1,
+            addr: AddressOperand::Ext {
+                base: Register::X2,
+                idx: Register::X3,
+                kind: ExtendKind::Uxtw,
+                shift: 0,
+            },
+            width: AccessWidth::Extended,
+            signed: false,
+        };
+        assert!(!ldp.is_encodable_aarch64());
+    }
+
+    #[test]
+    fn pair_imm_offset_out_of_range_rejected() {
+        // 7-bit signed scaled immediate: at width=Extended (×8) the legal
+        // range is -512..=504 in steps of 8; 512 is just out of range.
+        let ldp = Instruction::Ldp {
+            rt1: Register::X0,
+            rt2: Register::X1,
+            addr: AddressOperand::Imm {
+                base: Register::SP,
+                offset: 512,
+                mode: IndexMode::Offset,
+            },
+            width: AccessWidth::Extended,
+            signed: false,
+        };
+        assert!(!ldp.is_encodable_aarch64());
+    }
+
+    #[test]
+    fn pair_imm_offset_unscaled_rejected() {
+        // Offset must be divisible by access width. 12 % 8 != 0.
+        let ldp = Instruction::Ldp {
+            rt1: Register::X0,
+            rt2: Register::X1,
+            addr: AddressOperand::Imm {
+                base: Register::SP,
+                offset: 12,
+                mode: IndexMode::Offset,
+            },
+            width: AccessWidth::Extended,
+            signed: false,
+        };
+        assert!(!ldp.is_encodable_aarch64());
+    }
+
+    #[test]
+    fn pair_imm_offset_in_range_accepted() {
+        // Boundary check: scaled = 63 (max positive) at width=Extended.
+        let ldp = Instruction::Ldp {
+            rt1: Register::X0,
+            rt2: Register::X1,
+            addr: AddressOperand::Imm {
+                base: Register::SP,
+                offset: 504,
+                mode: IndexMode::Offset,
+            },
+            width: AccessWidth::Extended,
+            signed: false,
+        };
+        assert!(ldp.is_encodable_aarch64());
     }
 
     #[test]
