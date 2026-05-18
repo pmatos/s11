@@ -30,7 +30,6 @@ pub struct RegisterSet<R: RegisterType> {
     flags_live: bool,
 }
 
-#[allow(dead_code)] // public API, wired in #77 stage 1 step 9
 impl<R: RegisterType> RegisterSet<R> {
     /// Empty mask, flags not live.
     pub fn empty() -> Self {
@@ -72,24 +71,25 @@ impl<R: RegisterType> RegisterSet<R> {
     }
 
     /// Number of live-out registers.
+    #[allow(dead_code)]
     pub fn len(&self) -> usize {
         self.regs.len()
     }
 
     /// True if the mask contains no registers (flag-only liveness still
     /// possible if `flags_live()` returns true).
+    #[allow(dead_code)]
     pub fn is_empty(&self) -> bool {
         self.regs.is_empty()
     }
 
     /// True if the condition flags are part of the live-out contract.
-    #[allow(dead_code)] // wired in #77 stage 1 step 9
     pub fn flags_live(&self) -> bool {
         self.flags_live
     }
 
     /// Set whether the condition flags are live-out.
-    #[allow(dead_code)] // wired in #77 stage 1 step 9
+    #[allow(dead_code)]
     pub fn set_flags_live(&mut self, live: bool) {
         self.flags_live = live;
     }
@@ -98,13 +98,6 @@ impl<R: RegisterType> RegisterSet<R> {
     pub fn with_flags(mut self, flags_live: bool) -> Self {
         self.flags_live = flags_live;
         self
-    }
-
-    /// AArch64-flavored alias for `contains`. Kept so call sites using
-    /// the old `LiveOut::contains_register(reg)` keep compiling after
-    /// `LiveOut` becomes a type alias for this mask.
-    pub fn contains_register(&self, reg: R) -> bool {
-        self.contains(reg)
     }
 }
 
@@ -119,6 +112,14 @@ impl RegisterSet<Register> {
         }
         mask.add(Register::SP);
         mask
+    }
+
+    /// AArch64-flavored alias for `contains`. Kept so call sites using the
+    /// old `LiveOut::contains_register(reg)` (where `LiveOut` was a struct
+    /// wrapping `LiveOutRegisters`) keep compiling against the
+    /// `LiveOut = RegisterSet<Register>` alias.
+    pub fn contains_register(&self, reg: Register) -> bool {
+        self.contains(reg)
     }
 }
 

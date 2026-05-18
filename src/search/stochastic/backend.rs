@@ -56,6 +56,14 @@ pub trait StochasticBackend<I: ISA>: Sized {
     /// Loop-execute a sequence against an initial state.
     fn apply_sequence(state: Self::State, seq: &[I::Instruction]) -> Self::State;
     /// Compare two states over the live-out contract.
+    ///
+    /// **Invariant:** any `flags_live` bit on the mask is honoured by the
+    /// equivalence-checking layer (`semantics::equivalence`), not here.
+    /// Implementations of this trait method **must** treat the comparison as
+    /// register-only — the pre-SMT flag-writer guard upstream rejects
+    /// flag-divergent candidates before stochastic comparison runs. If the
+    /// call path is ever rearranged so stochastic compares states without
+    /// passing through the upstream guard, this invariant has to be revisited.
     fn states_equal(s1: &Self::State, s2: &Self::State, live_out: &Self::LiveOut) -> bool;
 
     /// Sum the cost of every instruction in the sequence.
