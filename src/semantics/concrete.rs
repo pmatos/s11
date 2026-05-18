@@ -245,7 +245,10 @@ pub fn apply_instruction_concrete(
             let result = if cond_true {
                 state.get_register(*rn)
             } else {
-                ConcreteValue::from_i64(-(state.get_register(*rm).as_i64()))
+                // `wrapping_neg` mirrors AArch64 two's-complement semantics:
+                // negating `i64::MIN` yields `i64::MIN`, matching the sibling
+                // NEG handler below. Plain `-x` would panic in debug builds.
+                ConcreteValue::from_i64(state.get_register(*rm).as_i64().wrapping_neg())
             };
             state.set_register(*rd, result);
         }
