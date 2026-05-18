@@ -896,8 +896,6 @@ impl InstructionGenerator<Instruction> for AArch64InstructionGenerator {
                     },
                 }
             }
-            // Issue #93: CSET / CSETM / ROR each get their own top-level
-            // slot (previously folded into slot 23's 4-way sub-multiplexer).
             30 => Instruction::Cset {
                 rd,
                 cond: Condition::random_normal(rng),
