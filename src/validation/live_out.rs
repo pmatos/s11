@@ -107,12 +107,17 @@ pub fn parse_live_out_contract(s: &str) -> Result<(LiveOut, bool), ParseLiveOutR
     let flags_live = match flags_tok.as_str() {
         "" => false,
         "nzcv" => true,
-        other => {
+        "n" | "z" | "c" | "v" => {
             return Err(ParseLiveOutRegistersError {
                 message: format!(
-                    "unknown flag token '{}', expected 'nzcv' (per-flag tokens n/z/c/v reserved)",
-                    other
+                    "per-flag token '{}' is reserved for a future extension; use 'nzcv' for all flags",
+                    flags_tok
                 ),
+            });
+        }
+        other => {
+            return Err(ParseLiveOutRegistersError {
+                message: format!("unknown flag token '{}'; expected 'nzcv'", other),
             });
         }
     };
@@ -617,10 +622,18 @@ mod tests {
     fn test_parse_live_out_contract_per_flag_tokens_reserved() {
         for tok in ["n", "z", "c", "v"] {
             let s = format!("x0;{}", tok);
+            let err = parse_live_out_contract(&s).unwrap_err();
             assert!(
-                parse_live_out_contract(&s).is_err(),
-                "expected '{}' to be rejected (reserved)",
-                s
+                err.message.contains("reserved for a future extension"),
+                "expected '{}' to be rejected as reserved, got: {}",
+                s,
+                err.message
+            );
+            assert!(
+                err.message.contains(&format!("per-flag token '{}'", tok)),
+                "expected reserved-token error to name '{}', got: {}",
+                tok,
+                err.message
             );
         }
     }
