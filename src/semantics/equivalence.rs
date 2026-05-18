@@ -397,28 +397,19 @@ fn run_fast_path(
 }
 
 /// Check equivalence with configuration (fast path + optional SMT). No metrics.
+///
+/// Thin wrapper around `check_equivalence_with_config_metrics` that drops
+/// the metrics. Callers that don't observe metrics pay the same
+/// `solver.to_string()` cost on the unsat branch as the metrics-aware
+/// caller; in practice that branch is rare (most candidates fail in the
+/// fast path or return sat) and the serialization is microseconds.
 pub fn check_equivalence_with_config(
     seq1: &[Instruction],
     seq2: &[Instruction],
     config: &EquivalenceConfig,
 ) -> EquivalenceResult {
-    // Issue #69: terminator-identity precheck — see `check_equivalence`.
-    let (prefix1, terminator1) = split_terminator(seq1);
-    let (prefix2, terminator2) = split_terminator(seq2);
-    if terminator1 != terminator2 {
-        return EquivalenceResult::NotEquivalentFast(ConcreteMachineState::new_zeroed());
-    }
-
-    if let Some(early) = pre_smt_guard(prefix1, prefix2, config.live_out.flags_live()) {
-        return early;
-    }
-
-    if let Some(fast) = run_fast_path(prefix1, prefix2, config) {
-        return fast;
-    }
-
-    let solver = build_smt_solver(prefix1, prefix2, config);
-    interpret_smt_result(solver.check())
+    let (result, _) = check_equivalence_with_config_metrics(seq1, seq2, config);
+    result
 }
 
 /// Like `check_equivalence_with_config`, but also reports per-call metrics
