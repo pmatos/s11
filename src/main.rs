@@ -2931,6 +2931,33 @@ mod cli_helper_tests {
     }
 
     #[test]
+    fn reassemble_x86_32_splices_and_pads_correctly() {
+        // Mirrors the x86-64 pad-with-NOPs test for the x86-32 mode.
+        // The x86-32 nop_sequence returns single-byte 0x90 NOPs, so the
+        // padding loop must iterate `gap` times rather than once.
+        use isa::x86::{X86Instruction, X86Register};
+        let original_jcc_bytes = [0x74u8, 0x05]; // je rel8=5
+        let final_ir = [X86Instruction::MovReg {
+            rd: X86Register::RAX,
+            rs: X86Register::RBX,
+        }];
+        // Original prefix was 5 bytes; optimized prefix encodes to 2
+        // bytes (`mov eax, ebx` on x86-32). NOP-pad 3 bytes then the
+        // 2-byte je at offset 5 — total 7 bytes.
+        let out = reassemble_x86_prefix_with_pinned_terminator(
+            &final_ir,
+            DetectedArch::X86_32,
+            Some(&original_jcc_bytes),
+            5,
+        )
+        .expect("x86-32 reassemble succeeds");
+        assert_eq!(out.len(), 7);
+        assert_eq!(&out[5..7], &original_jcc_bytes);
+        // Bytes [2..5] are NOP-padding; x86-32 nop_sequence emits 0x90.
+        assert_eq!(&out[2..5], &[0x90u8; 3]);
+    }
+
+    #[test]
     fn reassemble_x86_rejects_optimized_prefix_larger_than_original() {
         // Pathological case: optimized prefix is LARGER than the original
         // prefix room. Cannot pad backwards. Must surface as an error

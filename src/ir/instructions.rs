@@ -644,7 +644,7 @@ pub fn split_terminator(seq: &[Instruction]) -> (&[Instruction], Option<&Instruc
     }
 }
 
-/// Issue #74: x86 mirror of `split_terminator`. Peels a trailing Jcc
+/// x86 mirror of `split_terminator`. Peels a trailing Jcc
 /// off the sequence so the optimizer can reason about the straight-line
 /// prefix while leaving the branch terminator pinned in the binary.
 pub fn split_terminator_x86(

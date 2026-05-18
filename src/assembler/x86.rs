@@ -17,7 +17,7 @@
 // disfiguring the macro invocations. Allow at module scope.
 #![allow(clippy::useless_conversion)]
 
-use crate::isa::x86::{X86Instruction, X86Register};
+use crate::isa::x86::{X86Condition, X86Instruction, X86Register};
 use dynasm::dynasm;
 use dynasmrt::DynasmApi;
 
@@ -189,7 +189,6 @@ fn encode_64(ops: &mut dynasmrt::x64::Assembler, instr: &X86Instruction) -> Resu
         X86Instruction::Cmov { rd, rs, cond } => {
             let rd = reg_index(*rd)?;
             let rs = reg_index(*rs)?;
-            use crate::isa::x86::X86Condition;
             match cond {
                 X86Condition::E => dynasm!(ops ; .arch x64 ; cmove Rq(rd), Rq(rs)),
                 X86Condition::NE => dynasm!(ops ; .arch x64 ; cmovne Rq(rd), Rq(rs)),
@@ -215,7 +214,6 @@ fn encode_64(ops: &mut dynasmrt::x64::Assembler, instr: &X86Instruction) -> Resu
             // never patches Jcc bytes into the binary (terminators are
             // pinned), so the placeholder is only exercised by the
             // encoder round-trip tests.
-            use crate::isa::x86::X86Condition;
             match cond {
                 X86Condition::E => dynasm!(ops ; .arch x64 ; je BYTE 0),
                 X86Condition::NE => dynasm!(ops ; .arch x64 ; jne BYTE 0),
@@ -335,7 +333,6 @@ fn encode_32(ops: &mut dynasmrt::x86::Assembler, instr: &X86Instruction) -> Resu
         X86Instruction::Cmov { rd, rs, cond } => {
             let rd = reg_index_32(*rd)?;
             let rs = reg_index_32(*rs)?;
-            use crate::isa::x86::X86Condition;
             match cond {
                 X86Condition::E => dynasm!(ops ; .arch x86 ; cmove Rd(rd), Rd(rs)),
                 X86Condition::NE => dynasm!(ops ; .arch x86 ; cmovne Rd(rd), Rd(rs)),
@@ -357,7 +354,6 @@ fn encode_32(ops: &mut dynasmrt::x86::Assembler, instr: &X86Instruction) -> Resu
             Ok(())
         }
         X86Instruction::Jcc { cond } => {
-            use crate::isa::x86::X86Condition;
             match cond {
                 X86Condition::E => dynasm!(ops ; .arch x86 ; je BYTE 0),
                 X86Condition::NE => dynasm!(ops ; .arch x86 ; jne BYTE 0),
@@ -797,7 +793,6 @@ mod tests {
 
     #[test]
     fn cmove_x86_64_round_trips() {
-        use crate::isa::x86::X86Condition;
         check_x86_64(
             X86Instruction::Cmov {
                 rd: X86Register::RAX,
@@ -811,7 +806,6 @@ mod tests {
 
     #[test]
     fn all_cmov_suffixes_round_trip_x86_64() {
-        use crate::isa::x86::X86Condition;
         let cases = [
             (X86Condition::E, "cmove"),
             (X86Condition::NE, "cmovne"),
@@ -845,7 +839,6 @@ mod tests {
 
     #[test]
     fn cmove_x86_32_round_trips() {
-        use crate::isa::x86::X86Condition;
         check_x86_32(
             X86Instruction::Cmov {
                 rd: X86Register::RAX,
@@ -862,7 +855,6 @@ mod tests {
     #[test]
     fn je_x86_64_encodes_to_short_form_je() {
         // Short je with rel8=0 is bytes 0x74 0x00.
-        use crate::isa::x86::X86Condition;
         let mut asm = X86Assembler::new_64();
         let bytes = asm
             .assemble_instructions(&[X86Instruction::Jcc {
@@ -876,7 +868,6 @@ mod tests {
 
     #[test]
     fn all_jcc_suffixes_round_trip_x86_64() {
-        use crate::isa::x86::X86Condition;
         let cases = [
             (X86Condition::E, "je"),
             (X86Condition::NE, "jne"),
@@ -908,7 +899,6 @@ mod tests {
 
     #[test]
     fn je_x86_32_round_trips() {
-        use crate::isa::x86::X86Condition;
         let mut asm = X86Assembler::new_32();
         let bytes = asm
             .assemble_instructions(&[X86Instruction::Jcc {
