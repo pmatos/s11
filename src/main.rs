@@ -1878,9 +1878,11 @@ mod cli_helper_tests {
 
     #[test]
     fn convert_capstone_op_flags_unknown_mnemonic_as_unsupported() {
-        match convert_capstone_op("ldr", "x0, [x1]") {
+        // NEON FADD is not parsed; memory ops were promoted to supported in
+        // issue #68. See ADR-0007.
+        match convert_capstone_op("fadd", "v0.4s, v1.4s, v2.4s") {
             ConvertOutcome::Unsupported(line) => {
-                assert!(line.contains("ldr"), "warning line should name mnemonic");
+                assert!(line.contains("fadd"), "warning line should name mnemonic");
             }
             other => panic!("expected Unsupported, got {:?}", other),
         }
@@ -1888,10 +1890,10 @@ mod cli_helper_tests {
 
     #[test]
     fn convert_capstone_op_for_optimization_rejects_unsupported_instruction() {
-        let err = convert_capstone_op_for_optimization("ldr", "x0, [x1]", 0x1234)
+        let err = convert_capstone_op_for_optimization("fadd", "v0.4s, v1.4s, v2.4s", 0x1234)
             .expect_err("optimization conversion must reject unsupported non-NOP instructions");
 
-        assert!(err.contains("ldr x0, [x1]"));
+        assert!(err.contains("fadd v0.4s, v1.4s, v2.4s"));
         assert!(err.contains("0x1234"));
         assert!(err.contains("cannot optimize"));
     }
