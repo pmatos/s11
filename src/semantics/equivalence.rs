@@ -515,6 +515,7 @@ fn build_smt_solver(
         &final_state2,
         &config.live_out,
         config.live_out.flags_live(),
+        config.memory_live,
     ));
     solver
 }
