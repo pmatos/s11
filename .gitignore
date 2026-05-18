@@ -25,3 +25,4 @@ mutants.out/
 mutants.out.old/
 
 .ultraplan/
+.clawpatch/
