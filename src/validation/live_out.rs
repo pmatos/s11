@@ -14,7 +14,7 @@ pub struct ParseLiveOutRegistersError {
 
 impl std::fmt::Display for ParseLiveOutRegistersError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "ParseLiveOutRegistersError: {}", self.message)
+        f.write_str(&self.message)
     }
 }
 
@@ -236,6 +236,14 @@ pub fn x86_live_out_from_target(
 mod tests {
     use super::*;
     use crate::ir::{Condition, Operand};
+
+    #[test]
+    fn display_renders_message_without_type_prefix() {
+        let err = ParseLiveOutRegistersError {
+            message: "invalid register name: 'foo'".to_string(),
+        };
+        assert_eq!(err.to_string(), "invalid register name: 'foo'");
+    }
 
     #[test]
     fn test_parse_register_x0() {
