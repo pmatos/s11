@@ -1796,13 +1796,13 @@ mod tests {
         disassemble_and_verify(&bytes, "lsl", &["x0", "x1", "x2"]);
     }
 
-    fn assert_csel_family_disasm(bytes: &[u8], mnem: &str, cond: Condition, expected_cond: &str) {
-        use capstone::prelude::*;
-        let cs = Capstone::new()
-            .arm64()
-            .mode(arch::arm64::ArchMode::Arm)
-            .build()
-            .expect("Capstone init");
+    fn assert_csel_family_disasm(
+        cs: &capstone::Capstone,
+        bytes: &[u8],
+        mnem: &str,
+        cond: Condition,
+        expected_cond: &str,
+    ) {
         let insns = cs
             .disasm_all(bytes, 0)
             .unwrap_or_else(|e| panic!("{mnem} cond={cond:?}: disasm failed: {e}"));
@@ -1827,11 +1827,14 @@ mod tests {
         }
     }
 
-    /// Acceptance criterion for issue #64: every CSEL-family mnemonic encodes
-    /// for every condition code in `Condition` and round-trips through Capstone.
-    /// Capstone canonicalises CS→hs and CC→lo (preferred AArch64 mnemonics).
+    /// Round-trips every (CSEL-family mnemonic, condition code) pair through
+    /// the assembler and Capstone. Capstone canonicalises CS→hs and CC→lo
+    /// (preferred AArch64 mnemonics).
     #[test]
     fn csel_family_round_trip_all_conditions() {
+        use capstone::prelude::*;
+        type CsBuild = fn(Condition) -> Instruction;
+
         let conds: &[(Condition, &str)] = &[
             (Condition::EQ, "eq"),
             (Condition::NE, "ne"),
@@ -1851,44 +1854,49 @@ mod tests {
             (Condition::NV, "nv"),
         ];
 
-        let build_csel: fn(Condition) -> Instruction = |c| Instruction::Csel {
+        let build_csel: CsBuild = |c| Instruction::Csel {
             rd: Register::X0,
             rn: Register::X1,
             rm: Register::X2,
             cond: c,
         };
-        let build_csinc: fn(Condition) -> Instruction = |c| Instruction::Csinc {
+        let build_csinc: CsBuild = |c| Instruction::Csinc {
             rd: Register::X0,
             rn: Register::X1,
             rm: Register::X2,
             cond: c,
         };
-        let build_csinv: fn(Condition) -> Instruction = |c| Instruction::Csinv {
+        let build_csinv: CsBuild = |c| Instruction::Csinv {
             rd: Register::X0,
             rn: Register::X1,
             rm: Register::X2,
             cond: c,
         };
-        let build_csneg: fn(Condition) -> Instruction = |c| Instruction::Csneg {
+        let build_csneg: CsBuild = |c| Instruction::Csneg {
             rd: Register::X0,
             rn: Register::X1,
             rm: Register::X2,
             cond: c,
         };
-        let mnemonics: &[(&str, fn(Condition) -> Instruction)] = &[
+        let mnemonics: &[(&str, CsBuild)] = &[
             ("csel", build_csel),
             ("csinc", build_csinc),
             ("csinv", build_csinv),
             ("csneg", build_csneg),
         ];
 
+        let cs = Capstone::new()
+            .arm64()
+            .mode(arch::arm64::ArchMode::Arm)
+            .build()
+            .expect("Capstone init");
         let mut assembler = AArch64Assembler::new();
         for &(cond, cond_str) in conds {
             for &(mnem, build) in mnemonics {
                 let bytes = assembler
                     .assemble_instructions(&[build(cond)], 0)
                     .unwrap_or_else(|e| panic!("{mnem} cond={cond:?}: encode failed: {e}"));
-                assert_csel_family_disasm(&bytes, mnem, cond, cond_str);
+                assert_csel_family_disasm(&cs, &bytes, mnem, cond, cond_str);
             }
         }
     }
