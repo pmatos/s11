@@ -901,6 +901,8 @@ fn ensure_window_fully_decoded(
             "AArch64 window 0x{:x}-0x{:x} ({} bytes) was not fully decoded by Capstone; decoded only {} bytes",
             start_addr, end_addr, window_bytes, decoded_bytes
         )),
+        // Defensive: cs.disasm_all only emits bytes it was given, so this
+        // branch is an internal-invariant guard, not a user-facing condition.
         Ordering::Greater => Err(format!(
             "AArch64 window 0x{:x}-0x{:x} ({} bytes) decoded {} bytes by Capstone — more than the window holds",
             start_addr, end_addr, window_bytes, decoded_bytes
