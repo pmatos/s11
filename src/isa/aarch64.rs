@@ -1110,11 +1110,11 @@ impl InstructionGenerator<Instruction> for AArch64InstructionGenerator {
                         Instruction::MovImm { rd, imm: new_imm }
                     }
                     Instruction::Add { rd, rn, rm } => {
-                        let new_rm = mutate_operand(rng, rm, registers, immediates);
+                        let new_rm = mutate_operand(rng, rm, registers, immediates, 0xFFF);
                         Instruction::Add { rd, rn, rm: new_rm }
                     }
                     Instruction::Sub { rd, rn, rm } => {
-                        let new_rm = mutate_operand(rng, rm, registers, immediates);
+                        let new_rm = mutate_operand(rng, rm, registers, immediates, 0xFFF);
                         Instruction::Sub { rd, rn, rm: new_rm }
                     }
                     Instruction::And { rd, rn, rm: _ } => {
@@ -1223,11 +1223,11 @@ impl InstructionGenerator<Instruction> for AArch64InstructionGenerator {
                     }
                     // Comparison instructions - change operand
                     Instruction::Cmp { rn, rm } => {
-                        let new_rm = mutate_operand(rng, rm, registers, immediates);
+                        let new_rm = mutate_operand(rng, rm, registers, immediates, 0xFFF);
                         Instruction::Cmp { rn, rm: new_rm }
                     }
                     Instruction::Cmn { rn, rm } => {
-                        let new_rm = mutate_operand(rng, rm, registers, immediates);
+                        let new_rm = mutate_operand(rng, rm, registers, immediates, 0xFFF);
                         Instruction::Cmn { rn, rm: new_rm }
                     }
                     Instruction::Tst { rn, rm: _ } => {
@@ -1239,7 +1239,7 @@ impl InstructionGenerator<Instruction> for AArch64InstructionGenerator {
                     // dedicated mutate_operand path in
                     // `search/stochastic/mutation.rs` covers nzcv and cond.
                     Instruction::Ccmp { rn, rm, nzcv, cond } => {
-                        let new_rm = mutate_operand(rng, rm, registers, immediates);
+                        let new_rm = mutate_operand(rng, rm, registers, immediates, 31);
                         Instruction::Ccmp {
                             rn,
                             rm: new_rm,
@@ -1248,7 +1248,7 @@ impl InstructionGenerator<Instruction> for AArch64InstructionGenerator {
                         }
                     }
                     Instruction::Ccmn { rn, rm, nzcv, cond } => {
-                        let new_rm = mutate_operand(rng, rm, registers, immediates);
+                        let new_rm = mutate_operand(rng, rm, registers, immediates, 31);
                         Instruction::Ccmn {
                             rn,
                             rm: new_rm,
@@ -1365,11 +1365,11 @@ impl InstructionGenerator<Instruction> for AArch64InstructionGenerator {
                         Instruction::Eon { rd, rn, rm: new_rm }
                     }
                     Instruction::Adds { rd, rn, rm } => {
-                        let new_rm = mutate_operand(rng, rm, registers, immediates);
+                        let new_rm = mutate_operand(rng, rm, registers, immediates, 0xFFF);
                         Instruction::Adds { rd, rn, rm: new_rm }
                     }
                     Instruction::Subs { rd, rn, rm } => {
-                        let new_rm = mutate_operand(rng, rm, registers, immediates);
+                        let new_rm = mutate_operand(rng, rm, registers, immediates, 0xFFF);
                         Instruction::Subs { rd, rn, rm: new_rm }
                     }
                     Instruction::Ands { rd, rn, rm: _ } => {
@@ -1516,7 +1516,17 @@ fn mutate_operand<R: RngExt>(
     operand: Operand,
     registers: &[Register],
     immediates: &[i64],
+    imm_max: i64,
 ) -> Operand {
+    debug_assert!(imm_max >= 0, "imm_max must be non-negative");
+    let pick_imm = |rng: &mut R| {
+        let v = immediates[rng.random_range(0..immediates.len())];
+        // Issue #87: clamp to the caller's encodable upper bound. Mirrors
+        // the CCMP/CCMN clamp in `src/search/stochastic/mutation.rs` and
+        // matches `Instruction::is_encodable_aarch64`'s per-variant ranges
+        // (ADD/SUB/ADDS/SUBS/CMP/CMN: 0..=0xFFF; CCMP/CCMN: 0..=31).
+        Operand::Immediate(v.rem_euclid(imm_max + 1))
+    };
     match operand {
         Operand::Register(_)
         | Operand::ShiftedRegister { .. }
@@ -1524,12 +1534,12 @@ fn mutate_operand<R: RngExt>(
             if rng.random_bool(0.7) {
                 Operand::Register(registers[rng.random_range(0..registers.len())])
             } else {
-                Operand::Immediate(immediates[rng.random_range(0..immediates.len())])
+                pick_imm(rng)
             }
         }
         Operand::Immediate(_) => {
             if rng.random_bool(0.7) {
-                Operand::Immediate(immediates[rng.random_range(0..immediates.len())])
+                pick_imm(rng)
             } else {
                 Operand::Register(registers[rng.random_range(0..registers.len())])
             }
@@ -1975,6 +1985,100 @@ mod tests {
         for _ in 0..100 {
             let mutated = generator.mutate(&mut rng, &original, &regs, &imms);
             assert!(mutated.opcode_id() < generator.opcode_count());
+        }
+    }
+
+    /// Issue #87. The file-private `mutate_operand` helper at L1514 must
+    /// clamp `Operand::Immediate` values returned for ADD/SUB/ADDS/SUBS/
+    /// CMP/CMN (12-bit) and CCMP/CCMN (5-bit) so the result is encodable.
+    /// Hostile `imms` table deliberately includes values that would be
+    /// rejected by `is_encodable_aarch64` if returned unclamped.
+    #[test]
+    fn test_mutate_operand_clamps_arith_imm_to_encodable_range() {
+        let regs = vec![Register::X0, Register::X1, Register::X2];
+        let imms: Vec<i64> = vec![0, 1, 0xFFF, 0x1000, 8192, 0x1_0000, 1_000_000, -1];
+        let mut rng = ChaCha8Rng::seed_from_u64(42);
+
+        // (imm_max, host instruction builder used to wrap the resulting Operand
+        // so we can call `is_encodable_aarch64` on a real Instruction).
+        let cases: Vec<(i64, Box<dyn Fn(Operand) -> Instruction>)> = vec![
+            (
+                0xFFF,
+                Box::new(|rm| Instruction::Add {
+                    rd: Register::X0,
+                    rn: Register::X1,
+                    rm,
+                }),
+            ),
+            (
+                0xFFF,
+                Box::new(|rm| Instruction::Sub {
+                    rd: Register::X0,
+                    rn: Register::X1,
+                    rm,
+                }),
+            ),
+            (
+                0xFFF,
+                Box::new(|rm| Instruction::Adds {
+                    rd: Register::X0,
+                    rn: Register::X1,
+                    rm,
+                }),
+            ),
+            (
+                0xFFF,
+                Box::new(|rm| Instruction::Subs {
+                    rd: Register::X0,
+                    rn: Register::X1,
+                    rm,
+                }),
+            ),
+            (
+                0xFFF,
+                Box::new(|rm| Instruction::Cmp {
+                    rn: Register::X1,
+                    rm,
+                }),
+            ),
+            (
+                0xFFF,
+                Box::new(|rm| Instruction::Cmn {
+                    rn: Register::X1,
+                    rm,
+                }),
+            ),
+            (
+                31,
+                Box::new(|rm| Instruction::Ccmp {
+                    rn: Register::X1,
+                    rm,
+                    nzcv: 0,
+                    cond: Condition::EQ,
+                }),
+            ),
+            (
+                31,
+                Box::new(|rm| Instruction::Ccmn {
+                    rn: Register::X1,
+                    rm,
+                    nzcv: 0,
+                    cond: Condition::EQ,
+                }),
+            ),
+        ];
+
+        for (imm_max, build) in &cases {
+            for _ in 0..500 {
+                let new_rm =
+                    super::mutate_operand(&mut rng, Operand::Immediate(0), &regs, &imms, *imm_max);
+                let instr = build(new_rm);
+                assert!(
+                    instr.is_encodable_aarch64(),
+                    "imm_max={imm_max}, produced non-encodable {:?}",
+                    instr
+                );
+            }
         }
     }
 
