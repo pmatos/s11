@@ -42,3 +42,5 @@ ADR-0004 §5 commits to eventually replacing `LiveOut` and `X86LiveOutMask` with
 - The bit lives on `EquivalenceConfig` and (in scaffolding) on `LiveOutMask<R>`. When the mask migration of ADR-0004 §5 lands, this ADR's CLI grammar should remain stable but the parser will return `(LiveOutMask<Register>, ())` — a single-return shape — and the explicit `bool` plumbing in `run_equiv` will collapse.
 
 **Reversibility:** high for the per-flag rev — the `n`/`z`/`c`/`v` tokens are rejected with a "reserved" message today, so adding their semantics later is a strict superset of the current grammar. Reversibility low for the parser function itself: it becomes load-bearing for both CLI subcommands.
+
+**Resolution note (issue #80, 2026-05-18):** `ParseLiveOutRegistersError`'s `Display` impl writes only the message body. The `"invalid live-out: "` prefix from `run_equiv`/`run_llm_opt` (§2) is the sole documented user-visible prefix; pinned by `validation::live_out::tests::display_renders_message_without_type_prefix`.
