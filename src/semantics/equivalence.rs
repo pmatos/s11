@@ -728,14 +728,34 @@ pub fn check_equivalence_x86(
     seq2: &[crate::isa::x86::X86Instruction],
     config: &X86EquivalenceConfig,
 ) -> EquivalenceResult {
-    // Issue #74: peel Jcc terminators and require both sides to share
-    // the exact same terminator (struct equality on the condition code).
+    // Peel matching Jcc terminators and require both sides to share the
+    // exact same terminator (struct equality on the condition code).
     // Mirrors the AArch64 precheck in `check_equivalence`.
     let (prefix1, terminator1) = crate::ir::instructions::split_terminator_x86(seq1);
     let (prefix2, terminator2) = crate::ir::instructions::split_terminator_x86(seq2);
     if terminator1 != terminator2 {
         return EquivalenceResult::NotEquivalent;
     }
+
+    // When a Jcc terminator is held fixed across both sides, its branch
+    // outcome consumes the prefix's final EFLAGS. The caller-supplied
+    // live-out mask may not declare flags live (e.g. when the target
+    // contains only MOV/CMOV which `has_side_effects` reports as
+    // flag-clean), so force `flags_live=true` for the prefix comparison
+    // whenever a Jcc was peeled — otherwise a proposal that clobbers
+    // EFLAGS before the branch would be accepted unsoundly.
+    let effective_config = if matches!(
+        terminator1,
+        Some(crate::isa::x86::X86Instruction::Jcc { .. })
+    ) && !config.live_out.flags_live()
+    {
+        let mut c = config.clone();
+        c.live_out = c.live_out.with_flags(true);
+        std::borrow::Cow::Owned(c)
+    } else {
+        std::borrow::Cow::Borrowed(config)
+    };
+    let config = effective_config.as_ref();
 
     // Fast path: 10 random inputs over the prefixes only.
     if let Some(refutation) = run_fast_path_x86(prefix1, prefix2, config) {
@@ -760,8 +780,8 @@ pub fn check_equivalence_x86(
         let v2 = final2.get_register(*reg);
         disjuncts.push(v1.eq(v2).not());
     }
-    // Issue #74: when the caller declares flags live, any of the five
-    // tracked EFLAGS bits diverging is enough to refute equivalence.
+    // When flags are live (caller-declared or forced by a peeled Jcc),
+    // any of the five tracked EFLAGS bits diverging refutes equivalence.
     if config.live_out.flags_live() {
         disjuncts.push(crate::semantics::smt_x86::flags_not_equal_x86(
             &final1, &final2,
@@ -1037,6 +1057,42 @@ mod tests {
             check_equivalence_x86(&seq1, &seq2, &cfg),
             EquivalenceResult::Equivalent
         );
+    }
+
+    #[test]
+    fn x86_jcc_terminator_forces_flag_observability_on_prefix() {
+        // Reviewer-supplied counterexample: a no-op `cmove rax, rax` prefix
+        // versus `xor rcx, rcx` prefix, with a fixed `je` terminator on both
+        // sides. Live-out is rax only (no caller-declared flags_live). The
+        // prefixes leave rax untouched, but XOR clobbers ZF — which the
+        // trailing `je` reads. Equivalence must reject; the Jcc terminator
+        // forces the prefix's EFLAGS effect to be observable.
+        use crate::isa::x86::X86Condition;
+        let target = vec![
+            X86Instruction::Cmov {
+                rd: X86Register::RAX,
+                rs: X86Register::RAX,
+                cond: X86Condition::E,
+            },
+            X86Instruction::Jcc {
+                cond: X86Condition::E,
+            },
+        ];
+        let proposal = vec![
+            X86Instruction::XorReg {
+                rd: X86Register::RCX,
+                rs: X86Register::RCX,
+            },
+            X86Instruction::Jcc {
+                cond: X86Condition::E,
+            },
+        ];
+        let cfg = X86EquivalenceConfig::new(64)
+            .live_out(X86LiveOutMask::from_registers(vec![X86Register::RAX]));
+        assert!(matches!(
+            check_equivalence_x86(&target, &proposal, &cfg),
+            EquivalenceResult::NotEquivalent
+        ));
     }
 
     #[test]
