@@ -323,10 +323,17 @@ fn run_fast_path(
         }
     }
 
-    // When the live-out contract treats NZCV as observable AND either
-    // sequence reads flags before writing them, also test all 16 initial
-    // NZCV combinations. Skipped otherwise to keep per-call cost bounded.
-    if config.flags_live && (reads_flags_before_writing(seq1) || reads_flags_before_writing(seq2)) {
+    // Under `fast_only`, the SMT path that would otherwise catch initial-
+    // NZCV divergence is skipped — for sequences that read flags before
+    // writing them (CSEL family, CCMP, CCMN, ...), also test all 16 initial
+    // NZCV combinations. Gated on `fast_only` because the SMT path already
+    // handles this correctly via symbolic initial state, and adding 16
+    // inputs to every search-algorithm candidate would burn significant
+    // wall-clock time on a verifier that's normally SMT-authoritative.
+    if config.fast_only
+        && config.flags_live
+        && (reads_flags_before_writing(seq1) || reads_flags_before_writing(seq2))
+    {
         for input in &fast_path_initial_nzcv_variants(&input_regs) {
             let state1 = apply_sequence_concrete(input.clone(), seq1);
             let state2 = apply_sequence_concrete(input.clone(), seq2);
