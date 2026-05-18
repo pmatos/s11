@@ -334,6 +334,14 @@ mod tests {
         // length-2 sweep. After the search returns, the cumulative SMT
         // wall time must be non-zero, and it must be <= the overall search
         // elapsed (sanity check on aggregation correctness).
+        //
+        // `cores = Some(1)` is required for the upper-bound assertion: the
+        // global rayon pool would let multiple worker threads each spend
+        // wall-clock time inside `solver.check()` in parallel, and the
+        // shared atomic accumulator sums those per-thread durations —
+        // making the cumulative `smt_elapsed` exceed total wall-clock
+        // `elapsed_time` on a multicore runner. Pinning to one thread
+        // restores the `smt_elapsed <= elapsed_time` invariant.
         let target = vec![
             Instruction::MovReg {
                 rd: Register::X0,
@@ -354,7 +362,8 @@ mod tests {
         let config = SearchConfig::default()
             .with_registers(vec![Register::X0, Register::X1, Register::X2])
             .with_immediates(vec![0, 1])
-            .with_timeout(std::time::Duration::from_secs(30));
+            .with_timeout(std::time::Duration::from_secs(30))
+            .with_cores(Some(1));
 
         let mut search = EnumerativeSearch::new();
         let result = search.search(&target, &live_out, &config);
