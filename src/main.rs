@@ -1232,12 +1232,20 @@ fn reassemble_x86_prefix_with_pinned_terminator(
 
     // Pad NOPs so the Jcc lands at the same offset as in the original
     // window. `nop_sequence` may return fewer than the requested bytes;
-    // loop until the gap is filled.
+    // loop until the gap is filled. Return Err on an empty NOP slice
+    // (debug-assert alone would let release builds spin forever).
     let gap = original_prefix_byte_size - out.len();
     let mut padded = 0;
     while padded < gap {
         let nop = arch.nop_sequence(gap - padded);
-        debug_assert!(!nop.is_empty(), "nop_sequence returned empty slice");
+        if nop.is_empty() {
+            return Err(format!(
+                "nop_sequence returned an empty slice while padding {} bytes \
+                 for arch {:?}; refusing to spin forever",
+                gap - padded,
+                arch
+            ));
+        }
         out.extend_from_slice(nop);
         padded += nop.len();
     }
