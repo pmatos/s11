@@ -1036,6 +1036,14 @@ fn find_shorter_equivalent_x86(
     let target_cost =
         cost_x86::sequence_cost(target, &semantics::cost::CostMetric::CodeSize, width);
 
+    // Peel any trailing Jcc terminator. Candidates never include Jcc, so
+    // a non-Jcc proposal against a Jcc-terminated target would otherwise
+    // be immediately rejected by `check_equivalence_x86`'s terminator-
+    // equality precheck. We append the original terminator to each
+    // proposal so the equivalence check sees matching terminators and
+    // its flag-observability guard fires correctly.
+    let (_, target_terminator) = crate::ir::instructions::split_terminator_x86(target);
+
     // Live-out registers = everything the target writes.
     let live_regs: Vec<X86Register> = target.iter().filter_map(|i| i.destination()).collect();
     // Flags are live whenever the target contains any instruction with
@@ -1081,7 +1089,15 @@ fn find_shorter_equivalent_x86(
         .fast_only();
     let cfg_smt = X86EquivalenceConfig::new(width).live_out(live_out.clone());
     for cand in candidates {
-        let seq = vec![cand];
+        // Build the proposal as [candidate] + original_terminator so
+        // both sides share the same trailing Jcc (if any). The
+        // equivalence check peels them in lockstep and runs the prefix
+        // comparison under forced flags_live (since the terminator
+        // reads flags).
+        let mut seq = vec![cand];
+        if let Some(t) = target_terminator {
+            seq.push(*t);
+        }
         let cand_cost =
             cost_x86::sequence_cost(&seq, &semantics::cost::CostMetric::CodeSize, width);
         if cand_cost >= target_cost {
@@ -2217,6 +2233,45 @@ mod cli_helper_tests {
     /// pool-narrowing change (issue #84 item 8) so any future
     /// reintroduction of unconditional scratch-register inflation is
     /// caught.
+    #[test]
+    fn find_shorter_equivalent_x86_can_optimize_jcc_terminated_window() {
+        use isa::x86::X86Condition;
+        // Two redundant MovImms followed by a Jcc terminator. Search
+        // should collapse the prefix and re-attach the original Jcc.
+        let optimized = find_shorter_equivalent_x86(
+            &[
+                X86Instruction::MovImm {
+                    rd: X86Register::RBX,
+                    imm: 1,
+                },
+                X86Instruction::MovImm {
+                    rd: X86Register::RBX,
+                    imm: 1,
+                },
+                X86Instruction::Jcc {
+                    cond: X86Condition::E,
+                },
+            ],
+            64,
+        )
+        .expect("redundant prefix + Jcc must be optimizable");
+        // Expect: [MovImm RBX, 1, Jcc E].
+        assert_eq!(optimized.len(), 2);
+        match optimized[0] {
+            X86Instruction::MovImm { rd, imm } => {
+                assert_eq!(rd, X86Register::RBX);
+                assert_eq!(imm, 1);
+            }
+            ref other => panic!("expected MovImm RBX, 1, got {:?}", other),
+        }
+        assert!(matches!(
+            optimized[1],
+            X86Instruction::Jcc {
+                cond: X86Condition::E
+            }
+        ));
+    }
+
     #[test]
     fn find_shorter_equivalent_x86_collapses_without_rax_or_rdi_in_target() {
         let optimized = find_shorter_equivalent_x86(
