@@ -1,4 +1,5 @@
 pub mod assembler;
+pub mod bench_support;
 pub mod elf_patcher;
 pub mod ir;
 pub mod isa;
