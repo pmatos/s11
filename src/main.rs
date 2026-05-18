@@ -519,6 +519,22 @@ fn optimize_elf_binary(
     Ok(())
 }
 
+fn live_out_for_optimization_prefix(
+    prefix: &[Instruction],
+    terminator: Option<&Instruction>,
+) -> LiveOut {
+    let mut live_registers: Vec<Register> = prefix
+        .iter()
+        .filter_map(|instr| instr.destination())
+        .collect();
+
+    if let Some(terminator) = terminator {
+        live_registers.extend(terminator.source_registers());
+    }
+
+    LiveOut::from_registers(live_registers)
+}
+
 /// Run optimization using the selected algorithm.
 ///
 /// Issue #69: if `target` ends in a terminator (branch / control-flow
@@ -557,15 +573,9 @@ fn run_optimization(
     ];
 
     // Create live-out contract over the prefix (assume all modified registers
-    // are live-out). The fixed terminator is excluded — every candidate ends
-    // in the same terminator, so its register writes (e.g. BL's X30 write)
-    // are identical on both sides of equivalence.
-    let live_out = LiveOut::from_registers(
-        prefix
-            .iter()
-            .filter_map(|instr| instr.destination())
-            .collect(),
-    );
+    // are live-out), plus any registers the fixed terminator reads after the
+    // optimized prefix runs.
+    let live_out = live_out_for_optimization_prefix(prefix, terminator);
 
     // Reattach the terminator (if any) to a successfully optimized prefix.
     let reattach = |opt: Option<Vec<Instruction>>| -> Option<Vec<Instruction>> {
@@ -2185,6 +2195,44 @@ mod cli_helper_tests {
         assert_eq!(term, Some(&Instruction::Ret { rn: Register::X30 }));
     }
 
+    #[test]
+    fn live_out_for_optimization_prefix_includes_registers_read_by_terminator() {
+        let prefix = [Instruction::MovImm {
+            rd: Register::X1,
+            imm: 1,
+        }];
+        let cases = [
+            (
+                Instruction::Cbz {
+                    rn: Register::X0,
+                    target: crate::ir::LabelId(0x1000),
+                },
+                Register::X0,
+            ),
+            (
+                Instruction::Tbz {
+                    rt: Register::X2,
+                    bit: 5,
+                    target: crate::ir::LabelId(0x1000),
+                },
+                Register::X2,
+            ),
+            (Instruction::Br { rn: Register::X16 }, Register::X16),
+            (Instruction::Ret { rn: Register::X30 }, Register::X30),
+        ];
+
+        for (terminator, source) in cases {
+            let live_out = live_out_for_optimization_prefix(&prefix, Some(&terminator));
+            assert!(live_out.contains_register(Register::X1));
+            assert!(
+                live_out.contains_register(source),
+                "{:?} must keep {:?} live for the reattached terminator",
+                terminator,
+                source
+            );
+        }
+    }
+
     // (The standalone `find_shorter_equivalent_preserves_terminator_bit_identical`
     // test was removed when the MVP `find_shorter_equivalent` helper was
     // replaced by `search::EnumerativeSearch` (issue #67). The same contract
@@ -2240,7 +2288,6 @@ mod cli_helper_tests {
         //   3. The terminator is re-attached to the optimized prefix.
         use crate::search::SearchAlgorithm;
         use crate::search::config::SearchConfig;
-        use crate::semantics::LiveOut;
 
         let terminator = Instruction::Ret { rn: Register::X30 };
         let seq = vec![
@@ -2258,8 +2305,7 @@ mod cli_helper_tests {
         let (prefix, term) = split_terminator(&seq);
         assert_eq!(term, Some(&terminator), "split must recognize ret");
 
-        let live_out =
-            LiveOut::from_registers(prefix.iter().filter_map(|i| i.destination()).collect());
+        let live_out = live_out_for_optimization_prefix(prefix, term);
         let config = SearchConfig::default()
             .with_registers(vec![Register::X0, Register::X1])
             .with_immediates(vec![0, 1]);
@@ -2284,6 +2330,64 @@ mod cli_helper_tests {
         }
         // No shorter form found is acceptable; the assertion above fires
         // only when a shortening was actually achieved.
+    }
+
+    #[test]
+    fn equivalence_rejects_prefix_candidate_that_clobbers_cbz_source() {
+        // End-to-end regression for the live-out contract used by
+        // `run_optimization`. Target: a prefix that writes only x2, followed
+        // by `cbz x0, ...` as the fixed terminator. A candidate that also
+        // writes x0 as scratch would be accepted under a naive live-out of
+        // just prefix destinations ({x2}), but the reattached cbz reads x0
+        // — so the optimizer must reject it. With the live-out built by
+        // `live_out_for_optimization_prefix`, x0 is included and the
+        // clobbering candidate is correctly rejected.
+        use crate::semantics::EquivalenceConfig;
+        use crate::semantics::equivalence::{EquivalenceResult, check_equivalence_with_config};
+
+        let terminator = Instruction::Cbz {
+            rn: Register::X0,
+            target: crate::ir::LabelId(0x1000),
+        };
+        let target = vec![
+            Instruction::MovImm {
+                rd: Register::X2,
+                imm: 5,
+            },
+            terminator.clone(),
+        ];
+        let candidate_clobbers_x0 = vec![
+            Instruction::MovImm {
+                rd: Register::X2,
+                imm: 5,
+            },
+            Instruction::MovImm {
+                rd: Register::X0,
+                imm: 99,
+            },
+            terminator,
+        ];
+
+        let (prefix, term) = split_terminator(&target);
+        let live_out = live_out_for_optimization_prefix(prefix, term);
+        assert!(
+            live_out.contains_register(Register::X0),
+            "live_out_for_optimization_prefix must mark x0 live when the \
+             terminator reads x0; got {:?}",
+            live_out,
+        );
+
+        let config = EquivalenceConfig::default().live_out(live_out);
+        let result = check_equivalence_with_config(&target, &candidate_clobbers_x0, &config);
+        assert!(
+            matches!(
+                result,
+                EquivalenceResult::NotEquivalent | EquivalenceResult::NotEquivalentFast(_),
+            ),
+            "candidate that clobbers x0 must be rejected because the \
+             reattached cbz reads x0; got {:?}",
+            result,
+        );
     }
 
     #[test]
