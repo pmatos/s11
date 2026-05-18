@@ -341,10 +341,11 @@ fn run_fast_path(
     // handles this correctly via symbolic initial state, and adding 16
     // inputs to every search-algorithm candidate would burn significant
     // wall-clock time on a verifier that's normally SMT-authoritative.
-    if config.fast_only
-        && config.flags_live
-        && (reads_flags_before_writing(seq1) || reads_flags_before_writing(seq2))
-    {
+    // NOT gated on `config.flags_live` — a flag-reading sequence whose
+    // *register* output depends on incoming NZCV (e.g. `csel x0, x1, x2, mi`
+    // under `--live-out x0`) also needs the variants for the fast path to
+    // catch divergence on the condition-true branch.
+    if config.fast_only && (reads_flags_before_writing(seq1) || reads_flags_before_writing(seq2)) {
         for input in &fast_path_initial_nzcv_variants(&input_regs) {
             let state1 = apply_sequence_concrete(input.clone(), seq1);
             let state2 = apply_sequence_concrete(input.clone(), seq2);
@@ -2184,6 +2185,39 @@ mod tests {
         assert!(
             matches!(result, EquivalenceResult::NotEquivalentFast(_)),
             "expected NotEquivalentFast for ccmp pair under flags-only fast-only, got {:?}",
+            result
+        );
+    }
+
+    /// `csel x0, x1, x2, mi` reads incoming N to decide whether x0 = x1
+    /// (N=true) or x0 = x2 (N=false). With a register-live contract
+    /// (`--live-out x0` but `flags_live=false`), the initial-NZCV variants
+    /// were originally gated on `config.flags_live` — so all fast-path
+    /// inputs left N=false and the candidate `mov x0, x2` was accepted as
+    /// equivalent even when x1 != x2 and N=true would differ. Broadening
+    /// the gate to fire on any flag-reading sequence (regardless of whether
+    /// flags themselves are observable) plugs the gap.
+    #[test]
+    fn fast_only_register_contract_detects_csel_initial_nzcv_divergence() {
+        let seq1 = vec![Instruction::Csel {
+            rd: Register::X0,
+            rn: Register::X1,
+            rm: Register::X2,
+            cond: Condition::MI,
+        }];
+        let seq2 = vec![Instruction::MovReg {
+            rd: Register::X0,
+            rn: Register::X2,
+        }];
+        let config =
+            EquivalenceConfig::fast_only().live_out(LiveOut::from_registers(vec![Register::X0]));
+        // Deliberately NOT calling `.with_flags(true)` — this regression
+        // exercises a register-only contract where the candidate's output
+        // depends on incoming NZCV via CSEL.
+        let result = check_equivalence_with_config(&seq1, &seq2, &config);
+        assert!(
+            matches!(result, EquivalenceResult::NotEquivalentFast(_)),
+            "expected NotEquivalentFast for csel-vs-mov under --fast-only --live-out x0, got {:?}",
             result
         );
     }
