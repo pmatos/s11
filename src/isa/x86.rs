@@ -591,9 +591,10 @@ pub struct X86Mutator {
 }
 
 impl X86Mutator {
-    /// Construct a mutator with explicit pools, weights, and mode.
-    /// Mode32 filters R8-R15 out of `registers` once here so downstream
-    /// mutation cannot reintroduce extended registers.
+    /// Construct a mutator. `mode` is consumed here to filter extended
+    /// registers (Mode32 excludes R8-R15) once at construction; it is
+    /// not retained as a field. Downstream mutation therefore cannot
+    /// reintroduce extended registers.
     pub fn new(
         registers: Vec<X86Register>,
         immediates: Vec<i64>,
