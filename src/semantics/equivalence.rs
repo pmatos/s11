@@ -616,6 +616,29 @@ impl X86EquivalenceConfig {
     }
 }
 
+/// Convenience wrapper used by both x86 search backends
+/// (`stochastic/backend.rs` and `symbolic/backend.rs`). Builds an
+/// `X86EquivalenceConfig` from the supplied mask + width + timeout
+/// and invokes `check_equivalence_x86`. Two backends were each
+/// inlining this same builder + call — a single helper here keeps
+/// them from drifting.
+pub fn check_equivalence_x86_for_search(
+    target: &[crate::isa::x86::X86Instruction],
+    proposal: &[crate::isa::x86::X86Instruction],
+    live_out: &crate::semantics::state::X86LiveOutMask,
+    width: u32,
+    timeout: std::time::Duration,
+) -> EquivalenceResult {
+    let mut cfg = if width == 32 {
+        X86EquivalenceConfig::new_for_32()
+    } else {
+        X86EquivalenceConfig::new_for_64()
+    };
+    cfg.live_out = live_out.clone();
+    cfg.smt_timeout = Some(timeout);
+    check_equivalence_x86(target, proposal, &cfg)
+}
+
 /// Check whether two x86 instruction sequences are equivalent under the
 /// given live-out mask and operand width. Mirrors `check_equivalence_with_config`
 /// for the AArch64 backend: fast path uses the concrete interpreter over

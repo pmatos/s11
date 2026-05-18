@@ -200,23 +200,6 @@ fn x86_random_inputs(
     )
 }
 
-fn x86_check_equivalence(
-    target: &[crate::isa::x86::X86Instruction],
-    proposal: &[crate::isa::x86::X86Instruction],
-    live_out: &crate::semantics::state::X86LiveOutMask,
-    width: u32,
-    timeout: Duration,
-) -> EquivalenceResult {
-    let mut cfg = if width == 32 {
-        crate::semantics::equivalence::X86EquivalenceConfig::new_for_32()
-    } else {
-        crate::semantics::equivalence::X86EquivalenceConfig::new_for_64()
-    };
-    cfg.live_out = live_out.clone();
-    cfg.smt_timeout = Some(timeout);
-    crate::semantics::equivalence::check_equivalence_x86(target, proposal, &cfg)
-}
-
 fn x86_make_mutator(
     config: &SearchConfig,
     mode: crate::assembler::x86::X86Mode,
@@ -297,7 +280,9 @@ impl StochasticBackend<crate::isa::X86_64> for crate::isa::X86_64 {
         width: u32,
         timeout: Duration,
     ) -> EquivalenceResult {
-        x86_check_equivalence(target, proposal, live_out, width, timeout)
+        crate::semantics::equivalence::check_equivalence_x86_for_search(
+            target, proposal, live_out, width, timeout,
+        )
     }
 
     fn random_sequence<R: RngExt>(
@@ -373,7 +358,9 @@ impl StochasticBackend<crate::isa::X86_32> for crate::isa::X86_32 {
         width: u32,
         timeout: Duration,
     ) -> EquivalenceResult {
-        x86_check_equivalence(target, proposal, live_out, width, timeout)
+        crate::semantics::equivalence::check_equivalence_x86_for_search(
+            target, proposal, live_out, width, timeout,
+        )
     }
 
     fn random_sequence<R: RngExt>(
@@ -413,7 +400,13 @@ mod tests {
         }];
         let mask = X86LiveOutMask::from_registers(vec![X86Register::RAX]);
         // Self-equivalent at width 64.
-        let r = x86_check_equivalence(&target, &target, &mask, 64, Duration::from_secs(2));
+        let r = crate::semantics::equivalence::check_equivalence_x86_for_search(
+            &target,
+            &target,
+            &mask,
+            64,
+            Duration::from_secs(2),
+        );
         assert!(matches!(r, EquivalenceResult::Equivalent));
     }
 
@@ -425,7 +418,13 @@ mod tests {
         }];
         let mask = X86LiveOutMask::from_registers(vec![X86Register::RAX]);
         // Self-equivalent at width 32 — exercises the new_for_32() arm.
-        let r = x86_check_equivalence(&target, &target, &mask, 32, Duration::from_secs(2));
+        let r = crate::semantics::equivalence::check_equivalence_x86_for_search(
+            &target,
+            &target,
+            &mask,
+            32,
+            Duration::from_secs(2),
+        );
         assert!(matches!(r, EquivalenceResult::Equivalent));
     }
 
