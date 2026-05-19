@@ -406,10 +406,12 @@ mod tests {
     use crate::semantics::EquivalenceMetrics;
     use crate::semantics::cost::CostMetric;
     use crate::semantics::live_out::LiveOut;
+    use std::sync::Mutex;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::time::Duration;
 
     static TEST_EQUIVALENCE_CHECKS: AtomicUsize = AtomicUsize::new(0);
+    static SYMBOLIC_INNER_LOOP_TEST_LOCK: Mutex<()> = Mutex::new(());
 
     #[derive(Clone)]
     struct TestIsa;
@@ -775,6 +777,9 @@ mod tests {
         use std::thread;
         use std::time::Instant;
 
+        let _guard = SYMBOLIC_INNER_LOOP_TEST_LOCK
+            .lock()
+            .expect("symbolic inner-loop test lock poisoned");
         TEST_EQUIVALENCE_CHECKS.store(0, Ordering::SeqCst);
 
         let flag = Arc::new(AtomicBool::new(false));
@@ -826,6 +831,9 @@ mod tests {
         use std::thread;
         use std::time::Instant;
 
+        let _guard = SYMBOLIC_INNER_LOOP_TEST_LOCK
+            .lock()
+            .expect("symbolic inner-loop test lock poisoned");
         TEST_EQUIVALENCE_CHECKS.store(0, Ordering::SeqCst);
 
         let flag = Arc::new(AtomicBool::new(false));
