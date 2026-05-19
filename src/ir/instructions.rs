@@ -1206,6 +1206,13 @@ fn is_encodable_pair(
         // LDPSW is the only "signed pair" form; it is always 32→64.
         return false;
     }
+    // LDP/STP only have Word and Extended forms at the architecture level
+    // (no LDPB/LDPH/STPB/STPH). Byte/Half pair widths construct cleanly
+    // but the assembler errors at emit time — reject at the IR gate so
+    // parser and search candidates can't smuggle them through.
+    if !matches!(width, AccessWidth::Word | AccessWidth::Extended) {
+        return false;
+    }
     // LDP/STP have no register-offset / register-extend addressing form.
     let imm_offset = match addr {
         AddressOperand::Imm { offset, .. } => *offset,
@@ -1780,6 +1787,38 @@ mod tests {
             width: AccessWidth::Extended,
         };
         assert!(!ldr.is_encodable_aarch64());
+    }
+
+    #[test]
+    fn pair_byte_width_rejected_at_encodability() {
+        // LDP/STP have no Byte form at the architecture level.
+        let stp_byte = Instruction::Stp {
+            rt1: Register::X0,
+            rt2: Register::X1,
+            addr: AddressOperand::Imm {
+                base: Register::X2,
+                offset: 0,
+                mode: IndexMode::Offset,
+            },
+            width: AccessWidth::Byte,
+        };
+        assert!(!stp_byte.is_encodable_aarch64());
+    }
+
+    #[test]
+    fn pair_half_width_rejected_at_encodability() {
+        let ldp_half = Instruction::Ldp {
+            rt1: Register::X0,
+            rt2: Register::X1,
+            addr: AddressOperand::Imm {
+                base: Register::X2,
+                offset: 0,
+                mode: IndexMode::Offset,
+            },
+            width: AccessWidth::Half,
+            signed: false,
+        };
+        assert!(!ldp_half.is_encodable_aarch64());
     }
 
     #[test]
