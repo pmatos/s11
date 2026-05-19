@@ -12,6 +12,7 @@
 
 use crate::ir::Instruction;
 use crate::search::config::Algorithm;
+use crate::search::result::SearchStatistics;
 use crossbeam_channel::{Receiver, Sender, bounded, unbounded};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -26,10 +27,14 @@ pub enum WorkerMessage {
         cost: u64,
         algorithm: Algorithm,
     },
-    /// Worker has finished searching.
+    /// Worker has finished searching. Carries the full per-worker
+    /// `SearchStatistics` (including its `algorithm` field) so the
+    /// coordinator can aggregate every metric the worker recorded, not
+    /// only the candidate count.
     Finished {
         worker_id: usize,
-        candidates_evaluated: u64,
+        algorithm: Algorithm,
+        statistics: SearchStatistics,
     },
     /// Worker encountered an error.
     Error { worker_id: usize, message: String },
@@ -195,9 +200,12 @@ mod tests {
         assert_eq!(coordinator.to_workers.len(), 4);
 
         // Test sending from worker to coordinator
+        let mut stats = SearchStatistics::new(Algorithm::Stochastic);
+        stats.candidates_evaluated = 100;
         let msg = WorkerMessage::Finished {
             worker_id: 0,
-            candidates_evaluated: 100,
+            algorithm: Algorithm::Stochastic,
+            statistics: stats,
         };
         workers[0].to_coordinator.send(msg).unwrap();
 
@@ -205,10 +213,12 @@ mod tests {
         match received {
             WorkerMessage::Finished {
                 worker_id,
-                candidates_evaluated,
+                algorithm,
+                statistics,
             } => {
                 assert_eq!(worker_id, 0);
-                assert_eq!(candidates_evaluated, 100);
+                assert_eq!(algorithm, Algorithm::Stochastic);
+                assert_eq!(statistics.candidates_evaluated, 100);
             }
             _ => panic!("Unexpected message type"),
         }
