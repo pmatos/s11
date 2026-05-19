@@ -156,6 +156,11 @@ fn run_coordinator(
                         // Update best result. statistics is a placeholder
                         // here; it is finalised after every worker has
                         // reported, see post-loop block below.
+                        // winning_worker_id is overwritten on each
+                        // accepted Improvement: `try_update` only succeeds
+                        // when `cost` is strictly less than the prior
+                        // best, so the last accepted improvement is the
+                        // overall winner.
                         let result = SearchResult {
                             found_optimization: true,
                             original_sequence: target.to_vec(),
