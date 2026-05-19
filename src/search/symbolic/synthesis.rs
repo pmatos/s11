@@ -228,10 +228,16 @@ where
                     if count >= sample_size {
                         break;
                     }
+                    if should_stop(config, start_time) {
+                        return best_at_length;
+                    }
 
                     for instr3 in all_instructions {
                         if count >= sample_size {
                             break;
+                        }
+                        if should_stop(config, start_time) {
+                            return best_at_length;
                         }
 
                         let candidate = if length == 3 {
@@ -403,7 +409,7 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::time::Duration;
 
-    static LENGTH_TWO_EQUIVALENCE_CHECKS: AtomicUsize = AtomicUsize::new(0);
+    static TEST_EQUIVALENCE_CHECKS: AtomicUsize = AtomicUsize::new(0);
 
     #[derive(Clone)]
     struct TestIsa;
@@ -573,7 +579,7 @@ mod tests {
             _width: u32,
             _timeout: Duration,
         ) -> (EquivalenceResult, EquivalenceMetrics) {
-            LENGTH_TWO_EQUIVALENCE_CHECKS.fetch_add(1, Ordering::SeqCst);
+            TEST_EQUIVALENCE_CHECKS.fetch_add(1, Ordering::SeqCst);
             std::thread::sleep(Duration::from_millis(1));
             (
                 EquivalenceResult::NotEquivalent,
@@ -769,13 +775,13 @@ mod tests {
         use std::thread;
         use std::time::Instant;
 
-        LENGTH_TWO_EQUIVALENCE_CHECKS.store(0, Ordering::SeqCst);
+        TEST_EQUIVALENCE_CHECKS.store(0, Ordering::SeqCst);
 
         let flag = Arc::new(AtomicBool::new(false));
         let flag_for_stop = Arc::clone(&flag);
 
         let stopper = thread::spawn(move || {
-            while LENGTH_TWO_EQUIVALENCE_CHECKS.load(Ordering::SeqCst) == 0 {
+            while TEST_EQUIVALENCE_CHECKS.load(Ordering::SeqCst) == 0 {
                 thread::yield_now();
             }
             flag_for_stop.store(true, Ordering::SeqCst);
@@ -805,11 +811,63 @@ mod tests {
 
         stopper.join().expect("stopper thread panicked");
 
-        let checks = LENGTH_TWO_EQUIVALENCE_CHECKS.load(Ordering::SeqCst);
+        let checks = TEST_EQUIVALENCE_CHECKS.load(Ordering::SeqCst);
         assert_eq!(result, None);
         assert!(
             checks < 8,
             "length-2 search should poll cancellation inside the instr2 loop; ran {checks} checks",
+        );
+    }
+
+    #[test]
+    fn symbolic_length_three_inner_loops_respect_cooperative_stop_flag() {
+        use std::sync::Arc;
+        use std::sync::atomic::AtomicBool;
+        use std::thread;
+        use std::time::Instant;
+
+        TEST_EQUIVALENCE_CHECKS.store(0, Ordering::SeqCst);
+
+        let flag = Arc::new(AtomicBool::new(false));
+        let flag_for_stop = Arc::clone(&flag);
+
+        let stopper = thread::spawn(move || {
+            while TEST_EQUIVALENCE_CHECKS.load(Ordering::SeqCst) == 0 {
+                thread::yield_now();
+            }
+            flag_for_stop.store(true, Ordering::SeqCst);
+        });
+
+        let mut search: SymbolicSearch<TestIsa> = SymbolicSearch::new();
+        let config = SearchConfig::default()
+            .with_timeout_option(None)
+            .with_stop_flag(flag);
+        let all_instructions: Vec<_> = (0..16).map(TestInstruction).collect();
+        let target = [
+            TestInstruction(100),
+            TestInstruction(101),
+            TestInstruction(102),
+            TestInstruction(103),
+        ];
+        let mut best_cost = u64::MAX;
+
+        let result = search.search_at_length(
+            &target,
+            &(),
+            &config,
+            &all_instructions,
+            3,
+            &mut best_cost,
+            Instant::now(),
+        );
+
+        stopper.join().expect("stopper thread panicked");
+
+        let checks = TEST_EQUIVALENCE_CHECKS.load(Ordering::SeqCst);
+        assert_eq!(result, None);
+        assert!(
+            checks < 8,
+            "length-3 search should poll cancellation inside the instr2/instr3 loops; ran {checks} checks",
         );
     }
 
