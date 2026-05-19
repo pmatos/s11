@@ -41,4 +41,4 @@ Option 1. The LLM flow refuses to run on targets where static analysis says flag
 - The LLM flow has a **narrower applicable input class than the rest of the optimizer**. A user who feeds it a region ending in `CMP` for a downstream branch sees a refusal, not an attempt.
 - The static refusal in the LLM flow is conservative: it bails *before* invoking Codex, even on targets whose equivalence the pipeline could now verify under ADR-0006. This is a deliberate cost/safety trade-off, not a soundness workaround.
 
-**Reversibility:** high. If the LLM flow is later judged to be sound on flag-live-out targets, the static refusal in `src/search/llm/mod.rs:116` becomes a one-line deletion and the inputs pass through to Codex like any other target.
+**Reversibility:** high. If the LLM flow is later judged to be sound on flag-live-out targets, the static refusal in `src/search/llm/mod.rs` (the `if flags_live_out(target)` guard inside `Llm::search`) becomes a one-line deletion and the inputs pass through to Codex like any other target.
