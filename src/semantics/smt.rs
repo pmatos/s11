@@ -395,22 +395,26 @@ pub fn apply_instruction(mut state: MachineState, instruction: &Instruction) -> 
         }
         Instruction::Lsl { rd, rn, shift } => {
             let value = state.get_register(*rn).clone();
-            let shift_amount = state.eval_operand(shift);
-            // LSL is logical shift left
+            // AArch64 variable shifts consume only the low log2(width) bits
+            // (concrete.rs masks with `& 63`). Z3's `bvshl` zeroes the result
+            // when the shift amount is >= width, so we must mask first to
+            // keep SMT and concrete in agreement (issue #241).
+            let mask = BV::from_u64((width - 1) as u64, width);
+            let shift_amount = state.eval_operand(shift).bvand(&mask);
             let result = value.bvshl(&shift_amount);
             state.set_register(*rd, result);
         }
         Instruction::Lsr { rd, rn, shift } => {
             let value = state.get_register(*rn).clone();
-            let shift_amount = state.eval_operand(shift);
-            // LSR is logical shift right
+            let mask = BV::from_u64((width - 1) as u64, width);
+            let shift_amount = state.eval_operand(shift).bvand(&mask);
             let result = value.bvlshr(&shift_amount);
             state.set_register(*rd, result);
         }
         Instruction::Asr { rd, rn, shift } => {
             let value = state.get_register(*rn).clone();
-            let shift_amount = state.eval_operand(shift);
-            // ASR is arithmetic shift right
+            let mask = BV::from_u64((width - 1) as u64, width);
+            let shift_amount = state.eval_operand(shift).bvand(&mask);
             let result = value.bvashr(&shift_amount);
             state.set_register(*rd, result);
         }
@@ -2156,12 +2160,9 @@ mod tests {
     #[test]
     fn test_lsl_imm_concrete_smt_parity() {
         // LSL is width-sensitive: concrete (concrete.rs:84-88) masks the shift
-        // amount with `& 63` before applying. SMT relies on Z3 bvshl with a
-        // 64-bit shift operand. For shift in [0, 63] the two paths agree; the
-        // width-aware refactor in Step 6 must preserve that. Shift values >= 64
-        // are a known latent divergence in the SMT lowering (Z3 bvshl returns 0
-        // while AArch64 architecturally shifts by `shift & 63`) and are NOT
-        // tested here; addressing it is out of scope for the NFC stage.
+        // amount with `& 63` before applying. After the issue-#241 fix the
+        // SMT lowering masks the shift operand with `width - 1` too, so the
+        // two paths agree for all shift values including >= 64.
         let values: &[u64] = &[
             0,
             1,
@@ -2169,7 +2170,7 @@ mod tests {
             0x8000_0000_0000_0000,
             0x1234_5678_9ABC_DEF0,
         ];
-        let shifts: &[i64] = &[0, 1, 5, 16, 32, 63];
+        let shifts: &[i64] = &[0, 1, 5, 16, 32, 63, 64, 65, 127];
         for &v1 in values {
             for &shift in shifts {
                 let instr = Instruction::Lsl {
@@ -2192,7 +2193,7 @@ mod tests {
             0x8000_0000_0000_0000,
             0x1234_5678_9ABC_DEF0,
         ];
-        let shifts: &[i64] = &[0, 1, 5, 16, 32, 63];
+        let shifts: &[i64] = &[0, 1, 5, 16, 32, 63, 64, 65, 127];
         for &v1 in values {
             for &shift in shifts {
                 let instr = Instruction::Lsr {
@@ -2201,6 +2202,93 @@ mod tests {
                     shift: Operand::Immediate(shift),
                 };
                 assert_concrete_smt_parity(&instr, &[(Register::X1, v1)], Register::X0);
+            }
+        }
+    }
+
+    #[test]
+    fn test_lsl_reg_concrete_smt_parity() {
+        // Register-form LSL: shift amount comes from a register and may
+        // legitimately hold values >= 64. Issue #241: SMT lowering must
+        // mask with `width - 1` to mirror AArch64's `shift & 63`.
+        let instr = Instruction::Lsl {
+            rd: Register::X0,
+            rn: Register::X1,
+            shift: Operand::Register(Register::X2),
+        };
+        let values: &[u64] = &[
+            0,
+            1,
+            5,
+            0xFFFF_FFFF_FFFF_FFFF,
+            0x8000_0000_0000_0000,
+            0x1234_5678_9ABC_DEF0,
+        ];
+        let shifts: &[u64] = &[0, 1, 5, 63, 64, 65, 127, 128, u64::MAX];
+        for &v1 in values {
+            for &s in shifts {
+                assert_concrete_smt_parity(
+                    &instr,
+                    &[(Register::X1, v1), (Register::X2, s)],
+                    Register::X0,
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_lsr_reg_concrete_smt_parity() {
+        // Register-form LSR: mirrors LSL coverage.
+        let instr = Instruction::Lsr {
+            rd: Register::X0,
+            rn: Register::X1,
+            shift: Operand::Register(Register::X2),
+        };
+        let values: &[u64] = &[
+            0,
+            1,
+            5,
+            0xFFFF_FFFF_FFFF_FFFF,
+            0x8000_0000_0000_0000,
+            0x1234_5678_9ABC_DEF0,
+        ];
+        let shifts: &[u64] = &[0, 1, 5, 63, 64, 65, 127, 128, u64::MAX];
+        for &v1 in values {
+            for &s in shifts {
+                assert_concrete_smt_parity(
+                    &instr,
+                    &[(Register::X1, v1), (Register::X2, s)],
+                    Register::X0,
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_asr_reg_concrete_smt_parity() {
+        // Register-form ASR exercises sign-fill in addition to the issue
+        // #241 mask, so negative dividends are added to the matrix.
+        let instr = Instruction::Asr {
+            rd: Register::X0,
+            rn: Register::X1,
+            shift: Operand::Register(Register::X2),
+        };
+        let values: &[u64] = &[
+            0,
+            1,
+            (-1_i64) as u64,
+            (-16_i64) as u64,
+            0x8000_0000_0000_0000,
+            0x1234_5678_9ABC_DEF0,
+        ];
+        let shifts: &[u64] = &[0, 1, 5, 63, 64, 65, 127, 128, u64::MAX];
+        for &v1 in values {
+            for &s in shifts {
+                assert_concrete_smt_parity(
+                    &instr,
+                    &[(Register::X1, v1), (Register::X2, s)],
+                    Register::X0,
+                );
             }
         }
     }
@@ -3195,6 +3283,7 @@ mod tests {
         // ASR is sign-sensitive: concrete (concrete.rs:96-101) routes through
         // `as_i64() >> shift` then back to u64; SMT uses Z3 `bvashr` which
         // sign-preserves. Negative inputs (MSB set) must keep the sign bit.
+        // Shifts >= 64 exercise the issue-#241 mask path.
         let values: &[u64] = &[
             0,
             1,
@@ -3203,7 +3292,7 @@ mod tests {
             0x4000_0000_0000_0000, // positive, MSB-1 set
             0x1234_5678_9ABC_DEF0,
         ];
-        let shifts: &[i64] = &[0, 1, 5, 16, 32, 63];
+        let shifts: &[i64] = &[0, 1, 5, 16, 32, 63, 64, 65, 127];
         for &v1 in values {
             for &shift in shifts {
                 let instr = Instruction::Asr {
