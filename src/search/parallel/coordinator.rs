@@ -165,7 +165,6 @@ fn run_coordinator(
                 }
                 WorkerMessage::Finished {
                     worker_id,
-                    algorithm,
                     statistics,
                 } => {
                     finished_count += 1;
@@ -173,7 +172,7 @@ fn run_coordinator(
                     // Use coordinator wall-clock for per-worker elapsed_time
                     // so all entries share a common time origin (start_time).
                     stats.elapsed_time = start_time.elapsed();
-                    worker_stats.push((worker_id, algorithm, stats));
+                    worker_stats.push((worker_id, stats.algorithm, stats));
 
                     if finished_count >= total_workers {
                         break;
@@ -323,7 +322,6 @@ fn run_symbolic_worker(
 
     let _ = channels.to_coordinator.send(WorkerMessage::Finished {
         worker_id,
-        algorithm: Algorithm::Symbolic,
         statistics: result.statistics,
     });
 }
@@ -362,7 +360,6 @@ fn run_stochastic_worker(
 
     let _ = channels.to_coordinator.send(WorkerMessage::Finished {
         worker_id,
-        algorithm: Algorithm::Stochastic,
         statistics: result.statistics,
     });
 }

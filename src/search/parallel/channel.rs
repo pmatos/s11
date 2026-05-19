@@ -28,12 +28,11 @@ pub enum WorkerMessage {
         algorithm: Algorithm,
     },
     /// Worker has finished searching. Carries the full per-worker
-    /// `SearchStatistics` (including its `algorithm` field) so the
-    /// coordinator can aggregate every metric the worker recorded, not
-    /// only the candidate count.
+    /// `SearchStatistics`; `statistics.algorithm` is the single source
+    /// of truth for which algorithm the worker ran, so the coordinator
+    /// reads it from there when labelling `worker_statistics`.
     Finished {
         worker_id: usize,
-        algorithm: Algorithm,
         statistics: SearchStatistics,
     },
     /// Worker encountered an error.
@@ -204,7 +203,6 @@ mod tests {
         stats.candidates_evaluated = 100;
         let msg = WorkerMessage::Finished {
             worker_id: 0,
-            algorithm: Algorithm::Stochastic,
             statistics: stats,
         };
         workers[0].to_coordinator.send(msg).unwrap();
@@ -213,11 +211,10 @@ mod tests {
         match received {
             WorkerMessage::Finished {
                 worker_id,
-                algorithm,
                 statistics,
             } => {
                 assert_eq!(worker_id, 0);
-                assert_eq!(algorithm, Algorithm::Stochastic);
+                assert_eq!(statistics.algorithm, Algorithm::Stochastic);
                 assert_eq!(statistics.candidates_evaluated, 100);
             }
             _ => panic!("Unexpected message type"),
