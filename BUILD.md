@@ -141,7 +141,7 @@ and flag surface.
 cargo run -- disasm /path/to/binary
 
 # Or using just
-just run -- disasm /path/to/binary
+just analyze /path/to/binary
 ```
 
 `disasm` auto-detects the architecture from the ELF header; pass
