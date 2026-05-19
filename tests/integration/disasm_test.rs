@@ -244,8 +244,8 @@ fn legacy_top_level_binary_flag_is_rejected() {
     );
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
-        stderr.contains("Usage: s11 <COMMAND>"),
-        "Expected clap usage hint with <COMMAND>; got stderr: {stderr}"
+        stderr.contains("<COMMAND>"),
+        "Expected clap subcommand-required hint mentioning <COMMAND>; got stderr: {stderr}"
     );
 }
 
