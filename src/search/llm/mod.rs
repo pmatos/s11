@@ -112,7 +112,10 @@ impl SearchAlgorithm<crate::isa::AArch64> for LlmSearch {
         let mut timings = LlmTimings::default();
         let started = Instant::now();
 
-        // Per ADR-0002: refuse targets where flags are live-out.
+        // Per ADR-0002 (as amended by ADR-0006): the equivalence pipeline
+        // now models NZCV, but the LLM flow still refuses flag-live-out
+        // targets as a conservative pre-Codex gate. Removing this is a
+        // deliberate policy decision, not a bug.
         if flags_live_out(target) {
             eprintln!(
                 "llm-search: target has flags live-out (per ADR-0002 the LLM \
