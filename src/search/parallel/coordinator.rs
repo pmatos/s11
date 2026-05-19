@@ -29,7 +29,10 @@ use std::time::{Duration, Instant};
 /// it), and `best_cost_found` is the minimum nonzero across workers
 /// (falling back to `original_cost` when no worker recorded one).
 /// `worker_statistics` carries the per-worker, per-algorithm breakdown
-/// in arrival order.
+/// in arrival order. Each entry's `elapsed_time` is the coordinator
+/// wall-clock at message arrival (`start_time.elapsed()`), not the
+/// worker's own driver-reported duration; this gives every entry a
+/// common time origin.
 #[derive(Debug)]
 pub struct ParallelResult {
     /// The best result found across all workers.
