@@ -214,3 +214,73 @@ fn test_disasm_requires_binary() {
         "Should print error about missing arguments"
     );
 }
+
+/// Issue #248: BUILD.md historically documented `s11 --binary <file>`,
+/// which is a legacy pre-subcommand invocation that no longer parses.
+/// This test pins that contract: the legacy form must be rejected, so
+/// any future regression that re-introduces a top-level `--binary` flag
+/// trips this test loudly instead of silently re-inviting the broken
+/// documentation.
+#[test]
+fn legacy_top_level_binary_flag_is_rejected() {
+    let binary = get_binary_path();
+    let test_elf = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("binaries")
+        .join("simple_debug");
+    if !test_elf.exists() {
+        eprintln!("Skipping: {:?} not present (run build_tests.sh)", test_elf);
+        return;
+    }
+
+    let output = Command::new(binary)
+        .arg("--binary")
+        .arg(&test_elf)
+        .output()
+        .expect("Failed to execute s11");
+
+    assert!(
+        !output.status.success(),
+        "Legacy `--binary` form should not be accepted"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("Usage: s11 <COMMAND>"),
+        "Expected clap usage hint with <COMMAND>; got stderr: {stderr}"
+    );
+}
+
+/// Issue #248 (counterpart to the test above): the form BUILD.md now
+/// documents — `s11 disasm <file>` — must succeed and print the
+/// `0xADDR: BYTES MNEMONIC` listing that BUILD.md's "Example Output"
+/// block claims it does. This is a small, fast guard against drift
+/// between the docs and the subcommand surface.
+#[test]
+fn documented_disasm_form_succeeds() {
+    let binary = get_binary_path();
+    let test_elf = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("binaries")
+        .join("simple_debug");
+    if !test_elf.exists() {
+        eprintln!("Skipping: {:?} not present (run build_tests.sh)", test_elf);
+        return;
+    }
+
+    let output = Command::new(binary)
+        .arg("disasm")
+        .arg(&test_elf)
+        .output()
+        .expect("Failed to execute s11");
+
+    assert!(
+        output.status.success(),
+        "`s11 disasm <file>` (the documented form) should succeed; stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout
+            .lines()
+            .any(|line| line.trim_start().starts_with("0x")),
+        "disasm output should include `0xADDR:` lines as BUILD.md shows"
+    );
+}
