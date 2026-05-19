@@ -16,7 +16,25 @@ use crate::search::symbolic::backend::SymbolicBackend;
 use crate::search::{Algorithm, SearchAlgorithm};
 use crate::semantics::EquivalenceResult;
 use std::marker::PhantomData;
+use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
+
+/// Whether the symbolic search loop should exit at the next checkpoint.
+///
+/// True if the configured `timeout` has elapsed *or* an external
+/// coordinator (e.g. the parallel hybrid coordinator) has flipped the
+/// cooperative-cancel flag carried in `config.stop_flag`. Centralised so
+/// the four checkpoint sites in `linear_search` / `search_at_length`
+/// stay in sync.
+fn should_stop(config: &SearchConfig, start_time: Instant) -> bool {
+    if config.timeout.is_some_and(|t| start_time.elapsed() >= t) {
+        return true;
+    }
+    config
+        .stop_flag
+        .as_ref()
+        .is_some_and(|f| f.load(Ordering::Relaxed))
+}
 
 /// Symbolic search using SMT-based synthesis, generic over ISA.
 ///
@@ -66,8 +84,8 @@ where
                 println!("Searching for equivalent sequences of length {}...", length);
             }
 
-            // Check timeout
-            if config.timeout.is_some_and(|t| start_time.elapsed() >= t) {
+            // Check timeout / cooperative-cancel flag.
+            if should_stop(config, start_time) {
                 if config.verbose {
                     println!("Search timed out");
                 }
@@ -124,8 +142,8 @@ where
         if length == 1 {
             // Single instruction search
             for instr in all_instructions {
-                // Check timeout
-                if config.timeout.is_some_and(|t| start_time.elapsed() >= t) {
+                // Check timeout / cooperative-cancel flag.
+                if should_stop(config, start_time) {
                     return best_at_length;
                 }
 
@@ -155,8 +173,8 @@ where
         } else if length == 2 {
             // Two instruction search
             for instr1 in all_instructions {
-                // Check timeout periodically
-                if config.timeout.is_some_and(|t| start_time.elapsed() >= t) {
+                // Check timeout / cooperative-cancel flag periodically.
+                if should_stop(config, start_time) {
                     return best_at_length;
                 }
 
@@ -198,7 +216,7 @@ where
                 if count >= sample_size {
                     break;
                 }
-                if config.timeout.is_some_and(|t| start_time.elapsed() >= t) {
+                if should_stop(config, start_time) {
                     return best_at_length;
                 }
 
@@ -501,6 +519,56 @@ mod tests {
         // MOV X0, #0 is sufficient (or EOR X0, X0, X0)
         assert!(result.found_optimization);
         assert_eq!(result.cost_savings(), 1);
+    }
+
+    /// Regression for issue #243: symbolic search must abort promptly when
+    /// an external coordinator flips its cooperative-cancel flag, even if
+    /// `config.timeout` is `None` and the candidate space is large.
+    #[test]
+    fn symbolic_search_respects_cooperative_stop_flag() {
+        use std::sync::Arc;
+        use std::sync::atomic::AtomicBool;
+        use std::thread;
+        use std::time::{Duration, Instant};
+
+        let flag = Arc::new(AtomicBool::new(false));
+        let flag_for_search = Arc::clone(&flag);
+
+        let join = thread::spawn(move || {
+            let mut search: SymbolicSearch<AArch64> = SymbolicSearch::new();
+            let config = SearchConfig::default()
+                .with_timeout_option(None)
+                .with_stop_flag(flag_for_search)
+                .with_symbolic(SymbolicConfig::default().with_timeout(Duration::from_secs(60)))
+                .with_registers(vec![
+                    Register::X0,
+                    Register::X1,
+                    Register::X2,
+                    Register::X3,
+                    Register::X4,
+                    Register::X5,
+                ])
+                .with_immediates(vec![
+                    0, 1, 2, 3, 4, 5, 7, 8, 10, 15, 16, 31, 32, 63, 64, 100, 255, 256, 1000, 4095,
+                ]);
+            let live_out = LiveOut::from_registers(vec![Register::X0]);
+            let target = mov_add_sequence();
+            search.search(&target, &live_out, &config)
+        });
+
+        // Give the worker a moment to enter `search_at_length`, then signal stop.
+        thread::sleep(Duration::from_millis(20));
+        flag.store(true, std::sync::atomic::Ordering::SeqCst);
+
+        let started_join = Instant::now();
+        let _result = join.join().expect("symbolic worker panicked");
+        let join_elapsed = started_join.elapsed();
+
+        assert!(
+            join_elapsed < Duration::from_secs(2),
+            "stop flag should abort the symbolic loop promptly; took {:?}",
+            join_elapsed,
+        );
     }
 
     #[test]
