@@ -2439,6 +2439,52 @@ mod tests {
         );
     }
 
+    /// Issue #241 regression: AArch64 variable LSL consumes only the low 6
+    /// bits of the shift amount, so `lsl x0, x1, x2` differs from a sequence
+    /// that forces x0 to zero whenever x2 >= 64. Before the fix the SMT
+    /// lowering matched Z3's `bvshl` (which zeroes when shift >= width),
+    /// so the equivalence checker certified the rewrite. With the shift
+    /// amount masked to `width - 1`, the divergence at `x2 = 64` is visible
+    /// either as a fast-path counterexample (random tester edge values) or
+    /// a full SMT refutation.
+    #[test]
+    fn test_lsl_reg_shift_amount_masked_for_equivalence() {
+        use crate::ir::types::Condition;
+
+        let target = vec![Instruction::Lsl {
+            rd: Register::X0,
+            rn: Register::X1,
+            shift: Operand::Register(Register::X2),
+        }];
+        let candidate = vec![
+            Instruction::Lsl {
+                rd: Register::X0,
+                rn: Register::X1,
+                shift: Operand::Register(Register::X2),
+            },
+            Instruction::Cmp {
+                rn: Register::X2,
+                rm: Operand::Immediate(64),
+            },
+            Instruction::Csel {
+                rd: Register::X0,
+                rn: Register::XZR,
+                rm: Register::X0,
+                cond: Condition::CS,
+            },
+        ];
+        let config = EquivalenceConfig::with_live_out(LiveOut::from_registers(vec![Register::X0]));
+        let result = check_equivalence_with_config(&target, &candidate, &config);
+        assert!(
+            matches!(
+                result,
+                EquivalenceResult::NotEquivalent | EquivalenceResult::NotEquivalentFast(_)
+            ),
+            "expected NotEquivalent or NotEquivalentFast for shift-mask divergence, got {:?}",
+            result
+        );
+    }
+
     // ===== Issue #69: terminator-identity precheck =====
 
     use crate::ir::LabelId;
