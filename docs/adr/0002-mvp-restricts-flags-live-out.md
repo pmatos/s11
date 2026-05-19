@@ -3,11 +3,24 @@
 Status: Accepted
 Date: 2026-05-07
 
+## Amendment (2026-05-19)
+
+Superseded in part by [ADR-0006](0006-live-out-cli-grammar.md). The Context
+paragraph below originally claimed NZCV was not modeled by the equivalence
+pipeline (a "pre-existing soundness gap"). That claim no longer holds:
+`LiveOut` carries a `flags_live` bit (`src/semantics/live_out.rs`), and both
+the fast-path and SMT equivalence paths consume it
+(`src/semantics/equivalence.rs`); `equiv --live-out '...;nzcv'` is the
+user-facing knob (ADR-0006). What remains authoritative in this ADR is the
+LLM-specific *static refusal* of flag-live-out targets in
+`src/search/llm/mod.rs`; that policy is unchanged and is independent of how
+the equivalence pipeline handles NZCV.
+
 ## Context
 
-`LiveOut` (`src/semantics/live_out.rs`) names the broad live-out contract, but its only populated slice today is the register-only `LiveOutRegisters`. It does not encode whether AArch64 condition state (NZCV) is part of the broader live-out contract. The 20-opcode subset includes flag writers (`CMP`, `CMN`, `TST`) and flag readers (`CSEL`, `CSINC`, `CSINV`, `CSNEG`); a target whose final instruction is `CMP` (for example) has condition state as a real downstream output even though no register value reflects it.
+At the time this ADR was accepted, `LiveOut` (`src/semantics/live_out.rs`) named the broad live-out contract, but its only populated slice was the register-only `LiveOutRegisters`. It did not encode whether AArch64 condition state (NZCV) was part of the broader live-out contract. The 20-opcode subset includes flag writers (`CMP`, `CMN`, `TST`) and flag readers (`CSEL`, `CSINC`, `CSINV`, `CSNEG`); a target whose final instruction is `CMP` (for example) has condition state as a real downstream output even though no register value reflects it. (See the Amendment above for the present state of this part of the contract.)
 
-`EquivalenceConfig` and all four search algorithms thread `LiveOut` through, but equivalence currently checks only its `LiveOutRegisters` slice; none of them check NZCV equivalence. This is a pre-existing soundness gap with respect to condition-state live-out, but only matters for the LLM flow because the LLM is the only generator that might *legitimately* drop a final flag-setting instruction (the others enumerate from a pool that includes it).
+`EquivalenceConfig` and all four search algorithms threaded `LiveOut` through, but equivalence at that time checked only its `LiveOutRegisters` slice; none of them checked NZCV equivalence. That was a pre-existing soundness gap with respect to condition-state live-out, but only mattered for the LLM flow because the LLM is the only generator that might *legitimately* drop a final flag-setting instruction (the others enumerate from a pool that includes it).
 
 Two options:
 
@@ -26,6 +39,6 @@ Option 1. The LLM flow refuses to run on targets where static analysis says flag
 
 **Negative:**
 - The LLM flow has a **narrower applicable input class than the rest of the optimizer**. A user who feeds it a region ending in `CMP` for a downstream branch sees a refusal, not an attempt.
-- We are explicitly accepting a known pre-existing soundness gap (condition-state live-out is not checked by the equivalence internals for *all* algorithms) rather than fixing it. Fix is deferred.
+- The static refusal in the LLM flow is conservative: it bails *before* invoking Codex, even on targets whose equivalence the pipeline could now verify under ADR-0006. This is a deliberate cost/safety trade-off, not a soundness workaround.
 
-**Reversibility:** high. When flags-live-out becomes a supported part of the live-out contract (its own ADR), the static refusal in the LLM flow is replaced by passing the flag-live-out bit through to the prompt and the equivalence check.
+**Reversibility:** high. If the LLM flow is later judged to be sound on flag-live-out targets, the static refusal in `src/search/llm/mod.rs:116` becomes a one-line deletion and the inputs pass through to Codex like any other target.
