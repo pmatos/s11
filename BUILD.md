@@ -111,8 +111,8 @@ cargo test
 
 ## Performance Notes
 
-- Use **debug builds** (`just run`) for development — they compile faster
-- Use **release builds** (`just run-release`) for performance testing — they are significantly faster at runtime
+- Use **debug builds** (`just run`) for development - they compile faster
+- Use **release builds** (`just run-release`) for performance testing - they are significantly faster at runtime
 
 ## Example Session
 
@@ -159,7 +159,7 @@ cargo run -- opt /path/to/binary \
 ```
 
 The `opt` subcommand has many more flags (cost metric, MCMC tuning, SMT
-timeout, …) — see `cargo run -- opt --help` and `README.md` for the
+timeout, ...) - see `cargo run -- opt --help` and `README.md` for the
 full table.
 
 ### Example Output
@@ -218,7 +218,7 @@ cargo run -- disasm binaries/functions_opt
 The test suite demonstrates that s11 can:
 - Disassemble AArch64 and x86 ELF binaries across optimization levels.
 - Find shorter or cheaper equivalent instruction windows via `opt`
-  (enumerative, stochastic, symbolic, and — on AArch64 — hybrid / LLM
+  (enumerative, stochastic, symbolic, and - on AArch64 - hybrid / LLM
   search).
 - Prove equivalence of two assembly sequences via `equiv` and an
   explicit live-out set.

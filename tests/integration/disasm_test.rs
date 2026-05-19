@@ -161,7 +161,7 @@ fn test_disasm_functions_binary() {
 
 /// Disassemble an x86-64 binary if build_tests.sh has produced one. We
 /// only assert that s11 exits successfully and reports the architecture
-/// header — we don't pin specific instruction mnemonics because the
+/// header - we don't pin specific instruction mnemonics because the
 /// compiler is free to choose any encoding it wants.
 #[test]
 fn test_disasm_x86_64_binary_if_present() {
@@ -187,7 +187,7 @@ fn test_disasm_x86_64_binary_if_present() {
         "s11 disasm failed on x86-64 binary: stderr={}",
         String::from_utf8_lossy(&output.stderr)
     );
-    // stdout in disasm mode is the per-instruction listing — should not
+    // stdout in disasm mode is the per-instruction listing - should not
     // contain the architecture header.
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(stdout.contains("0x"), "expected hex addresses in output");
@@ -250,7 +250,7 @@ fn legacy_top_level_binary_flag_is_rejected() {
 }
 
 /// Issue #248 (counterpart to the test above): the form BUILD.md now
-/// documents — `s11 disasm <file>` — must succeed and print the
+/// documents - `s11 disasm <file>` - must succeed and print the
 /// `0xADDR: BYTES MNEMONIC` listing that BUILD.md's "Example Output"
 /// block claims it does. This is a small, fast guard against drift
 /// between the docs and the subcommand surface.
