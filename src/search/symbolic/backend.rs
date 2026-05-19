@@ -29,6 +29,15 @@ pub trait SymbolicBackend<I: ISA>: Sized {
     /// the supplied register and immediate pools.
     fn enumerate_all(regs: &[I::Register], imms: &[i64]) -> Vec<I::Instruction>;
 
+    /// Return the target's trailing terminator if any. The synthesis
+    /// loop appends it to each candidate proposal so the equivalence
+    /// check's terminator-equality precheck doesn't reject every
+    /// candidate against a Jcc-terminated target. Default returns
+    /// `None`; x86 overrides to peel its `Jcc` terminator.
+    fn target_terminator(_target: &[I::Instruction]) -> Option<I::Instruction> {
+        None
+    }
+
     /// Sum the cost of every instruction in the sequence.
     fn sequence_cost(seq: &[I::Instruction], metric: &CostMetric, width: u32) -> u64;
 
@@ -113,6 +122,14 @@ impl SymbolicBackend<crate::isa::X86_64> for crate::isa::X86_64 {
         crate::search::candidate_x86::generate_all_x86_instructions(regs, imms)
     }
 
+    fn target_terminator(
+        target: &[crate::isa::x86::X86Instruction],
+    ) -> Option<crate::isa::x86::X86Instruction> {
+        crate::ir::instructions::split_terminator_x86(target)
+            .1
+            .copied()
+    }
+
     fn sequence_cost(
         seq: &[crate::isa::x86::X86Instruction],
         metric: &CostMetric,
@@ -166,6 +183,14 @@ impl SymbolicBackend<crate::isa::X86_32> for crate::isa::X86_32 {
         imms: &[i64],
     ) -> Vec<crate::isa::x86::X86Instruction> {
         crate::search::candidate_x86::generate_all_x86_instructions(regs, imms)
+    }
+
+    fn target_terminator(
+        target: &[crate::isa::x86::X86Instruction],
+    ) -> Option<crate::isa::x86::X86Instruction> {
+        crate::ir::instructions::split_terminator_x86(target)
+            .1
+            .copied()
     }
 
     fn sequence_cost(

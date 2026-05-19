@@ -495,7 +495,7 @@ fn x86_modifies_flags(instr: &X86Instruction) -> bool {
 /// callers (e.g. `find_shorter_equivalent_x86`) can route through one
 /// authoritative match arm — adding a future flag-reader like SETcc
 /// then updates exactly one place.
-pub(crate) fn x86_reads_flags(instr: &X86Instruction) -> bool {
+pub fn x86_reads_flags(instr: &X86Instruction) -> bool {
     matches!(
         instr,
         X86Instruction::Cmov { .. } | X86Instruction::Jcc { .. }

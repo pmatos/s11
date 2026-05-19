@@ -109,6 +109,17 @@ where
     ) -> Option<Vec<I::Instruction>> {
         let width = <I as SymbolicBackend<I>>::width(config);
         let mut best_at_length: Option<Vec<I::Instruction>> = None;
+        // If the target ends in a terminator (x86 Jcc, AArch64 branch),
+        // candidate proposals must end in the same terminator for the
+        // equivalence check's peel-and-compare precheck to admit them.
+        // Compute once and append below.
+        let target_terminator = <I as SymbolicBackend<I>>::target_terminator(target);
+        let with_term = |mut seq: Vec<I::Instruction>| -> Vec<I::Instruction> {
+            if let Some(t) = target_terminator {
+                seq.push(t);
+            }
+            seq
+        };
 
         if length == 1 {
             // Single instruction search
@@ -118,7 +129,7 @@ where
                     return best_at_length;
                 }
 
-                let candidate = vec![*instr];
+                let candidate = with_term(vec![*instr]);
                 let candidate_cost = <I as SymbolicBackend<I>>::sequence_cost(
                     &candidate,
                     &config.cost_metric,
@@ -150,7 +161,7 @@ where
                 }
 
                 for instr2 in all_instructions {
-                    let candidate = vec![*instr1, *instr2];
+                    let candidate = with_term(vec![*instr1, *instr2]);
                     let candidate_cost = <I as SymbolicBackend<I>>::sequence_cost(
                         &candidate,
                         &config.cost_metric,
@@ -202,14 +213,14 @@ where
                         }
 
                         let candidate = if length == 3 {
-                            vec![*instr1, *instr2, *instr3]
+                            with_term(vec![*instr1, *instr2, *instr3])
                         } else {
                             // For longer sequences, fill with first instruction
                             let mut seq = vec![*instr1, *instr2, *instr3];
                             while seq.len() < length {
                                 seq.push(all_instructions[0]);
                             }
-                            seq
+                            with_term(seq)
                         };
 
                         let candidate_cost = <I as SymbolicBackend<I>>::sequence_cost(
