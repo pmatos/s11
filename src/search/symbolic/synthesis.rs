@@ -24,8 +24,8 @@ use std::time::{Duration, Instant};
 /// True if the configured `timeout` has elapsed *or* an external
 /// coordinator (e.g. the parallel hybrid coordinator) has flipped the
 /// cooperative-cancel flag carried in `config.stop_flag`. Centralised so
-/// the four checkpoint sites in `linear_search` / `search_at_length`
-/// stay in sync.
+/// the checkpoint sites in `linear_search` / `search_at_length` stay
+/// in sync.
 fn should_stop(config: &SearchConfig, start_time: Instant) -> bool {
     if config.timeout.is_some_and(|t| start_time.elapsed() >= t) {
         return true;
@@ -179,6 +179,10 @@ where
                 }
 
                 for instr2 in all_instructions {
+                    if should_stop(config, start_time) {
+                        return best_at_length;
+                    }
+
                     let candidate = with_term(vec![*instr1, *instr2]);
                     let candidate_cost = <I as SymbolicBackend<I>>::sequence_cost(
                         &candidate,
@@ -391,9 +395,196 @@ where
 mod tests {
     use super::*;
     use crate::ir::{Instruction, Operand, Register};
-    use crate::isa::AArch64;
+    use crate::isa::{AArch64, ISA, ISAMutator, InstructionType, OperandType, RegisterType, U64};
     use crate::search::config::SymbolicConfig;
+    use crate::semantics::EquivalenceMetrics;
+    use crate::semantics::cost::CostMetric;
     use crate::semantics::live_out::LiveOut;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::time::Duration;
+
+    static LENGTH_TWO_EQUIVALENCE_CHECKS: AtomicUsize = AtomicUsize::new(0);
+
+    #[derive(Clone)]
+    struct TestIsa;
+
+    #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+    struct TestRegister;
+
+    impl std::fmt::Display for TestRegister {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            write!(f, "R0")
+        }
+    }
+
+    impl RegisterType for TestRegister {
+        fn index(&self) -> Option<u8> {
+            Some(0)
+        }
+
+        fn from_index(idx: u8) -> Option<Self> {
+            (idx == 0).then_some(Self)
+        }
+
+        fn is_zero_register(&self) -> bool {
+            false
+        }
+
+        fn is_special(&self) -> bool {
+            false
+        }
+    }
+
+    #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+    enum TestOperand {
+        Reg(TestRegister),
+        Imm(i64),
+    }
+
+    impl std::fmt::Display for TestOperand {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            match self {
+                Self::Reg(reg) => write!(f, "{reg}"),
+                Self::Imm(imm) => write!(f, "#{imm}"),
+            }
+        }
+    }
+
+    impl OperandType for TestOperand {
+        type Register = TestRegister;
+
+        fn as_register(&self) -> Option<Self::Register> {
+            match self {
+                Self::Reg(reg) => Some(*reg),
+                Self::Imm(_) => None,
+            }
+        }
+
+        fn as_immediate(&self) -> Option<i64> {
+            match self {
+                Self::Reg(_) => None,
+                Self::Imm(imm) => Some(*imm),
+            }
+        }
+
+        fn from_register(reg: Self::Register) -> Self {
+            Self::Reg(reg)
+        }
+
+        fn from_immediate(imm: i64) -> Self {
+            Self::Imm(imm)
+        }
+    }
+
+    #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+    struct TestInstruction(u8);
+
+    impl std::fmt::Display for TestInstruction {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            write!(f, "test{}", self.0)
+        }
+    }
+
+    impl InstructionType for TestInstruction {
+        type Register = TestRegister;
+        type Operand = TestOperand;
+
+        fn destination(&self) -> Option<Self::Register> {
+            Some(TestRegister)
+        }
+
+        fn source_registers(&self) -> Vec<Self::Register> {
+            Vec::new()
+        }
+
+        fn opcode_id(&self) -> u8 {
+            self.0
+        }
+
+        fn mnemonic(&self) -> &'static str {
+            "test"
+        }
+    }
+
+    struct TestMutator;
+
+    impl ISAMutator<TestInstruction> for TestMutator {
+        fn mutate<R: rand::RngExt>(
+            &self,
+            _rng: &mut R,
+            sequence: &[TestInstruction],
+        ) -> Vec<TestInstruction> {
+            sequence.to_vec()
+        }
+    }
+
+    impl ISA for TestIsa {
+        type Register = TestRegister;
+        type Operand = TestOperand;
+        type Instruction = TestInstruction;
+        type Width = U64;
+        type Flags = ();
+        type Mutator = TestMutator;
+
+        fn name(&self) -> &'static str {
+            "Test"
+        }
+
+        fn register_count(&self) -> usize {
+            1
+        }
+
+        fn instruction_size(&self) -> Option<usize> {
+            Some(1)
+        }
+
+        fn general_registers(&self) -> Vec<Self::Register> {
+            vec![TestRegister]
+        }
+
+        fn zero_register(&self) -> Option<Self::Register> {
+            None
+        }
+    }
+
+    impl SymbolicBackend<TestIsa> for TestIsa {
+        type LiveOut = ();
+
+        fn registers_from_config(_config: &SearchConfig) -> Vec<TestRegister> {
+            vec![TestRegister]
+        }
+
+        fn immediates_from_config(_config: &SearchConfig) -> Vec<i64> {
+            vec![0]
+        }
+
+        fn enumerate_all(_regs: &[TestRegister], _imms: &[i64]) -> Vec<TestInstruction> {
+            vec![TestInstruction(0)]
+        }
+
+        fn sequence_cost(seq: &[TestInstruction], _metric: &CostMetric, _width: u32) -> u64 {
+            seq.len() as u64
+        }
+
+        fn check_equivalence(
+            _target: &[TestInstruction],
+            _proposal: &[TestInstruction],
+            _live_out: &Self::LiveOut,
+            _width: u32,
+            _timeout: Duration,
+        ) -> (EquivalenceResult, EquivalenceMetrics) {
+            LENGTH_TWO_EQUIVALENCE_CHECKS.fetch_add(1, Ordering::SeqCst);
+            std::thread::sleep(Duration::from_millis(1));
+            (
+                EquivalenceResult::NotEquivalent,
+                EquivalenceMetrics::default(),
+            )
+        }
+
+        fn width(_config: &SearchConfig) -> u32 {
+            64
+        }
+    }
 
     fn mov_add_sequence() -> Vec<Instruction> {
         vec![
@@ -529,7 +720,7 @@ mod tests {
         use std::sync::Arc;
         use std::sync::atomic::AtomicBool;
         use std::thread;
-        use std::time::{Duration, Instant};
+        use std::time::Instant;
 
         let flag = Arc::new(AtomicBool::new(false));
         let flag_for_search = Arc::clone(&flag);
@@ -568,6 +759,57 @@ mod tests {
             join_elapsed < Duration::from_secs(2),
             "stop flag should abort the symbolic loop promptly; took {:?}",
             join_elapsed,
+        );
+    }
+
+    #[test]
+    fn symbolic_length_two_inner_loop_respects_cooperative_stop_flag() {
+        use std::sync::Arc;
+        use std::sync::atomic::AtomicBool;
+        use std::thread;
+        use std::time::Instant;
+
+        LENGTH_TWO_EQUIVALENCE_CHECKS.store(0, Ordering::SeqCst);
+
+        let flag = Arc::new(AtomicBool::new(false));
+        let flag_for_stop = Arc::clone(&flag);
+
+        let stopper = thread::spawn(move || {
+            while LENGTH_TWO_EQUIVALENCE_CHECKS.load(Ordering::SeqCst) == 0 {
+                thread::yield_now();
+            }
+            flag_for_stop.store(true, Ordering::SeqCst);
+        });
+
+        let mut search: SymbolicSearch<TestIsa> = SymbolicSearch::new();
+        let config = SearchConfig::default()
+            .with_timeout_option(None)
+            .with_stop_flag(flag);
+        let all_instructions: Vec<_> = (0..64).map(TestInstruction).collect();
+        let target = [
+            TestInstruction(100),
+            TestInstruction(101),
+            TestInstruction(102),
+        ];
+        let mut best_cost = u64::MAX;
+
+        let result = search.search_at_length(
+            &target,
+            &(),
+            &config,
+            &all_instructions,
+            2,
+            &mut best_cost,
+            Instant::now(),
+        );
+
+        stopper.join().expect("stopper thread panicked");
+
+        let checks = LENGTH_TWO_EQUIVALENCE_CHECKS.load(Ordering::SeqCst);
+        assert_eq!(result, None);
+        assert!(
+            checks < 8,
+            "length-2 search should poll cancellation inside the instr2 loop; ran {checks} checks",
         );
     }
 
