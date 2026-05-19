@@ -117,18 +117,28 @@ where
         let mutator = <I as StochasticBackend<I>>::make_mutator(config);
         let acceptance = AcceptanceCriterion::new(config.stochastic.beta);
 
+        // If the target ends in a terminator (x86 Jcc, AArch64 branch),
+        // every random_sequence proposal must end in the same terminator
+        // — the equivalence check's terminator-equality precheck rejects
+        // any candidate that lacks it. Peel once and append below.
+        let target_terminator = <I as StochasticBackend<I>>::target_terminator(target);
+        let terminator_len = if target_terminator.is_some() { 1 } else { 0 };
+        let with_term = |mut seq: Vec<I::Instruction>| -> Vec<I::Instruction> {
+            if let Some(t) = target_terminator {
+                seq.push(t);
+            }
+            seq
+        };
+
         // Start with target sequence or random sequence of same length
         let mut current = if rng.random_bool(0.5) {
             target.to_vec()
         } else {
             loop {
-                let seq = <I as StochasticBackend<I>>::random_sequence(
-                    &mut rng,
-                    target.len(),
-                    &regs,
-                    &imms,
-                    config,
-                );
+                let prefix_len = target.len().saturating_sub(terminator_len);
+                let seq = with_term(<I as StochasticBackend<I>>::random_sequence(
+                    &mut rng, prefix_len, &regs, &imms, config,
+                ));
                 if <I as StochasticBackend<I>>::is_encodable(&seq) {
                     break seq;
                 }
@@ -140,7 +150,9 @@ where
         let mut best_equivalent: Option<Vec<I::Instruction>> = None;
         let mut best_cost = original_cost;
 
-        let min_length = 1;
+        // Length bounds: the terminator (if any) is always pinned at the
+        // tail, so length-change proposals only vary the prefix length.
+        let min_length = 1 + terminator_len;
         let max_length = target.len();
         let smt_timeout = Duration::from_secs(5);
 
@@ -159,9 +171,10 @@ where
                 let new_len = rng.random_range(min_length..=max_length);
                 if new_len != current.len() {
                     loop {
-                        let seq = <I as StochasticBackend<I>>::random_sequence(
-                            &mut rng, new_len, &regs, &imms, config,
-                        );
+                        let prefix_len = new_len.saturating_sub(terminator_len);
+                        let seq = with_term(<I as StochasticBackend<I>>::random_sequence(
+                            &mut rng, prefix_len, &regs, &imms, config,
+                        ));
                         if <I as StochasticBackend<I>>::is_encodable(&seq) {
                             current = seq;
                             break;

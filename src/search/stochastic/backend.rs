@@ -99,6 +99,15 @@ pub trait StochasticBackend<I: ISA>: Sized {
         config: &SearchConfig,
     ) -> Vec<I::Instruction>;
 
+    /// Return the target's trailing terminator if any. MCMC appends it
+    /// to every `random_sequence` result so the equivalence check's
+    /// terminator-equality precheck doesn't reject every random
+    /// proposal against a Jcc-terminated target. Default returns
+    /// `None`; x86 overrides to peel its `Jcc` terminator.
+    fn target_terminator(_target: &[I::Instruction]) -> Option<I::Instruction> {
+        None
+    }
+
     /// Width parameter for cost + state masking. AArch64 returns 64;
     /// x86 reads `SearchConfig::x86_width` (32 or 64).
     fn width(config: &SearchConfig) -> u32;
@@ -316,6 +325,14 @@ impl StochasticBackend<crate::isa::X86_64> for crate::isa::X86_64 {
         x86_random_sequence(rng, len, regs, imms, crate::assembler::x86::X86Mode::Mode64)
     }
 
+    fn target_terminator(
+        target: &[crate::isa::x86::X86Instruction],
+    ) -> Option<crate::isa::x86::X86Instruction> {
+        crate::ir::instructions::split_terminator_x86(target)
+            .1
+            .copied()
+    }
+
     fn width(_config: &SearchConfig) -> u32 {
         64
     }
@@ -393,6 +410,14 @@ impl StochasticBackend<crate::isa::X86_32> for crate::isa::X86_32 {
         _config: &SearchConfig,
     ) -> Vec<crate::isa::x86::X86Instruction> {
         x86_random_sequence(rng, len, regs, imms, crate::assembler::x86::X86Mode::Mode32)
+    }
+
+    fn target_terminator(
+        target: &[crate::isa::x86::X86Instruction],
+    ) -> Option<crate::isa::x86::X86Instruction> {
+        crate::ir::instructions::split_terminator_x86(target)
+            .1
+            .copied()
     }
 
     fn width(config: &SearchConfig) -> u32 {
