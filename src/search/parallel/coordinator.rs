@@ -39,7 +39,11 @@ pub struct ParallelResult {
     pub best_result: SearchResult,
     /// Statistics aggregated from all workers.
     pub total_statistics: SearchStatistics,
-    /// Per-worker statistics.
+    /// Per-worker statistics in arrival order. Each entry's
+    /// `elapsed_time` is the coordinator wall-clock at message arrival
+    /// (`start_time.elapsed()`), not the worker's own driver-reported
+    /// duration — see the struct-level doc for the full aggregation
+    /// contract.
     pub worker_statistics: Vec<(usize, Algorithm, SearchStatistics)>,
 }
 
@@ -246,9 +250,12 @@ fn run_coordinator(
         {
             br.statistics = winner_stats.clone();
         } else {
-            // Improvement arrived but no matching Finished message did
-            // (loop should not exit before all workers report, so this
-            // is defensive). Fall back to the aggregate.
+            // A winner was recorded but its Finished message hadn't
+            // arrived yet — reachable when the coordinator's outer
+            // timeout fires and breaks the loop before every worker
+            // drains. Fall back to the cross-worker aggregate so the
+            // CLI surfaces the counters drained so far rather than a
+            // fresh-zero placeholder.
             br.statistics = total_stats.clone();
         }
     }
