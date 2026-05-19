@@ -33,11 +33,12 @@ run_test() {
     echo "=== Testing $name ==="
     echo "Binary: $binary"
     
-    # Run the analyzer and extract main function area
-    cargo run -- --binary "$binary" 2>/dev/null | \
-        awk '/Section: \.text/,/Section:|Binary analysis/' | \
+    # Run the disassembler and show the last ~20 instructions of .text
+    # (usually contains main). `s11 disasm` prints one
+    # "addr: bytes mnemonic" line per instruction with no header.
+    cargo run -- disasm "$binary" 2>/dev/null | \
         grep -E "0x[0-9a-f]+:" | \
-        tail -20  # Show last 20 instructions which usually include main
+        tail -20
     echo
 }
 

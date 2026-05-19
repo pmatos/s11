@@ -57,10 +57,10 @@ fmt:
 list:
     @just --list
 
-# Analyze an AArch64 ELF binary
+# Disassemble an ELF binary (AArch64 or x86; arch auto-detected)
 analyze binary_path: build
-    @echo "Analyzing binary: {{binary_path}}"
-    cargo run -- --binary "{{binary_path}}"
+    @echo "Disassembling binary: {{binary_path}}"
+    cargo run -- disasm "{{binary_path}}"
 
 # Build test binaries
 build-tests:
@@ -119,7 +119,7 @@ help:
     @echo "  release       - Build the project in release mode (optimized)"
     @echo "  run           - Build and run the project (debug mode)"
     @echo "  run-release   - Build and run the project (release mode)"
-    @echo "  analyze PATH  - Analyze an AArch64 ELF binary at PATH"
+    @echo "  analyze PATH  - Disassemble an ELF binary at PATH (runs `s11 disasm`)"
     @echo "  test          - Run tests"
     @echo "  build-tests   - Build AArch64 test binaries"
     @echo "  test-all      - Run complete test suite"
