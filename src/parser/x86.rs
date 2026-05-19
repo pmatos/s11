@@ -135,10 +135,18 @@ pub fn x86_ir_from_mnemonic(
 
     // Jcc — strip "j" prefix (excluding "jmp"), parse suffix,
     // validate the operand is a numeric target then discard it.
+    // Mnemonics like `jrcxz`/`jecxz` start with 'j' but aren't
+    // flag-based conditional branches — `parse_x86_condition` rejects
+    // their suffixes. Fall back to `Ok(None)` for those (same shape
+    // unsupported mnemonics like `lea` get) instead of erroring; that
+    // way `convert_to_x86_ir`'s unified "unsupported mnemonic" branch
+    // produces an actionable window-rejection error.
     if mnemonic != "jmp"
         && let Some(suffix) = mnemonic.strip_prefix('j')
     {
-        let cond = parse_x86_condition(suffix)?;
+        let Ok(cond) = parse_x86_condition(suffix) else {
+            return Ok(None);
+        };
         let op = op_str.trim();
         if op.is_empty() {
             return Err(format!("j{} expects a target operand", suffix));
@@ -635,6 +643,25 @@ mod tests {
         // The unconditional JMP is not in scope; must not be claimed.
         let r = x86_ir_from_mnemonic("jmp", "0x100").unwrap();
         assert_eq!(r, None);
+    }
+
+    #[test]
+    fn jrcxz_and_jecxz_fall_through_to_ok_none() {
+        // jrcxz / jecxz appear in real compiled binaries. They start
+        // with 'j' but aren't conditional branches with a flag-based
+        // condition code, so they fall outside the Jcc IR. Returning
+        // Err here would propagate through convert_to_x86_ir and refuse
+        // the whole window; Ok(None) lets convert_to_x86_ir reject the
+        // window with a clean "unsupported mnemonic" error instead.
+        for mn in ["jrcxz", "jecxz", "jcxz"] {
+            let r = x86_ir_from_mnemonic(mn, "0x100");
+            assert_eq!(
+                r,
+                Ok(None),
+                "{} should be Ok(None), not propagate an unknown-suffix Err",
+                mn
+            );
+        }
     }
 
     #[test]
