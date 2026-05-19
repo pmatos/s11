@@ -1140,11 +1140,15 @@ fn address_source_registers(addr: &AddressOperand) -> Vec<Register> {
 /// Encodability gate for the LDR / LDRS / STR family. Rules per ADR-0007:
 /// (a) base register cannot be XZR (the XSP slot rejects the zero register
 /// — SP is accepted); (b) `rt` cannot be SP (loads/stores use Xt/Wt
-/// slots); (c) writeback `rt == base` is CONSTRAINED UNPREDICTABLE and
-/// rejected at the IR level; (d) signed loads only support B/H/W access
-/// widths (LDRSX does not exist — LDR handles 64-bit zero-extension).
+/// slots); XZR is legal — `str xzr, [x0]` zero-stores and `ldr xzr, [x0]`
+/// discards the load per ARM ARM C6.2.131 / C6.2.205; (c) writeback
+/// `rt == base` is CONSTRAINED UNPREDICTABLE and rejected at the IR
+/// level; (d) signed loads only support B/H/W access widths (LDRSX does
+/// not exist — LDR handles 64-bit zero-extension); (e) for `Reg` / `Ext`
+/// address modes the index register cannot be SP — the Rm field encodes
+/// X0..X30 / XZR, not SP (`register_to_dynasm(SP)` returns None).
 fn is_encodable_ldr_like(rt: Register, addr: &AddressOperand, width: AccessWidth) -> bool {
-    if rt == Register::XZR || rt == Register::SP {
+    if rt == Register::SP {
         return false;
     }
     if address_base(addr) == Register::XZR {
@@ -1152,6 +1156,14 @@ fn is_encodable_ldr_like(rt: Register, addr: &AddressOperand, width: AccessWidth
     }
     if is_writeback(addr) && rt == address_base(addr) {
         return false;
+    }
+    match addr {
+        AddressOperand::Reg { idx, .. } | AddressOperand::Ext { idx, .. } => {
+            if *idx == Register::SP {
+                return false;
+            }
+        }
+        AddressOperand::Imm { .. } => {}
     }
     if width == AccessWidth::Extended {
         // The caller decides whether Extended is valid (LDR allows it, but
@@ -1702,6 +1714,72 @@ mod tests {
             signed: false,
         };
         assert_eq!(format!("{}", ldp), "ldp x0, x1, [sp, #16]");
+    }
+
+    #[test]
+    fn str_xzr_is_encodable() {
+        // ARM ARM C6.2.205: `str xzr, [x0]` stores a zero doubleword.
+        // Previously rejected because is_encodable_ldr_like bailed on
+        // `rt == XZR` (codex P2).
+        let str_xzr = Instruction::Str {
+            rt: Register::XZR,
+            addr: AddressOperand::Imm {
+                base: Register::X0,
+                offset: 0,
+                mode: IndexMode::Offset,
+            },
+            width: AccessWidth::Extended,
+        };
+        assert!(str_xzr.is_encodable_aarch64());
+    }
+
+    #[test]
+    fn ldr_xzr_is_encodable() {
+        // ARM ARM C6.2.131: `ldr xzr, [x0]` is legal — the loaded value
+        // is discarded (write to ZR has no architectural effect).
+        let ldr_xzr = Instruction::Ldr {
+            rt: Register::XZR,
+            addr: AddressOperand::Imm {
+                base: Register::X0,
+                offset: 0,
+                mode: IndexMode::Offset,
+            },
+            width: AccessWidth::Extended,
+        };
+        assert!(ldr_xzr.is_encodable_aarch64());
+    }
+
+    #[test]
+    fn ldr_with_sp_index_rejected() {
+        // SP is encoded via the XSP slot (base only), not the Rm slot.
+        // `register_to_dynasm(SP)` returns None, so the assembler errors;
+        // reject at IR layer to keep parse/encode in sync (codex P1).
+        let ldr = Instruction::Ldr {
+            rt: Register::X0,
+            addr: AddressOperand::Reg {
+                base: Register::X1,
+                idx: Register::SP,
+                shift: 0,
+            },
+            width: AccessWidth::Extended,
+        };
+        assert!(!ldr.is_encodable_aarch64());
+    }
+
+    #[test]
+    fn ldr_with_sp_index_via_ext_mode_rejected() {
+        use crate::ir::ExtendKind;
+        let ldr = Instruction::Ldr {
+            rt: Register::X0,
+            addr: AddressOperand::Ext {
+                base: Register::X1,
+                idx: Register::SP,
+                kind: ExtendKind::Uxtx,
+                shift: 0,
+            },
+            width: AccessWidth::Extended,
+        };
+        assert!(!ldr.is_encodable_aarch64());
     }
 
     #[test]
