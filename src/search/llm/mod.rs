@@ -118,8 +118,9 @@ impl SearchAlgorithm<crate::isa::AArch64> for LlmSearch {
         // deliberate policy decision, not a bug.
         if flags_live_out(target) {
             eprintln!(
-                "llm-search: target has flags live-out (per ADR-0002 the LLM \
-                 flow is not sound on this input). Refusing."
+                "llm-search: target has flags live-out — the LLM flow does \
+                 not process flag-live-out targets (conservative policy per \
+                 ADR-0002 as amended by ADR-0006). Refusing."
             );
             stats.elapsed_time = started.elapsed();
             self.last_stats = stats.clone();
