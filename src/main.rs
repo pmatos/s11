@@ -530,7 +530,7 @@ fn live_out_for_optimization_prefix(
 ) -> LiveOut {
     let mut live_registers: Vec<Register> = prefix
         .iter()
-        .filter_map(|instr| instr.destination())
+        .flat_map(|instr| instr.destinations())
         .collect();
 
     if let Some(terminator) = terminator {
@@ -979,6 +979,29 @@ fn validate_basic_block(ir: &[Instruction]) -> Result<(), String> {
 
 use parser::x86::x86_ir_from_mnemonic;
 
+/// Reject any non-terminal Jcc in an x86 optimization window. The
+/// optimizer only special-cases a trailing Jcc (peeled by
+/// `split_terminator_x86`, displacement preserved by
+/// `reassemble_x86_prefix_with_pinned_terminator`). A Jcc anywhere
+/// else in the window would be modelled as a data-state no-op by
+/// both the concrete and SMT executors, so the equivalence check
+/// could accept a rewrite that silently drops or rewrites the branch.
+fn validate_x86_window_terminator_placement(ir: &[isa::x86::X86Instruction]) -> Result<(), String> {
+    for (idx, instr) in ir.iter().enumerate() {
+        if matches!(instr, isa::x86::X86Instruction::Jcc { .. }) && idx != ir.len() - 1 {
+            return Err(format!(
+                "x86 window contains a non-terminal conditional branch at position {} \
+                 (last position is {}). The optimizer only supports Jcc as the trailing \
+                 terminator of a window. Narrow --start-addr/--end-addr to exclude the \
+                 mid-window branch.",
+                idx,
+                ir.len() - 1
+            ));
+        }
+    }
+    Ok(())
+}
+
 fn convert_to_x86_ir(
     instructions: &capstone::Instructions,
 ) -> Result<Vec<isa::x86::X86Instruction>, String> {
@@ -1036,6 +1059,14 @@ fn find_shorter_equivalent_x86(
     let target_cost =
         cost_x86::sequence_cost(target, &semantics::cost::CostMetric::CodeSize, width);
 
+    // Peel any trailing Jcc terminator. Candidates never include Jcc, so
+    // a non-Jcc proposal against a Jcc-terminated target would otherwise
+    // be immediately rejected by `check_equivalence_x86`'s terminator-
+    // equality precheck. We append the original terminator to each
+    // proposal so the equivalence check sees matching terminators and
+    // its flag-observability guard fires correctly.
+    let (_, target_terminator) = crate::ir::instructions::split_terminator_x86(target);
+
     // Live-out registers = everything the target writes.
     let live_regs: Vec<X86Register> = target.iter().filter_map(|i| i.destination()).collect();
     // Flags are live whenever the target contains any instruction with
@@ -1062,17 +1093,41 @@ fn find_shorter_equivalent_x86(
     let imms = vec![0i64, 1, -1];
 
     let candidates = generate_all_x86_instructions(&pool, &imms);
-    let cfg = X86EquivalenceConfig::new(width)
+    // Defense-in-depth: when EITHER side reads EFLAGS (CMOV/Jcc), the
+    // fast-path's 10 random trials may not cover every flag combination
+    // the reader depends on. Drop `.fast_only()` for those iterations so
+    // the SMT path also runs. The two configs differ only in fast_only;
+    // building them once outside the loop avoids per-iteration churn.
+    // Route through `isa::x86::x86_reads_flags` so a future flag-reader
+    // (e.g. SETcc) only needs the predicate updated in one place.
+    let reads_flags =
+        |seq: &[isa::x86::X86Instruction]| -> bool { seq.iter().any(isa::x86::x86_reads_flags) };
+    let target_reads_flags = reads_flags(target);
+    let cfg_fast = X86EquivalenceConfig::new(width)
         .live_out(live_out.clone())
         .fast_only();
+    let cfg_smt = X86EquivalenceConfig::new(width).live_out(live_out.clone());
     for cand in candidates {
-        let seq = vec![cand];
+        // Build the proposal as [candidate] + original_terminator so
+        // both sides share the same trailing Jcc (if any). The
+        // equivalence check peels them in lockstep and runs the prefix
+        // comparison under forced flags_live (since the terminator
+        // reads flags).
+        let mut seq = vec![cand];
+        if let Some(t) = target_terminator {
+            seq.push(*t);
+        }
         let cand_cost =
             cost_x86::sequence_cost(&seq, &semantics::cost::CostMetric::CodeSize, width);
         if cand_cost >= target_cost {
             continue;
         }
-        match check_equivalence_x86(target, &seq, &cfg) {
+        let cfg = if target_reads_flags || reads_flags(&seq) {
+            &cfg_smt
+        } else {
+            &cfg_fast
+        };
+        match check_equivalence_x86(target, &seq, cfg) {
             semantics::equivalence::EquivalenceResult::Equivalent => return Some(seq),
             _ => continue,
         }
@@ -1186,6 +1241,73 @@ fn run_x86_symbolic(
     optimized
 }
 
+/// Reassemble an x86 prefix and splice an ORIGINAL pinned Jcc
+/// terminator back at its original byte offset. Re-encoding the Jcc via
+/// dynasm would emit a placeholder zero displacement and overwrite the
+/// real branch target.
+///
+/// `pinned_terminator` is `None` when the source window had no trailing
+/// Jcc; in that case the function returns the assembled prefix verbatim.
+/// When `Some(jcc_bytes)`, the returned vector is exactly
+/// `original_prefix_byte_size + jcc_bytes.len()` long, with NOP padding
+/// inserted between the new prefix and the Jcc so the Jcc lands at its
+/// original offset (preserving its rel8 / rel32 displacement).
+///
+/// Returns `Err` if the optimized prefix encodes to more bytes than the
+/// original prefix occupied — shifting the Jcc earlier would change the
+/// branch target.
+fn reassemble_x86_prefix_with_pinned_terminator(
+    final_prefix_ir: &[isa::x86::X86Instruction],
+    arch: DetectedArch,
+    pinned_terminator: Option<&[u8]>,
+    original_prefix_byte_size: usize,
+) -> Result<Vec<u8>, String> {
+    let mut asm = match arch {
+        DetectedArch::X86_64 => assembler::x86::X86Assembler::new_64(),
+        DetectedArch::X86_32 => assembler::x86::X86Assembler::new_32(),
+        DetectedArch::Aarch64 => {
+            return Err("reassemble helper is x86-only".to_string());
+        }
+    };
+    let mut out = asm.assemble_instructions(final_prefix_ir)?;
+
+    let Some(jcc_bytes) = pinned_terminator else {
+        return Ok(out);
+    };
+
+    if out.len() > original_prefix_byte_size {
+        return Err(format!(
+            "optimized prefix ({} bytes) is larger than original prefix \
+             ({} bytes); cannot preserve the pinned Jcc terminator's \
+             displacement",
+            out.len(),
+            original_prefix_byte_size
+        ));
+    }
+
+    // Pad NOPs so the Jcc lands at the same offset as in the original
+    // window. `nop_sequence` may return fewer than the requested bytes;
+    // loop until the gap is filled. Return Err on an empty NOP slice
+    // (debug-assert alone would let release builds spin forever).
+    let gap = original_prefix_byte_size - out.len();
+    let mut padded = 0;
+    while padded < gap {
+        let nop = arch.nop_sequence(gap - padded);
+        if nop.is_empty() {
+            return Err(format!(
+                "nop_sequence returned an empty slice while padding {} bytes \
+                 for arch {:?}; refusing to spin forever",
+                gap - padded,
+                arch
+            ));
+        }
+        out.extend_from_slice(nop);
+        padded += nop.len();
+    }
+    out.extend_from_slice(jcc_bytes);
+    Ok(out)
+}
+
 fn optimize_elf_binary_x86(
     patcher: &ElfPatcher,
     path: &Path,
@@ -1267,6 +1389,14 @@ fn optimize_elf_binary_x86(
         println!("  {}", instr);
     }
 
+    // Reject any non-terminal Jcc. The optimizer only special-cases a
+    // trailing Jcc (peeled by `split_terminator_x86`, displacement
+    // preserved by the reassemble helper); a mid-window Jcc would be a
+    // data-state no-op in both the concrete executor and the SMT path,
+    // letting the equivalence check accept rewrites that silently
+    // corrupt control flow in the patched binary.
+    validate_x86_window_terminator_placement(&ir)?;
+
     let optimized = match options.algorithm {
         Algorithm::Enumerative => find_shorter_equivalent_x86(&ir, width),
         Algorithm::Stochastic => run_x86_stochastic(&ir, width, options),
@@ -1292,12 +1422,41 @@ fn optimize_elf_binary_x86(
         println!("  {}", i);
     }
 
-    let mut asm = match arch {
-        DetectedArch::X86_64 => assembler::x86::X86Assembler::new_64(),
-        DetectedArch::X86_32 => assembler::x86::X86Assembler::new_32(),
-        DetectedArch::Aarch64 => unreachable!(),
+    // If the original window ended in a Jcc, the search holds that
+    // terminator fixed. Re-encoding it via dynasm would emit a placeholder
+    // zero displacement and overwrite the real branch target. Peel the
+    // Jcc from `final_ir` and splice the ORIGINAL Jcc bytes back at the
+    // same offset they had in the source window so the displacement
+    // stays valid.
+    let (final_prefix_ir, final_terminator) =
+        crate::ir::instructions::split_terminator_x86(&final_ir);
+    let (_, original_terminator) = crate::ir::instructions::split_terminator_x86(&ir);
+    if final_terminator != original_terminator {
+        return Err(format!(
+            "search returned a terminator ({:?}) that does not match the \
+             original window's terminator ({:?}); refusing to patch",
+            final_terminator, original_terminator
+        )
+        .into());
+    }
+    let pinned_terminator_bytes: Option<Vec<u8>> = if original_terminator.is_some() {
+        let last = cs_instrs
+            .iter()
+            .last()
+            .ok_or("expected non-empty disassembly when peeling terminator")?;
+        Some(last.bytes().to_vec())
+    } else {
+        None
     };
-    let new_bytes = asm.assemble_instructions(&final_ir)?;
+    let original_prefix_byte_size =
+        bytes.len() - pinned_terminator_bytes.as_ref().map_or(0, |b| b.len());
+
+    let new_bytes = reassemble_x86_prefix_with_pinned_terminator(
+        final_prefix_ir,
+        arch,
+        pinned_terminator_bytes.as_deref(),
+        original_prefix_byte_size,
+    )?;
     println!("Reassembled to {} bytes", new_bytes.len());
 
     let output_path = {
@@ -1846,12 +2005,83 @@ mod cli_helper_tests {
             ("cbnz", "x5, #0x1000"),
             ("tbz", "w3, #5, #0x1000"),
             ("tbnz", "x3, #40, #0x1000"),
+            // Issue #68: memory ops. 9 single-register mnemonics × 5
+            // addressing modes = 45 rows; 3 pair mnemonics × 3 modes = 9
+            // rows. See ADR-0007.
+            // LDR (X/W form, immediate-offset / pre-index / post-index /
+            // register-offset / register-extend).
+            ("ldr", "x0, [x1]"),
+            ("ldr", "x0, [x1, #8]!"),
+            ("ldr", "x0, [x1], #8"),
+            ("ldr", "x0, [x1, x2]"),
+            ("ldr", "x0, [x1, w2, uxtw #3]"),
+            // LDRB.
+            ("ldrb", "w0, [x1]"),
+            ("ldrb", "w0, [x1, #1]!"),
+            ("ldrb", "w0, [x1], #1"),
+            ("ldrb", "w0, [x1, x2]"),
+            ("ldrb", "w0, [x1, w2, uxtw]"),
+            // LDRH.
+            ("ldrh", "w0, [x1]"),
+            ("ldrh", "w0, [x1, #2]!"),
+            ("ldrh", "w0, [x1], #2"),
+            ("ldrh", "w0, [x1, x2]"),
+            ("ldrh", "w0, [x1, w2, uxtw #1]"),
+            // LDRSB.
+            ("ldrsb", "x0, [x1]"),
+            ("ldrsb", "x0, [x1, #1]!"),
+            ("ldrsb", "x0, [x1], #1"),
+            ("ldrsb", "x0, [x1, x2]"),
+            ("ldrsb", "x0, [x1, w2, sxtw]"),
+            // LDRSH.
+            ("ldrsh", "x0, [x1]"),
+            ("ldrsh", "x0, [x1, #2]!"),
+            ("ldrsh", "x0, [x1], #2"),
+            ("ldrsh", "x0, [x1, x2]"),
+            ("ldrsh", "x0, [x1, w2, sxtw #1]"),
+            // LDRSW.
+            ("ldrsw", "x0, [x1]"),
+            ("ldrsw", "x0, [x1, #4]!"),
+            ("ldrsw", "x0, [x1], #4"),
+            ("ldrsw", "x0, [x1, x2]"),
+            ("ldrsw", "x0, [x1, w2, sxtw #2]"),
+            // STR.
+            ("str", "x0, [x1]"),
+            ("str", "x0, [x1, #8]!"),
+            ("str", "x0, [x1], #8"),
+            ("str", "x0, [x1, x2]"),
+            ("str", "x0, [x1, w2, uxtw #3]"),
+            // STRB.
+            ("strb", "w0, [x1]"),
+            ("strb", "w0, [x1, #1]!"),
+            ("strb", "w0, [x1], #1"),
+            ("strb", "w0, [x1, x2]"),
+            ("strb", "w0, [x1, w2, uxtw]"),
+            // STRH.
+            ("strh", "w0, [x1]"),
+            ("strh", "w0, [x1, #2]!"),
+            ("strh", "w0, [x1], #2"),
+            ("strh", "w0, [x1, x2]"),
+            ("strh", "w0, [x1, w2, uxtw #1]"),
+            // LDP (offset / pre-index / post-index — register-offset and
+            // register-extend are not part of the AArch64 pair grammar).
+            ("ldp", "x0, x1, [sp, #16]"),
+            ("ldp", "x0, x1, [sp, #-16]!"),
+            ("ldp", "x0, x1, [sp], #16"),
+            // STP.
+            ("stp", "x0, x1, [sp, #16]"),
+            ("stp", "x0, x1, [sp, #-16]!"),
+            ("stp", "x0, x1, [sp], #16"),
+            // LDPSW.
+            ("ldpsw", "x0, x1, [sp, #8]"),
+            ("ldpsw", "x0, x1, [sp, #-8]!"),
+            ("ldpsw", "x0, x1, [sp], #8"),
         ];
 
         // Tripwire: bump in lockstep when adding/removing rows. Catches
         // accidental row deletion and forces a re-read when adding a parser
         // mnemonic without a matching test row.
-        assert_eq!(cases.len(), 78);
+        assert_eq!(cases.len(), 132);
 
         for (mnem, ops) in cases {
             match convert_capstone_op(mnem, ops) {
@@ -1878,20 +2108,46 @@ mod cli_helper_tests {
 
     #[test]
     fn convert_capstone_op_flags_unknown_mnemonic_as_unsupported() {
-        match convert_capstone_op("ldr", "x0, [x1]") {
+        // NEON FADD is not parsed; memory ops were promoted to supported in
+        // issue #68. See ADR-0007.
+        match convert_capstone_op("fadd", "v0.4s, v1.4s, v2.4s") {
             ConvertOutcome::Unsupported(line) => {
-                assert!(line.contains("ldr"), "warning line should name mnemonic");
+                assert!(line.contains("fadd"), "warning line should name mnemonic");
             }
             other => panic!("expected Unsupported, got {:?}", other),
         }
     }
 
     #[test]
+    fn convert_capstone_op_keeps_related_memory_mnemonics_unsupported() {
+        // ADR-0007 §9 explicitly leaves these out of scope. Lock the outcome
+        // here so a future Capstone-syntax shift cannot silently start
+        // parsing them as supported instructions:
+        //   - LDUR / STUR: unscaled-signed-offset variants Capstone uses
+        //     for negative immediates that LDR-imm cannot encode.
+        //   - LDR (literal): PC-relative pool load — different operand
+        //     grammar than the bracketed forms supported by step 4.
+        for (mnem, ops) in [
+            ("ldur", "x0, [x1, #-1]"),
+            ("stur", "x0, [x1, #-1]"),
+            ("ldr", "x0, #0x1234"),
+        ] {
+            match convert_capstone_op(mnem, ops) {
+                ConvertOutcome::Unsupported(_) => {}
+                other => panic!(
+                    "expected Unsupported for `{} {}`, got {:?}",
+                    mnem, ops, other
+                ),
+            }
+        }
+    }
+
+    #[test]
     fn convert_capstone_op_for_optimization_rejects_unsupported_instruction() {
-        let err = convert_capstone_op_for_optimization("ldr", "x0, [x1]", 0x1234)
+        let err = convert_capstone_op_for_optimization("fadd", "v0.4s, v1.4s, v2.4s", 0x1234)
             .expect_err("optimization conversion must reject unsupported non-NOP instructions");
 
-        assert!(err.contains("ldr x0, [x1]"));
+        assert!(err.contains("fadd v0.4s, v1.4s, v2.4s"));
         assert!(err.contains("0x1234"));
         assert!(err.contains("cannot optimize"));
     }
@@ -2004,6 +2260,95 @@ mod cli_helper_tests {
     /// pool-narrowing change (issue #84 item 8) so any future
     /// reintroduction of unconditional scratch-register inflation is
     /// caught.
+    #[test]
+    fn validate_x86_window_rejects_mid_window_jcc() {
+        use isa::x86::{X86Condition, X86Instruction, X86Register};
+        let ir = vec![
+            X86Instruction::CmpReg {
+                rn: X86Register::RAX,
+                rs: X86Register::RBX,
+            },
+            X86Instruction::Jcc {
+                cond: X86Condition::E,
+            },
+            X86Instruction::MovImm {
+                rd: X86Register::RAX,
+                imm: 0,
+            },
+        ];
+        let err = validate_x86_window_terminator_placement(&ir)
+            .expect_err("mid-window Jcc must be rejected");
+        assert!(
+            err.contains("non-terminal conditional branch") && err.contains("position 1"),
+            "unhelpful error: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn validate_x86_window_accepts_trailing_jcc() {
+        use isa::x86::{X86Condition, X86Instruction, X86Register};
+        let ir = vec![
+            X86Instruction::CmpReg {
+                rn: X86Register::RAX,
+                rs: X86Register::RBX,
+            },
+            X86Instruction::Jcc {
+                cond: X86Condition::E,
+            },
+        ];
+        validate_x86_window_terminator_placement(&ir).expect("trailing Jcc must be accepted");
+    }
+
+    #[test]
+    fn validate_x86_window_accepts_no_jcc() {
+        use isa::x86::{X86Instruction, X86Register};
+        let ir = vec![X86Instruction::MovImm {
+            rd: X86Register::RAX,
+            imm: 0,
+        }];
+        validate_x86_window_terminator_placement(&ir).expect("Jcc-free window must be accepted");
+    }
+
+    #[test]
+    fn find_shorter_equivalent_x86_can_optimize_jcc_terminated_window() {
+        use isa::x86::X86Condition;
+        // Two redundant MovImms followed by a Jcc terminator. Search
+        // should collapse the prefix and re-attach the original Jcc.
+        let optimized = find_shorter_equivalent_x86(
+            &[
+                X86Instruction::MovImm {
+                    rd: X86Register::RBX,
+                    imm: 1,
+                },
+                X86Instruction::MovImm {
+                    rd: X86Register::RBX,
+                    imm: 1,
+                },
+                X86Instruction::Jcc {
+                    cond: X86Condition::E,
+                },
+            ],
+            64,
+        )
+        .expect("redundant prefix + Jcc must be optimizable");
+        // Expect: [MovImm RBX, 1, Jcc E].
+        assert_eq!(optimized.len(), 2);
+        match optimized[0] {
+            X86Instruction::MovImm { rd, imm } => {
+                assert_eq!(rd, X86Register::RBX);
+                assert_eq!(imm, 1);
+            }
+            ref other => panic!("expected MovImm RBX, 1, got {:?}", other),
+        }
+        assert!(matches!(
+            optimized[1],
+            X86Instruction::Jcc {
+                cond: X86Condition::E
+            }
+        ));
+    }
+
     #[test]
     fn find_shorter_equivalent_x86_collapses_without_rax_or_rdi_in_target() {
         let optimized = find_shorter_equivalent_x86(
@@ -2319,7 +2664,7 @@ mod cli_helper_tests {
                 rd: Register::X2,
                 imm: 5,
             },
-            terminator.clone(),
+            terminator,
         ];
         let candidate_clobbers_x0 = vec![
             Instruction::MovImm {
@@ -2375,6 +2720,265 @@ mod cli_helper_tests {
         assert!(
             err.contains("position 1") && err.contains("issue #69"),
             "unexpected error: {}",
+            err
+        );
+    }
+
+    // --- end-to-end CMP + CMOV / Jcc pipeline ---
+
+    #[test]
+    fn issue_74_cmp_cmov_round_trips_through_asm_disasm_parse() {
+        use assembler::x86::X86Assembler;
+        use capstone::prelude::*;
+        use isa::x86::{X86Condition, X86Instruction, X86Register};
+        use parser::x86::x86_ir_from_mnemonic;
+
+        let original = vec![
+            X86Instruction::CmpReg {
+                rn: X86Register::RAX,
+                rs: X86Register::RBX,
+            },
+            X86Instruction::Cmov {
+                rd: X86Register::RAX,
+                rs: X86Register::RCX,
+                cond: X86Condition::E,
+            },
+        ];
+        let mut asm = X86Assembler::new_64();
+        let bytes = asm
+            .assemble_instructions(&original)
+            .expect("encode cmp + cmove");
+        let cs = capstone::Capstone::new()
+            .x86()
+            .mode(capstone::arch::x86::ArchMode::Mode64)
+            .syntax(capstone::arch::x86::ArchSyntax::Intel)
+            .build()
+            .expect("capstone init");
+        let insns = cs.disasm_all(&bytes, 0x0).expect("disassemble");
+        let recovered: Vec<X86Instruction> = insns
+            .iter()
+            .map(|i| {
+                let mn = i.mnemonic().unwrap_or("");
+                let op = i.op_str().unwrap_or("");
+                x86_ir_from_mnemonic(mn, op)
+                    .expect("parse succeeds")
+                    .expect("parse yields IR")
+            })
+            .collect();
+        assert_eq!(recovered, original);
+    }
+
+    #[test]
+    fn issue_74_jcc_round_trips_through_asm_disasm_parse() {
+        use assembler::x86::X86Assembler;
+        use capstone::prelude::*;
+        use isa::x86::{X86Condition, X86Instruction};
+        use parser::x86::x86_ir_from_mnemonic;
+
+        let original = vec![X86Instruction::Jcc {
+            cond: X86Condition::NE,
+        }];
+        let mut asm = X86Assembler::new_64();
+        let bytes = asm.assemble_instructions(&original).expect("encode jne");
+        let cs = capstone::Capstone::new()
+            .x86()
+            .mode(capstone::arch::x86::ArchMode::Mode64)
+            .syntax(capstone::arch::x86::ArchSyntax::Intel)
+            .build()
+            .expect("capstone init");
+        let insns = cs.disasm_all(&bytes, 0x0).expect("disassemble");
+        assert_eq!(insns.len(), 1);
+        let mn = insns.iter().next().unwrap().mnemonic().unwrap_or("");
+        let op = insns.iter().next().unwrap().op_str().unwrap_or("");
+        let parsed = x86_ir_from_mnemonic(mn, op)
+            .expect("parse succeeds")
+            .expect("parse yields IR");
+        assert_eq!(parsed, original[0]);
+    }
+
+    #[test]
+    fn issue_74_cmp_cmov_pipeline_distinguishes_different_cmov_sources_when_flags_live() {
+        use isa::x86::{X86Condition, X86Instruction, X86Register};
+        use semantics::equivalence::{
+            EquivalenceResult, X86EquivalenceConfig, check_equivalence_x86,
+        };
+        use semantics::state::X86LiveOutMask;
+
+        let target = vec![
+            X86Instruction::CmpReg {
+                rn: X86Register::RAX,
+                rs: X86Register::RBX,
+            },
+            X86Instruction::Cmov {
+                rd: X86Register::RAX,
+                rs: X86Register::RCX,
+                cond: X86Condition::E,
+            },
+        ];
+        let proposal = vec![
+            X86Instruction::CmpReg {
+                rn: X86Register::RAX,
+                rs: X86Register::RBX,
+            },
+            X86Instruction::Cmov {
+                rd: X86Register::RAX,
+                rs: X86Register::RDX,
+                cond: X86Condition::E,
+            },
+        ];
+        let cfg = X86EquivalenceConfig::new(64)
+            .live_out(X86LiveOutMask::from_registers(vec![X86Register::RAX]).with_flags(true));
+        assert!(matches!(
+            check_equivalence_x86(&target, &proposal, &cfg),
+            EquivalenceResult::NotEquivalent
+        ));
+    }
+
+    #[test]
+    fn issue_74_cmp_cmov_pipeline_self_equivalent_under_flags_live() {
+        use isa::x86::{X86Condition, X86Instruction, X86Register};
+        use semantics::equivalence::{
+            EquivalenceResult, X86EquivalenceConfig, check_equivalence_x86,
+        };
+        use semantics::state::X86LiveOutMask;
+
+        let seq = vec![
+            X86Instruction::CmpReg {
+                rn: X86Register::RAX,
+                rs: X86Register::RBX,
+            },
+            X86Instruction::Cmov {
+                rd: X86Register::RAX,
+                rs: X86Register::RCX,
+                cond: X86Condition::NE,
+            },
+        ];
+        let cfg = X86EquivalenceConfig::new(64)
+            .live_out(X86LiveOutMask::from_registers(vec![X86Register::RAX]).with_flags(true));
+        assert_eq!(
+            check_equivalence_x86(&seq.clone(), &seq, &cfg),
+            EquivalenceResult::Equivalent
+        );
+    }
+
+    // --- x86 Jcc-byte preservation across reassembly ---
+
+    #[test]
+    fn reassemble_x86_no_terminator_returns_assembled_bytes_unchanged() {
+        use isa::x86::{X86Instruction, X86Register};
+        let final_ir = [X86Instruction::MovReg {
+            rd: X86Register::RAX,
+            rs: X86Register::RBX,
+        }];
+        let bytes =
+            reassemble_x86_prefix_with_pinned_terminator(&final_ir, DetectedArch::X86_64, None, 3)
+                .expect("reassemble succeeds");
+        // No splice, no padding: just the assembled prefix.
+        assert_eq!(bytes.len(), 3);
+    }
+
+    #[test]
+    fn reassemble_x86_splices_original_terminator_bytes_at_original_offset() {
+        // Original window: [3-byte mov rax,rbx] [2-byte je 0x10] = 5 bytes total,
+        // jcc at offset 3.
+        // Optimized prefix: same 3-byte mov. Should produce: [mov, je] = 5 bytes,
+        // jcc still at offset 3 (no NOP padding needed since prefix didn't shrink).
+        use isa::x86::{X86Instruction, X86Register};
+        let original_jcc_bytes = [0x74u8, 0x10]; // je rel8=0x10
+        let final_ir = [X86Instruction::MovReg {
+            rd: X86Register::RAX,
+            rs: X86Register::RBX,
+        }];
+        let out = reassemble_x86_prefix_with_pinned_terminator(
+            &final_ir,
+            DetectedArch::X86_64,
+            Some(&original_jcc_bytes),
+            3,
+        )
+        .expect("reassemble succeeds");
+        // Original Jcc bytes must be the LAST 2 bytes, unchanged.
+        assert_eq!(&out[out.len() - 2..], &original_jcc_bytes);
+        assert_eq!(out.len(), 5);
+    }
+
+    #[test]
+    fn reassemble_x86_pads_with_nops_when_optimized_prefix_shrinks() {
+        // Original window: 7-byte prefix + 2-byte jcc = 9 bytes, jcc at offset 7.
+        // Optimized prefix shrinks to 3 bytes. We must NOP-pad 4 bytes so the
+        // Jcc still lands at offset 7 (preserving its rel8 displacement).
+        use isa::x86::{X86Instruction, X86Register};
+        let original_jcc_bytes = [0x75u8, 0x20]; // jne rel8=0x20
+        let final_ir = [X86Instruction::MovReg {
+            rd: X86Register::RAX,
+            rs: X86Register::RBX,
+        }];
+        let out = reassemble_x86_prefix_with_pinned_terminator(
+            &final_ir,
+            DetectedArch::X86_64,
+            Some(&original_jcc_bytes),
+            7,
+        )
+        .expect("reassemble succeeds");
+        // Total length matches the original window.
+        assert_eq!(out.len(), 9);
+        // Jcc bytes are at the original offset (7).
+        assert_eq!(&out[7..9], &original_jcc_bytes);
+        // First 3 bytes are the new prefix; bytes [3..7] are NOP padding.
+        // We don't assert specific NOP encodings here — `nop_sequence` is
+        // covered separately. We just assert they aren't zero (which would
+        // be the buggy `je BYTE 0` overwrite the reviewer flagged).
+        assert_ne!(&out[3..7], &[0u8; 4]);
+    }
+
+    #[test]
+    fn reassemble_x86_32_splices_and_pads_correctly() {
+        // Mirrors the x86-64 pad-with-NOPs test for the x86-32 mode.
+        // The x86-32 nop_sequence returns single-byte 0x90 NOPs, so the
+        // padding loop must iterate `gap` times rather than once.
+        use isa::x86::{X86Instruction, X86Register};
+        let original_jcc_bytes = [0x74u8, 0x05]; // je rel8=5
+        let final_ir = [X86Instruction::MovReg {
+            rd: X86Register::RAX,
+            rs: X86Register::RBX,
+        }];
+        // Original prefix was 5 bytes; optimized prefix encodes to 2
+        // bytes (`mov eax, ebx` on x86-32). NOP-pad 3 bytes then the
+        // 2-byte je at offset 5 — total 7 bytes.
+        let out = reassemble_x86_prefix_with_pinned_terminator(
+            &final_ir,
+            DetectedArch::X86_32,
+            Some(&original_jcc_bytes),
+            5,
+        )
+        .expect("x86-32 reassemble succeeds");
+        assert_eq!(out.len(), 7);
+        assert_eq!(&out[5..7], &original_jcc_bytes);
+        // Bytes [2..5] are NOP-padding; x86-32 nop_sequence emits 0x90.
+        assert_eq!(&out[2..5], &[0x90u8; 3]);
+    }
+
+    #[test]
+    fn reassemble_x86_rejects_optimized_prefix_larger_than_original() {
+        // Pathological case: optimized prefix is LARGER than the original
+        // prefix room. Cannot pad backwards. Must surface as an error
+        // instead of silently corrupting the Jcc displacement.
+        use isa::x86::{X86Instruction, X86Register};
+        let original_jcc_bytes = [0x74u8, 0x10];
+        // 3-byte assembled prefix — but we claim original prefix room was 1.
+        let final_ir = [X86Instruction::MovReg {
+            rd: X86Register::RAX,
+            rs: X86Register::RBX,
+        }];
+        let err = reassemble_x86_prefix_with_pinned_terminator(
+            &final_ir,
+            DetectedArch::X86_64,
+            Some(&original_jcc_bytes),
+            1,
+        )
+        .expect_err("should reject");
+        assert!(
+            err.contains("larger") || err.contains("preserve"),
+            "expected explanatory error, got: {}",
             err
         );
     }

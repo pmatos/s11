@@ -93,7 +93,8 @@ fn verify_candidate(
     let equiv_config = EquivalenceConfig::with_live_out(live_out.clone())
         .random_tests(5)
         .timeout(smt_timeout)
-        .with_flags(true);
+        .with_flags(true)
+        .with_memory(true);
 
     let (verdict, metrics) =
         check_equivalence_with_config_metrics(target, candidate, &equiv_config);

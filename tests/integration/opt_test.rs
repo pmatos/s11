@@ -397,15 +397,16 @@ fn test_opt_rejects_unsupported_instruction_window() {
         .join("loops_debug");
     check_test_binary(&test_elf);
 
-    // Scan loops_debug for the first `stp x29, x30, [sp, #-0x10]!` — an
-    // unsupported mnemonic for the AArch64 optimization path. Targeting a
-    // 4-byte window on that instruction must abort before any output file
-    // is written.
+    // Scan loops_debug for the first `paciasp` — pointer authentication is
+    // unsupported by the AArch64 optimization path. (Memory ops moved to
+    // supported in issue #68, so the old `stp` fixture became valid; see
+    // ADR-0007.) Targeting a 4-byte window on this instruction must abort
+    // before any output file is written.
     let start_addr = find_encoding_masked(
         &test_elf,
-        &[0xfd, 0x7b, 0xbf, 0xa9],
+        &[0x3f, 0x23, 0x03, 0xd5],
         &[0xff, 0xff, 0xff, 0xff],
-        "stp x29, x30, [sp, #-0x10]!",
+        "paciasp",
     );
     let end_addr = start_addr + 4;
 
@@ -433,7 +434,7 @@ fn test_opt_rejects_unsupported_instruction_window() {
 
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
-        stderr.contains("unsupported instruction") && stderr.contains("stp"),
+        stderr.contains("unsupported instruction") && stderr.contains("paciasp"),
         "stderr should identify the offending mnemonic; got: {stderr}",
     );
     assert!(
@@ -446,6 +447,118 @@ fn test_opt_rejects_unsupported_instruction_window() {
         "no optimized binary should be written when conversion fails: {:?}",
         optimized_path,
     );
+}
+
+/// Helper for memory-op integration tests: assert that `s11 opt` on the
+/// given single-instruction window succeeds.
+///
+/// Each test copies the source ELF to a unique tmp path
+/// (`std::env::temp_dir` joined with the supplied `fixture_tag`) so
+/// concurrent `cargo test` runs don't collide on the
+/// `<input>_optimized` artifact the binary always writes alongside its
+/// input. The artifact is cleaned up before the test returns.
+fn assert_opt_succeeds_on_window(source_elf: &Path, fixture_tag: &str, start_addr: u64) {
+    let binary = get_binary_path();
+    let end_addr = start_addr + 4;
+
+    let tmp_dir = std::env::temp_dir().join(format!("s11_opt_{fixture_tag}"));
+    let _ = fs::remove_dir_all(&tmp_dir);
+    fs::create_dir_all(&tmp_dir).expect("create temp fixture dir");
+    let test_elf = tmp_dir.join("loops_debug");
+    fs::copy(source_elf, &test_elf).expect("copy ELF fixture to tmp");
+    let optimized_path = tmp_dir.join("loops_debug_optimized");
+
+    let output = Command::new(&binary)
+        .arg("opt")
+        .arg(&test_elf)
+        .arg("--start-addr")
+        .arg(format!("0x{start_addr:x}"))
+        .arg("--end-addr")
+        .arg(format!("0x{end_addr:x}"))
+        .output()
+        .expect("Failed to execute s11");
+
+    if !output.status.success() {
+        let _ = fs::remove_dir_all(&tmp_dir);
+        panic!(
+            "opt failed on memory-op window 0x{start_addr:x}.\nstdout: {}\nstderr: {}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr),
+        );
+    }
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let ok = stdout.contains("Optimization completed successfully");
+    let optimized_exists = optimized_path.exists();
+    let _ = fs::remove_dir_all(&tmp_dir);
+
+    assert!(
+        ok,
+        "memory-op window must round-trip end-to-end; stdout: {stdout}",
+    );
+    assert!(
+        optimized_exists,
+        "optimized binary must be created at {:?}",
+        optimized_path,
+    );
+}
+
+#[test]
+fn test_opt_accepts_stp_writeback_window() {
+    // STP pre-index `stp x29, x30, [sp, #-16]!` — the standard AArch64
+    // function-prologue spill. Issue #68 moves this from "unsupported" to
+    // "supported"; this test pins that decision at the CLI boundary.
+    let source_elf = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("binaries")
+        .join("loops_debug");
+    check_test_binary(&source_elf);
+    let start_addr = find_encoding_masked(
+        &source_elf,
+        &[0xfd, 0x7b, 0xbf, 0xa9],
+        &[0xff, 0xff, 0xff, 0xff],
+        "stp x29, x30, [sp, #-16]!",
+    );
+    assert_opt_succeeds_on_window(&source_elf, "stp_writeback", start_addr);
+}
+
+#[test]
+fn test_opt_accepts_ldp_postindex_window() {
+    // LDP post-index `ldp x29, x30, [sp], #16` — function-epilogue
+    // restore. Verifies the post-index addressing mode runs cleanly
+    // through disasm → IR → SMT → reassemble.
+    let source_elf = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("binaries")
+        .join("loops_debug");
+    check_test_binary(&source_elf);
+    let start_addr = find_encoding_masked(
+        &source_elf,
+        &[0xfd, 0x7b, 0xc1, 0xa8],
+        &[0xff, 0xff, 0xff, 0xff],
+        "ldp x29, x30, [sp], #16",
+    );
+    assert_opt_succeeds_on_window(&source_elf, "ldp_postindex", start_addr);
+}
+
+#[test]
+fn test_opt_accepts_ldr_positive_offset_window() {
+    // LDR X-form unsigned-offset family `ldr xN, [xM{, #imm}]` — covers
+    // the RefOffset / Uscaled encoding path (vs the LDUR Sbits path tested
+    // at the assembler unit-test layer). The exact (Rt, Rn, imm) tuple
+    // varies across `loops_debug` rebuilds (PLT layout depends on the
+    // toolchain), so the mask wildcards them and pins only the class bits:
+    // byte 3 = 11111001 (size=11, V=1, class=001, opc=01); byte 2 top
+    // bits 7-6 = 01 (LDR unsigned-offset variant).
+    let source_elf = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("binaries")
+        .join("loops_debug");
+    check_test_binary(&source_elf);
+    let start_addr = find_encoding_masked(
+        &source_elf,
+        &[0x00, 0x00, 0x40, 0xf9],
+        &[0x00, 0x00, 0xc0, 0xff],
+        "ldr xN, [xM{, #imm}]",
+    );
+    assert_opt_succeeds_on_window(&source_elf, "ldr_offset", start_addr);
 }
 
 #[test]

@@ -301,9 +301,27 @@ fn is_directive(line: &str) -> bool {
     line.trim().starts_with('.')
 }
 
-/// Split operands by comma, handling whitespace
+/// Split operands by comma, handling whitespace. Bracket-aware: commas
+/// inside `[ ... ]` (memory-operand grammar) are kept inside the same
+/// token. See ADR-0007.
 fn split_operands(operands_str: &str) -> Vec<&str> {
-    operands_str.split(',').map(|s| s.trim()).collect()
+    let mut parts = Vec::new();
+    let bytes = operands_str.as_bytes();
+    let mut depth: i32 = 0;
+    let mut start = 0usize;
+    for (i, &b) in bytes.iter().enumerate() {
+        match b {
+            b'[' => depth += 1,
+            b']' => depth -= 1,
+            b',' if depth == 0 => {
+                parts.push(operands_str[start..i].trim());
+                start = i + 1;
+            }
+            _ => {}
+        }
+    }
+    parts.push(operands_str[start..].trim());
+    parts
 }
 
 /// Parse a MOV instruction
@@ -709,6 +727,293 @@ fn is_extend_keyword(kw: &str) -> bool {
         kw.to_ascii_lowercase().as_str(),
         "uxtb" | "uxth" | "uxtw" | "uxtx" | "sxtb" | "sxth" | "sxtw" | "sxtx"
     )
+}
+
+/// Parse an `AddressOperand` from the bracketed-operand tokens of a
+/// memory instruction. Accepts:
+///   - `[Xn]`                          → Imm { offset=0, mode=Offset }
+///   - `[Xn, #imm]`                    → Imm { mode=Offset }
+///   - `[Xn, #imm]!`                   → Imm { mode=PreIndex }
+///   - `[Xn], #imm` (two tokens)       → Imm { mode=PostIndex }
+///   - `[Xn, Xm]`                      → Reg { shift=0 }
+///   - `[Xn, Xm, LSL #shift]`          → Reg { shift }
+///   - `[Xn, {W|X}m, UXTW/SXTW/UXTX/SXTX{ #shift}]`  → Ext
+///
+/// Returns the parsed operand and the number of input tokens consumed (1 for
+/// the four bracketed forms, 2 for the trailing-immediate post-index form).
+/// See ADR-0007.
+fn parse_memory_operand(
+    tokens: &[&str],
+) -> Result<(crate::ir::types::AddressOperand, usize), String> {
+    use crate::ir::types::{AddressOperand, ExtendKind, IndexMode};
+
+    let first = tokens.first().ok_or("missing address operand")?.trim();
+    if !first.starts_with('[') {
+        return Err(format!(
+            "expected '[' at start of address operand, got `{}`",
+            first
+        ));
+    }
+
+    // Locate the closing bracket. The bracket-aware split puts the entire
+    // bracketed group in a single token, so the ']' is in this same token.
+    let close = first
+        .rfind(']')
+        .ok_or_else(|| format!("missing ']' in address operand `{}`", first))?;
+    let inner = first[1..close].trim();
+    let after_bracket = first[close + 1..].trim();
+
+    // Parse the inner pieces.
+    let inner_parts: Vec<&str> = inner.split(',').map(|s| s.trim()).collect();
+    let base = parse_register(inner_parts[0])
+        .map_err(|e| format!("invalid base register in memory operand: {}", e))?;
+
+    let mut addr = if inner_parts.len() == 1 {
+        AddressOperand::Imm {
+            base,
+            offset: 0,
+            mode: IndexMode::Offset,
+        }
+    } else if inner_parts.len() == 2 {
+        // Either `[Xn, #imm]` or `[Xn, Xm]`.
+        let second = inner_parts[1];
+        if let Ok(imm) = parse_immediate(second) {
+            AddressOperand::Imm {
+                base,
+                offset: imm,
+                mode: IndexMode::Offset,
+            }
+        } else {
+            // Register-offset, no shift.
+            let idx = parse_register(second)
+                .map_err(|e| format!("invalid index register in memory operand: {}", e))?;
+            AddressOperand::Reg {
+                base,
+                idx,
+                shift: 0,
+            }
+        }
+    } else if inner_parts.len() == 3 {
+        // `[Xn, Xm, LSL #N]` or `[Xn, Wm, UXTW/SXTW/UXTX/SXTX{ #N}]`.
+        let third = inner_parts[2];
+        let kw = third.split_whitespace().next().unwrap_or("");
+        if kw.eq_ignore_ascii_case("lsl") {
+            let idx = parse_register(inner_parts[1])
+                .map_err(|e| format!("invalid index register in memory operand: {}", e))?;
+            let shift = parse_lsl_amount(third)?;
+            AddressOperand::Reg { base, idx, shift }
+        } else if is_extend_keyword(kw) {
+            let idx = parse_w_or_x_register(inner_parts[1])
+                .map_err(|e| format!("invalid index register in memory operand: {}", e))?;
+            let (kind, shift) = parse_memory_extend_tail(third)?;
+            // Memory operands only accept the W/X-extend kinds (no byte/half).
+            if !matches!(
+                kind,
+                ExtendKind::Uxtw | ExtendKind::Sxtw | ExtendKind::Uxtx | ExtendKind::Sxtx
+            ) {
+                return Err(format!(
+                    "memory operand does not accept extend kind `{}`",
+                    kw.to_lowercase()
+                ));
+            }
+            AddressOperand::Ext {
+                base,
+                idx,
+                kind,
+                shift,
+            }
+        } else {
+            return Err(format!("unrecognised memory-operand tail: `{}`", third));
+        }
+    } else {
+        return Err(format!("unrecognised memory operand `{}`", first));
+    };
+
+    // Writeback (`!`) marker after `]`.
+    if after_bracket == "!" {
+        if let AddressOperand::Imm {
+            base,
+            offset,
+            mode: IndexMode::Offset,
+        } = addr
+        {
+            addr = AddressOperand::Imm {
+                base,
+                offset,
+                mode: IndexMode::PreIndex,
+            };
+            return Ok((addr, 1));
+        } else {
+            return Err("pre-index writeback `!` requires `[Xn, #imm]` form".into());
+        }
+    } else if !after_bracket.is_empty() {
+        return Err(format!(
+            "unexpected trailing text after `]`: `{}`",
+            after_bracket
+        ));
+    }
+
+    // Post-index uses a second top-level token: `[Xn], #imm`.
+    if tokens.len() >= 2 {
+        let second = tokens[1].trim();
+        if let Ok(imm) = parse_immediate(second) {
+            if let AddressOperand::Imm {
+                base,
+                offset: 0,
+                mode: IndexMode::Offset,
+            } = addr
+            {
+                addr = AddressOperand::Imm {
+                    base,
+                    offset: imm,
+                    mode: IndexMode::PostIndex,
+                };
+                return Ok((addr, 2));
+            } else {
+                return Err("post-index requires bare `[Xn]` base form".into());
+            }
+        }
+    }
+
+    Ok((addr, 1))
+}
+
+/// Parse a `LSL #N` tail (after the leading "lsl" keyword).
+fn parse_lsl_amount(tail: &str) -> Result<u8, String> {
+    let mut parts = tail.split_whitespace();
+    let kw = parts.next().unwrap_or("");
+    if !kw.eq_ignore_ascii_case("lsl") {
+        return Err(format!("expected `lsl`, got `{}`", kw));
+    }
+    let imm_tok = parts.next().ok_or("missing LSL amount")?;
+    let amt = parse_immediate(imm_tok)?;
+    if !(0..=63).contains(&amt) {
+        return Err(format!("LSL amount {} out of range", amt));
+    }
+    Ok(amt as u8)
+}
+
+/// Parse a `<extend> #shift` tail used in memory operands. Returns the
+/// extend kind plus the optional shift (defaults to 0 if absent).
+fn parse_memory_extend_tail(tail: &str) -> Result<(crate::ir::types::ExtendKind, u8), String> {
+    use crate::ir::types::ExtendKind;
+    let mut parts = tail.split_whitespace();
+    let kw = parts.next().unwrap_or("").to_lowercase();
+    let kind = match kw.as_str() {
+        "uxtw" => ExtendKind::Uxtw,
+        "sxtw" => ExtendKind::Sxtw,
+        "uxtx" => ExtendKind::Uxtx,
+        "sxtx" => ExtendKind::Sxtx,
+        _ => return Err(format!("unsupported memory extend keyword `{}`", kw)),
+    };
+    let shift = match parts.next() {
+        None => 0u8,
+        Some(imm_tok) => {
+            let amt = parse_immediate(imm_tok)?;
+            if !(0..=4).contains(&amt) {
+                return Err(format!("extend shift {} out of range (0..=4)", amt));
+            }
+            amt as u8
+        }
+    };
+    Ok((kind, shift))
+}
+
+/// Infer `AccessWidth` for the unsized LDR/STR mnemonics (where the data
+/// register's spelling — `wN` vs `xN` — chooses the width).
+fn ldr_width(operands: &[&str]) -> crate::ir::types::AccessWidth {
+    match operands.first().and_then(|s| s.trim().chars().next()) {
+        Some('w') | Some('W') => crate::ir::types::AccessWidth::Word,
+        _ => crate::ir::types::AccessWidth::Extended,
+    }
+}
+
+/// Infer `AccessWidth` for LDP / STP based on whether the first paired
+/// register is W-form or X-form.
+fn ldp_pair_width(operands: &[&str]) -> crate::ir::types::AccessWidth {
+    ldr_width(operands)
+}
+
+/// Parse a single-register LDR-family instruction (LDR/LDRB/LDRH/LDRSB/
+/// LDRSH/LDRSW/STR/STRB/STRH). The destination/source register is the
+/// first operand; the remaining tokens form the address operand.
+fn parse_single_reg_mem(
+    mnem: &str,
+    operands: &[&str],
+    width: crate::ir::types::AccessWidth,
+    builder: fn(
+        Register,
+        crate::ir::types::AddressOperand,
+        crate::ir::types::AccessWidth,
+    ) -> Instruction,
+) -> Result<Instruction, String> {
+    if operands.len() < 2 {
+        return Err(format!(
+            "{} requires register + address operand, got {}",
+            mnem,
+            operands.len()
+        ));
+    }
+    let rt =
+        parse_w_or_x_register(operands[0]).map_err(|e| format!("{}: invalid Xt: {}", mnem, e))?;
+    let (addr, consumed) = parse_memory_operand(&operands[1..])?;
+    if 1 + consumed != operands.len() {
+        return Err(format!(
+            "{} has {} operands, expected {}",
+            mnem,
+            operands.len(),
+            1 + consumed
+        ));
+    }
+    Ok(builder(rt, addr, width))
+}
+
+/// Parse a pair memory instruction (LDP/STP/LDPSW). The destination
+/// pair is the first two operands; the remaining tokens form the
+/// address operand. `signed=true` only for LDPSW.
+fn parse_pair_mem(
+    mnem: &str,
+    operands: &[&str],
+    width: crate::ir::types::AccessWidth,
+    is_load: bool,
+    signed: bool,
+) -> Result<Instruction, String> {
+    if operands.len() < 3 {
+        return Err(format!(
+            "{} requires two registers + address operand, got {}",
+            mnem,
+            operands.len()
+        ));
+    }
+    let rt1 = parse_w_or_x_register(operands[0])
+        .map_err(|e| format!("{}: invalid first register: {}", mnem, e))?;
+    let rt2 = parse_w_or_x_register(operands[1])
+        .map_err(|e| format!("{}: invalid second register: {}", mnem, e))?;
+    let (addr, consumed) = parse_memory_operand(&operands[2..])?;
+    if 2 + consumed != operands.len() {
+        return Err(format!(
+            "{} has {} operands, expected {}",
+            mnem,
+            operands.len(),
+            2 + consumed
+        ));
+    }
+    if is_load {
+        Ok(Instruction::Ldp {
+            rt1,
+            rt2,
+            addr,
+            width,
+            signed,
+        })
+    } else {
+        Ok(Instruction::Stp {
+            rt1,
+            rt2,
+            addr,
+            width,
+        })
+    }
 }
 
 /// Parse the rm slot for the 3-operand arith/logical instructions
@@ -1401,6 +1706,76 @@ pub fn parse_line(line: &str) -> Result<LineResult, ParseLineError> {
         "cbnz" => parse_cbnz(&operands).map_err(ParseLineError::Other)?,
         "tbz" => parse_tbz(&operands).map_err(ParseLineError::Other)?,
         "tbnz" => parse_tbnz(&operands).map_err(ParseLineError::Other)?,
+        // Memory ops (issue #68). Width-detecting load family.
+        "ldr" => parse_single_reg_mem("ldr", &operands, ldr_width(&operands), |rt, addr, w| {
+            Instruction::Ldr { rt, addr, width: w }
+        })
+        .map_err(ParseLineError::Other)?,
+        "ldrb" => parse_single_reg_mem(
+            "ldrb",
+            &operands,
+            crate::ir::types::AccessWidth::Byte,
+            |rt, addr, w| Instruction::Ldr { rt, addr, width: w },
+        )
+        .map_err(ParseLineError::Other)?,
+        "ldrh" => parse_single_reg_mem(
+            "ldrh",
+            &operands,
+            crate::ir::types::AccessWidth::Half,
+            |rt, addr, w| Instruction::Ldr { rt, addr, width: w },
+        )
+        .map_err(ParseLineError::Other)?,
+        "ldrsb" => parse_single_reg_mem(
+            "ldrsb",
+            &operands,
+            crate::ir::types::AccessWidth::Byte,
+            |rt, addr, w| Instruction::Ldrs { rt, addr, width: w },
+        )
+        .map_err(ParseLineError::Other)?,
+        "ldrsh" => parse_single_reg_mem(
+            "ldrsh",
+            &operands,
+            crate::ir::types::AccessWidth::Half,
+            |rt, addr, w| Instruction::Ldrs { rt, addr, width: w },
+        )
+        .map_err(ParseLineError::Other)?,
+        "ldrsw" => parse_single_reg_mem(
+            "ldrsw",
+            &operands,
+            crate::ir::types::AccessWidth::Word,
+            |rt, addr, w| Instruction::Ldrs { rt, addr, width: w },
+        )
+        .map_err(ParseLineError::Other)?,
+        "str" => parse_single_reg_mem("str", &operands, ldr_width(&operands), |rt, addr, w| {
+            Instruction::Str { rt, addr, width: w }
+        })
+        .map_err(ParseLineError::Other)?,
+        "strb" => parse_single_reg_mem(
+            "strb",
+            &operands,
+            crate::ir::types::AccessWidth::Byte,
+            |rt, addr, w| Instruction::Str { rt, addr, width: w },
+        )
+        .map_err(ParseLineError::Other)?,
+        "strh" => parse_single_reg_mem(
+            "strh",
+            &operands,
+            crate::ir::types::AccessWidth::Half,
+            |rt, addr, w| Instruction::Str { rt, addr, width: w },
+        )
+        .map_err(ParseLineError::Other)?,
+        "ldp" => parse_pair_mem("ldp", &operands, ldp_pair_width(&operands), true, false)
+            .map_err(ParseLineError::Other)?,
+        "stp" => parse_pair_mem("stp", &operands, ldp_pair_width(&operands), false, false)
+            .map_err(ParseLineError::Other)?,
+        "ldpsw" => parse_pair_mem(
+            "ldpsw",
+            &operands,
+            crate::ir::types::AccessWidth::Word,
+            true,
+            true,
+        )
+        .map_err(ParseLineError::Other)?,
         // b.<cond> — split on the dot, parse the condition, dispatch.
         op if op.starts_with("b.") => {
             let suffix = &op[2..];
@@ -2474,5 +2849,211 @@ mod tests {
         assert_eq!(a, b, "same label should hash to same LabelId");
         let c = parse_one("b .Lbar");
         assert_ne!(a, c, "different labels should hash differently");
+    }
+
+    #[test]
+    fn split_operands_treats_bracketed_commas_as_one_token() {
+        // Memory operands carry commas inside `[ ... ]`; the splitter must
+        // not break them apart.
+        let parts = split_operands("x0, [x1, x2, lsl #3]");
+        assert_eq!(parts, vec!["x0", "[x1, x2, lsl #3]"]);
+    }
+
+    #[test]
+    fn split_operands_flat_corpus_is_unchanged() {
+        // Existing comma-separated three-operand instructions must keep
+        // the same tokenisation after the bracket-aware rewrite.
+        assert_eq!(split_operands("x0, x1, #8"), vec!["x0", "x1", "#8"]);
+        assert_eq!(
+            split_operands("x0, x1, x2, x3"),
+            vec!["x0", "x1", "x2", "x3"]
+        );
+    }
+
+    #[test]
+    fn split_operands_handles_post_index_trailing_immediate() {
+        // Post-index uses `[base], #imm` — the trailing `, #imm` is a real
+        // top-level comma after the closing `]`.
+        let parts = split_operands("x0, [x1], #8");
+        assert_eq!(parts, vec!["x0", "[x1]", "#8"]);
+    }
+
+    #[test]
+    fn parse_ldr_bare_base_yields_offset_mode_with_zero_offset() {
+        use crate::ir::types::{AccessWidth, AddressOperand, IndexMode};
+        let instr = parse_one("ldr x0, [x1]");
+        assert_eq!(
+            instr,
+            Instruction::Ldr {
+                rt: Register::X0,
+                addr: AddressOperand::Imm {
+                    base: Register::X1,
+                    offset: 0,
+                    mode: IndexMode::Offset,
+                },
+                width: AccessWidth::Extended,
+            }
+        );
+    }
+
+    /// Round-trip helper: every input must `parse_line → Display` back to
+    /// itself (canonical Capstone-ish form).
+    fn assert_mem_round_trip(text: &str) {
+        let instr = parse_one(text);
+        assert_eq!(format!("{}", instr), text, "round-trip mismatch");
+    }
+
+    #[test]
+    fn memory_op_round_trips_across_all_addressing_modes() {
+        // Immediate-offset, including bare-base and negative offsets.
+        assert_mem_round_trip("ldr x0, [x1]");
+        assert_mem_round_trip("ldr x0, [x1, #8]");
+        assert_mem_round_trip("ldr x0, [sp, #-8]");
+        // Pre-index.
+        assert_mem_round_trip("ldr x0, [x1, #16]!");
+        assert_mem_round_trip("str x0, [sp, #-16]!");
+        // Post-index.
+        assert_mem_round_trip("ldr x0, [x1], #8");
+        assert_mem_round_trip("str x0, [x1], #-8");
+        // Register-offset, with and without LSL.
+        assert_mem_round_trip("ldr x0, [x1, x2]");
+        assert_mem_round_trip("ldr x0, [x1, x2, lsl #3]");
+        // Register-extend.
+        assert_mem_round_trip("ldr x0, [x1, w2, uxtw #2]");
+        assert_mem_round_trip("ldr x0, [x1, w2, sxtw]");
+        // Other mnemonics.
+        assert_mem_round_trip("ldrb x0, [x1]");
+        assert_mem_round_trip("ldrh x0, [x1, #4]");
+        assert_mem_round_trip("ldrsb x0, [x1]");
+        assert_mem_round_trip("ldrsh x0, [x1]");
+        assert_mem_round_trip("ldrsw x0, [x1]");
+        assert_mem_round_trip("strb x0, [x1]");
+        assert_mem_round_trip("strh x0, [x1]");
+        // Pair forms.
+        assert_mem_round_trip("ldp x0, x1, [sp]");
+        assert_mem_round_trip("ldp x0, x1, [sp, #16]");
+        assert_mem_round_trip("ldp x0, x1, [sp, #-16]!");
+        assert_mem_round_trip("ldp x0, x1, [sp], #16");
+        assert_mem_round_trip("stp x29, x30, [sp, #-16]!");
+        assert_mem_round_trip("ldpsw x0, x1, [sp]");
+    }
+
+    #[test]
+    fn parse_ldr_pre_index_yields_pre_index_mode() {
+        use crate::ir::types::{AccessWidth, AddressOperand, IndexMode};
+        let instr = parse_one("ldr x0, [x1, #8]!");
+        assert_eq!(
+            instr,
+            Instruction::Ldr {
+                rt: Register::X0,
+                addr: AddressOperand::Imm {
+                    base: Register::X1,
+                    offset: 8,
+                    mode: IndexMode::PreIndex,
+                },
+                width: AccessWidth::Extended,
+            }
+        );
+    }
+
+    #[test]
+    fn parse_ldr_post_index_yields_post_index_mode() {
+        use crate::ir::types::{AccessWidth, AddressOperand, IndexMode};
+        let instr = parse_one("ldr x0, [x1], #8");
+        assert_eq!(
+            instr,
+            Instruction::Ldr {
+                rt: Register::X0,
+                addr: AddressOperand::Imm {
+                    base: Register::X1,
+                    offset: 8,
+                    mode: IndexMode::PostIndex,
+                },
+                width: AccessWidth::Extended,
+            }
+        );
+    }
+
+    #[test]
+    fn parse_ldr_register_offset_with_shift() {
+        use crate::ir::types::{AccessWidth, AddressOperand};
+        let instr = parse_one("ldr x0, [x1, x2, lsl #3]");
+        assert_eq!(
+            instr,
+            Instruction::Ldr {
+                rt: Register::X0,
+                addr: AddressOperand::Reg {
+                    base: Register::X1,
+                    idx: Register::X2,
+                    shift: 3,
+                },
+                width: AccessWidth::Extended,
+            }
+        );
+    }
+
+    #[test]
+    fn parse_ldr_register_extend_with_w_index() {
+        use crate::ir::types::{AccessWidth, AddressOperand, ExtendKind};
+        let instr = parse_one("ldr x0, [x1, w2, uxtw #2]");
+        assert_eq!(
+            instr,
+            Instruction::Ldr {
+                rt: Register::X0,
+                addr: AddressOperand::Ext {
+                    base: Register::X1,
+                    idx: Register::X2,
+                    kind: ExtendKind::Uxtw,
+                    shift: 2,
+                },
+                width: AccessWidth::Extended,
+            }
+        );
+    }
+
+    #[test]
+    fn parse_ldp_yields_two_register_load() {
+        use crate::ir::types::{AccessWidth, AddressOperand, IndexMode};
+        let instr = parse_one("ldp x0, x1, [sp, #16]");
+        assert_eq!(
+            instr,
+            Instruction::Ldp {
+                rt1: Register::X0,
+                rt2: Register::X1,
+                addr: AddressOperand::Imm {
+                    base: Register::SP,
+                    offset: 16,
+                    mode: IndexMode::Offset,
+                },
+                width: AccessWidth::Extended,
+                signed: false,
+            }
+        );
+    }
+
+    #[test]
+    fn parse_ldpsw_yields_signed_pair_load() {
+        let instr = parse_one("ldpsw x0, x1, [sp]");
+        match instr {
+            Instruction::Ldp {
+                signed: true,
+                width,
+                ..
+            } => {
+                assert_eq!(width, crate::ir::types::AccessWidth::Word);
+            }
+            _ => panic!("expected Ldp with signed=true"),
+        }
+    }
+
+    #[test]
+    fn parse_ldrb_uses_byte_width() {
+        let instr = parse_one("ldrb w0, [x1]");
+        match instr {
+            Instruction::Ldr { width, .. } => {
+                assert_eq!(width, crate::ir::types::AccessWidth::Byte);
+            }
+            _ => panic!("expected Ldr with byte width"),
+        }
     }
 }

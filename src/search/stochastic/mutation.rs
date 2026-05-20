@@ -403,6 +403,30 @@ impl Mutator {
             | Instruction::Tbnz { .. }
             | Instruction::Bl { .. }
             | Instruction::Br { .. } => {}
+
+            // Memory ops (issue #68 step 16). Rotate over the small set of
+            // mutable fields per variant: data register, base, optional
+            // index register, optional offset. Keep address-mode and width
+            // unchanged here (those are bridged via mutate_opcode in a
+            // future step); the encodability filter downstream drops any
+            // mutation that violates SP/XZR or writeback-aliasing rules.
+            Instruction::Ldr { rt, addr, .. }
+            | Instruction::Ldrs { rt, addr, .. }
+            | Instruction::Str { rt, addr, .. } => {
+                if rng.random_bool(0.5) {
+                    *rt = self.random_register(rng);
+                } else {
+                    mutate_address_operand(self, rng, addr);
+                }
+            }
+            Instruction::Ldp { rt1, rt2, addr, .. } | Instruction::Stp { rt1, rt2, addr, .. } => {
+                let choice = rng.random_range(0..3);
+                match choice {
+                    0 => *rt1 = self.random_register(rng),
+                    1 => *rt2 = self.random_register(rng),
+                    _ => mutate_address_operand(self, rng, addr),
+                }
+            }
         }
     }
 
@@ -874,6 +898,36 @@ impl Mutator {
             Instruction::Tbnz { rt, bit, target } => Instruction::Tbnz { rt, bit, target },
             Instruction::Bl { target } => Instruction::Bl { target },
             Instruction::Br { rn } => Instruction::Br { rn },
+
+            // Memory ops (issue #68): width/sign-extend bridges arrive in
+            // step 16. Identity-mutate for now.
+            Instruction::Ldr { rt, addr, width } => Instruction::Ldr { rt, addr, width },
+            Instruction::Ldrs { rt, addr, width } => Instruction::Ldrs { rt, addr, width },
+            Instruction::Str { rt, addr, width } => Instruction::Str { rt, addr, width },
+            Instruction::Ldp {
+                rt1,
+                rt2,
+                addr,
+                width,
+                signed,
+            } => Instruction::Ldp {
+                rt1,
+                rt2,
+                addr,
+                width,
+                signed,
+            },
+            Instruction::Stp {
+                rt1,
+                rt2,
+                addr,
+                width,
+            } => Instruction::Stp {
+                rt1,
+                rt2,
+                addr,
+                width,
+            },
         };
     }
 
@@ -904,6 +958,14 @@ impl Mutator {
         }
         let idx = rng.random_range(0..rewritable);
         sequence[idx] = generate_random_instruction(rng, &self.registers, &self.immediates);
+    }
+
+    fn random_address_offset<R: RngExt>(&self, rng: &mut R) -> i64 {
+        // Restrict to a tiny offset pool so mutations stay encodable.
+        // Values are chosen to cover the unscaled-signed (LDUR) and
+        // scaled-positive (LDR) ranges.
+        const POOL: [i64; 5] = [0, 8, 16, -8, -256];
+        POOL[rng.random_range(0..POOL.len())]
     }
 
     fn random_register<R: RngExt>(&self, rng: &mut R) -> Register {
@@ -1014,6 +1076,46 @@ impl crate::isa::ISAMutator<Instruction> for AArch64Mutator {
     }
 }
 
+/// Mutate one field of an `AddressOperand`. The variant kind (Imm vs Reg
+/// vs Ext) and IndexMode are preserved; only the base register, optional
+/// index register, optional offset, or optional shift amount changes.
+/// Width / writeback are untouched here — those bridges live in
+/// `mutate_opcode`.
+fn mutate_address_operand<R: RngExt>(
+    mutator: &Mutator,
+    rng: &mut R,
+    addr: &mut crate::ir::types::AddressOperand,
+) {
+    use crate::ir::types::AddressOperand;
+    match addr {
+        AddressOperand::Imm { base, offset, .. } => {
+            if rng.random_bool(0.5) {
+                *base = mutator.random_register(rng);
+            } else {
+                *offset = mutator.random_address_offset(rng);
+            }
+        }
+        AddressOperand::Reg { base, idx, shift } => {
+            let choice = rng.random_range(0..3);
+            match choice {
+                0 => *base = mutator.random_register(rng),
+                1 => *idx = mutator.random_register(rng),
+                _ => *shift = if rng.random_bool(0.5) { 0 } else { 3 },
+            }
+        }
+        AddressOperand::Ext {
+            base, idx, shift, ..
+        } => {
+            let choice = rng.random_range(0..3);
+            match choice {
+                0 => *base = mutator.random_register(rng),
+                1 => *idx = mutator.random_register(rng),
+                _ => *shift = if rng.random_bool(0.5) { 0 } else { 3 },
+            }
+        }
+    }
+}
+
 /// Perform operand mutation on a specific instruction (for testing)
 /// Number of instructions a mutation operator may rewrite. Equals
 /// `sequence.len()` for terminator-free sequences and `sequence.len() - 1`
@@ -1095,6 +1197,75 @@ mod tests {
         assert!(
             produced_shifted,
             "mutate_operand on Add must occasionally produce ShiftedRegister rm"
+        );
+    }
+
+    #[test]
+    fn mutate_operand_on_ldr_can_change_base_or_rt_or_offset() {
+        // Issue #68 step 16: mutate_operand must touch one of {rt, base,
+        // offset} on a memory op without changing the variant or width.
+        use crate::ir::types::{AccessWidth, AddressOperand, IndexMode};
+        let mutator = default_mutator();
+        let mut rng = rand::rng();
+        let initial = Instruction::Ldr {
+            rt: Register::X0,
+            addr: AddressOperand::Imm {
+                base: Register::X1,
+                offset: 0,
+                mode: IndexMode::Offset,
+            },
+            width: AccessWidth::Extended,
+        };
+        let mut changed = false;
+        for _ in 0..200 {
+            let mut seq = vec![initial];
+            mutator.mutate_operand(&mut rng, &mut seq);
+            if seq[0] != initial {
+                changed = true;
+            }
+            // Width and variant must be invariant under mutate_operand.
+            match seq[0] {
+                Instruction::Ldr {
+                    width: AccessWidth::Extended,
+                    addr:
+                        AddressOperand::Imm {
+                            mode: IndexMode::Offset,
+                            ..
+                        },
+                    ..
+                } => {}
+                _ => panic!(
+                    "mutate_operand changed variant/width/mode on Ldr: {:?}",
+                    seq[0]
+                ),
+            }
+        }
+        assert!(changed, "mutate_operand never modified Ldr operands");
+    }
+
+    #[test]
+    fn generate_all_instructions_includes_memory_ops() {
+        // Step 15: enumerative pool must produce at least one each of
+        // Ldr / Str / Ldp / Stp for downstream search algorithms.
+        use crate::search::candidate::generate_all_encodable_instructions;
+        let regs = vec![Register::X0, Register::X1, Register::X2, Register::SP];
+        let imms = vec![0, 8, 16];
+        let pool = generate_all_encodable_instructions(&regs, &imms);
+        assert!(
+            pool.iter().any(|i| matches!(i, Instruction::Ldr { .. })),
+            "candidate pool must contain Ldr",
+        );
+        assert!(
+            pool.iter().any(|i| matches!(i, Instruction::Str { .. })),
+            "candidate pool must contain Str",
+        );
+        assert!(
+            pool.iter().any(|i| matches!(i, Instruction::Ldp { .. })),
+            "candidate pool must contain Ldp",
+        );
+        assert!(
+            pool.iter().any(|i| matches!(i, Instruction::Stp { .. })),
+            "candidate pool must contain Stp",
         );
     }
 

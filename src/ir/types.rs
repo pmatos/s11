@@ -287,6 +287,132 @@ impl fmt::Display for LabelId {
     }
 }
 
+/// Access width for LDR/STR/LDP/STP families. Byte = 8 bits (LDRB/STRB),
+/// Half = 16 bits (LDRH/STRH), Word = 32 bits (LDR/STR W-form, LDRSW,
+/// LDPSW), Extended = 64 bits (LDR/STR X-form). See ADR-0007.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[allow(dead_code)]
+pub enum AccessWidth {
+    Byte,
+    Half,
+    Word,
+    Extended,
+}
+
+impl AccessWidth {
+    /// Number of bytes the access reads or writes.
+    #[must_use]
+    #[allow(dead_code)]
+    pub fn bytes(&self) -> u32 {
+        match self {
+            AccessWidth::Byte => 1,
+            AccessWidth::Half => 2,
+            AccessWidth::Word => 4,
+            AccessWidth::Extended => 8,
+        }
+    }
+}
+
+/// Writeback / index selector for memory-address operands (`[Xn, #imm]`,
+/// `[Xn, #imm]!`, `[Xn], #imm`). See ADR-0007.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[allow(dead_code)]
+pub enum IndexMode {
+    /// `[Xn, #imm]` — no writeback.
+    Offset,
+    /// `[Xn, #imm]!` — base updated to `Xn + imm` before the access.
+    PreIndex,
+    /// `[Xn], #imm` — base updated to `Xn + imm` after the access.
+    PostIndex,
+}
+
+/// AArch64 memory-address operand. See ADR-0007.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[allow(dead_code)]
+pub enum AddressOperand {
+    /// `[base{, #offset}]` / `[base, #offset]!` / `[base], #offset`.
+    Imm {
+        base: Register,
+        offset: i64,
+        mode: IndexMode,
+    },
+    /// `[base, idx{, lsl #shift}]`. LSL only (other shift kinds are not
+    /// part of AArch64 memory-operand grammar).
+    Reg {
+        base: Register,
+        idx: Register,
+        shift: u8,
+    },
+    /// `[base, idx, kind{ #shift}]` where `kind` is one of UXTW/SXTW (idx
+    /// is W-form) or UXTX/SXTX (idx is X-form). UXTB/UXTH/SXTB/SXTH are
+    /// not valid AArch64 memory-extend kinds and are rejected by
+    /// `is_encodable_aarch64`.
+    Ext {
+        base: Register,
+        idx: Register,
+        kind: ExtendKind,
+        shift: u8,
+    },
+}
+
+impl fmt::Display for AddressOperand {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            AddressOperand::Imm {
+                base,
+                offset,
+                mode: IndexMode::Offset,
+            } => {
+                if *offset == 0 {
+                    write!(f, "[{}]", base)
+                } else {
+                    write!(f, "[{}, #{}]", base, offset)
+                }
+            }
+            AddressOperand::Imm {
+                base,
+                offset,
+                mode: IndexMode::PreIndex,
+            } => write!(f, "[{}, #{}]!", base, offset),
+            AddressOperand::Imm {
+                base,
+                offset,
+                mode: IndexMode::PostIndex,
+            } => write!(f, "[{}], #{}", base, offset),
+            AddressOperand::Reg { base, idx, shift } => {
+                if *shift == 0 {
+                    write!(f, "[{}, {}]", base, idx)
+                } else {
+                    write!(f, "[{}, {}, lsl #{}]", base, idx, shift)
+                }
+            }
+            AddressOperand::Ext {
+                base,
+                idx,
+                kind,
+                shift,
+            } => {
+                // UXTW/SXTW take a W-form index; UXTX/SXTX take an X-form.
+                // Match the existing Operand::ExtendedRegister convention
+                // for the inner-register print.
+                let inner = if kind.is_x_form() {
+                    format!("{}", idx)
+                } else {
+                    match idx.index() {
+                        Some(n) => format!("w{}", n),
+                        None => format!("{}", idx),
+                    }
+                };
+                if *shift == 0 {
+                    write!(f, "[{}, {}, {}]", base, inner, kind)
+                } else {
+                    write!(f, "[{}, {}, {} #{}]", base, inner, kind, shift)
+                }
+            }
+        }
+    }
+}
+
 /// Condition codes for AArch64
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[allow(dead_code)]
@@ -559,5 +685,116 @@ mod tests {
         assert_eq!(NORMAL_CONDITIONS.len(), 14);
         assert!(!NORMAL_CONDITIONS.contains(&Condition::AL));
         assert!(!NORMAL_CONDITIONS.contains(&Condition::NV));
+    }
+
+    #[test]
+    fn address_operand_imm_offset_zero_displays_as_bare_base() {
+        let addr = AddressOperand::Imm {
+            base: Register::X1,
+            offset: 0,
+            mode: IndexMode::Offset,
+        };
+        assert_eq!(format!("{}", addr), "[x1]");
+    }
+
+    #[test]
+    fn address_operand_imm_offset_nonzero_displays_with_immediate() {
+        let addr = AddressOperand::Imm {
+            base: Register::X1,
+            offset: 8,
+            mode: IndexMode::Offset,
+        };
+        assert_eq!(format!("{}", addr), "[x1, #8]");
+    }
+
+    #[test]
+    fn address_operand_imm_negative_offset_emits_minus_sign() {
+        let addr = AddressOperand::Imm {
+            base: Register::SP,
+            offset: -16,
+            mode: IndexMode::Offset,
+        };
+        assert_eq!(format!("{}", addr), "[sp, #-16]");
+    }
+
+    #[test]
+    fn address_operand_imm_pre_index_displays_with_trailing_bang() {
+        let addr = AddressOperand::Imm {
+            base: Register::X29,
+            offset: -16,
+            mode: IndexMode::PreIndex,
+        };
+        assert_eq!(format!("{}", addr), "[x29, #-16]!");
+    }
+
+    #[test]
+    fn address_operand_imm_post_index_emits_immediate_outside_bracket() {
+        let addr = AddressOperand::Imm {
+            base: Register::X1,
+            offset: 8,
+            mode: IndexMode::PostIndex,
+        };
+        assert_eq!(format!("{}", addr), "[x1], #8");
+    }
+
+    #[test]
+    fn address_operand_reg_zero_shift_omits_lsl_clause() {
+        let addr = AddressOperand::Reg {
+            base: Register::X1,
+            idx: Register::X2,
+            shift: 0,
+        };
+        assert_eq!(format!("{}", addr), "[x1, x2]");
+    }
+
+    #[test]
+    fn address_operand_reg_nonzero_shift_emits_lsl_immediate() {
+        let addr = AddressOperand::Reg {
+            base: Register::X1,
+            idx: Register::X2,
+            shift: 3,
+        };
+        assert_eq!(format!("{}", addr), "[x1, x2, lsl #3]");
+    }
+
+    #[test]
+    fn address_operand_ext_uxtw_index_prints_as_w_form() {
+        let addr = AddressOperand::Ext {
+            base: Register::X1,
+            idx: Register::X2,
+            kind: ExtendKind::Uxtw,
+            shift: 2,
+        };
+        assert_eq!(format!("{}", addr), "[x1, w2, uxtw #2]");
+    }
+
+    #[test]
+    fn address_operand_ext_sxtx_index_prints_as_x_form() {
+        let addr = AddressOperand::Ext {
+            base: Register::X1,
+            idx: Register::X2,
+            kind: ExtendKind::Sxtx,
+            shift: 3,
+        };
+        assert_eq!(format!("{}", addr), "[x1, x2, sxtx #3]");
+    }
+
+    #[test]
+    fn address_operand_ext_zero_shift_omits_immediate() {
+        let addr = AddressOperand::Ext {
+            base: Register::X1,
+            idx: Register::X2,
+            kind: ExtendKind::Uxtw,
+            shift: 0,
+        };
+        assert_eq!(format!("{}", addr), "[x1, w2, uxtw]");
+    }
+
+    #[test]
+    fn access_width_bytes_matches_arm_arm() {
+        assert_eq!(AccessWidth::Byte.bytes(), 1);
+        assert_eq!(AccessWidth::Half.bytes(), 2);
+        assert_eq!(AccessWidth::Word.bytes(), 4);
+        assert_eq!(AccessWidth::Extended.bytes(), 8);
     }
 }

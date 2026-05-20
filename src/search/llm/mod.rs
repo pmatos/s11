@@ -112,11 +112,15 @@ impl SearchAlgorithm<crate::isa::AArch64> for LlmSearch {
         let mut timings = LlmTimings::default();
         let started = Instant::now();
 
-        // Per ADR-0002: refuse targets where flags are live-out.
+        // Per ADR-0002 (as amended by ADR-0006): the equivalence pipeline
+        // now models NZCV, but the LLM flow still refuses flag-live-out
+        // targets as a conservative pre-Codex gate. Removing this is a
+        // deliberate policy decision, not a bug.
         if flags_live_out(target) {
             eprintln!(
-                "llm-search: target has flags live-out (per ADR-0002 the LLM \
-                 flow is not sound on this input). Refusing."
+                "llm-search: target has flags live-out — the LLM flow does \
+                 not process flag-live-out targets (conservative policy per \
+                 ADR-0002 as amended by ADR-0006). Refusing."
             );
             stats.elapsed_time = started.elapsed();
             self.last_stats = stats.clone();
@@ -459,7 +463,11 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn fake_codex_parse_failure_records_unsupported_mnemonics() {
-        let fake = FakeCodex::new(&assembly_answer_writer_script("ldr x0, [x1]\nstr x2, [x3]"));
+        // Use NEON mnemonics — memory ops were promoted to supported in
+        // issue #68, so `ldr` / `str` no longer drive the unsupported path.
+        let fake = FakeCodex::new(&assembly_answer_writer_script(
+            "fadd v0.4s, v1.4s, v2.4s\nld1 {v3.16b}, [x4]",
+        ));
         let mut search = LlmSearch::new();
 
         let result = search.search(
@@ -471,7 +479,7 @@ mod tests {
         assert!(!result.found_optimization);
         assert_eq!(
             search.ledger().sorted_entries(),
-            vec![("ldr".to_string(), 1), ("str".to_string(), 1)]
+            vec![("fadd".to_string(), 1), ("ld1".to_string(), 1)]
         );
         assert_eq!(search.timings().codex_calls, 1);
         assert_eq!(search.timings().verifications, 0);

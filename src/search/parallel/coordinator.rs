@@ -183,6 +183,10 @@ fn run_coordinator(
                     let mut stats = statistics;
                     // Use coordinator wall-clock for per-worker elapsed_time
                     // so all entries share a common time origin (start_time).
+                    // statistics.algorithm is the single source of truth for
+                    // which algorithm the worker ran (set by run_symbolic_worker
+                    // / run_stochastic_worker, which themselves are routed by
+                    // worker_algorithm() below) — read the label from there.
                     stats.elapsed_time = start_time.elapsed();
                     worker_stats.push((worker_id, stats.algorithm, stats));
 
@@ -274,6 +278,21 @@ fn run_coordinator(
     }
 }
 
+/// Single source of truth for which algorithm a worker runs.
+///
+/// Mirrors the contract encoded by [`ParallelConfig::num_stochastic_workers`]:
+/// a worker is symbolic only when `include_symbolic` is set, more than one
+/// worker is configured, and this is worker 0. With a single worker the lone
+/// worker is stochastic regardless of `include_symbolic`, so CLI knobs like
+/// `--beta`, `--iterations`, and `--seed` are not silently ignored.
+fn worker_algorithm(worker_id: usize, parallel_config: &ParallelConfig) -> Algorithm {
+    if parallel_config.include_symbolic && parallel_config.num_workers > 1 && worker_id == 0 {
+        Algorithm::Symbolic
+    } else {
+        Algorithm::Stochastic
+    }
+}
+
 /// Worker function that runs a search algorithm.
 fn run_worker(
     worker_id: usize,
@@ -283,7 +302,10 @@ fn run_worker(
     parallel_config: &ParallelConfig,
     channels: WorkerChannels,
 ) {
-    let is_symbolic_worker = parallel_config.include_symbolic && worker_id == 0;
+    let is_symbolic_worker = matches!(
+        worker_algorithm(worker_id, parallel_config),
+        Algorithm::Symbolic
+    );
 
     // Build worker-specific config
     let mut config = search_config.clone();
@@ -418,6 +440,103 @@ mod tests {
 
         // Should complete without errors
         assert!(result.total_statistics.elapsed_time.as_nanos() > 0);
+    }
+
+    // Issue #244 regression: hybrid dispatch must follow the contract pinned by
+    // ParallelConfig::num_stochastic_workers. Worker 0 is symbolic only when
+    // include_symbolic && num_workers > 1; otherwise the lone worker must run
+    // stochastic so the user's --beta/--iterations/--seed knobs take effect.
+
+    #[test]
+    fn test_two_workers_with_symbolic_reports_one_symbolic_one_stochastic() {
+        let target = mov_add_sequence();
+        let live_out = LiveOut::from_registers(vec![Register::X0]);
+
+        // Keep the symbolic worker's solver budget tight so it terminates
+        // quickly under Z3 on this trivial target.
+        let symbolic_cfg = crate::search::config::SymbolicConfig::default()
+            .with_timeout(Duration::from_millis(250));
+        let search_config = SearchConfig::default()
+            .with_registers(vec![Register::X0, Register::X1])
+            .with_immediates(vec![0, 1, 2])
+            .with_stochastic(StochasticConfig::default().with_iterations(200))
+            .with_symbolic(symbolic_cfg);
+
+        let parallel_config = ParallelConfig::default()
+            .with_workers(2)
+            .with_symbolic(true)
+            .with_seed(42)
+            .with_timeout(Duration::from_secs(10));
+
+        let result = run_parallel_search(&target, &live_out, &search_config, &parallel_config);
+
+        assert_eq!(result.worker_statistics.len(), 2);
+        let mut pairs: Vec<(usize, Algorithm)> = result
+            .worker_statistics
+            .iter()
+            .map(|(id, alg, _)| (*id, *alg))
+            .collect();
+        pairs.sort_by_key(|(id, _)| *id);
+        assert_eq!(
+            pairs,
+            vec![(0, Algorithm::Symbolic), (1, Algorithm::Stochastic)],
+            "expected worker 0 = Symbolic, worker 1 = Stochastic, got {:?}",
+            pairs,
+        );
+    }
+
+    #[test]
+    fn test_single_worker_with_symbolic_is_stochastic() {
+        let target = mov_add_sequence();
+        let live_out = LiveOut::from_registers(vec![Register::X0]);
+
+        let search_config = SearchConfig::default()
+            .with_registers(vec![Register::X0, Register::X1])
+            .with_immediates(vec![0, 1, 2])
+            .with_stochastic(StochasticConfig::default().with_iterations(200));
+
+        // include_symbolic = true but num_workers = 1: per the contract pinned
+        // by ParallelConfig::num_stochastic_workers, the lone worker must be
+        // stochastic. Before the fix, coordinator.rs dispatched worker 0 to
+        // SymbolicSearch and reported Stochastic anyway via a hardcoded label.
+        let parallel_config = ParallelConfig::default()
+            .with_workers(1)
+            .with_symbolic(true)
+            .with_seed(42)
+            .with_timeout(Duration::from_secs(5));
+
+        let result = run_parallel_search(&target, &live_out, &search_config, &parallel_config);
+
+        assert_eq!(result.worker_statistics.len(), 1);
+        assert_eq!(result.worker_statistics[0].0, 0);
+        assert_eq!(
+            result.worker_statistics[0].1,
+            Algorithm::Stochastic,
+            "single hybrid worker must run stochastic, got {:?}",
+            result.worker_statistics[0].1,
+        );
+    }
+
+    #[test]
+    fn test_single_worker_without_symbolic_stays_stochastic() {
+        let target = mov_add_sequence();
+        let live_out = LiveOut::from_registers(vec![Register::X0]);
+
+        let search_config = SearchConfig::default()
+            .with_registers(vec![Register::X0, Register::X1])
+            .with_immediates(vec![0, 1, 2])
+            .with_stochastic(StochasticConfig::default().with_iterations(200));
+
+        let parallel_config = ParallelConfig::default()
+            .with_workers(1)
+            .with_symbolic(false)
+            .with_seed(42)
+            .with_timeout(Duration::from_secs(5));
+
+        let result = run_parallel_search(&target, &live_out, &search_config, &parallel_config);
+
+        assert_eq!(result.worker_statistics.len(), 1);
+        assert_eq!(result.worker_statistics[0].1, Algorithm::Stochastic);
     }
 
     #[test]
