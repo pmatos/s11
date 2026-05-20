@@ -5,7 +5,7 @@ Date: 2026-05-07
 
 ## Context
 
-`LiveOut` (`src/semantics/live_out.rs`) names the broad live-out contract, but its only populated slice today is the register-only `LiveOutRegisters`. It does not encode whether AArch64 condition state (NZCV) is part of the broader live-out contract. The 20-opcode subset includes flag writers (`CMP`, `CMN`, `TST`) and flag readers (`CSEL`, `CSINC`, `CSINV`, `CSNEG`); a target whose final instruction is `CMP` (for example) has condition state as a real downstream output even though no register value reflects it.
+`LiveOut` (`src/semantics/live_out.rs`) names the broad live-out contract, but its only populated slice today is the register-only `LiveOutRegisters`. It does not encode whether AArch64 condition state (NZCV) is part of the broader live-out contract. The current AArch64 subset includes flag writers (`CMP`, `CMN`, `TST`) and flag readers (`CSEL`, `CSINC`, `CSINV`, `CSNEG`); a target whose final instruction is `CMP` (for example) has condition state as a real downstream output even though no register value reflects it.
 
 `EquivalenceConfig` and all four search algorithms thread `LiveOut` through, but equivalence currently checks only its `LiveOutRegisters` slice; none of them check NZCV equivalence. This is a pre-existing soundness gap with respect to condition-state live-out, but only matters for the LLM flow because the LLM is the only generator that might *legitimately* drop a final flag-setting instruction (the others enumerate from a pool that includes it).
 

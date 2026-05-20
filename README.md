@@ -18,10 +18,11 @@ sequence that is provably equivalent under SMT.
   reject, then with [Z3] over bitvector constraints for a formal proof.
 - Patches the verified replacement back into the binary.
 
-The IR currently covers 20 AArch64 integer instructions: `MOV`, `ADD`,
-`SUB`, `AND`, `ORR`, `EOR`, `LSL`, `LSR`, `ASR`, `MUL`, `SDIV`, `UDIV`,
-`CMP`, `CMN`, `TST`, `CSEL`, `CSINC`, `CSINV`, `CSNEG`. There is also a
-RISC-V (rv32 / rv64) backend behind the same ISA trait.
+See [docs/capability.md](docs/capability.md) for the canonical instruction and
+ISA support matrix. In short: AArch64 is the primary target, x86-64 and x86-32
+support enumerative/stochastic/symbolic optimization, hybrid and LLM remain
+AArch64-only, and RISC-V is scaffold-only with no supported RISC-V opt path
+because machine-code emission is not yet implemented.
 
 [Capstone]: https://www.capstone-engine.org/
 [Z3]: https://github.com/Z3Prover/z3
@@ -102,7 +103,7 @@ search result.
 src/
 ├── main.rs           # CLI, ELF I/O, top-level orchestration
 ├── ir/               # Register, Operand, Condition, Instruction
-├── isa/              # ISA trait + AArch64 / RISC-V backends
+├── isa/              # ISA trait + AArch64 / x86 support and RISC-V scaffold
 ├── semantics/        # Concrete + symbolic interpreters, equivalence,
 │                     # cost model, machine state
 ├── search/           # enumerative / stochastic / symbolic / parallel

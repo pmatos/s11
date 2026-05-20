@@ -1754,10 +1754,9 @@ mod cli_helper_tests {
     }
 
     /// Locks in that the Capstone→IR converter covers every mnemonic the asm
-    /// parser supports. If a new mnemonic is added to `parser::parse_line`
-    /// without a sample here, this stays green (we only catch regressions in
-    /// the other direction). If a mnemonic in this list ever stops parsing,
-    /// the binary path has silently broken.
+    /// parser supports and the docs capability matrix lists. If a mnemonic in
+    /// this list ever stops parsing, the binary path has silently broken; if
+    /// the docs source changes without a sample here, this test fails.
     #[test]
     fn convert_capstone_op_handles_all_supported_aarch64_mnemonics() {
         let cases = [
@@ -1852,6 +1851,26 @@ mod cli_helper_tests {
         // accidental row deletion and forces a re-read when adding a parser
         // mnemonic without a matching test row.
         assert_eq!(cases.len(), 78);
+
+        fn docs_mnemonic(mnemonic: &'static str) -> &'static str {
+            if mnemonic.starts_with("b.") {
+                "b.<cond>"
+            } else {
+                mnemonic
+            }
+        }
+
+        let case_mnemonics: std::collections::BTreeSet<&'static str> = cases
+            .iter()
+            .map(|(mnemonic, _)| docs_mnemonic(mnemonic))
+            .collect();
+        let documented_mnemonics: std::collections::BTreeSet<&'static str> =
+            s11::docs_support::AARCH64_REWRITABLE_MNEMONICS
+                .iter()
+                .chain(s11::docs_support::AARCH64_FIXED_TERMINATORS.iter())
+                .copied()
+                .collect();
+        assert_eq!(case_mnemonics, documented_mnemonics);
 
         for (mnem, ops) in cases {
             match convert_capstone_op(mnem, ops) {

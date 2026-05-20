@@ -415,28 +415,17 @@ Minimize code size in bytes (4 bytes per AArch64 instruction):
 
 ## Supported Instructions
 
-s11 currently supports these AArch64 instructions:
+See [docs/capability.md](docs/capability.md) for the canonical instruction and
+ISA support matrix.
 
-**Arithmetic:**
-- `ADD`, `SUB` (register and immediate)
-- `MUL`, `SDIV`, `UDIV`
+s11's AArch64 parser and ELF/Capstone bridge accept the same maintained
+straight-line instruction set plus fixed control-flow terminators. Search
+rewrites only the straight-line prefix; supported terminators are parsed and
+held fixed. Memory operations such as `LDR` and `STR` are still unsupported.
 
-**Logical:**
-- `AND`, `ORR`, `EOR` (register and immediate)
-
-**Shifts:**
-- `LSL`, `LSR`, `ASR` (register and immediate)
-
-**Move:**
-- `MOV` (register and immediate)
-
-**Comparison (flag-setting):**
-- `CMP`, `CMN`, `TST`
-
-**Conditional Select:**
-- `CSEL`, `CSINC`, `CSINV`, `CSNEG`
-
-Unsupported instructions (memory operations, branches, etc.) are skipped with a warning.
+x86-64 and x86-32 support the documented `MOV` / `ADD` / `SUB` / `AND` / `OR`
+/ `XOR` / `CMP` families through enumerative, stochastic, and symbolic search.
+Hybrid and LLM remain AArch64-only.
 
 ---
 
@@ -453,7 +442,7 @@ Unsupported instructions (memory operations, branches, etc.) are skipped with a 
 ## Known Limitations
 
 - Memory operations (LDR, STR) are not supported
-- Branch instructions are not supported
+- Supported control-flow terminators are parsed and held fixed; search does not rewrite across them
 - Some immediate values may not be encodable in optimized forms
 - Condition flags are approximated in SMT mode
 

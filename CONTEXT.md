@@ -2,10 +2,13 @@
 
 A glossary of domain terms used in this superoptimizer. Update inline as terms get sharpened.
 
+See [docs/capability.md](docs/capability.md) for the canonical instruction and
+ISA support matrix.
+
 ## Glossary
 
 ### Target
-The original instruction sequence we are trying to optimize. Always a `Vec<Instruction>` from the s11 IR, drawn from the 20-opcode AArch64 subset. "The target" is fixed input; "candidates" are what search algorithms produce as potential replacements.
+The original instruction sequence we are trying to optimize. In the AArch64 path this is a `Vec<Instruction>` from the s11 IR, drawn from the supported AArch64 subset in [docs/capability.md](docs/capability.md). "The target" is fixed input; "candidates" are what search algorithms produce as potential replacements.
 
 ### Candidate
 A `Vec<Instruction>` produced by a search algorithm as a potential replacement for the target. A candidate is not yet accepted as an optimization — it must be (a) cheaper than the target by some metric and (b) semantically equivalent on live-out state.
@@ -51,7 +54,7 @@ A `SearchAlgorithm` impl that delegates candidate generation to the OpenAI Codex
 For the LLM-assisted search MVP only, targets whose final architectural state includes meaningful AArch64 condition state (NZCV) are **refused** rather than processed. `LiveOut` does not currently populate a condition-state slice, and adding condition state to the live-out contract would require co-ordinated changes to the equivalence internals — out of scope for the MVP. The LLM flow detects flags-live-out by static inspection of the target and bails with an explicit message. See ADR-0002.
 
 ### Subset hint (intentionally absent)
-The LLM prompt does **not** enumerate the 20-opcode subset s11's parser accepts. The model is invited to use any AArch64 mnemonic it knows. Outputs that use unsupported instructions are recorded as a research signal (which mnemonics the model "wanted" to reach for), not treated as wasted calls. See ADR-0003.
+The LLM prompt does **not** enumerate the maintained AArch64 subset s11's parser accepts (see [docs/capability.md](docs/capability.md)). The model is invited to use any AArch64 mnemonic it knows. Outputs that use unsupported instructions are recorded as a research signal (which mnemonics the model "wanted" to reach for), not treated as wasted calls. See ADR-0003.
 
 ### Unsupported-mnemonic ledger
 A first-class output of an LLM-assisted search run, alongside the (optional) optimization. A multiset of mnemonics the model emitted that `parse_assembly_string` rejected — interpretable as "which instructions should s11 add support for next, sorted by frequency of LLM demand on real targets." Surfaced in the `SearchStatistics` (or a sibling `LlmStatistics`) returned from `SearchAlgorithm::search`.

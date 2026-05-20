@@ -19,6 +19,12 @@ Three options:
 
 Option 2. The first RISC-V PR ships with `<RiscV32 as ISA>::Assembler::assemble` and `<RiscV64 as ISA>::Assembler::assemble` returning `Err`, and the CLI route through `optimize_elf_binary_generic` surfaces a clear "RISC-V optimization disabled" error when the user asks for an opt pass on a RISC-V ELF. `s11 disasm` works unchanged because it does not call the assembler.
 
+Current implementation status: RISC-V is scaffold-only in this tree. There is
+no supported RISC-V opt path, and RISC-V machine-code emission is not yet
+implemented; user-facing RISC-V ELF flows are rejected before an optimization
+pipeline runs. See the live [capability matrix](../capability.md) for the
+current public support boundary.
+
 Concretely:
 
 - `src/isa/riscv.rs` adds `impl Assembler<RiscVInstruction> for RiscV32` / `for RiscV64`; `assemble` returns `Err("RISC-V machine-code emission is not yet implemented; pass --algorithm enumerative for assembly-text output only".into())`; `can_assemble` returns `false` for every instruction so the search pipeline filters them out before reaching the assembler. (Returning `false` from `can_assemble` is consistent with how the trait was designed in step 8 — an assembler that cannot encode the instruction reports it cannot, regardless of why.)

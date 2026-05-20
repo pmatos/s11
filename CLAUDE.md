@@ -4,12 +4,14 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-s11 is a superoptimizer written in Rust. It finds shorter or faster equivalent instruction sequences using multiple search strategies and SMT-based equivalence checking. Primary target is AArch64; x86-64 and x86-32 are supported through a parallel pipeline; RISC-V is scaffold-only.
+s11 is a superoptimizer written in Rust. It finds shorter or faster equivalent instruction sequences using multiple search strategies and SMT-based equivalence checking. Primary target is AArch64; x86-64 and x86-32 are supported through a parallel pipeline; RISC-V is scaffold-only with no supported RISC-V opt path because machine-code emission is not yet implemented.
+
+See [docs/capability.md](docs/capability.md) for the canonical instruction and ISA support matrix.
 
 **Key Features:**
 - ELF binary reading and disassembly using Capstone engine (auto-detects e_machine)
-- **AArch64** (42 instructions): MOV, ADD, SUB, AND, ORR, EOR, LSL, LSR, ASR, MUL, SDIV, UDIV, CMP, CMN, TST, CSEL, CSINC, CSINV, CSNEG, MADD, MSUB, MNEG, SMULH, UMULH, CCMP, CCMN, UBFX, SBFX, BFI, BFXIL, UBFIZ, SBFIZ, plus branches/control-flow B, B.cond, RET, CBZ, CBNZ, TBZ, TBNZ, BL, BR (issue #69 — terminators only; search holds them fixed and rewrites only the straight-line prefix). Full pipeline including stochastic/symbolic/hybrid/LLM search.
-- **x86-64 + x86-32** (14 variants, 7 mnemonics): MOV, ADD, SUB, AND, OR, XOR, CMP (each with reg/imm forms) — enumerative, stochastic (MCMC), and symbolic (SMT) search supported. Hybrid (parallel coordinator) and LLM remain AArch64-only.
+- **AArch64**: see [docs/capability.md](docs/capability.md) for the canonical mnemonic matrix. Full pipeline including stochastic/symbolic/hybrid/LLM search. Supported control-flow terminators are parsed, held fixed, and the search rewrites only the straight-line prefix.
+- **x86-64 + x86-32**: see [docs/capability.md](docs/capability.md) for the canonical mnemonic matrix. Enumerative, stochastic (MCMC), and symbolic (SMT) search are supported. Hybrid and LLM remain AArch64-only.
 - SMT-based equivalence checking using Z3 (width-parameterised for x86-32 vs x86-64)
 - Multi-threaded parallel search with worker coordination
 - ISA abstraction supporting AArch64 (primary), x86-64/x86-32, RISC-V (scaffolded)
