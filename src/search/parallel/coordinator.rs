@@ -18,13 +18,32 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 /// Result from parallel search execution.
+///
+/// `best_result.statistics` is the *winning worker's* `SearchStatistics`
+/// when an optimization was found, and the cross-worker aggregate when
+/// none was. `total_statistics` is always the cross-worker aggregate:
+/// `algorithm` is `Algorithm::Hybrid`, `elapsed_time` is the coordinator
+/// wall-clock from start to teardown, counter fields are sums,
+/// `original_cost` is the maximum across workers (workers see the same
+/// target, so the max is robust to a worker that exited before recording
+/// it), and `best_cost_found` is the minimum nonzero across workers
+/// (falling back to `original_cost` when no worker recorded one).
+/// `worker_statistics` carries the per-worker, per-algorithm breakdown
+/// in arrival order. Each entry's `elapsed_time` is the coordinator
+/// wall-clock at message arrival (`start_time.elapsed()`), not the
+/// worker's own driver-reported duration; this gives every entry a
+/// common time origin.
 #[derive(Debug)]
 pub struct ParallelResult {
     /// The best result found across all workers.
     pub best_result: SearchResult,
     /// Statistics aggregated from all workers.
     pub total_statistics: SearchStatistics,
-    /// Per-worker statistics.
+    /// Per-worker statistics in arrival order. Each entry's
+    /// `elapsed_time` is the coordinator wall-clock at message arrival
+    /// (`start_time.elapsed()`), not the worker's own driver-reported
+    /// duration — see the struct-level doc for the full aggregation
+    /// contract.
     pub worker_statistics: Vec<(usize, Algorithm, SearchStatistics)>,
 }
 
@@ -98,6 +117,7 @@ fn run_coordinator(
     let mut best_result: Option<SearchResult> = None;
     let mut worker_stats: Vec<(usize, Algorithm, SearchStatistics)> = Vec::new();
     let mut finished_count = 0;
+    let mut winning_worker_id: Option<usize> = None;
     let total_workers = config.num_workers;
 
     // Calculate timeout
@@ -147,7 +167,14 @@ fn run_coordinator(
                             }
                         }
 
-                        // Update best result
+                        // Update best result. statistics is a placeholder
+                        // here; it is finalised after every worker has
+                        // reported, see post-loop block below.
+                        // winning_worker_id is overwritten on each
+                        // accepted Improvement: `try_update` only succeeds
+                        // when `cost` is strictly less than the prior
+                        // best, so the last accepted improvement is the
+                        // overall winner.
                         let result = SearchResult {
                             found_optimization: true,
                             original_sequence: target.to_vec(),
@@ -155,18 +182,23 @@ fn run_coordinator(
                             statistics: SearchStatistics::new(algorithm),
                         };
                         best_result = Some(result);
+                        winning_worker_id = Some(worker_id);
                     }
                 }
                 WorkerMessage::Finished {
                     worker_id,
-                    candidates_evaluated,
+                    statistics,
                 } => {
                     finished_count += 1;
-                    let algorithm = worker_algorithm(worker_id, config);
-                    let mut stats = SearchStatistics::new(algorithm);
-                    stats.candidates_evaluated = candidates_evaluated;
+                    let mut stats = statistics;
+                    // Use coordinator wall-clock for per-worker elapsed_time
+                    // so all entries share a common time origin (start_time).
+                    // statistics.algorithm is the single source of truth for
+                    // which algorithm the worker ran (set by run_symbolic_worker
+                    // / run_stochastic_worker, which themselves are routed by
+                    // worker_algorithm() below) — read the label from there.
                     stats.elapsed_time = start_time.elapsed();
-                    worker_stats.push((worker_id, algorithm, stats));
+                    worker_stats.push((worker_id, stats.algorithm, stats));
 
                     if finished_count >= total_workers {
                         break;
@@ -193,16 +225,54 @@ fn run_coordinator(
         }
     }
 
-    // Build final result
+    // Build cross-worker aggregate. Counters sum; original_cost takes the
+    // max across workers (defensive against a worker that exited before
+    // recording it); best_cost_found takes the min nonzero, falling back
+    // to original_cost so the CLI never prints 0 when workers verified a
+    // candidate.
     let elapsed = start_time.elapsed();
-    let total_candidates: u64 = worker_stats
-        .iter()
-        .map(|(_, _, s)| s.candidates_evaluated)
-        .sum();
-
     let mut total_stats = SearchStatistics::new(Algorithm::Hybrid);
     total_stats.elapsed_time = elapsed;
-    total_stats.candidates_evaluated = total_candidates;
+    for (_, _, s) in &worker_stats {
+        total_stats.candidates_evaluated += s.candidates_evaluated;
+        total_stats.candidates_passed_fast += s.candidates_passed_fast;
+        total_stats.smt_queries += s.smt_queries;
+        total_stats.smt_elapsed += s.smt_elapsed;
+        total_stats.smt_equivalent += s.smt_equivalent;
+        total_stats.iterations += s.iterations;
+        total_stats.accepted_proposals += s.accepted_proposals;
+        total_stats.improvements_found += s.improvements_found;
+    }
+    total_stats.original_cost = worker_stats
+        .iter()
+        .map(|(_, _, s)| s.original_cost)
+        .max()
+        .unwrap_or(0);
+    total_stats.best_cost_found = worker_stats
+        .iter()
+        .map(|(_, _, s)| s.best_cost_found)
+        .filter(|&c| c > 0)
+        .min()
+        .unwrap_or(total_stats.original_cost);
+
+    // Finalise best_result.statistics with the winning worker's own
+    // statistics so the CLI surfaces real SMT/improvement numbers rather
+    // than a fresh-zero placeholder.
+    if let Some(ref mut br) = best_result {
+        if let Some(winner) = winning_worker_id
+            && let Some((_, _, winner_stats)) = worker_stats.iter().find(|(id, _, _)| *id == winner)
+        {
+            br.statistics = winner_stats.clone();
+        } else {
+            // A winner was recorded but its Finished message hadn't
+            // arrived yet — reachable when the coordinator's outer
+            // timeout fires and breaks the loop before every worker
+            // drains. Fall back to the cross-worker aggregate so the
+            // CLI surfaces the counters drained so far rather than a
+            // fresh-zero placeholder.
+            br.statistics = total_stats.clone();
+        }
+    }
 
     let final_result = best_result.unwrap_or_else(|| SearchResult {
         found_optimization: false,
@@ -289,7 +359,6 @@ fn run_symbolic_worker(
     // the AArch64-typed `SearchResult` the coordinator consumes.
     let result: crate::search::result::SearchResult =
         search.search(target, live_out, config).into();
-    let candidates_evaluated = result.statistics.candidates_evaluated;
 
     if result.found_optimization
         && let Some(ref optimized) = result.optimized_sequence
@@ -305,7 +374,7 @@ fn run_symbolic_worker(
 
     let _ = channels.to_coordinator.send(WorkerMessage::Finished {
         worker_id,
-        candidates_evaluated,
+        statistics: result.statistics,
     });
 }
 
@@ -325,7 +394,6 @@ fn run_stochastic_worker(
     // `SearchResult` the parallel coordinator still consumes.
     let result: crate::search::result::SearchResult =
         search.search(target, live_out, config).into();
-    let candidates_evaluated = result.statistics.candidates_evaluated;
 
     if result.found_optimization
         && let Some(ref optimized) = result.optimized_sequence
@@ -344,7 +412,7 @@ fn run_stochastic_worker(
 
     let _ = channels.to_coordinator.send(WorkerMessage::Finished {
         worker_id,
-        candidates_evaluated,
+        statistics: result.statistics,
     });
 }
 
@@ -352,7 +420,7 @@ fn run_stochastic_worker(
 mod tests {
     use super::*;
     use crate::ir::{Operand, Register};
-    use crate::search::config::{SearchConfig, StochasticConfig};
+    use crate::search::config::{SearchConfig, StochasticConfig, SymbolicConfig};
 
     fn mov_add_sequence() -> Vec<Instruction> {
         vec![
@@ -562,7 +630,7 @@ mod tests {
         // channel; the worker→coordinator channel is unaffected.
         let _ = WorkerMessage::Finished {
             worker_id: 0,
-            candidates_evaluated: 0,
+            statistics: SearchStatistics::new(Algorithm::Stochastic),
         };
     }
 
@@ -648,6 +716,110 @@ mod tests {
         assert!(
             result.total_statistics.candidates_evaluated > 0,
             "expected workers to evaluate at least one candidate",
+        );
+    }
+
+    // Regression test for issue #242: a symbolic worker's `SearchStatistics`
+    // must flow through the parallel coordinator without being relabelled as
+    // stochastic or having every field except `candidates_evaluated` zeroed.
+    // Hyperparameters mirror `test_symbolic_finds_mov_add_fusion` in
+    // src/search/symbolic/synthesis.rs which is known to land the
+    // mov-add -> add fusion within a few seconds.
+    #[test]
+    fn test_parallel_search_symbolic_worker_statistics_are_propagated() {
+        let target = mov_add_sequence();
+        let live_out = LiveOut::from_registers(vec![Register::X0]);
+
+        let search_config = SearchConfig::default()
+            .with_registers(vec![Register::X0, Register::X1, Register::X2])
+            .with_immediates(vec![-1, 0, 1, 2])
+            .with_symbolic(SymbolicConfig::default().with_timeout(Duration::from_secs(10)))
+            .with_stochastic(StochasticConfig::default().with_iterations(200));
+
+        let parallel_config = ParallelConfig::default()
+            .with_workers(2)
+            .with_symbolic(true)
+            .with_seed(42)
+            .with_timeout(Duration::from_secs(60));
+
+        let result = run_parallel_search(&target, &live_out, &search_config, &parallel_config);
+
+        // Per the coordinator's worker-spawn logic, worker_id 0 runs the
+        // symbolic search and the remaining workers run stochastic.
+        let symbolic_entries: Vec<_> = result
+            .worker_statistics
+            .iter()
+            .filter(|(_, alg, _)| *alg == Algorithm::Symbolic)
+            .collect();
+        assert_eq!(
+            symbolic_entries.len(),
+            1,
+            "expected exactly one Algorithm::Symbolic entry in worker_statistics, got {:?}",
+            result
+                .worker_statistics
+                .iter()
+                .map(|(id, alg, _)| (*id, *alg))
+                .collect::<Vec<_>>(),
+        );
+        assert_eq!(
+            symbolic_entries[0].0, 0,
+            "symbolic worker should be worker_id 0",
+        );
+        for (id, alg, _) in &result.worker_statistics {
+            if *id != 0 {
+                assert_eq!(
+                    *alg,
+                    Algorithm::Stochastic,
+                    "non-symbolic workers must be labeled Stochastic, got {:?} for id {}",
+                    alg,
+                    id,
+                );
+            }
+        }
+
+        // Symbolic worker reaches the solver to verify candidates, so
+        // total_statistics.smt_queries must be nonzero — proving the
+        // symbolic stats are aggregated rather than dropped.
+        assert!(
+            result.total_statistics.smt_queries > 0,
+            "expected aggregated smt_queries > 0, got {}",
+            result.total_statistics.smt_queries,
+        );
+
+        // The symbolic worker increments improvements_found when it finds
+        // the mov-add -> add fusion.
+        assert!(
+            result.total_statistics.improvements_found > 0,
+            "expected aggregated improvements_found > 0, got {}",
+            result.total_statistics.improvements_found,
+        );
+
+        // Original-cost and best-cost fields must be populated from the
+        // workers; today they are silently zero.
+        assert!(
+            result.total_statistics.original_cost > 0,
+            "expected aggregated original_cost > 0, got {}",
+            result.total_statistics.original_cost,
+        );
+        assert!(
+            result.total_statistics.best_cost_found > 0,
+            "expected aggregated best_cost_found > 0, got {}",
+            result.total_statistics.best_cost_found,
+        );
+
+        // The winning result must carry the winning worker's statistics,
+        // not a fresh placeholder. The symbolic worker is the only one
+        // that can land the 2-instruction -> 1-instruction fusion on this
+        // target, so its stats must be the ones we surface.
+        assert!(
+            result.best_result.found_optimization,
+            "expected the hybrid run to find an optimization",
+        );
+        assert_eq!(
+            result.best_result.statistics.algorithm,
+            Algorithm::Symbolic,
+            "best_result.statistics should reflect the winning (symbolic) worker, got {:?}",
+            result.best_result.statistics.algorithm,
         );
     }
 }
