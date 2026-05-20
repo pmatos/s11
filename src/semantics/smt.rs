@@ -15,13 +15,16 @@ use z3::{Params, Solver};
 /// slices with byte 0 placed in the most-significant position. `width` must
 /// be a multiple of 8.
 fn bv_swap_bytes(value: &BV, width: u32) -> BV {
-    debug_assert!(width % 8 == 0, "bv_swap_bytes requires byte-multiple width");
+    debug_assert!(
+        width.is_multiple_of(8),
+        "bv_swap_bytes requires byte-multiple width"
+    );
     let num_bytes = width / 8;
     let mut result = value.extract(7, 0);
     for i in 1..num_bytes {
         let lo = i * 8;
         let hi = lo + 7;
-        result = result.concat(&value.extract(hi, lo));
+        result = result.concat(value.extract(hi, lo));
     }
     result
 }
@@ -49,7 +52,7 @@ fn bv_reverse_bits(value: &BV, width: u32) -> BV {
     // Bit 0 of `value` becomes the new MSB; bit width-1 becomes the new LSB.
     let mut result = value.extract(0, 0);
     for i in 1..width {
-        result = result.concat(&value.extract(i, i));
+        result = result.concat(value.extract(i, i));
     }
     result
 }
@@ -267,7 +270,7 @@ pub fn compute_flags_sub(lhs: &BV, rhs: &BV, width: u32) -> Nzcv {
     let lhs_sign = lhs.extract(msb, msb);
     let rhs_sign = rhs.extract(msb, msb);
     let res_sign = result.extract(msb, msb);
-    let v = lhs_sign.bvxor(&rhs_sign).bvand(&lhs_sign.bvxor(&res_sign));
+    let v = lhs_sign.bvxor(&rhs_sign).bvand(lhs_sign.bvxor(&res_sign));
     (n, z, c, v)
 }
 
@@ -340,7 +343,7 @@ pub fn condition_to_smt(cond: crate::ir::types::Condition, n: &BV, z: &BV, c: &B
         Condition::GE => n_eq_v.clone(),
         Condition::LT => n_eq_v.bvxor(&one), // N != V
         Condition::GT => not_z.bvand(&n_eq_v),
-        Condition::LE => z.bvor(&n_eq_v.bvxor(&one)),
+        Condition::LE => z.bvor(n_eq_v.bvxor(&one)),
         Condition::AL => one.clone(),
         // NV (0b1111) is reserved but per ARM ARM still satisfies
         // condition_holds = true — equivalent to AL. Concrete execution
@@ -445,13 +448,13 @@ pub fn apply_instruction(mut state: MachineState, instruction: &Instruction) -> 
             let a = state.get_register(*rn).clone();
             let b = state.get_register(*rm).clone();
             let c = state.get_register(*ra).clone();
-            state.set_register(*rd, c.bvadd(&a.bvmul(&b)));
+            state.set_register(*rd, c.bvadd(a.bvmul(&b)));
         }
         Instruction::Msub { rd, rn, rm, ra } => {
             let a = state.get_register(*rn).clone();
             let b = state.get_register(*rm).clone();
             let c = state.get_register(*ra).clone();
-            state.set_register(*rd, c.bvsub(&a.bvmul(&b)));
+            state.set_register(*rd, c.bvsub(a.bvmul(&b)));
         }
         Instruction::Mneg { rd, rn, rm } => {
             let a = state.get_register(*rn).clone();
@@ -499,8 +502,7 @@ pub fn apply_instruction(mut state: MachineState, instruction: &Instruction) -> 
             let lhs = state.get_register(*rn).clone();
             let rhs = state.eval_operand(rm);
             let (n_t, z_t, c_t, v_t) = compute_flags_sub(&lhs, &rhs, width);
-            let pred =
-                condition_to_smt(*cond, &state.n, &state.z, &state.c, &state.v).eq(&bv_one());
+            let pred = condition_to_smt(*cond, &state.n, &state.z, &state.c, &state.v).eq(bv_one());
             let (n_f, z_f, c_f, v_f) = nzcv_to_bvs(*nzcv);
             state.set_flags(
                 pred.ite(&n_t, &n_f),
@@ -513,8 +515,7 @@ pub fn apply_instruction(mut state: MachineState, instruction: &Instruction) -> 
             let lhs = state.get_register(*rn).clone();
             let rhs = state.eval_operand(rm);
             let (n_t, z_t, c_t, v_t) = compute_flags_add(&lhs, &rhs, width);
-            let pred =
-                condition_to_smt(*cond, &state.n, &state.z, &state.c, &state.v).eq(&bv_one());
+            let pred = condition_to_smt(*cond, &state.n, &state.z, &state.c, &state.v).eq(bv_one());
             let (n_f, z_f, c_f, v_f) = nzcv_to_bvs(*nzcv);
             state.set_flags(
                 pred.ite(&n_t, &n_f),
@@ -528,29 +529,25 @@ pub fn apply_instruction(mut state: MachineState, instruction: &Instruction) -> 
         Instruction::Csel { rd, rn, rm, cond } => {
             let rn_v = state.get_register(*rn).clone();
             let rm_v = state.get_register(*rm).clone();
-            let pred =
-                condition_to_smt(*cond, &state.n, &state.z, &state.c, &state.v).eq(&bv_one());
+            let pred = condition_to_smt(*cond, &state.n, &state.z, &state.c, &state.v).eq(bv_one());
             state.set_register(*rd, pred.ite(&rn_v, &rm_v));
         }
         Instruction::Csinc { rd, rn, rm, cond } => {
             let rn_v = state.get_register(*rn).clone();
-            let rm_plus_one = state.get_register(*rm).bvadd(&BV::from_u64(1, width));
-            let pred =
-                condition_to_smt(*cond, &state.n, &state.z, &state.c, &state.v).eq(&bv_one());
+            let rm_plus_one = state.get_register(*rm).bvadd(BV::from_u64(1, width));
+            let pred = condition_to_smt(*cond, &state.n, &state.z, &state.c, &state.v).eq(bv_one());
             state.set_register(*rd, pred.ite(&rn_v, &rm_plus_one));
         }
         Instruction::Csinv { rd, rn, rm, cond } => {
             let rn_v = state.get_register(*rn).clone();
             let rm_not = state.get_register(*rm).bvnot();
-            let pred =
-                condition_to_smt(*cond, &state.n, &state.z, &state.c, &state.v).eq(&bv_one());
+            let pred = condition_to_smt(*cond, &state.n, &state.z, &state.c, &state.v).eq(bv_one());
             state.set_register(*rd, pred.ite(&rn_v, &rm_not));
         }
         Instruction::Csneg { rd, rn, rm, cond } => {
             let rn_v = state.get_register(*rn).clone();
             let rm_neg = state.get_register(*rm).bvneg();
-            let pred =
-                condition_to_smt(*cond, &state.n, &state.z, &state.c, &state.v).eq(&bv_one());
+            let pred = condition_to_smt(*cond, &state.n, &state.z, &state.c, &state.v).eq(bv_one());
             state.set_register(*rd, pred.ite(&rn_v, &rm_neg));
         }
         Instruction::Mvn { rd, rm } => {
@@ -642,15 +639,13 @@ pub fn apply_instruction(mut state: MachineState, instruction: &Instruction) -> 
         }
         // CSET / CSETM: rd = cond ? 1 : 0 (or all-ones for CSETM).
         Instruction::Cset { rd, cond } => {
-            let pred =
-                condition_to_smt(*cond, &state.n, &state.z, &state.c, &state.v).eq(&bv_one());
+            let pred = condition_to_smt(*cond, &state.n, &state.z, &state.c, &state.v).eq(bv_one());
             let one = BV::from_u64(1, width);
             let zero = BV::from_u64(0, width);
             state.set_register(*rd, pred.ite(&one, &zero));
         }
         Instruction::Csetm { rd, cond } => {
-            let pred =
-                condition_to_smt(*cond, &state.n, &state.z, &state.c, &state.v).eq(&bv_one());
+            let pred = condition_to_smt(*cond, &state.n, &state.z, &state.c, &state.v).eq(bv_one());
             let ones = BV::from_i64(-1, width); // all-ones at any width
             let zero = BV::from_u64(0, width);
             state.set_register(*rd, pred.ite(&ones, &zero));
@@ -674,10 +669,10 @@ pub fn apply_instruction(mut state: MachineState, instruction: &Instruction) -> 
         // folded is zero, clz is `width`, and the result is `width - 1`.
         Instruction::Cls { rd, rn } => {
             let value = state.get_register(*rn).clone();
-            let asr = value.bvashr(&BV::from_u64((width - 1) as u64, width));
+            let asr = value.bvashr(BV::from_u64((width - 1) as u64, width));
             let folded = value.bvxor(&asr);
             let clz = bv_clz(&folded, width);
-            let result = clz.bvsub(&BV::from_u64(1, width));
+            let result = clz.bvsub(BV::from_u64(1, width));
             state.set_register(*rd, result);
         }
         // RBIT: reverse the bits of the value.
@@ -701,11 +696,11 @@ pub fn apply_instruction(mut state: MachineState, instruction: &Instruction) -> 
                 let mut acc = h.extract(7, 0);
                 for i in 1..4u32 {
                     let l = i * 8;
-                    acc = acc.concat(&h.extract(l + 7, l));
+                    acc = acc.concat(h.extract(l + 7, l));
                 }
                 acc
             };
-            let result = rev_half(&hi).concat(&rev_half(&lo));
+            let result = rev_half(&hi).concat(rev_half(&lo));
             state.set_register(*rd, result);
         }
         // REV16: byte-reverse within each 16-bit half (four halves).
@@ -715,7 +710,7 @@ pub fn apply_instruction(mut state: MachineState, instruction: &Instruction) -> 
             let swap_half = |start: u32| -> BV {
                 value
                     .extract(start + 7, start)
-                    .concat(&value.extract(start + 15, start + 8))
+                    .concat(value.extract(start + 15, start + 8))
             };
             let h3 = swap_half(48);
             let h2 = swap_half(32);

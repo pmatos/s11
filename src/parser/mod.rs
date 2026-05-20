@@ -1036,10 +1036,10 @@ fn parse_ccmp_like(
     }
     let rn = parse_register(operands[0])?;
     let rm = parse_operand(operands[1])?;
-    if let Operand::Immediate(imm) = rm {
-        if !(0..=31).contains(&imm) {
-            return Err(format!("{} imm5 {} out of range (0..=31)", mnem, imm));
-        }
+    if let Operand::Immediate(imm) = rm
+        && !(0..=31).contains(&imm)
+    {
+        return Err(format!("{} imm5 {} out of range (0..=31)", mnem, imm));
     }
     let nzcv_raw = parse_immediate(operands[2])?;
     if !(0..=15).contains(&nzcv_raw) {
