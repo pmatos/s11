@@ -14,6 +14,14 @@ fn read_doc(relative: &str) -> String {
         .unwrap_or_else(|err| panic!("failed to read {relative}: {err}"))
 }
 
+fn normalized_doc(relative: &str) -> String {
+    read_doc(relative)
+        .to_ascii_lowercase()
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
 #[test]
 fn docs_capability_matrix_exists_and_public_docs_link_it() {
     let matrix = read_doc("docs/capability.md");
@@ -50,6 +58,67 @@ fn docs_capability_lists_every_checked_in_aarch64_mnemonic() {
             "docs/capability.md must list fixed AArch64 terminator `{mnemonic}`"
         );
     }
+}
+
+#[test]
+fn memory_operations_are_consistently_documented_with_known_gaps() {
+    let matrix = normalized_doc("docs/capability.md");
+    assert!(
+        matrix.contains("memory loads and stores"),
+        "docs/capability.md must document supported memory loads and stores"
+    );
+    assert!(
+        matrix.contains("`ldur`, `stur`, and `ldr (literal)` are out of scope"),
+        "docs/capability.md must document unsupported memory-operation gaps"
+    );
+
+    let tutorial = normalized_doc("TUTORIAL.md");
+    assert!(
+        tutorial.contains("load/store family added in adr-0007"),
+        "TUTORIAL.md supported-instructions section must point to the load/store family"
+    );
+    assert!(
+        tutorial.contains("`ldur`, `stur`, and `ldr (literal)` remain unsupported"),
+        "TUTORIAL.md known-limitations section must keep unsupported memory gaps visible"
+    );
+
+    for mnemonic in ["ldr", "str"] {
+        assert!(
+            AARCH64_REWRITABLE_MNEMONICS.contains(&mnemonic),
+            "`{mnemonic}` must be listed as a rewritable AArch64 mnemonic"
+        );
+
+        let line = format!("{mnemonic} x0, [x1]");
+        assert!(
+            matches!(
+                s11::parser::parse_line(&line),
+                Ok(s11::parser::LineResult::Instruction(_))
+            ),
+            "parser must accept supported memory instruction `{line}`"
+        );
+    }
+
+    for mnemonic in ["ldur", "stur"] {
+        assert!(
+            !AARCH64_REWRITABLE_MNEMONICS.contains(&mnemonic),
+            "`{mnemonic}` must not be listed as a rewritable AArch64 mnemonic"
+        );
+
+        let line = format!("{mnemonic} x0, [x1]");
+        assert!(
+            matches!(
+                s11::parser::parse_line(&line),
+                Err(s11::parser::ParseLineError::UnknownInstruction(ref unsupported))
+                    if unsupported == mnemonic
+            ),
+            "parser must reject unsupported memory instruction `{line}`"
+        );
+    }
+
+    assert!(
+        s11::parser::parse_line("ldr x0, #0x1234").is_err(),
+        "parser must reject out-of-scope LDR literal form"
+    );
 }
 
 #[test]
