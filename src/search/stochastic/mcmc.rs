@@ -27,6 +27,7 @@ use crate::semantics::state::ConcreteMachineState;
 use rand::{RngExt, SeedableRng};
 use rand_chacha::ChaCha8Rng;
 use std::marker::PhantomData;
+use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
 
 /// Stochastic search using Metropolis-Hastings MCMC, generic over ISA.
@@ -117,18 +118,28 @@ where
         let mutator = <I as StochasticBackend<I>>::make_mutator(config);
         let acceptance = AcceptanceCriterion::new(config.stochastic.beta);
 
+        // If the target ends in a terminator (x86 Jcc, AArch64 branch),
+        // every random_sequence proposal must end in the same terminator
+        // — the equivalence check's terminator-equality precheck rejects
+        // any candidate that lacks it. Peel once and append below.
+        let target_terminator = <I as StochasticBackend<I>>::target_terminator(target);
+        let terminator_len = if target_terminator.is_some() { 1 } else { 0 };
+        let with_term = |mut seq: Vec<I::Instruction>| -> Vec<I::Instruction> {
+            if let Some(t) = target_terminator {
+                seq.push(t);
+            }
+            seq
+        };
+
         // Start with target sequence or random sequence of same length
         let mut current = if rng.random_bool(0.5) {
             target.to_vec()
         } else {
             loop {
-                let seq = <I as StochasticBackend<I>>::random_sequence(
-                    &mut rng,
-                    target.len(),
-                    &regs,
-                    &imms,
-                    config,
-                );
+                let prefix_len = target.len().saturating_sub(terminator_len);
+                let seq = with_term(<I as StochasticBackend<I>>::random_sequence(
+                    &mut rng, prefix_len, &regs, &imms, config,
+                ));
                 if <I as StochasticBackend<I>>::is_encodable(&seq) {
                     break seq;
                 }
@@ -140,7 +151,9 @@ where
         let mut best_equivalent: Option<Vec<I::Instruction>> = None;
         let mut best_cost = original_cost;
 
-        let min_length = 1;
+        // Length bounds: the terminator (if any) is always pinned at the
+        // tail, so length-change proposals only vary the prefix length.
+        let min_length = 1 + terminator_len;
         let max_length = target.len();
         let smt_timeout = Duration::from_secs(5);
 
@@ -154,14 +167,28 @@ where
                 break;
             }
 
+            // Cooperative cancel: the parallel coordinator (or any external
+            // driver) can flip the shared flag to stop us promptly without
+            // waiting for `config.timeout` to elapse. `Relaxed` is fine: the
+            // flag is monotonic (false → true once) and late observation
+            // costs at most one extra iteration.
+            if config
+                .stop_flag
+                .as_ref()
+                .is_some_and(|f| f.load(Ordering::Relaxed))
+            {
+                break;
+            }
+
             // Occasionally try a different length
             if rng.random_bool(0.1) && max_length > min_length {
                 let new_len = rng.random_range(min_length..=max_length);
                 if new_len != current.len() {
                     loop {
-                        let seq = <I as StochasticBackend<I>>::random_sequence(
-                            &mut rng, new_len, &regs, &imms, config,
-                        );
+                        let prefix_len = new_len.saturating_sub(terminator_len);
+                        let seq = with_term(<I as StochasticBackend<I>>::random_sequence(
+                            &mut rng, prefix_len, &regs, &imms, config,
+                        ));
                         if <I as StochasticBackend<I>>::is_encodable(&seq) {
                             current = seq;
                             break;
@@ -282,7 +309,7 @@ pub fn evaluate_with_tests(
 
     for (input, target_output) in test_inputs.iter().zip(target_outputs.iter()) {
         let proposal_output = apply_sequence_concrete(input.clone(), proposal);
-        if !states_equal_for_live_out(&proposal_output, target_output, live_out, false) {
+        if !states_equal_for_live_out(&proposal_output, target_output, live_out, false, false) {
             passes_all = false;
             break;
         }
@@ -466,6 +493,57 @@ mod tests {
         assert!(stats.elapsed_time.as_nanos() > 0);
         assert_eq!(stats.iterations, 1000);
         assert!(stats.candidates_evaluated >= stats.candidates_passed_fast);
+    }
+
+    /// Regression for issue #243: a stochastic search must abort promptly
+    /// when an external coordinator flips its cooperative-cancel flag, even
+    /// if `config.timeout` is `None` and `iterations` is unbounded.
+    #[test]
+    fn stochastic_search_respects_cooperative_stop_flag() {
+        use std::sync::Arc;
+        use std::sync::atomic::AtomicBool;
+        use std::thread;
+        use std::time::{Duration, Instant};
+
+        let flag = Arc::new(AtomicBool::new(false));
+        let flag_for_search = Arc::clone(&flag);
+
+        let configured_iterations: u64 = u64::MAX / 2;
+        let join = thread::spawn(move || {
+            let mut search: StochasticSearch<AArch64> = StochasticSearch::new();
+            let config = SearchConfig::default()
+                .with_timeout_option(None)
+                .with_stop_flag(flag_for_search)
+                .with_registers(vec![Register::X0, Register::X1])
+                .with_immediates(vec![-1, 0, 1])
+                .with_stochastic(
+                    StochasticConfig::default()
+                        .with_iterations(configured_iterations)
+                        .with_seed(7),
+                );
+            let live_out = LiveOut::from_registers(vec![Register::X0]);
+            let target = mov_add_sequence();
+            search.search(&target, &live_out, &config)
+        });
+
+        // Give the worker a moment to enter its main loop, then signal stop.
+        thread::sleep(Duration::from_millis(20));
+        flag.store(true, std::sync::atomic::Ordering::SeqCst);
+
+        let started_join = Instant::now();
+        let result = join.join().expect("stochastic worker panicked");
+        let join_elapsed = started_join.elapsed();
+
+        assert!(
+            join_elapsed < Duration::from_secs(2),
+            "stop flag should abort the MCMC loop promptly; took {:?}",
+            join_elapsed,
+        );
+        assert!(
+            result.statistics.iterations < configured_iterations,
+            "search should have aborted before exhausting iterations; got {}",
+            result.statistics.iterations,
+        );
     }
 
     #[test]

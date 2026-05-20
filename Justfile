@@ -1,4 +1,4 @@
-# Justfile for the AArch64 Super-Optimizer MVP
+# Justfile for s11
 
 # Default recipe to run when `just` is called without arguments
 default: build
@@ -33,7 +33,7 @@ run-release: release
     # Alternatively, run the executable directly:
     # ./target/release/s11
 
-# Run tests (currently, the MVP doesn't have dedicated unit tests beyond main's demo)
+# Run tests
 test:
     @echo "Running tests..."
     cargo test
@@ -57,10 +57,10 @@ fmt:
 list:
     @just --list
 
-# Analyze an AArch64 ELF binary
+# Disassemble an ELF binary (AArch64 or x86; arch auto-detected)
 analyze binary_path: build
-    @echo "Analyzing binary: {{binary_path}}"
-    cargo run -- --binary "{{binary_path}}"
+    @echo "Disassembling binary: {{binary_path}}"
+    cargo run -- disasm "{{binary_path}}"
 
 # Build test binaries
 build-tests:
@@ -106,7 +106,7 @@ coverage: build-tests
     @echo "Collecting coverage (HTML)..."
     cargo llvm-cov --workspace --all-features --html
 
-# Emit an LCOV report at target/llvm-cov/lcov.info — the format consumed by CI/Codecov.
+# Emit an LCOV report at target/llvm-cov/lcov.info - the format consumed by CI/Codecov.
 coverage-lcov: build-tests
     @echo "Collecting coverage (LCOV)..."
     @mkdir -p target/llvm-cov
@@ -114,12 +114,12 @@ coverage-lcov: build-tests
 
 # Help message (can be more detailed than just listing)
 help:
-    @echo "Available commands for AArch64 Super-Optimizer MVP (run with 'just <command>'):"
+    @echo "Available commands for s11 (run with 'just <command>'):"
     @echo "  build         - Build the project (debug mode)"
     @echo "  release       - Build the project in release mode (optimized)"
     @echo "  run           - Build and run the project (debug mode)"
     @echo "  run-release   - Build and run the project (release mode)"
-    @echo "  analyze PATH  - Analyze an AArch64 ELF binary at PATH"
+    @echo "  analyze PATH  - Disassemble an ELF binary at PATH (runs `s11 disasm`)"
     @echo "  test          - Run tests"
     @echo "  build-tests   - Build AArch64 test binaries"
     @echo "  test-all      - Run complete test suite"

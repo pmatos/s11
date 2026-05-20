@@ -104,6 +104,11 @@ pub struct EquivalenceConfig {
     pub smt_timeout: Option<Duration>,
     /// Skip SMT verification (fast path only)
     pub fast_only: bool,
+    /// Treat the entire memory image as live-out — every cell must agree
+    /// between the two sequences' final states. Auto-derived in
+    /// `check_equivalence_with_config` whenever either sequence touches
+    /// memory (see ADR-0007).
+    pub memory_live: bool,
 }
 
 impl Default for EquivalenceConfig {
@@ -113,6 +118,7 @@ impl Default for EquivalenceConfig {
             random_test_count: 10,
             smt_timeout: Some(Duration::from_secs(30)),
             fast_only: false,
+            memory_live: false,
         }
     }
 }
@@ -188,6 +194,16 @@ impl EquivalenceConfig {
         self.live_out = self.live_out.with_flags(flags_live);
         self
     }
+
+    /// Builder method to mark whole memory as live-out. Search algorithms
+    /// pin `with_memory(true)` analogously to `with_flags(true)`; the
+    /// `check_equivalence_with_config` entry point auto-derives this from
+    /// `touches_memory()` on the candidate / target sequences. See
+    /// ADR-0007.
+    pub fn with_memory(mut self, memory_live: bool) -> Self {
+        self.memory_live = memory_live;
+        self
+    }
 }
 
 /// Check if two instruction sequences are semantically equivalent
@@ -207,7 +223,12 @@ pub fn check_equivalence(seq1: &[Instruction], seq2: &[Instruction]) -> Equivale
     }
 
     // Unmasked entry point compares full state including NZCV (see
-    // `states_not_equal`); flags are always observable here.
+    // `states_not_equal`); flags are always observable here. Issue #240's
+    // terminator-input augmentation lives on the configured entry point
+    // (`check_equivalence_with_config_metrics`) only — this unmasked path is
+    // sound by construction because every register and flag is already part
+    // of the comparison. Anyone reintroducing a masked entry point here must
+    // route through `augment_config_for_terminator` to preserve that.
     if let Some(early) = pre_smt_guard(prefix1, prefix2, true) {
         return early;
     }
@@ -292,6 +313,7 @@ fn fast_path_initial_nzcv_variants(
     let variant_regs_config = RandomInputConfig {
         count: 16,
         registers: input_regs.to_vec(),
+        memory_seed_size: 0,
     };
     let mut variants = generate_random_inputs(&variant_regs_config);
     for (i, input) in variants.iter_mut().enumerate() {
@@ -328,9 +350,18 @@ fn run_fast_path(
         live_out_registers.iter().cloned().collect()
     };
 
+    // Seed memory when either sequence touches it, so that LDR observations
+    // during the fast-random pass return non-trivial values. See ADR-0007.
+    let touches_mem = crate::validation::live_out::touches_memory(seq1)
+        || crate::validation::live_out::touches_memory(seq2);
     let random_config = RandomInputConfig {
         count: config.random_test_count,
         registers: input_regs.clone(),
+        memory_seed_size: if touches_mem {
+            crate::validation::random::MEMORY_SEED_SIZE
+        } else {
+            0
+        },
     };
     let random_inputs = generate_random_inputs(&random_config);
 
@@ -343,6 +374,7 @@ fn run_fast_path(
             &state2,
             live_out_registers,
             config.live_out.flags_live(),
+            config.memory_live,
         ) {
             return Some(EquivalenceResult::NotEquivalentFast(input.clone()));
         }
@@ -358,6 +390,7 @@ fn run_fast_path(
             &state2,
             live_out_registers,
             config.live_out.flags_live(),
+            config.memory_live,
         ) {
             return Some(EquivalenceResult::NotEquivalentFast(input.clone()));
         }
@@ -383,6 +416,7 @@ fn run_fast_path(
                 &state2,
                 live_out_registers,
                 config.live_out.flags_live(),
+                config.memory_live,
             ) {
                 return Some(EquivalenceResult::NotEquivalentFast(input.clone()));
             }
@@ -412,6 +446,37 @@ pub fn check_equivalence_with_config(
     result
 }
 
+/// Issue #240: derive the prefix's effective live-out contract from the
+/// caller-supplied config and the stripped trailing terminator.
+///
+/// `split_terminator` peels the terminator off both sequences before the
+/// prefixes are compared, but conditional / register-consuming terminators
+/// read prefix-produced state: `BCond` reads NZCV; `Cbz`/`Cbnz`/`Ret`/`Br`
+/// read a register; `Tbz`/`Tbnz` read a register. If those inputs aren't in
+/// the caller's mask the verifier can approve two prefixes whose reattached
+/// terminator would branch differently. This helper unions the terminator's
+/// source registers into `live_out` and ORs in `terminator.reads_flags()`,
+/// matching the discipline of `EquivalenceConfig::live_out`'s one-way ratchet
+/// (flag liveness is monotonically additive, never silently cleared).
+///
+/// Idempotent: a config already augmented for the same terminator is a
+/// fixed point — set union plus an OR cannot change a contract twice.
+fn augment_config_for_terminator(
+    config: &EquivalenceConfig,
+    terminator: &Instruction,
+) -> EquivalenceConfig {
+    let mut live_out = config.live_out.clone();
+    for reg in terminator.source_registers() {
+        live_out.add(reg);
+    }
+    let flags_live = live_out.flags_live() || terminator.reads_flags();
+    let live_out = live_out.with_flags(flags_live);
+    EquivalenceConfig {
+        live_out,
+        ..config.clone()
+    }
+}
+
 /// Like `check_equivalence_with_config`, but also reports per-call metrics
 /// including the SMT formula size in bytes. Use this only when the metrics
 /// are actually consumed — `solver.to_string()` is non-trivial work compared
@@ -438,15 +503,49 @@ pub fn check_equivalence_with_config_metrics(
         );
     }
 
-    if let Some(early) = pre_smt_guard(prefix1, prefix2, config.live_out.flags_live()) {
+    // ADR-0007: auto-derive memory_live and force fast_only off when memory
+    // ops appear (see `check_equivalence_with_config` above for rationale).
+    let memory_touched = crate::validation::live_out::touches_memory(prefix1)
+        || crate::validation::live_out::touches_memory(prefix2);
+    let mut config_owned;
+    let config: &EquivalenceConfig = if memory_touched && (!config.memory_live || config.fast_only)
+    {
+        config_owned = config.clone();
+        config_owned.memory_live = true;
+        if config_owned.fast_only {
+            config_owned.fast_only = false;
+        }
+        &config_owned
+    } else {
+        config
+    };
+
+    // Issue #240: the reattached terminator consumes prefix-produced state —
+    // `BCond` reads NZCV; `Cbz`/`Cbnz`/`Ret`/`Br` read a register;
+    // `Tbz`/`Tbnz` read a register. The caller's `live_out` only covers what
+    // the *prefix* must agree on post-execution; we extend it here with the
+    // terminator's input contract so two prefixes that produce different
+    // branch-predicate inputs aren't accepted as equivalent. Built once and
+    // reused for the pre-SMT guard, fast path, and SMT builder so the
+    // augmentation is canonical across all three.
+    let augmented_owned;
+    let effective_config: &EquivalenceConfig = match terminator1 {
+        Some(t) => {
+            augmented_owned = augment_config_for_terminator(config, t);
+            &augmented_owned
+        }
+        None => config,
+    };
+
+    if let Some(early) = pre_smt_guard(prefix1, prefix2, effective_config.live_out.flags_live()) {
         return (early, metrics);
     }
 
-    if let Some(fast) = run_fast_path(prefix1, prefix2, config) {
+    if let Some(fast) = run_fast_path(prefix1, prefix2, effective_config) {
         return (fast, metrics);
     }
 
-    let solver = build_smt_solver(prefix1, prefix2, config);
+    let solver = build_smt_solver(prefix1, prefix2, effective_config);
     let smt_start = std::time::Instant::now();
     let sat_result = solver.check();
     let smt_elapsed = smt_start.elapsed();
@@ -496,6 +595,7 @@ fn build_smt_solver(
         &final_state2,
         &config.live_out,
         config.live_out.flags_live(),
+        config.memory_live,
     ));
     solver
 }
@@ -567,9 +667,16 @@ pub fn find_counterexample_concrete(
     let live_out_registers = &config.live_out;
     let input_regs: Vec<_> = live_out_registers.iter().cloned().collect();
 
+    let touches_mem = crate::validation::live_out::touches_memory(seq1)
+        || crate::validation::live_out::touches_memory(seq2);
     let random_config = RandomInputConfig {
         count: config.random_test_count,
         registers: input_regs.clone(),
+        memory_seed_size: if touches_mem {
+            crate::validation::random::MEMORY_SEED_SIZE
+        } else {
+            0
+        },
     };
     let random_inputs = generate_random_inputs(&random_config);
 
@@ -622,6 +729,11 @@ pub struct X86EquivalenceConfig {
 }
 
 impl X86EquivalenceConfig {
+    /// Construct a baseline config. **Note:** `live_out` defaults to
+    /// `X86LiveOutMask::empty()` — equivalence over an empty live-out
+    /// set is vacuously true. Callers must populate the mask (typically
+    /// via `live_out(x86_live_out_from_target(target))`) before using
+    /// the config, or any two sequences will compare as equivalent.
     pub fn new(width: u32) -> Self {
         Self {
             live_out: crate::semantics::state::X86LiveOutMask::empty(),
@@ -667,14 +779,44 @@ pub fn check_equivalence_x86_for_search(
 /// for the AArch64 backend: fast path uses the concrete interpreter over
 /// random inputs (and EFLAGS comparison when CMP is present or the mask
 /// declares flags live); slow path lowers to Z3 BVs and checks UNSAT of the
-/// not-equal assertion over live-out registers.
+/// not-equal assertion over live-out registers, plus the five tracked
+/// EFLAGS bits when `flags_live` is set.
 pub fn check_equivalence_x86(
     seq1: &[crate::isa::x86::X86Instruction],
     seq2: &[crate::isa::x86::X86Instruction],
     config: &X86EquivalenceConfig,
 ) -> EquivalenceResult {
-    // Fast path: 10 random inputs.
-    if let Some(refutation) = run_fast_path_x86(seq1, seq2, config) {
+    // Peel matching Jcc terminators and require both sides to share the
+    // exact same terminator (struct equality on the condition code).
+    // Mirrors the AArch64 precheck in `check_equivalence`.
+    let (prefix1, terminator1) = crate::ir::instructions::split_terminator_x86(seq1);
+    let (prefix2, terminator2) = crate::ir::instructions::split_terminator_x86(seq2);
+    if terminator1 != terminator2 {
+        return EquivalenceResult::NotEquivalent;
+    }
+
+    // When a Jcc terminator is held fixed across both sides, its branch
+    // outcome consumes the prefix's final EFLAGS. The caller-supplied
+    // live-out mask may not declare flags live (e.g. when the target
+    // contains only MOV/CMOV which `has_side_effects` reports as
+    // flag-clean), so force `flags_live=true` for the prefix comparison
+    // whenever a Jcc was peeled — otherwise a proposal that clobbers
+    // EFLAGS before the branch would be accepted unsoundly.
+    let effective_config = if matches!(
+        terminator1,
+        Some(crate::isa::x86::X86Instruction::Jcc { .. })
+    ) && !config.live_out.flags_live()
+    {
+        let mut c = config.clone();
+        c.live_out = c.live_out.with_flags(true);
+        std::borrow::Cow::Owned(c)
+    } else {
+        std::borrow::Cow::Borrowed(config)
+    };
+    let config = effective_config.as_ref();
+
+    // Fast path: 10 random inputs over the prefixes only.
+    if let Some(refutation) = run_fast_path_x86(prefix1, prefix2, config) {
         return refutation;
     }
     if config.fast_only {
@@ -687,14 +829,21 @@ pub fn check_equivalence_x86(
     };
     let solver = create_solver_with_config(&solver_config);
     let initial = crate::semantics::smt_x86::MachineStateX86::new_symbolic("init", config.width);
-    let final1 = crate::semantics::smt_x86::apply_sequence(initial.clone(), seq1);
-    let final2 = crate::semantics::smt_x86::apply_sequence(initial, seq2);
+    let final1 = crate::semantics::smt_x86::apply_sequence(initial.clone(), prefix1);
+    let final2 = crate::semantics::smt_x86::apply_sequence(initial, prefix2);
 
     let mut disjuncts: Vec<z3::ast::Bool> = Vec::new();
     for reg in config.live_out.iter() {
         let v1 = final1.get_register(*reg);
         let v2 = final2.get_register(*reg);
         disjuncts.push(v1.eq(v2).not());
+    }
+    // When flags are live (caller-declared or forced by a peeled Jcc),
+    // any of the five tracked EFLAGS bits diverging refutes equivalence.
+    if config.live_out.flags_live() {
+        disjuncts.push(crate::semantics::smt_x86::flags_not_equal_x86(
+            &final1, &final2,
+        ));
     }
     let any_diff = if disjuncts.is_empty() {
         z3::ast::Bool::from_bool(false)
@@ -748,6 +897,18 @@ fn run_fast_path_x86(
                 );
             }
         }
+        // Also randomize the five tracked input EFLAGS bits from the
+        // same seed. Otherwise CMOV/Jcc-flag-reading instructions would
+        // see ZF=CF=SF=OF=PF=0 across every trial and a proposal that
+        // ignores incoming flags could pass the fast path (e.g.
+        // `cmovne rax, rbx` accepted as equivalent to `mov rax, rbx`).
+        let mut flags = crate::semantics::state::Eflags::new();
+        flags.cf = (seed & 1) != 0;
+        flags.pf = (seed & 2) != 0;
+        flags.zf = (seed & 4) != 0;
+        flags.sf = (seed & 8) != 0;
+        flags.of = (seed & 16) != 0;
+        state.set_flags(flags);
         let mut s1 = state.clone();
         for instr in seq1 {
             s1 = apply_instruction_concrete_x86(s1, instr);
@@ -890,6 +1051,202 @@ mod tests {
             .live_out(X86LiveOutMask::from_registers(vec![X86Register::RAX]));
         assert_eq!(
             check_equivalence_x86(&seq1, &seq2, &cfg),
+            EquivalenceResult::Equivalent
+        );
+    }
+
+    // --- SMT path catches flag-only divergence when flags_live ---
+
+    #[test]
+    fn x86_smt_path_distinguishes_cmps_with_different_operands_when_flags_live() {
+        // `cmp rax, rbx` and `cmp rax, rcx` both write EFLAGS symbolically
+        // (cycle 3) but their flag effects diverge whenever rbx != rcx.
+        // The SMT flag disjunct (cycle 4) must let Z3 find that model and
+        // refute equivalence under flags_live=true.
+        //
+        // Zero `random_test_count` to force-skip the fast path so the
+        // assertion lands squarely on the SMT solver path.
+        let seq1 = vec![X86Instruction::CmpReg {
+            rn: X86Register::RAX,
+            rs: X86Register::RBX,
+        }];
+        let seq2 = vec![X86Instruction::CmpReg {
+            rn: X86Register::RAX,
+            rs: X86Register::RCX,
+        }];
+        let mut cfg =
+            X86EquivalenceConfig::new(64).live_out(X86LiveOutMask::empty().with_flags(true));
+        cfg.random_test_count = 0;
+        assert!(matches!(
+            check_equivalence_x86(&seq1, &seq2, &cfg),
+            EquivalenceResult::NotEquivalent
+        ));
+    }
+
+    #[test]
+    fn x86_rejects_sequences_with_differing_jcc_terminators() {
+        use crate::isa::x86::X86Condition;
+        // Same prefix, different Jcc conditions => not equivalent.
+        let prefix = X86Instruction::CmpReg {
+            rn: X86Register::RAX,
+            rs: X86Register::RBX,
+        };
+        let seq_je = vec![
+            prefix,
+            X86Instruction::Jcc {
+                cond: X86Condition::E,
+            },
+        ];
+        let seq_jne = vec![
+            prefix,
+            X86Instruction::Jcc {
+                cond: X86Condition::NE,
+            },
+        ];
+        let cfg = X86EquivalenceConfig::new(64).live_out(X86LiveOutMask::empty());
+        assert!(matches!(
+            check_equivalence_x86(&seq_je, &seq_jne, &cfg),
+            EquivalenceResult::NotEquivalent
+        ));
+    }
+
+    #[test]
+    fn x86_accepts_sequences_with_matching_jcc_terminators() {
+        use crate::isa::x86::X86Condition;
+        let prefix = X86Instruction::CmpReg {
+            rn: X86Register::RAX,
+            rs: X86Register::RBX,
+        };
+        let jcc = X86Instruction::Jcc {
+            cond: X86Condition::E,
+        };
+        let seq1 = vec![prefix, jcc];
+        let seq2 = vec![prefix, jcc];
+        let cfg = X86EquivalenceConfig::new(64).live_out(X86LiveOutMask::empty());
+        assert_eq!(
+            check_equivalence_x86(&seq1, &seq2, &cfg),
+            EquivalenceResult::Equivalent
+        );
+    }
+
+    #[test]
+    fn x86_fast_path_distinguishes_cmov_from_unconditional_mov_under_random_flags() {
+        // Reviewer-supplied counterexample: `cmovne rax, rbx` should NOT
+        // be accepted as equivalent to `mov rax, rbx` because the
+        // original preserves rax when incoming ZF=1. The fast path must
+        // randomize incoming EFLAGS — not just registers — for any trial
+        // to hit a ZF=1 case and refute the rewrite.
+        use crate::isa::x86::X86Condition;
+        let target = vec![X86Instruction::Cmov {
+            rd: X86Register::RAX,
+            rs: X86Register::RBX,
+            cond: X86Condition::NE,
+        }];
+        let proposal = vec![X86Instruction::MovReg {
+            rd: X86Register::RAX,
+            rs: X86Register::RBX,
+        }];
+        let cfg = X86EquivalenceConfig::new(64)
+            .live_out(X86LiveOutMask::from_registers(vec![X86Register::RAX]))
+            .fast_only();
+        assert!(matches!(
+            check_equivalence_x86(&target, &proposal, &cfg),
+            EquivalenceResult::NotEquivalent
+        ));
+    }
+
+    #[test]
+    fn x86_jcc_terminator_forces_flag_observability_on_prefix() {
+        // Reviewer-supplied counterexample: a no-op `cmove rax, rax` prefix
+        // versus `xor rcx, rcx` prefix, with a fixed `je` terminator on both
+        // sides. Live-out is rax only (no caller-declared flags_live). The
+        // prefixes leave rax untouched, but XOR clobbers ZF — which the
+        // trailing `je` reads. Equivalence must reject; the Jcc terminator
+        // forces the prefix's EFLAGS effect to be observable.
+        use crate::isa::x86::X86Condition;
+        let target = vec![
+            X86Instruction::Cmov {
+                rd: X86Register::RAX,
+                rs: X86Register::RAX,
+                cond: X86Condition::E,
+            },
+            X86Instruction::Jcc {
+                cond: X86Condition::E,
+            },
+        ];
+        let proposal = vec![
+            X86Instruction::XorReg {
+                rd: X86Register::RCX,
+                rs: X86Register::RCX,
+            },
+            X86Instruction::Jcc {
+                cond: X86Condition::E,
+            },
+        ];
+        let cfg = X86EquivalenceConfig::new(64)
+            .live_out(X86LiveOutMask::from_registers(vec![X86Register::RAX]));
+        assert!(matches!(
+            check_equivalence_x86(&target, &proposal, &cfg),
+            EquivalenceResult::NotEquivalent
+        ));
+    }
+
+    #[test]
+    fn x86_rejects_terminator_present_on_only_one_side() {
+        use crate::isa::x86::X86Condition;
+        let prefix = X86Instruction::CmpReg {
+            rn: X86Register::RAX,
+            rs: X86Register::RBX,
+        };
+        let seq_with_jcc = vec![
+            prefix,
+            X86Instruction::Jcc {
+                cond: X86Condition::E,
+            },
+        ];
+        let seq_without = vec![prefix];
+        let cfg = X86EquivalenceConfig::new(64).live_out(X86LiveOutMask::empty());
+        assert!(matches!(
+            check_equivalence_x86(&seq_with_jcc, &seq_without, &cfg),
+            EquivalenceResult::NotEquivalent
+        ));
+    }
+
+    #[test]
+    fn x86_smt_path_treats_cmps_with_different_operands_as_equivalent_without_flags_live() {
+        // Without flags_live=true, the same CMP pair must still pass on
+        // the SMT path — the disjunct is gated on `flags_live`, and the
+        // register-disjunct list is empty (no live-out registers), so
+        // equivalence is vacuously true.
+        let seq1 = vec![X86Instruction::CmpReg {
+            rn: X86Register::RAX,
+            rs: X86Register::RBX,
+        }];
+        let seq2 = vec![X86Instruction::CmpReg {
+            rn: X86Register::RAX,
+            rs: X86Register::RCX,
+        }];
+        let mut cfg = X86EquivalenceConfig::new(64).live_out(X86LiveOutMask::empty());
+        cfg.random_test_count = 0;
+        assert_eq!(
+            check_equivalence_x86(&seq1, &seq2, &cfg),
+            EquivalenceResult::Equivalent
+        );
+    }
+
+    #[test]
+    fn x86_smt_path_equates_two_cmps_with_same_operands_under_flags_live() {
+        // Identical CMPs must remain equivalent on the SMT path even with
+        // flags_live=true — the flag-disjunct should be UNSAT.
+        let cmp = vec![X86Instruction::CmpReg {
+            rn: X86Register::RAX,
+            rs: X86Register::RBX,
+        }];
+        let mut cfg =
+            X86EquivalenceConfig::new(64).live_out(X86LiveOutMask::empty().with_flags(true));
+        cfg.random_test_count = 0;
+        assert_eq!(
+            check_equivalence_x86(&cmp.clone(), &cmp, &cfg),
             EquivalenceResult::Equivalent
         );
     }
@@ -2135,6 +2492,52 @@ mod tests {
         );
     }
 
+    /// Issue #241 regression: AArch64 variable LSL consumes only the low 6
+    /// bits of the shift amount, so `lsl x0, x1, x2` differs from a sequence
+    /// that forces x0 to zero whenever x2 >= 64. Before the fix the SMT
+    /// lowering matched Z3's `bvshl` (which zeroes when shift >= width),
+    /// so the equivalence checker certified the rewrite. With the shift
+    /// amount masked to `width - 1`, the divergence at `x2 = 64` is visible
+    /// either as a fast-path counterexample (random tester edge values) or
+    /// a full SMT refutation.
+    #[test]
+    fn test_lsl_reg_shift_amount_masked_for_equivalence() {
+        use crate::ir::types::Condition;
+
+        let target = vec![Instruction::Lsl {
+            rd: Register::X0,
+            rn: Register::X1,
+            shift: Operand::Register(Register::X2),
+        }];
+        let candidate = vec![
+            Instruction::Lsl {
+                rd: Register::X0,
+                rn: Register::X1,
+                shift: Operand::Register(Register::X2),
+            },
+            Instruction::Cmp {
+                rn: Register::X2,
+                rm: Operand::Immediate(64),
+            },
+            Instruction::Csel {
+                rd: Register::X0,
+                rn: Register::XZR,
+                rm: Register::X0,
+                cond: Condition::CS,
+            },
+        ];
+        let config = EquivalenceConfig::with_live_out(LiveOut::from_registers(vec![Register::X0]));
+        let result = check_equivalence_with_config(&target, &candidate, &config);
+        assert!(
+            matches!(
+                result,
+                EquivalenceResult::NotEquivalent | EquivalenceResult::NotEquivalentFast(_)
+            ),
+            "expected NotEquivalent or NotEquivalentFast for shift-mask divergence, got {:?}",
+            result
+        );
+    }
+
     // ===== Issue #69: terminator-identity precheck =====
 
     use crate::ir::LabelId;
@@ -2206,6 +2609,98 @@ mod tests {
             matches!(result, EquivalenceResult::Equivalent),
             "got {:?}",
             result
+        );
+    }
+
+    // Issue #240: when two sequences end in the same terminator, the prefix
+    // contract must be augmented with the terminator's input registers and
+    // flag reads. Otherwise a caller-supplied live-out that does not declare
+    // those inputs lets the equivalence layer accept prefixes that produce
+    // different branch behaviour with the same terminator.
+
+    /// Repro from issue #240: identical `cbz x0, L` terminators with prefixes
+    /// that disagree on x0 (one writes x1=7, the other writes x1=7 and then
+    /// x0=0). With `LiveOut = {X1}` and flags dead, the bug accepted them as
+    /// equivalent. The fix augments the prefix live-out with the terminator's
+    /// source registers (x0 here), so the fast path catches the divergence.
+    #[test]
+    fn check_equivalence_with_config_rejects_cbz_input_clobber() {
+        let term = Instruction::Cbz {
+            rn: Register::X0,
+            target: LabelId(0x1000),
+        };
+        let seq1 = vec![
+            Instruction::MovImm {
+                rd: Register::X1,
+                imm: 7,
+            },
+            term,
+        ];
+        let seq2 = vec![
+            Instruction::MovImm {
+                rd: Register::X1,
+                imm: 7,
+            },
+            Instruction::MovImm {
+                rd: Register::X0,
+                imm: 0,
+            },
+            term,
+        ];
+        let config = EquivalenceConfig::with_live_out(LiveOut::from_registers(vec![Register::X1]));
+        let result = check_equivalence_with_config(&seq1, &seq2, &config);
+        assert!(
+            matches!(
+                result,
+                EquivalenceResult::NotEquivalent | EquivalenceResult::NotEquivalentFast(_)
+            ),
+            "expected rejection for cbz-input clobber under {{X1}} live-out, got {:?}",
+            result
+        );
+    }
+
+    /// Repro from issue #240: identical `b.eq L` terminators with prefixes
+    /// that produce different NZCV (`cmp x0,#1` vs `cmp x0,#2`). With
+    /// `LiveOut = {}` and `flags_live = false`, the bug accepted them as
+    /// equivalent. The fix forces `flags_live = true` when the terminator
+    /// reads flags (BCond), so SMT proves the NZCV divergence.
+    ///
+    /// `flag_writers_diverge` returns false here (both prefixes write flags),
+    /// so the pre-SMT guard does not fire — we must reach the solver.
+    /// Pinned by asserting `metrics.smt_called == true`.
+    #[test]
+    fn check_equivalence_with_config_rejects_bcond_flag_divergence() {
+        let term = Instruction::BCond {
+            target: LabelId(0x1000),
+            cond: Condition::EQ,
+        };
+        let seq1 = vec![
+            Instruction::Cmp {
+                rn: Register::X0,
+                rm: Operand::Immediate(1),
+            },
+            term,
+        ];
+        let seq2 = vec![
+            Instruction::Cmp {
+                rn: Register::X0,
+                rm: Operand::Immediate(2),
+            },
+            term,
+        ];
+        let config = EquivalenceConfig::with_live_out(LiveOut::from_registers(vec![]));
+        let (result, metrics) = check_equivalence_with_config_metrics(&seq1, &seq2, &config);
+        assert!(
+            matches!(
+                result,
+                EquivalenceResult::NotEquivalent | EquivalenceResult::NotEquivalentFast(_)
+            ),
+            "expected rejection for b.eq with NZCV divergence under empty live-out, got {:?}",
+            result
+        );
+        assert!(
+            metrics.smt_called,
+            "SMT must be invoked to refute NZCV divergence reachable only via the augmented flags-live contract"
         );
     }
 

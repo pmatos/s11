@@ -254,6 +254,19 @@ impl InstructionType for Instruction {
             Instruction::Tbnz { .. } => 61,
             Instruction::Bl { .. } => 62,
             Instruction::Br { .. } => 63,
+
+            // Memory ops (issue #68). LDR/LDRB/LDRH share id 64 — the
+            // mnemonic table differentiates by `AccessWidth`; this id
+            // bucket is used only for coarse equality checks.
+            Instruction::Ldr { .. } => 64,
+            // Sign-extending loads (LDRSB / LDRSH / LDRSW).
+            Instruction::Ldrs { .. } => 65,
+            // Stores (STR / STRB / STRH).
+            Instruction::Str { .. } => 66,
+            // Pair loads (LDP, LDPSW).
+            Instruction::Ldp { .. } => 67,
+            // Pair store (STP).
+            Instruction::Stp { .. } => 68,
         }
     }
 
@@ -328,11 +341,56 @@ impl InstructionType for Instruction {
             Instruction::Tbnz { .. } => "tbnz",
             Instruction::Bl { .. } => "bl",
             Instruction::Br { .. } => "br",
+
+            // Memory ops (issue #68). LDR / LDRB / LDRH differ only by
+            // access width.
+            Instruction::Ldr { width, .. } => match width {
+                crate::ir::types::AccessWidth::Byte => "ldrb",
+                crate::ir::types::AccessWidth::Half => "ldrh",
+                crate::ir::types::AccessWidth::Word | crate::ir::types::AccessWidth::Extended => {
+                    "ldr"
+                }
+            },
+            // Sign-extending loads. `Extended` width is rejected by
+            // `is_encodable_aarch64`; fall through to "ldrsw" if it ever
+            // reaches here.
+            Instruction::Ldrs { width, .. } => match width {
+                crate::ir::types::AccessWidth::Byte => "ldrsb",
+                crate::ir::types::AccessWidth::Half => "ldrsh",
+                crate::ir::types::AccessWidth::Word | crate::ir::types::AccessWidth::Extended => {
+                    "ldrsw"
+                }
+            },
+            // Stores. STR / STRB / STRH; the X/W distinction is hidden in
+            // the AccessWidth (Extended vs Word).
+            Instruction::Str { width, .. } => match width {
+                crate::ir::types::AccessWidth::Byte => "strb",
+                crate::ir::types::AccessWidth::Half => "strh",
+                crate::ir::types::AccessWidth::Word | crate::ir::types::AccessWidth::Extended => {
+                    "str"
+                }
+            },
+            // LDP / LDPSW.
+            Instruction::Ldp { signed: true, .. } => "ldpsw",
+            Instruction::Ldp { signed: false, .. } => "ldp",
+            // STP.
+            Instruction::Stp { .. } => "stp",
         }
     }
 
     fn has_side_effects(&self) -> bool {
+        // Memory ops have observable side effects beyond NZCV: stores write
+        // memory, writeback modes mutate the base register, loads read from
+        // potentially-aliased memory. See ADR-0007.
         self.modifies_flags()
+            || matches!(
+                self,
+                Instruction::Ldr { .. }
+                    | Instruction::Ldrs { .. }
+                    | Instruction::Str { .. }
+                    | Instruction::Ldp { .. }
+                    | Instruction::Stp { .. }
+            )
     }
 }
 
@@ -1096,6 +1154,14 @@ impl InstructionGenerator<Instruction> for AArch64InstructionGenerator {
                     Instruction::Tbnz { rt, bit, target } => Instruction::Tbnz { rt, bit, target },
                     Instruction::Bl { target } => Instruction::Bl { target },
                     Instruction::Br { rn } => Instruction::Br { rn },
+                    // Memory ops: identity-mutate for now. Step 16 wires
+                    // dedicated rt/base/idx/offset rotation slots in
+                    // `mutate_operand` / `mutate_opcode`.
+                    Instruction::Ldr { .. }
+                    | Instruction::Ldrs { .. }
+                    | Instruction::Str { .. }
+                    | Instruction::Ldp { .. }
+                    | Instruction::Stp { .. } => *instruction,
                 }
             }
             2 => {
@@ -1485,6 +1551,13 @@ impl InstructionGenerator<Instruction> for AArch64InstructionGenerator {
                     Instruction::Tbnz { rt, bit, target } => Instruction::Tbnz { rt, bit, target },
                     Instruction::Bl { target } => Instruction::Bl { target },
                     Instruction::Br { rn } => Instruction::Br { rn },
+                    // Memory ops: identity-mutate for now. Step 16 wires
+                    // dedicated source-operand rotation slots.
+                    Instruction::Ldr { .. }
+                    | Instruction::Ldrs { .. }
+                    | Instruction::Str { .. }
+                    | Instruction::Ldp { .. }
+                    | Instruction::Stp { .. } => *instruction,
                 }
             }
             _ => unreachable!(),

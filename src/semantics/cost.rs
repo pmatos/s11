@@ -97,6 +97,16 @@ fn instruction_latency(instr: &Instruction) -> u64 {
         | Instruction::Tbnz { .. }
         | Instruction::Bl { .. }
         | Instruction::Br { .. } => 1,
+        // Loads (issue #68): Cortex-A72/A76 L1-hit latency ~ 4 cycles. See
+        // ADR-0007 §Consequences for the calibration rationale.
+        Instruction::Ldr { .. } | Instruction::Ldrs { .. } => 4,
+        // Stores commit to the L1 store buffer in 1 cycle.
+        Instruction::Str { .. } => 1,
+        // Pair loads take one extra cycle vs single load (issue address
+        // generation + two-register writeback).
+        Instruction::Ldp { .. } => 5,
+        // Pair stores: two store-buffer entries.
+        Instruction::Stp { .. } => 2,
     }
 }
 

@@ -53,6 +53,13 @@ fn instruction_code_size(instr: &X86Instruction, width: u32) -> u64 {
         | X86Instruction::OrImm { .. }
         | X86Instruction::XorImm { .. }
         | X86Instruction::CmpImm { .. } => 6 + rex,
+        // CMOV is `0F 4x ModR/M` = 3 bytes plus REX.W on 64-bit.
+        X86Instruction::Cmov { .. } => 3 + rex,
+        // Short-form Jcc is `7x rel8` = 2 bytes (no REX). Long-form
+        // `0F 8x rel32` = 6 bytes is used when the displacement doesn't
+        // fit. The optimizer never emits Jcc bytes (terminators stay
+        // pinned in the binary), so 2 is the conservative baseline.
+        X86Instruction::Jcc { .. } => 2,
     }
 }
 
@@ -141,5 +148,31 @@ mod tests {
         assert_eq!(sequence_cost(&seq, &CostMetric::CodeSize, 64), 6);
         // 2 + 2 = 4 bytes on x86-32.
         assert_eq!(sequence_cost(&seq, &CostMetric::CodeSize, 32), 4);
+    }
+
+    // --- CMOV / Jcc cost ---
+
+    #[test]
+    fn cmov_code_size_includes_rex_on_64_bit() {
+        use crate::isa::x86::X86Condition;
+        let cmov = X86Instruction::Cmov {
+            rd: X86Register::RAX,
+            rs: X86Register::RBX,
+            cond: X86Condition::E,
+        };
+        // CMOV is `0F 4x ModR/M` = 3 bytes, +1 for REX.W on x86-64.
+        assert_eq!(instruction_cost(&cmov, &CostMetric::CodeSize, 64), 4);
+        assert_eq!(instruction_cost(&cmov, &CostMetric::CodeSize, 32), 3);
+    }
+
+    #[test]
+    fn jcc_short_form_costs_two_bytes() {
+        use crate::isa::x86::X86Condition;
+        let jcc = X86Instruction::Jcc {
+            cond: X86Condition::NE,
+        };
+        // 0x7x + rel8 = 2 bytes regardless of mode.
+        assert_eq!(instruction_cost(&jcc, &CostMetric::CodeSize, 64), 2);
+        assert_eq!(instruction_cost(&jcc, &CostMetric::CodeSize, 32), 2);
     }
 }

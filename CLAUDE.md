@@ -165,6 +165,8 @@ To prevent drift, `convert_to_ir` does NOT maintain its own mnemonic switch — 
 
 The regression test `convert_capstone_op_handles_all_supported_aarch64_mnemonics` in `src/main.rs` pins one canonical operand string per supported mnemonic — extend it whenever you add an opcode so a future Capstone-syntax regression on that mnemonic fails loudly.
 
+For instructions with multiple destinations (LDP, pre/post-index writeback), use `Instruction::destinations() -> Vec<Register>` rather than the singleton `destination() -> Option<Register>`. Memory ops are non-terminator, do not modify NZCV, and have observable memory side effects — `has_side_effects()` and `EquivalenceConfig::memory_live` model the latter. See ADR-0007 for the design.
+
 ### Search Algorithms
 
 1. **Enumerative**: Exhaustively enumerate candidate sequences

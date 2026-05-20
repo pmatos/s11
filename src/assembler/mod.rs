@@ -1,6 +1,8 @@
 pub mod x86;
 
-use crate::ir::types::{Condition, ExtendKind, LabelId, ShiftKind};
+use crate::ir::types::{
+    AccessWidth, AddressOperand, Condition, ExtendKind, IndexMode, LabelId, ShiftKind,
+};
 use crate::ir::{Instruction, Operand, Register};
 use dynasmrt::{DynasmApi, dynasm};
 
@@ -288,6 +290,315 @@ macro_rules! emit_ccmp_imm {
             Condition::AL | Condition::NV => {
                 return Err("CCMP/CCMN forbid AL/NV per ARM ARM C6.2.36".to_string());
             }
+        }
+    }};
+}
+
+// ===== Memory-op encoder macros (issue #68 / ADR-0007) =====
+//
+// dynasm requires the register form (X / W), the modifier kind
+// (LSL / UXTW / SXTW / UXTX / SXTX), and the mnemonic itself to be
+// compile-time tokens. The macros below expand to a single dynasm! call
+// per addressing mode and accept the mnemonic + rt register form as
+// `ident` parameters so the encoder can dispatch on width without
+// duplicating the entire dynasm! invocation.
+
+/// `[base]` and `[base, #imm]` (positive scaled offset, dynasm `RefOffset`
+/// uses `Uscaled` → `u32`). The caller is responsible for routing negative
+/// / unscaled offsets to the LDUR-family macro below; the cast assumes the
+/// offset has already passed `can_use_scaled_offset`.
+macro_rules! emit_mem_imm_offset {
+    ($ops:expr, $mnem:ident, $rt_tok:ident, $rt:expr, $base:expr, $offset:expr) => {{
+        let rt_n: u8 = $rt;
+        let base_n: u8 = $base;
+        let off: u32 = $offset as u32;
+        if off == 0 {
+            dynasm!($ops ; .arch aarch64 ; $mnem $rt_tok(rt_n), [XSP(base_n)]);
+        } else {
+            dynasm!($ops ; .arch aarch64 ; $mnem $rt_tok(rt_n), [XSP(base_n), off]);
+        }
+    }};
+}
+
+/// LDUR / STUR-family (unscaled signed 9-bit). Used when the offset is
+/// negative or not divisible by the access width.
+macro_rules! emit_mem_imm_unscaled {
+    ($ops:expr, $mnem:ident, $rt_tok:ident, $rt:expr, $base:expr, $offset:expr) => {{
+        let rt_n: u8 = $rt;
+        let base_n: u8 = $base;
+        let off: i32 = $offset;
+        dynasm!($ops ; .arch aarch64 ; $mnem $rt_tok(rt_n), [XSP(base_n), off]);
+    }};
+}
+
+/// `[base, #imm]!` — pre-index writeback.
+macro_rules! emit_mem_imm_preindex {
+    ($ops:expr, $mnem:ident, $rt_tok:ident, $rt:expr, $base:expr, $offset:expr) => {{
+        let rt_n: u8 = $rt;
+        let base_n: u8 = $base;
+        let off: i32 = $offset;
+        dynasm!($ops ; .arch aarch64 ; $mnem $rt_tok(rt_n), [XSP(base_n), off]!);
+    }};
+}
+
+/// `[base], #imm` — post-index writeback.
+macro_rules! emit_mem_imm_postindex {
+    ($ops:expr, $mnem:ident, $rt_tok:ident, $rt:expr, $base:expr, $offset:expr) => {{
+        let rt_n: u8 = $rt;
+        let base_n: u8 = $base;
+        let off: i32 = $offset;
+        dynasm!($ops ; .arch aarch64 ; $mnem $rt_tok(rt_n), [XSP(base_n)], off);
+    }};
+}
+
+/// `[base, X(idx)]` and `[base, X(idx), LSL #shift]`. dynasm encodes the
+/// shift modifier; `shift` is the raw LSL amount (0 or `log2(access_bytes)`).
+macro_rules! emit_mem_reg {
+    ($ops:expr, $mnem:ident, $rt_tok:ident, $rt:expr, $base:expr, $idx:expr, $shift:expr) => {{
+        let rt_n: u8 = $rt;
+        let base_n: u8 = $base;
+        let idx_n: u8 = $idx;
+        let shift_n: u32 = $shift as u32;
+        if shift_n == 0 {
+            dynasm!($ops ; .arch aarch64 ; $mnem $rt_tok(rt_n), [XSP(base_n), X(idx_n)]);
+        } else {
+            dynasm!($ops ; .arch aarch64 ; $mnem $rt_tok(rt_n), [XSP(base_n), X(idx_n), LSL shift_n]);
+        }
+    }};
+}
+
+/// `[base, W/X(idx), UXTW/SXTW/UXTX/SXTX{, #shift}]`. UXTB/UXTH/SXTB/SXTH
+/// are rejected by `is_encodable_aarch64`; the macro errors at the catch-all
+/// arm for defensive depth.
+macro_rules! emit_mem_ext {
+    ($ops:expr, $mnem:ident, $rt_tok:ident, $rt:expr, $base:expr, $idx:expr, $kind:expr, $shift:expr) => {{
+        let rt_n: u8 = $rt;
+        let base_n: u8 = $base;
+        let idx_n: u8 = $idx;
+        let shift_n: u32 = $shift as u32;
+        match $kind {
+            ExtendKind::Uxtw => {
+                if shift_n == 0 {
+                    dynasm!($ops ; .arch aarch64 ; $mnem $rt_tok(rt_n), [XSP(base_n), W(idx_n), UXTW]);
+                } else {
+                    dynasm!($ops ; .arch aarch64 ; $mnem $rt_tok(rt_n), [XSP(base_n), W(idx_n), UXTW shift_n]);
+                }
+                Ok::<(), String>(())
+            }
+            ExtendKind::Sxtw => {
+                if shift_n == 0 {
+                    dynasm!($ops ; .arch aarch64 ; $mnem $rt_tok(rt_n), [XSP(base_n), W(idx_n), SXTW]);
+                } else {
+                    dynasm!($ops ; .arch aarch64 ; $mnem $rt_tok(rt_n), [XSP(base_n), W(idx_n), SXTW shift_n]);
+                }
+                Ok::<(), String>(())
+            }
+            ExtendKind::Sxtx => {
+                if shift_n == 0 {
+                    dynasm!($ops ; .arch aarch64 ; $mnem $rt_tok(rt_n), [XSP(base_n), X(idx_n), SXTX]);
+                } else {
+                    dynasm!($ops ; .arch aarch64 ; $mnem $rt_tok(rt_n), [XSP(base_n), X(idx_n), SXTX shift_n]);
+                }
+                Ok::<(), String>(())
+            }
+            // UXTX on an X-form index is architecturally equivalent to LSL
+            // (both select option=011 in the LDR-register encoding). dynasm
+            // disallows the UXTX token for memory operands but accepts the
+            // bare/LSL form, so dispatch through that. Mirrors GNU `as`,
+            // which silently rewrites `[Xn, Xm, UXTX]` to `[Xn, Xm]`.
+            ExtendKind::Uxtx => {
+                if shift_n == 0 {
+                    dynasm!($ops ; .arch aarch64 ; $mnem $rt_tok(rt_n), [XSP(base_n), X(idx_n)]);
+                } else {
+                    dynasm!($ops ; .arch aarch64 ; $mnem $rt_tok(rt_n), [XSP(base_n), X(idx_n), LSL shift_n]);
+                }
+                Ok::<(), String>(())
+            }
+            _ => Err(format!(
+                "{} cannot use extend kind {:?} (rejected by is_encodable_aarch64)",
+                stringify!($mnem),
+                $kind
+            )),
+        }
+    }};
+}
+
+/// Pair `[base]` / `[base, #imm]` — RefOffset (signed 7-bit scaled).
+macro_rules! emit_pair_imm_offset {
+    ($ops:expr, $mnem:ident, $rt_tok:ident, $rt1:expr, $rt2:expr, $base:expr, $offset:expr) => {{
+        let rt1_n: u8 = $rt1;
+        let rt2_n: u8 = $rt2;
+        let base_n: u8 = $base;
+        let off: i32 = $offset;
+        if off == 0 {
+            dynasm!($ops ; .arch aarch64 ; $mnem $rt_tok(rt1_n), $rt_tok(rt2_n), [XSP(base_n)]);
+        } else {
+            dynasm!($ops ; .arch aarch64 ; $mnem $rt_tok(rt1_n), $rt_tok(rt2_n), [XSP(base_n), off]);
+        }
+    }};
+}
+
+/// Pair `[base, #imm]!` — pre-index writeback.
+macro_rules! emit_pair_imm_preindex {
+    ($ops:expr, $mnem:ident, $rt_tok:ident, $rt1:expr, $rt2:expr, $base:expr, $offset:expr) => {{
+        let rt1_n: u8 = $rt1;
+        let rt2_n: u8 = $rt2;
+        let base_n: u8 = $base;
+        let off: i32 = $offset;
+        dynasm!($ops ; .arch aarch64 ; $mnem $rt_tok(rt1_n), $rt_tok(rt2_n), [XSP(base_n), off]!);
+    }};
+}
+
+/// Pair `[base], #imm` — post-index writeback.
+macro_rules! emit_pair_imm_postindex {
+    ($ops:expr, $mnem:ident, $rt_tok:ident, $rt1:expr, $rt2:expr, $base:expr, $offset:expr) => {{
+        let rt1_n: u8 = $rt1;
+        let rt2_n: u8 = $rt2;
+        let base_n: u8 = $base;
+        let off: i32 = $offset;
+        dynasm!($ops ; .arch aarch64 ; $mnem $rt_tok(rt1_n), $rt_tok(rt2_n), [XSP(base_n)], off);
+    }};
+}
+
+/// True if `offset` fits the LDR/STR positive unsigned-scaled immediate
+/// encoding for the given access width: `0..=4095 * width_bytes`, divisible
+/// by `width_bytes`. Negative or unscaled offsets must route to LDUR/STUR.
+fn can_use_scaled_offset(offset: i64, width_bytes: u32) -> bool {
+    if offset < 0 {
+        return false;
+    }
+    let scale = width_bytes as i64;
+    if scale == 0 || offset % scale != 0 {
+        return false;
+    }
+    let max_scaled = 4095i64 * scale;
+    offset <= max_scaled
+}
+
+/// True if `offset` fits the LDUR/STUR / pre/post-index 9-bit signed
+/// unscaled immediate (`-256..=255`).
+fn can_use_unscaled_offset(offset: i64) -> bool {
+    (-256..=255).contains(&offset)
+}
+
+/// Single-register load/store dispatcher. Selects between scaled positive
+/// (LDR/STR-family) and unscaled signed (LDUR/STUR-family) encoding for the
+/// `Imm + Offset` mode and routes pre-/post-index / register-offset /
+/// register-extend modes to their dedicated macros.
+macro_rules! encode_load_or_store_with {
+    ($ops:expr, $addr:expr, $rt_n:expr, $base_n:expr, $width:expr,
+     $mnem:ident, $unscaled_mnem:ident, $rt_tok:ident) => {{
+        match $addr {
+            AddressOperand::Imm {
+                offset,
+                mode: IndexMode::Offset,
+                ..
+            } => {
+                let off = i32::try_from(*offset)
+                    .map_err(|_| format!("offset {} out of i32 range", offset))?;
+                if can_use_scaled_offset(*offset, $width) {
+                    emit_mem_imm_offset!($ops, $mnem, $rt_tok, $rt_n, $base_n, off);
+                    Ok::<(), String>(())
+                } else if can_use_unscaled_offset(*offset) {
+                    emit_mem_imm_unscaled!($ops, $unscaled_mnem, $rt_tok, $rt_n, $base_n, off);
+                    Ok(())
+                } else {
+                    Err(format!(
+                        "offset {} not encodable for {}/{}",
+                        offset,
+                        stringify!($mnem),
+                        stringify!($unscaled_mnem),
+                    ))
+                }
+            }
+            AddressOperand::Imm {
+                offset,
+                mode: IndexMode::PreIndex,
+                ..
+            } => {
+                let off = i32::try_from(*offset)
+                    .map_err(|_| format!("offset {} out of i32 range", offset))?;
+                if !can_use_unscaled_offset(*offset) {
+                    return Err(format!(
+                        "pre-index offset {} out of 9-bit signed range",
+                        offset
+                    ));
+                }
+                emit_mem_imm_preindex!($ops, $mnem, $rt_tok, $rt_n, $base_n, off);
+                Ok(())
+            }
+            AddressOperand::Imm {
+                offset,
+                mode: IndexMode::PostIndex,
+                ..
+            } => {
+                let off = i32::try_from(*offset)
+                    .map_err(|_| format!("offset {} out of i32 range", offset))?;
+                if !can_use_unscaled_offset(*offset) {
+                    return Err(format!(
+                        "post-index offset {} out of 9-bit signed range",
+                        offset
+                    ));
+                }
+                emit_mem_imm_postindex!($ops, $mnem, $rt_tok, $rt_n, $base_n, off);
+                Ok(())
+            }
+            AddressOperand::Reg { idx, shift, .. } => {
+                let idx_n = register_to_dynasm(*idx)?;
+                emit_mem_reg!($ops, $mnem, $rt_tok, $rt_n, $base_n, idx_n, *shift);
+                Ok(())
+            }
+            AddressOperand::Ext {
+                idx, kind, shift, ..
+            } => {
+                let idx_n = register_to_dynasm(*idx)?;
+                emit_mem_ext!($ops, $mnem, $rt_tok, $rt_n, $base_n, idx_n, *kind, *shift)
+            }
+        }
+    }};
+}
+
+/// Pair load/store dispatcher (LDP/STP/LDPSW). Pair operations support
+/// only the three immediate addressing modes; Reg/Ext are rejected at the
+/// IR layer (`is_encodable_pair`).
+macro_rules! encode_pair_with {
+    ($ops:expr, $addr:expr, $rt1_n:expr, $rt2_n:expr, $base_n:expr,
+     $mnem:ident, $rt_tok:ident) => {{
+        match $addr {
+            AddressOperand::Imm {
+                offset,
+                mode: IndexMode::Offset,
+                ..
+            } => {
+                let off = i32::try_from(*offset)
+                    .map_err(|_| format!("offset {} out of i32 range", offset))?;
+                emit_pair_imm_offset!($ops, $mnem, $rt_tok, $rt1_n, $rt2_n, $base_n, off);
+                Ok::<(), String>(())
+            }
+            AddressOperand::Imm {
+                offset,
+                mode: IndexMode::PreIndex,
+                ..
+            } => {
+                let off = i32::try_from(*offset)
+                    .map_err(|_| format!("offset {} out of i32 range", offset))?;
+                emit_pair_imm_preindex!($ops, $mnem, $rt_tok, $rt1_n, $rt2_n, $base_n, off);
+                Ok(())
+            }
+            AddressOperand::Imm {
+                offset,
+                mode: IndexMode::PostIndex,
+                ..
+            } => {
+                let off = i32::try_from(*offset)
+                    .map_err(|_| format!("offset {} out of i32 range", offset))?;
+                emit_pair_imm_postindex!($ops, $mnem, $rt_tok, $rt1_n, $rt2_n, $base_n, off);
+                Ok(())
+            }
+            AddressOperand::Reg { .. } | AddressOperand::Ext { .. } => Err(format!(
+                "{} only supports immediate addressing modes",
+                stringify!($mnem)
+            )),
         }
     }};
 }
@@ -1449,6 +1760,115 @@ impl AArch64Assembler {
                 dynasm!(ops ; .arch aarch64 ; tbnz X(rt_reg), bit, offset);
                 Ok(())
             }
+            // Memory ops (issue #68). dynasm dispatch per width × mode.
+            Instruction::Ldr { rt, addr, width } => {
+                let rt_n = register_to_dynasm(*rt)?;
+                let base_n = register_to_dynasm_xsp(address_base_of(addr))?;
+                let bytes = width.bytes();
+                match width {
+                    AccessWidth::Byte => {
+                        encode_load_or_store_with!(ops, addr, rt_n, base_n, bytes, ldrb, ldurb, W)
+                    }
+                    AccessWidth::Half => {
+                        encode_load_or_store_with!(ops, addr, rt_n, base_n, bytes, ldrh, ldurh, W)
+                    }
+                    AccessWidth::Word => {
+                        encode_load_or_store_with!(ops, addr, rt_n, base_n, bytes, ldr, ldur, W)
+                    }
+                    AccessWidth::Extended => {
+                        encode_load_or_store_with!(ops, addr, rt_n, base_n, bytes, ldr, ldur, X)
+                    }
+                }
+            }
+            Instruction::Ldrs { rt, addr, width } => {
+                let rt_n = register_to_dynasm(*rt)?;
+                let base_n = register_to_dynasm_xsp(address_base_of(addr))?;
+                let bytes = width.bytes();
+                match width {
+                    AccessWidth::Byte => {
+                        encode_load_or_store_with!(ops, addr, rt_n, base_n, bytes, ldrsb, ldursb, X)
+                    }
+                    AccessWidth::Half => {
+                        encode_load_or_store_with!(ops, addr, rt_n, base_n, bytes, ldrsh, ldursh, X)
+                    }
+                    AccessWidth::Word => {
+                        encode_load_or_store_with!(ops, addr, rt_n, base_n, bytes, ldrsw, ldursw, X)
+                    }
+                    AccessWidth::Extended => {
+                        Err("LDRSX does not exist (Extended width rejected for Ldrs)".into())
+                    }
+                }
+            }
+            Instruction::Str { rt, addr, width } => {
+                let rt_n = register_to_dynasm(*rt)?;
+                let base_n = register_to_dynasm_xsp(address_base_of(addr))?;
+                let bytes = width.bytes();
+                match width {
+                    AccessWidth::Byte => {
+                        encode_load_or_store_with!(ops, addr, rt_n, base_n, bytes, strb, sturb, W)
+                    }
+                    AccessWidth::Half => {
+                        encode_load_or_store_with!(ops, addr, rt_n, base_n, bytes, strh, sturh, W)
+                    }
+                    AccessWidth::Word => {
+                        encode_load_or_store_with!(ops, addr, rt_n, base_n, bytes, str, stur, W)
+                    }
+                    AccessWidth::Extended => {
+                        encode_load_or_store_with!(ops, addr, rt_n, base_n, bytes, str, stur, X)
+                    }
+                }
+            }
+            Instruction::Ldp {
+                rt1,
+                rt2,
+                addr,
+                width,
+                signed,
+            } => {
+                let rt1_n = register_to_dynasm(*rt1)?;
+                let rt2_n = register_to_dynasm(*rt2)?;
+                let base_n = register_to_dynasm_xsp(address_base_of(addr))?;
+                match (width, signed) {
+                    (AccessWidth::Word, false) => {
+                        encode_pair_with!(ops, addr, rt1_n, rt2_n, base_n, ldp, W)
+                    }
+                    (AccessWidth::Word, true) => {
+                        encode_pair_with!(ops, addr, rt1_n, rt2_n, base_n, ldpsw, X)
+                    }
+                    (AccessWidth::Extended, false) => {
+                        encode_pair_with!(ops, addr, rt1_n, rt2_n, base_n, ldp, X)
+                    }
+                    (AccessWidth::Extended, true) => {
+                        Err("LDPSW only supports 32-bit access width".into())
+                    }
+                    (AccessWidth::Byte, _) | (AccessWidth::Half, _) => Err(format!(
+                        "LDP {:?} access width not supported (Word/Extended only)",
+                        width
+                    )),
+                }
+            }
+            Instruction::Stp {
+                rt1,
+                rt2,
+                addr,
+                width,
+            } => {
+                let rt1_n = register_to_dynasm(*rt1)?;
+                let rt2_n = register_to_dynasm(*rt2)?;
+                let base_n = register_to_dynasm_xsp(address_base_of(addr))?;
+                match width {
+                    AccessWidth::Word => {
+                        encode_pair_with!(ops, addr, rt1_n, rt2_n, base_n, stp, W)
+                    }
+                    AccessWidth::Extended => {
+                        encode_pair_with!(ops, addr, rt1_n, rt2_n, base_n, stp, X)
+                    }
+                    AccessWidth::Byte | AccessWidth::Half => Err(format!(
+                        "STP {:?} access width not supported (Word/Extended only)",
+                        width
+                    )),
+                }
+            }
         }
     }
 }
@@ -1500,6 +1920,17 @@ fn pc_relative_offset(target: LabelId, current_pc: u64, range: BranchRange) -> R
 impl Default for AArch64Assembler {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+/// Extract the base register from an `AddressOperand`. Mirrors
+/// `ir::instructions::address_base` which is module-private; the encoder
+/// keeps a local copy to avoid widening that surface.
+fn address_base_of(addr: &AddressOperand) -> Register {
+    match addr {
+        AddressOperand::Imm { base, .. }
+        | AddressOperand::Reg { base, .. }
+        | AddressOperand::Ext { base, .. } => *base,
     }
 }
 
@@ -3648,5 +4079,429 @@ mod tests {
             .unwrap();
         let insns = cs.disasm_all(&bytes, 0x1000).unwrap();
         assert_eq!(insns.iter().next().unwrap().mnemonic().unwrap(), "b.eq");
+    }
+
+    // ===== Memory-op assembler tests (issue #68 / ADR-0007) =====
+    //
+    // Each test assembles one IR instruction and disassembles it back via
+    // Capstone, then asserts the printed (mnemonic, op_str). LDUR / STUR
+    // strings appear when the encoder routes an unscaled-or-negative offset
+    // to the unscaled-signed encoding; they are pinned here so any
+    // regression that silently flips the dispatch wakes the test up.
+
+    fn assemble_one(instr: Instruction) -> Vec<u8> {
+        let mut a = AArch64Assembler::new();
+        a.assemble_instructions(&[instr], 0)
+            .unwrap_or_else(|e| panic!("encode failed: {e}"))
+    }
+
+    fn disasm_mnem_op(bytes: &[u8]) -> (String, String) {
+        use capstone::prelude::*;
+        let cs = Capstone::new()
+            .arm64()
+            .mode(arch::arm64::ArchMode::Arm)
+            .build()
+            .unwrap();
+        let insns = cs.disasm_all(bytes, 0x1000).unwrap();
+        assert_eq!(insns.len(), 1, "expected one instruction in {:?}", bytes);
+        let i = insns.iter().next().unwrap();
+        (
+            i.mnemonic().unwrap_or("").to_string(),
+            i.op_str().unwrap_or("").to_string(),
+        )
+    }
+
+    #[test]
+    fn ldr_x_offset_zero_encodes_as_ldr_xn_xn() {
+        let bytes = assemble_one(Instruction::Ldr {
+            rt: Register::X0,
+            addr: AddressOperand::Imm {
+                base: Register::X1,
+                offset: 0,
+                mode: IndexMode::Offset,
+            },
+            width: AccessWidth::Extended,
+        });
+        let (m, op) = disasm_mnem_op(&bytes);
+        assert_eq!(m, "ldr");
+        assert_eq!(op, "x0, [x1]");
+    }
+
+    #[test]
+    fn ldr_x_offset_positive_uses_scaled_encoding() {
+        let bytes = assemble_one(Instruction::Ldr {
+            rt: Register::X0,
+            addr: AddressOperand::Imm {
+                base: Register::X1,
+                offset: 8,
+                mode: IndexMode::Offset,
+            },
+            width: AccessWidth::Extended,
+        });
+        let (m, op) = disasm_mnem_op(&bytes);
+        assert_eq!(m, "ldr");
+        assert_eq!(op, "x0, [x1, #8]");
+    }
+
+    #[test]
+    fn ldr_x_offset_negative_routes_to_ldur() {
+        let bytes = assemble_one(Instruction::Ldr {
+            rt: Register::X0,
+            addr: AddressOperand::Imm {
+                base: Register::SP,
+                offset: -8,
+                mode: IndexMode::Offset,
+            },
+            width: AccessWidth::Extended,
+        });
+        let (m, op) = disasm_mnem_op(&bytes);
+        assert_eq!(m, "ldur");
+        assert_eq!(op, "x0, [sp, #-8]");
+    }
+
+    #[test]
+    fn ldr_w_word_width_uses_w_register_form() {
+        let bytes = assemble_one(Instruction::Ldr {
+            rt: Register::X3,
+            addr: AddressOperand::Imm {
+                base: Register::X1,
+                offset: 4,
+                mode: IndexMode::Offset,
+            },
+            width: AccessWidth::Word,
+        });
+        let (m, op) = disasm_mnem_op(&bytes);
+        assert_eq!(m, "ldr");
+        assert_eq!(op, "w3, [x1, #4]");
+    }
+
+    #[test]
+    fn ldrb_emits_byte_load_into_w_form() {
+        let bytes = assemble_one(Instruction::Ldr {
+            rt: Register::X2,
+            addr: AddressOperand::Imm {
+                base: Register::X1,
+                offset: 0,
+                mode: IndexMode::Offset,
+            },
+            width: AccessWidth::Byte,
+        });
+        let (m, op) = disasm_mnem_op(&bytes);
+        assert_eq!(m, "ldrb");
+        assert_eq!(op, "w2, [x1]");
+    }
+
+    #[test]
+    fn ldrsb_emits_sign_extending_byte_load_into_x_form() {
+        let bytes = assemble_one(Instruction::Ldrs {
+            rt: Register::X2,
+            addr: AddressOperand::Imm {
+                base: Register::X1,
+                offset: 0,
+                mode: IndexMode::Offset,
+            },
+            width: AccessWidth::Byte,
+        });
+        let (m, op) = disasm_mnem_op(&bytes);
+        assert_eq!(m, "ldrsb");
+        assert_eq!(op, "x2, [x1]");
+    }
+
+    #[test]
+    fn ldrsw_emits_sign_extending_word_load() {
+        let bytes = assemble_one(Instruction::Ldrs {
+            rt: Register::X4,
+            addr: AddressOperand::Imm {
+                base: Register::X1,
+                offset: 8,
+                mode: IndexMode::Offset,
+            },
+            width: AccessWidth::Word,
+        });
+        let (m, op) = disasm_mnem_op(&bytes);
+        assert_eq!(m, "ldrsw");
+        assert_eq!(op, "x4, [x1, #8]");
+    }
+
+    #[test]
+    fn str_x_pre_index_emits_writeback_form() {
+        let bytes = assemble_one(Instruction::Str {
+            rt: Register::X0,
+            addr: AddressOperand::Imm {
+                base: Register::SP,
+                offset: -16,
+                mode: IndexMode::PreIndex,
+            },
+            width: AccessWidth::Extended,
+        });
+        let (m, op) = disasm_mnem_op(&bytes);
+        assert_eq!(m, "str");
+        assert_eq!(op, "x0, [sp, #-0x10]!");
+    }
+
+    #[test]
+    fn ldr_x_post_index_emits_post_writeback_form() {
+        let bytes = assemble_one(Instruction::Ldr {
+            rt: Register::X0,
+            addr: AddressOperand::Imm {
+                base: Register::X1,
+                offset: 8,
+                mode: IndexMode::PostIndex,
+            },
+            width: AccessWidth::Extended,
+        });
+        let (m, op) = disasm_mnem_op(&bytes);
+        assert_eq!(m, "ldr");
+        assert_eq!(op, "x0, [x1], #8");
+    }
+
+    #[test]
+    fn ldr_x_register_offset_lsl_three() {
+        let bytes = assemble_one(Instruction::Ldr {
+            rt: Register::X0,
+            addr: AddressOperand::Reg {
+                base: Register::X1,
+                idx: Register::X2,
+                shift: 3,
+            },
+            width: AccessWidth::Extended,
+        });
+        let (m, op) = disasm_mnem_op(&bytes);
+        assert_eq!(m, "ldr");
+        assert_eq!(op, "x0, [x1, x2, lsl #3]");
+    }
+
+    #[test]
+    fn ldr_x_register_offset_no_shift_omits_lsl() {
+        let bytes = assemble_one(Instruction::Ldr {
+            rt: Register::X0,
+            addr: AddressOperand::Reg {
+                base: Register::X1,
+                idx: Register::X2,
+                shift: 0,
+            },
+            width: AccessWidth::Extended,
+        });
+        let (m, op) = disasm_mnem_op(&bytes);
+        assert_eq!(m, "ldr");
+        assert_eq!(op, "x0, [x1, x2]");
+    }
+
+    #[test]
+    fn ldr_x_uxtw_extended_index() {
+        let bytes = assemble_one(Instruction::Ldr {
+            rt: Register::X0,
+            addr: AddressOperand::Ext {
+                base: Register::X1,
+                idx: Register::X2,
+                kind: ExtendKind::Uxtw,
+                shift: 3,
+            },
+            width: AccessWidth::Extended,
+        });
+        let (m, op) = disasm_mnem_op(&bytes);
+        assert_eq!(m, "ldr");
+        assert_eq!(op, "x0, [x1, w2, uxtw #3]");
+    }
+
+    #[test]
+    fn ldr_x_sxtw_extended_index_no_shift() {
+        let bytes = assemble_one(Instruction::Ldr {
+            rt: Register::X0,
+            addr: AddressOperand::Ext {
+                base: Register::X1,
+                idx: Register::X2,
+                kind: ExtendKind::Sxtw,
+                shift: 0,
+            },
+            width: AccessWidth::Extended,
+        });
+        let (m, op) = disasm_mnem_op(&bytes);
+        assert_eq!(m, "ldr");
+        assert_eq!(op, "x0, [x1, w2, sxtw]");
+    }
+
+    #[test]
+    fn ldr_x_sxtx_extended_index() {
+        let bytes = assemble_one(Instruction::Ldr {
+            rt: Register::X0,
+            addr: AddressOperand::Ext {
+                base: Register::X1,
+                idx: Register::X2,
+                kind: ExtendKind::Sxtx,
+                shift: 3,
+            },
+            width: AccessWidth::Extended,
+        });
+        let (m, op) = disasm_mnem_op(&bytes);
+        assert_eq!(m, "ldr");
+        assert_eq!(op, "x0, [x1, x2, sxtx #3]");
+    }
+
+    #[test]
+    fn ldr_x_uxtx_extended_index_no_shift() {
+        // UXTX on an X-form index is architecturally equivalent to LSL #0.
+        // Capstone renders the canonical form (`[x1, x2]`) since dynasm
+        // emits option=011 with shift=0.
+        let bytes = assemble_one(Instruction::Ldr {
+            rt: Register::X0,
+            addr: AddressOperand::Ext {
+                base: Register::X1,
+                idx: Register::X2,
+                kind: ExtendKind::Uxtx,
+                shift: 0,
+            },
+            width: AccessWidth::Extended,
+        });
+        let (m, op) = disasm_mnem_op(&bytes);
+        assert_eq!(m, "ldr");
+        assert_eq!(op, "x0, [x1, x2]");
+    }
+
+    #[test]
+    fn ldr_x_uxtx_extended_index_shift_three() {
+        let bytes = assemble_one(Instruction::Ldr {
+            rt: Register::X0,
+            addr: AddressOperand::Ext {
+                base: Register::X1,
+                idx: Register::X2,
+                kind: ExtendKind::Uxtx,
+                shift: 3,
+            },
+            width: AccessWidth::Extended,
+        });
+        let (m, op) = disasm_mnem_op(&bytes);
+        assert_eq!(m, "ldr");
+        assert_eq!(op, "x0, [x1, x2, lsl #3]");
+    }
+
+    #[test]
+    fn ldp_x_offset_zero() {
+        let bytes = assemble_one(Instruction::Ldp {
+            rt1: Register::X0,
+            rt2: Register::X1,
+            addr: AddressOperand::Imm {
+                base: Register::SP,
+                offset: 0,
+                mode: IndexMode::Offset,
+            },
+            width: AccessWidth::Extended,
+            signed: false,
+        });
+        let (m, op) = disasm_mnem_op(&bytes);
+        assert_eq!(m, "ldp");
+        assert_eq!(op, "x0, x1, [sp]");
+    }
+
+    #[test]
+    fn ldp_x_pre_index_negative_offset() {
+        let bytes = assemble_one(Instruction::Ldp {
+            rt1: Register::X29,
+            rt2: Register::X30,
+            addr: AddressOperand::Imm {
+                base: Register::SP,
+                offset: -16,
+                mode: IndexMode::PreIndex,
+            },
+            width: AccessWidth::Extended,
+            signed: false,
+        });
+        let (m, op) = disasm_mnem_op(&bytes);
+        assert_eq!(m, "ldp");
+        assert_eq!(op, "x29, x30, [sp, #-0x10]!");
+    }
+
+    #[test]
+    fn stp_x_post_index_positive_offset() {
+        let bytes = assemble_one(Instruction::Stp {
+            rt1: Register::X29,
+            rt2: Register::X30,
+            addr: AddressOperand::Imm {
+                base: Register::SP,
+                offset: 16,
+                mode: IndexMode::PostIndex,
+            },
+            width: AccessWidth::Extended,
+        });
+        let (m, op) = disasm_mnem_op(&bytes);
+        assert_eq!(m, "stp");
+        assert_eq!(op, "x29, x30, [sp], #0x10");
+    }
+
+    #[test]
+    fn ldpsw_word_width_signed_emits_ldpsw() {
+        let bytes = assemble_one(Instruction::Ldp {
+            rt1: Register::X0,
+            rt2: Register::X1,
+            addr: AddressOperand::Imm {
+                base: Register::SP,
+                offset: 0,
+                mode: IndexMode::Offset,
+            },
+            width: AccessWidth::Word,
+            signed: true,
+        });
+        let (m, op) = disasm_mnem_op(&bytes);
+        assert_eq!(m, "ldpsw");
+        assert_eq!(op, "x0, x1, [sp]");
+    }
+
+    #[test]
+    fn ldp_w_word_width_uses_w_form() {
+        let bytes = assemble_one(Instruction::Ldp {
+            rt1: Register::X0,
+            rt2: Register::X1,
+            addr: AddressOperand::Imm {
+                base: Register::X2,
+                offset: 8,
+                mode: IndexMode::Offset,
+            },
+            width: AccessWidth::Word,
+            signed: false,
+        });
+        let (m, op) = disasm_mnem_op(&bytes);
+        assert_eq!(m, "ldp");
+        assert_eq!(op, "w0, w1, [x2, #8]");
+    }
+
+    #[test]
+    fn ldrs_extended_width_is_rejected() {
+        let mut a = AArch64Assembler::new();
+        let res = a.assemble_instructions(
+            &[Instruction::Ldrs {
+                rt: Register::X0,
+                addr: AddressOperand::Imm {
+                    base: Register::X1,
+                    offset: 0,
+                    mode: IndexMode::Offset,
+                },
+                width: AccessWidth::Extended,
+            }],
+            0,
+        );
+        assert!(
+            res.is_err(),
+            "LDRSX does not exist — encoder must reject Extended-width Ldrs"
+        );
+    }
+
+    #[test]
+    fn ldp_byte_width_is_rejected() {
+        let mut a = AArch64Assembler::new();
+        let res = a.assemble_instructions(
+            &[Instruction::Ldp {
+                rt1: Register::X0,
+                rt2: Register::X1,
+                addr: AddressOperand::Imm {
+                    base: Register::X2,
+                    offset: 0,
+                    mode: IndexMode::Offset,
+                },
+                width: AccessWidth::Byte,
+                signed: false,
+            }],
+            0,
+        );
+        assert!(res.is_err(), "LDP only supports Word/Extended widths");
     }
 }

@@ -18,6 +18,60 @@ use crate::isa::traits::{ISA, InstructionGenerator, InstructionType, OperandType
 use rand::{Rng, RngExt};
 use std::fmt;
 
+/// x86 condition codes consumed by CMOVcc / Jcc.
+///
+/// The 16 canonical codes here cover every short-form jump / cmov GAS
+/// emits. Aliases (`NB` for `AE`, `Z` for `E`, etc.) are normalized to
+/// the canonical variant by the parser, not represented here.
+///
+/// Kept distinct from AArch64's `Condition` because (a) x86's CF on
+/// subtraction has inverted polarity vs AArch64's C, and (b) the
+/// mnemonics differ (`e`/`ne` vs `eq`/`ne`), so a shared enum would
+/// invite cross-arch bugs.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum X86Condition {
+    E,  // equal / zero            (ZF=1)
+    NE, // not equal / not zero    (ZF=0)
+    B,  // below   (unsigned <)    (CF=1)
+    AE, // above-or-equal          (CF=0)
+    BE, // below-or-equal          (CF=1 | ZF=1)
+    A,  // above                   (CF=0 & ZF=0)
+    L,  // less    (signed <)      (SF!=OF)
+    GE, // greater-or-equal        (SF==OF)
+    LE, // less-or-equal           (ZF=1 | SF!=OF)
+    G,  // greater                 (ZF=0 & SF==OF)
+    S,  // sign (negative)         (SF=1)
+    NS, // not sign                (SF=0)
+    O,  // overflow                (OF=1)
+    NO, // not overflow            (OF=0)
+    P,  // parity-even             (PF=1)
+    NP, // parity-odd              (PF=0)
+}
+
+impl fmt::Display for X86Condition {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let s = match self {
+            X86Condition::E => "e",
+            X86Condition::NE => "ne",
+            X86Condition::B => "b",
+            X86Condition::AE => "ae",
+            X86Condition::BE => "be",
+            X86Condition::A => "a",
+            X86Condition::L => "l",
+            X86Condition::GE => "ge",
+            X86Condition::LE => "le",
+            X86Condition::G => "g",
+            X86Condition::S => "s",
+            X86Condition::NS => "ns",
+            X86Condition::O => "o",
+            X86Condition::NO => "no",
+            X86Condition::P => "p",
+            X86Condition::NP => "np",
+        };
+        f.write_str(s)
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum X86Register {
     RAX,
@@ -185,6 +239,19 @@ pub enum X86Instruction {
     CmpReg { rn: X86Register, rs: X86Register },
     /// `cmp rn, imm` — `rn - imm` discarding the result; sets EFLAGS.
     CmpImm { rn: X86Register, imm: i64 },
+    /// `cmovCC rd, rs` — conditional move. Reads EFLAGS;
+    /// when `cond` holds, writes `rd = rs`; otherwise `rd` is unchanged.
+    /// Does not modify EFLAGS.
+    Cmov {
+        rd: X86Register,
+        rs: X86Register,
+        cond: X86Condition,
+    },
+    /// `jCC <target>` — conditional branch. Reads EFLAGS;
+    /// modelled as an opaque terminator. The branch target is recovered
+    /// from the surrounding ELF disassembly and is not carried in the IR
+    /// — search holds terminators fixed (see `split_terminator_x86`).
+    Jcc { cond: X86Condition },
 }
 
 impl X86Instruction {
@@ -201,8 +268,11 @@ impl X86Instruction {
             | X86Instruction::OrReg { rd, .. }
             | X86Instruction::OrImm { rd, .. }
             | X86Instruction::XorReg { rd, .. }
-            | X86Instruction::XorImm { rd, .. } => Some(*rd),
-            X86Instruction::CmpReg { .. } | X86Instruction::CmpImm { .. } => None,
+            | X86Instruction::XorImm { rd, .. }
+            | X86Instruction::Cmov { rd, .. } => Some(*rd),
+            X86Instruction::CmpReg { .. }
+            | X86Instruction::CmpImm { .. }
+            | X86Instruction::Jcc { .. } => None,
         }
     }
 
@@ -215,6 +285,8 @@ impl X86Instruction {
             X86Instruction::OrReg { .. } | X86Instruction::OrImm { .. } => "or",
             X86Instruction::XorReg { .. } | X86Instruction::XorImm { .. } => "xor",
             X86Instruction::CmpReg { .. } | X86Instruction::CmpImm { .. } => "cmp",
+            X86Instruction::Cmov { .. } => "cmov",
+            X86Instruction::Jcc { .. } => "jcc",
         }
     }
 
@@ -240,7 +312,17 @@ impl X86Instruction {
             | X86Instruction::XorImm { rd, .. } => vec![*rd],
             X86Instruction::CmpReg { rn, rs } => vec![*rn, *rs],
             X86Instruction::CmpImm { rn, .. } => vec![*rn],
+            // Cmov reads both rd (kept on false branch) and rs.
+            X86Instruction::Cmov { rd, rs, .. } => vec![*rd, *rs],
+            X86Instruction::Jcc { .. } => vec![],
         }
+    }
+
+    /// Whether this instruction transfers control out of the
+    /// optimization window. Jcc terminators are held fixed by
+    /// `split_terminator_x86`; the search never synthesizes them.
+    pub fn is_terminator(&self) -> bool {
+        matches!(self, X86Instruction::Jcc { .. })
     }
 }
 
@@ -272,6 +354,8 @@ impl InstructionType for X86Instruction {
             X86Instruction::XorImm { .. } => 11,
             X86Instruction::CmpReg { .. } => 12,
             X86Instruction::CmpImm { .. } => 13,
+            X86Instruction::Cmov { .. } => 14,
+            X86Instruction::Jcc { .. } => 15,
         }
     }
 
@@ -280,12 +364,16 @@ impl InstructionType for X86Instruction {
     }
 
     fn has_side_effects(&self) -> bool {
-        // x86 MOV does not touch EFLAGS. Every other variant in the minimal
-        // core set sets or clobbers flag bits, which is observable state
-        // beyond the destination register.
+        // MOV / CMOV / Jcc do not write EFLAGS (CMOV and Jcc read them,
+        // but reading is not a side effect on observable state). Every
+        // other variant sets or clobbers flag bits, which is observable
+        // state beyond the destination register.
         !matches!(
             self,
-            X86Instruction::MovReg { .. } | X86Instruction::MovImm { .. }
+            X86Instruction::MovReg { .. }
+                | X86Instruction::MovImm { .. }
+                | X86Instruction::Cmov { .. }
+                | X86Instruction::Jcc { .. }
         )
     }
 }
@@ -308,6 +396,10 @@ impl fmt::Display for X86Instruction {
             | X86Instruction::XorImm { rd, imm } => write!(f, "{} {}, {}", mn, rd, imm),
             X86Instruction::CmpReg { rn, rs } => write!(f, "{} {}, {}", mn, rn, rs),
             X86Instruction::CmpImm { rn, imm } => write!(f, "{} {}, {}", mn, rn, imm),
+            // Render as e.g. `cmove rax, rbx` (mnemonic + condition suffix).
+            X86Instruction::Cmov { rd, rs, cond } => write!(f, "cmov{} {}, {}", cond, rd, rs),
+            // Target is opaque to the IR; render with a placeholder.
+            X86Instruction::Jcc { cond } => write!(f, "j{} <target>", cond),
         }
     }
 }
@@ -385,11 +477,28 @@ impl ISA for X86_32 {
 }
 
 /// Helper used by both `FlagsAnalysis<X86Instruction> for X86_64` and
-/// `for X86_32`: every x86 mnemonic except `Mov*` writes EFLAGS.
+/// `for X86_32`. MOV / CMOV / Jcc do not write EFLAGS — CMOV and Jcc
+/// read them via `x86_reads_flags` but do not modify any flag bit.
+/// Every other variant in the current set writes EFLAGS.
 fn x86_modifies_flags(instr: &X86Instruction) -> bool {
     !matches!(
         instr,
-        X86Instruction::MovReg { .. } | X86Instruction::MovImm { .. }
+        X86Instruction::MovReg { .. }
+            | X86Instruction::MovImm { .. }
+            | X86Instruction::Cmov { .. }
+            | X86Instruction::Jcc { .. }
+    )
+}
+
+/// CMOV and Jcc read EFLAGS; every other variant in the current set
+/// is flag-agnostic on the read side. Crate-visible so external
+/// callers (e.g. `find_shorter_equivalent_x86`) can route through one
+/// authoritative match arm — adding a future flag-reader like SETcc
+/// then updates exactly one place.
+pub fn x86_reads_flags(instr: &X86Instruction) -> bool {
+    matches!(
+        instr,
+        X86Instruction::Cmov { .. } | X86Instruction::Jcc { .. }
     )
 }
 
@@ -398,9 +507,8 @@ impl crate::isa::traits::FlagsAnalysis<X86Instruction> for X86_64 {
         x86_modifies_flags(instr)
     }
 
-    fn reads_flags(_instr: &X86Instruction) -> bool {
-        // No conditional ops in the current x86 mnemonic set.
-        false
+    fn reads_flags(instr: &X86Instruction) -> bool {
+        x86_reads_flags(instr)
     }
 }
 
@@ -409,8 +517,8 @@ impl crate::isa::traits::FlagsAnalysis<X86Instruction> for X86_32 {
         x86_modifies_flags(instr)
     }
 
-    fn reads_flags(_instr: &X86Instruction) -> bool {
-        false
+    fn reads_flags(instr: &X86Instruction) -> bool {
+        x86_reads_flags(instr)
     }
 }
 
@@ -567,6 +675,8 @@ impl crate::isa::traits::Assembler<X86Instruction> for X86_32 {
             | X86Instruction::XorImm { rd, .. } => reg_ok_32(*rd),
             X86Instruction::CmpReg { rn, rs } => reg_ok_32(*rn) && reg_ok_32(*rs),
             X86Instruction::CmpImm { rn, .. } => reg_ok_32(*rn),
+            X86Instruction::Cmov { rd, rs, .. } => reg_ok_32(*rd) && reg_ok_32(*rs),
+            X86Instruction::Jcc { .. } => true,
         }
     }
 }
@@ -711,6 +821,19 @@ impl X86Mutator {
                     *imm = self.pick_immediate(rng);
                 }
             }
+            X86Instruction::Cmov { rd, rs, .. } => {
+                // Cond stays fixed — stochastic mutation only swaps registers
+                // for now; cycle 16+ may add condition-bridging.
+                if rng.random_bool(0.5) {
+                    *rd = self.pick_register(rng);
+                } else {
+                    *rs = self.pick_register(rng);
+                }
+            }
+            // Jcc is a terminator; mutation never reaches it because the
+            // search pool excludes terminators. Keep the arm as a no-op
+            // so an accidental call doesn't panic.
+            X86Instruction::Jcc { .. } => {}
         }
     }
 
@@ -751,6 +874,11 @@ impl X86Mutator {
                 _ => X86Instruction::XorImm { rd, imm },
             },
             X86Instruction::CmpReg { .. } | X86Instruction::CmpImm { .. } => current,
+            // Cmov has a unique shape (rd, rs, cond) with no opcode-shape
+            // siblings; keep it unchanged in the opcode-bridge mutator.
+            X86Instruction::Cmov { .. } => current,
+            // Jcc is a terminator and should never reach mutation; preserve it.
+            X86Instruction::Jcc { .. } => current,
         };
     }
 
@@ -928,6 +1056,13 @@ fn with_destination(instr: X86Instruction, new_rd: X86Register) -> X86Instructio
         // CMP variants have rn instead of rd; mutate rn for symmetry.
         X86Instruction::CmpReg { rs, .. } => X86Instruction::CmpReg { rn: new_rd, rs },
         X86Instruction::CmpImm { imm, .. } => X86Instruction::CmpImm { rn: new_rd, imm },
+        X86Instruction::Cmov { rs, cond, .. } => X86Instruction::Cmov {
+            rd: new_rd,
+            rs,
+            cond,
+        },
+        // Jcc has no register operand; ignore the requested rd swap.
+        X86Instruction::Jcc { cond } => X86Instruction::Jcc { cond },
     }
 }
 
@@ -947,6 +1082,13 @@ fn with_sources(instr: X86Instruction, new_rs: X86Register, new_imm: i64) -> X86
         X86Instruction::XorImm { rd, .. } => X86Instruction::XorImm { rd, imm: new_imm },
         X86Instruction::CmpReg { rn, .. } => X86Instruction::CmpReg { rn, rs: new_rs },
         X86Instruction::CmpImm { rn, .. } => X86Instruction::CmpImm { rn, imm: new_imm },
+        // Cmov's `rs` is mutated; `cond` and `rd` carry through unchanged.
+        X86Instruction::Cmov { rd, cond, .. } => X86Instruction::Cmov {
+            rd,
+            rs: new_rs,
+            cond,
+        },
+        X86Instruction::Jcc { cond } => X86Instruction::Jcc { cond },
     }
 }
 
@@ -1572,5 +1714,114 @@ mod tests {
                 }
             }
         }
+    }
+
+    // --- Jcc IR + is_terminator ---
+
+    #[test]
+    fn jcc_is_terminator() {
+        let jcc = X86Instruction::Jcc {
+            cond: X86Condition::E,
+        };
+        assert!(jcc.is_terminator());
+    }
+
+    #[test]
+    fn non_jcc_x86_instructions_are_not_terminators() {
+        assert!(
+            !X86Instruction::MovImm {
+                rd: X86Register::RAX,
+                imm: 0
+            }
+            .is_terminator()
+        );
+        assert!(
+            !X86Instruction::CmpReg {
+                rn: X86Register::RAX,
+                rs: X86Register::RBX
+            }
+            .is_terminator()
+        );
+        assert!(
+            !X86Instruction::Cmov {
+                rd: X86Register::RAX,
+                rs: X86Register::RBX,
+                cond: X86Condition::E
+            }
+            .is_terminator()
+        );
+    }
+
+    #[test]
+    fn jcc_has_no_destination_and_no_source_registers() {
+        let jcc = X86Instruction::Jcc {
+            cond: X86Condition::NE,
+        };
+        assert_eq!(jcc.destination(), None);
+        assert!(jcc.source_registers().is_empty());
+    }
+
+    #[test]
+    fn jcc_does_not_modify_flags_and_has_no_side_effects() {
+        let jcc = X86Instruction::Jcc {
+            cond: X86Condition::B,
+        };
+        assert!(!x86_modifies_flags(&jcc));
+        assert!(!jcc.has_side_effects());
+    }
+
+    // --- FlagsAnalysis::reads_flags wired for Cmov / Jcc ---
+
+    #[test]
+    fn x86_64_reads_flags_returns_true_for_cmov_and_jcc() {
+        use crate::isa::traits::FlagsAnalysis;
+        let cmov = X86Instruction::Cmov {
+            rd: X86Register::RAX,
+            rs: X86Register::RBX,
+            cond: X86Condition::E,
+        };
+        let jcc = X86Instruction::Jcc {
+            cond: X86Condition::NE,
+        };
+        assert!(<X86_64 as FlagsAnalysis<X86Instruction>>::reads_flags(
+            &cmov
+        ));
+        assert!(<X86_64 as FlagsAnalysis<X86Instruction>>::reads_flags(&jcc));
+    }
+
+    #[test]
+    fn x86_32_reads_flags_returns_true_for_cmov_and_jcc() {
+        use crate::isa::traits::FlagsAnalysis;
+        let cmov = X86Instruction::Cmov {
+            rd: X86Register::RAX,
+            rs: X86Register::RBX,
+            cond: X86Condition::E,
+        };
+        let jcc = X86Instruction::Jcc {
+            cond: X86Condition::NE,
+        };
+        assert!(<X86_32 as FlagsAnalysis<X86Instruction>>::reads_flags(
+            &cmov
+        ));
+        assert!(<X86_32 as FlagsAnalysis<X86Instruction>>::reads_flags(&jcc));
+    }
+
+    #[test]
+    fn x86_reads_flags_returns_false_for_non_condition_ops() {
+        use crate::isa::traits::FlagsAnalysis;
+        let mov = X86Instruction::MovImm {
+            rd: X86Register::RAX,
+            imm: 0,
+        };
+        let add = X86Instruction::AddReg {
+            rd: X86Register::RAX,
+            rs: X86Register::RBX,
+        };
+        assert!(!<X86_64 as FlagsAnalysis<X86Instruction>>::reads_flags(
+            &mov
+        ));
+        assert!(!<X86_64 as FlagsAnalysis<X86Instruction>>::reads_flags(
+            &add
+        ));
     }
 }

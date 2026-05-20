@@ -1,9 +1,18 @@
 //! Random input generation for fast validation
 
 use crate::ir::Register;
+use crate::ir::types::AccessWidth;
 use crate::semantics::state::ConcreteMachineState;
 use rand::RngExt;
 use std::collections::HashMap;
+
+/// Base address of the random-input memory seed region. See ADR-0007.
+pub const MEMORY_SEED_BASE: u64 = 0x1000_0000;
+
+/// Size of the random-input memory seed region in bytes. 4 KiB matches a
+/// page; large enough to exercise meaningful overlap patterns yet small
+/// enough that filling it stays cheap.
+pub const MEMORY_SEED_SIZE: usize = 4096;
 
 /// Configuration for random input generation
 #[derive(Debug, Clone)]
@@ -12,6 +21,12 @@ pub struct RandomInputConfig {
     pub count: usize,
     /// Registers to randomize (others will be zero)
     pub registers: Vec<Register>,
+    /// If non-zero, seed each generated state's memory with this many
+    /// random bytes starting at `MEMORY_SEED_BASE`. Default 0 (no seed).
+    /// Set to `MEMORY_SEED_SIZE` for memory-bearing windows so memory
+    /// loads return non-trivial values during fast / counterexample
+    /// random testing.
+    pub memory_seed_size: usize,
 }
 
 impl Default for RandomInputConfig {
@@ -26,6 +41,7 @@ impl Default for RandomInputConfig {
                 Register::X4,
                 Register::X5,
             ],
+            memory_seed_size: 0,
         }
     }
 }
@@ -40,7 +56,18 @@ pub fn generate_random_inputs(config: &RandomInputConfig) -> Vec<ConcreteMachine
         for reg in &config.registers {
             values.insert(*reg, rng.random::<u64>());
         }
-        inputs.push(ConcreteMachineState::from_values(values));
+        let mut state = ConcreteMachineState::from_values(values);
+        if config.memory_seed_size > 0 {
+            for i in 0..config.memory_seed_size {
+                let byte = rng.random::<u8>();
+                state.write_bytes(
+                    MEMORY_SEED_BASE.wrapping_add(i as u64),
+                    byte as u64,
+                    AccessWidth::Byte,
+                );
+            }
+        }
+        inputs.push(state);
     }
 
     inputs
@@ -191,6 +218,7 @@ mod tests {
         let config = RandomInputConfig {
             count: 5,
             registers: vec![Register::X0, Register::X1],
+            memory_seed_size: 0,
         };
         let inputs = generate_random_inputs(&config);
         assert_eq!(inputs.len(), 5);
@@ -208,6 +236,7 @@ mod tests {
         let config = RandomInputConfig {
             count: 10,
             registers: vec![Register::X0],
+            memory_seed_size: 0,
         };
         let inputs = generate_random_inputs(&config);
 
@@ -221,6 +250,46 @@ mod tests {
             .collect::<std::collections::HashSet<_>>()
             .len();
         assert!(unique_count > 1);
+    }
+
+    #[test]
+    fn memory_seed_populates_region_when_size_nonzero() {
+        let config = RandomInputConfig {
+            count: 4,
+            registers: vec![Register::X0],
+            memory_seed_size: MEMORY_SEED_SIZE,
+        };
+        let inputs = generate_random_inputs(&config);
+        // At least one input must have a non-empty memory map (the random
+        // bytes might all be zero, but with 4 KiB of random bytes and four
+        // independent draws the probability of every byte being zero is
+        // 256^-(4*4096) — vastly below 2^-256, indistinguishable from zero).
+        let any_populated = inputs.iter().any(|s| !s.memory().is_empty());
+        assert!(any_populated, "memory seed produced no entries");
+        // Every populated byte must lie inside [MEMORY_SEED_BASE,
+        // MEMORY_SEED_BASE + MEMORY_SEED_SIZE).
+        for s in &inputs {
+            for &addr in s.memory().keys() {
+                assert!(
+                    (MEMORY_SEED_BASE..MEMORY_SEED_BASE + MEMORY_SEED_SIZE as u64).contains(&addr),
+                    "address 0x{:x} outside seed region",
+                    addr
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn memory_seed_default_zero_leaves_memory_empty() {
+        let config = RandomInputConfig {
+            count: 4,
+            registers: vec![Register::X0],
+            memory_seed_size: 0,
+        };
+        let inputs = generate_random_inputs(&config);
+        for s in &inputs {
+            assert!(s.memory().is_empty(), "memory must stay empty without seed");
+        }
     }
 
     #[test]

@@ -10,6 +10,7 @@ pub const AARCH64_REWRITABLE_MNEMONICS: &[&str] = &[
     "msub", "mneg", "smulh", "umulh", "sdiv", "udiv", "cmp", "cmn", "tst", "ccmp", "ccmn", "csel",
     "csinc", "csinv", "csneg", "cset", "csetm", "clz", "cls", "rbit", "rev", "rev32", "rev16",
     "uxtb", "uxth", "sxtb", "sxth", "sxtw", "ubfx", "sbfx", "bfi", "bfxil", "ubfiz", "sbfiz",
+    "ldr", "ldrb", "ldrh", "ldrsb", "ldrsh", "ldrsw", "str", "strb", "strh", "ldp", "stp", "ldpsw",
 ];
 
 pub const AARCH64_FIXED_TERMINATORS: &[&str] = &[

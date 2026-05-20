@@ -1,6 +1,8 @@
 //! AArch64 instruction definitions for the IR
 
-use crate::ir::types::{Condition, LabelId, Operand, Register, ShiftKind};
+use crate::ir::types::{
+    AccessWidth, AddressOperand, Condition, IndexMode, LabelId, Operand, Register, ShiftKind,
+};
 use std::fmt;
 
 /// Legal `lsl` amounts for the move-wide immediate family (MOVN / MOVZ / MOVK).
@@ -14,6 +16,65 @@ pub const MOVW_LEGAL_SHIFTS: [u8; 4] = [0, 16, 32, 48];
 /// AND/ORR/EOR/TST/ANDS immediate forms). Delegates to dynasmrt's encoder.
 fn logical_imm64_encodable(imm: i64) -> bool {
     dynasmrt::aarch64::encode_logical_immediate_64bit(imm as u64).is_some()
+}
+
+/// Helper for `Instruction::destinations` on single-register memory ops: the
+/// data register is always written, and PreIndex/PostIndex modes additionally
+/// write the base register through writeback. See ADR-0007.
+#[allow(dead_code)]
+fn writeback_destinations(rt: Register, addr: &AddressOperand) -> Vec<Register> {
+    match addr {
+        AddressOperand::Imm {
+            base,
+            mode: IndexMode::PreIndex,
+            ..
+        }
+        | AddressOperand::Imm {
+            base,
+            mode: IndexMode::PostIndex,
+            ..
+        } => vec![rt, *base],
+        _ => vec![rt],
+    }
+}
+
+/// Helper for `Instruction::destinations` on LDP-family ops: two register
+/// destinations plus the writeback base when applicable. See ADR-0007.
+#[allow(dead_code)]
+fn pair_load_destinations(rt1: Register, rt2: Register, addr: &AddressOperand) -> Vec<Register> {
+    match addr {
+        AddressOperand::Imm {
+            base,
+            mode: IndexMode::PreIndex,
+            ..
+        }
+        | AddressOperand::Imm {
+            base,
+            mode: IndexMode::PostIndex,
+            ..
+        } => vec![rt1, rt2, *base],
+        _ => vec![rt1, rt2],
+    }
+}
+
+/// Helper for `Instruction::destinations` on store ops: `rt` is read (not
+/// written), so the only destination is the writeback base — and only in
+/// PreIndex / PostIndex modes. See ADR-0007.
+#[allow(dead_code)]
+fn store_destinations(addr: &AddressOperand) -> Vec<Register> {
+    match addr {
+        AddressOperand::Imm {
+            base,
+            mode: IndexMode::PreIndex,
+            ..
+        }
+        | AddressOperand::Imm {
+            base,
+            mode: IndexMode::PostIndex,
+            ..
+        } => vec![*base],
+        _ => vec![],
+    }
 }
 
 /// AArch64 instructions supported by the IR
@@ -399,9 +460,72 @@ pub enum Instruction {
     Br {
         rn: Register,
     },
+
+    // Memory ops — see ADR-0007.
+    /// LDR / LDRB / LDRH — zero-extended load into `rt`. With PreIndex or
+    /// PostIndex mode the base register is also written (writeback).
+    Ldr {
+        rt: Register,
+        addr: AddressOperand,
+        width: AccessWidth,
+    },
+    /// LDRSB / LDRSH / LDRSW — sign-extending load into `rt` (always
+    /// X-form destination). Writeback handled identically to `Ldr`.
+    Ldrs {
+        rt: Register,
+        addr: AddressOperand,
+        width: AccessWidth,
+    },
+    /// STR / STRB / STRH — store `rt` into memory. `rt` is a *source*
+    /// register (no register destination); PreIndex / PostIndex modes
+    /// still write the base register through writeback.
+    Str {
+        rt: Register,
+        addr: AddressOperand,
+        width: AccessWidth,
+    },
+    /// LDP / LDPSW — load a pair of registers. Writeback writes the base
+    /// register as a third destination. `signed=true` is legal only when
+    /// `width == Word` (LDPSW); this is enforced by `is_encodable_aarch64`.
+    Ldp {
+        rt1: Register,
+        rt2: Register,
+        addr: AddressOperand,
+        width: AccessWidth,
+        signed: bool,
+    },
+    /// STP — store a pair of registers. `rt1`/`rt2` are read; writeback
+    /// addressing modes mutate the base register.
+    Stp {
+        rt1: Register,
+        rt2: Register,
+        addr: AddressOperand,
+        width: AccessWidth,
+    },
 }
 
 impl Instruction {
+    /// Registers this instruction writes (in canonical order). Empty for
+    /// pure flag-setters and branches; one entry for single-destination
+    /// arithmetic and logical ops; two entries for LDP and writeback
+    /// addressing modes (post-/pre-index update the base register as well
+    /// as the data register). See ADR-0007.
+    #[allow(dead_code)]
+    pub fn destinations(&self) -> Vec<Register> {
+        match self {
+            Instruction::Ldr { rt, addr, .. } | Instruction::Ldrs { rt, addr, .. } => {
+                writeback_destinations(*rt, addr)
+            }
+            Instruction::Str { addr, .. } => store_destinations(addr),
+            Instruction::Ldp { rt1, rt2, addr, .. } => pair_load_destinations(*rt1, *rt2, addr),
+            Instruction::Stp { addr, .. } => store_destinations(addr),
+            _ => match self.destination() {
+                Some(r) => vec![r],
+                None => Vec::new(),
+            },
+        }
+    }
+
     /// Get the destination register for this instruction (None for comparison instructions)
     #[allow(dead_code)]
     pub fn destination(&self) -> Option<Register> {
@@ -477,6 +601,15 @@ impl Instruction {
             | Instruction::Tbnz { .. }
             | Instruction::Bl { .. }
             | Instruction::Br { .. } => None,
+            // Memory ops may have multiple destinations (writeback) — callers
+            // must use `destinations()` instead. `destination()` is retained
+            // only for migration; it returns `None` here to avoid silently
+            // hiding the base-register writeback. See ADR-0007.
+            Instruction::Ldr { .. }
+            | Instruction::Ldrs { .. }
+            | Instruction::Str { .. }
+            | Instruction::Ldp { .. }
+            | Instruction::Stp { .. } => None,
         }
     }
 
@@ -505,6 +638,21 @@ impl Instruction {
 /// terminator. Issue #69: shared by the search splitter (`find_shorter_equivalent`)
 /// and the equivalence precheck (`check_equivalence*`).
 pub fn split_terminator(seq: &[Instruction]) -> (&[Instruction], Option<&Instruction>) {
+    match seq.last() {
+        Some(last) if last.is_terminator() => (&seq[..seq.len() - 1], Some(last)),
+        _ => (seq, None),
+    }
+}
+
+/// x86 mirror of `split_terminator`. Peels a trailing Jcc
+/// off the sequence so the optimizer can reason about the straight-line
+/// prefix while leaving the branch terminator pinned in the binary.
+pub fn split_terminator_x86(
+    seq: &[crate::isa::x86::X86Instruction],
+) -> (
+    &[crate::isa::x86::X86Instruction],
+    Option<&crate::isa::x86::X86Instruction>,
+) {
     match seq.last() {
         Some(last) if last.is_terminator() => (&seq[..seq.len() - 1], Some(last)),
         _ => (seq, None),
@@ -807,6 +955,33 @@ impl Instruction {
             | Instruction::Br { .. } => true,
             Instruction::BCond { cond, .. } => !matches!(cond, Condition::AL | Condition::NV),
             Instruction::Tbz { bit, .. } | Instruction::Tbnz { bit, .. } => *bit <= 63,
+
+            // Memory ops (issue #68). See ADR-0007.
+            Instruction::Ldr { rt, addr, width } | Instruction::Str { rt, addr, width } => {
+                is_encodable_ldr_like(*rt, addr, *width)
+            }
+            // LDRSB/LDRSH/LDRSW — no LDRSX, so reject Extended.
+            Instruction::Ldrs { rt, addr, width } => {
+                if *width == AccessWidth::Extended {
+                    return false;
+                }
+                is_encodable_ldr_like(*rt, addr, *width)
+            }
+            // LDP additionally rejects rt1==rt2 (UNPREDICTABLE).
+            Instruction::Ldp {
+                rt1,
+                rt2,
+                addr,
+                width,
+                signed,
+            } => *rt1 != *rt2 && is_encodable_pair(*rt1, *rt2, addr, *width, *signed),
+            // STP allows rt1==rt2 (stores the same value twice).
+            Instruction::Stp {
+                rt1,
+                rt2,
+                addr,
+                width,
+            } => is_encodable_pair(*rt1, *rt2, addr, *width, false),
         }
     }
 
@@ -940,7 +1115,165 @@ impl Instruction {
             Instruction::Cbz { rn, .. } | Instruction::Cbnz { rn, .. } => vec![*rn],
             Instruction::Tbz { rt, .. } | Instruction::Tbnz { rt, .. } => vec![*rt],
             Instruction::Ret { rn } | Instruction::Br { rn } => vec![*rn],
+            // Memory ops read the base register; register-offset / register-
+            // extend modes also read the index register. Stores additionally
+            // read the data register, but LDR does not (the data register is
+            // a destination).
+            Instruction::Ldr { addr, .. } | Instruction::Ldrs { addr, .. } => {
+                address_source_registers(addr)
+            }
+            Instruction::Str { rt, addr, .. } => {
+                let mut regs = vec![*rt];
+                regs.extend(address_source_registers(addr));
+                regs
+            }
+            // LDP reads only the address operand (base/idx); rt1 and rt2 are
+            // destinations.
+            Instruction::Ldp { addr, .. } => address_source_registers(addr),
+            // STP reads rt1, rt2, and the address operand.
+            Instruction::Stp { rt1, rt2, addr, .. } => {
+                let mut regs = vec![*rt1, *rt2];
+                regs.extend(address_source_registers(addr));
+                regs
+            }
         }
+    }
+}
+
+/// Helper for `Instruction::source_registers` on memory ops. Returns the
+/// registers read by an `AddressOperand`: always the base, plus the index
+/// register for Reg/Ext modes.
+fn address_source_registers(addr: &AddressOperand) -> Vec<Register> {
+    match addr {
+        AddressOperand::Imm { base, .. } => vec![*base],
+        AddressOperand::Reg { base, idx, .. } | AddressOperand::Ext { base, idx, .. } => {
+            vec![*base, *idx]
+        }
+    }
+}
+
+/// Encodability gate for the LDR / LDRS / STR family. Rules per ADR-0007:
+/// (a) base register cannot be XZR (the XSP slot rejects the zero register
+/// — SP is accepted); (b) `rt` cannot be SP (loads/stores use Xt/Wt
+/// slots); XZR is legal — `str xzr, [x0]` zero-stores and `ldr xzr, [x0]`
+/// discards the load per ARM ARM C6.2.131 / C6.2.205; (c) writeback
+/// `rt == base` is CONSTRAINED UNPREDICTABLE and rejected at the IR
+/// level; (d) signed loads only support B/H/W access widths (LDRSX does
+/// not exist — LDR handles 64-bit zero-extension); (e) for `Reg` / `Ext`
+/// address modes the index register cannot be SP — the Rm field encodes
+/// X0..X30 / XZR, not SP (`register_to_dynasm(SP)` returns None).
+fn is_encodable_ldr_like(rt: Register, addr: &AddressOperand, width: AccessWidth) -> bool {
+    if rt == Register::SP {
+        return false;
+    }
+    if address_base(addr) == Register::XZR {
+        return false;
+    }
+    if is_writeback(addr) && rt == address_base(addr) {
+        return false;
+    }
+    match addr {
+        AddressOperand::Reg { idx, .. } | AddressOperand::Ext { idx, .. } => {
+            if *idx == Register::SP {
+                return false;
+            }
+        }
+        AddressOperand::Imm { .. } => {}
+    }
+    if width == AccessWidth::Extended {
+        // The caller decides whether Extended is valid (LDR allows it, but
+        // is_encodable_ldr_like is also used for LDRS where it isn't). The
+        // Ldrs arm of is_encodable_aarch64 rejects Extended explicitly
+        // below; this helper conservatively allows it and the variant arm
+        // layers on the narrower rule.
+    }
+    true
+}
+
+/// Encodability gate for the LDP / STP family. See `is_encodable_ldr_like`
+/// for the shared base/XZR rules; pair-specific rules layered below.
+///
+/// Reject paths (codex P2 + claude review #8):
+///   * Non-immediate addressing — LDP/STP only accept `[base{, #imm}]`,
+///     `[base, #imm]!`, `[base], #imm`. `AddressOperand::Reg` / `Ext`
+///     parse cleanly today but the assembler errors at emit time, so
+///     drop them at the IR layer for parity with `parse_line`'s gate.
+///   * Out-of-range scaled-7-bit signed immediate — the LDP/STP imm7
+///     field encodes `-64..=63` scaled by the access width. Offsets
+///     outside that range pass IR validation but panic at dynasm.
+fn is_encodable_pair(
+    rt1: Register,
+    rt2: Register,
+    addr: &AddressOperand,
+    width: AccessWidth,
+    signed: bool,
+) -> bool {
+    if rt1 == Register::XZR || rt2 == Register::XZR || rt1 == Register::SP || rt2 == Register::SP {
+        return false;
+    }
+    if address_base(addr) == Register::XZR {
+        return false;
+    }
+    // LDP rejects rt1 == rt2 (UNPREDICTABLE per ARM ARM). STP allows it —
+    // stores the same value twice — so this rule fires only for the
+    // load-pair caller.
+    if signed && width != AccessWidth::Word {
+        // LDPSW is the only "signed pair" form; it is always 32→64.
+        return false;
+    }
+    // LDP/STP only have Word and Extended forms at the architecture level
+    // (no LDPB/LDPH/STPB/STPH). Byte/Half pair widths construct cleanly
+    // but the assembler errors at emit time — reject at the IR gate so
+    // parser and search candidates can't smuggle them through.
+    if !matches!(width, AccessWidth::Word | AccessWidth::Extended) {
+        return false;
+    }
+    // LDP/STP have no register-offset / register-extend addressing form.
+    let imm_offset = match addr {
+        AddressOperand::Imm { offset, .. } => *offset,
+        AddressOperand::Reg { .. } | AddressOperand::Ext { .. } => return false,
+    };
+    // Offset must fit the 7-bit signed scaled immediate. Pair access
+    // width is the per-register transfer width (4 or 8 bytes).
+    let scale = width.bytes() as i64;
+    if scale == 0 || imm_offset % scale != 0 {
+        return false;
+    }
+    let scaled = imm_offset / scale;
+    if !(-64..=63).contains(&scaled) {
+        return false;
+    }
+    // Writeback `base == rtN` is rejected.
+    if is_writeback(addr) {
+        let base = address_base(addr);
+        if base == rt1 || base == rt2 {
+            return false;
+        }
+    }
+    true
+}
+
+/// True if the address operand performs writeback (PreIndex / PostIndex).
+fn is_writeback(addr: &AddressOperand) -> bool {
+    matches!(
+        addr,
+        AddressOperand::Imm {
+            mode: IndexMode::PreIndex,
+            ..
+        } | AddressOperand::Imm {
+            mode: IndexMode::PostIndex,
+            ..
+        }
+    )
+}
+
+/// Extract the base register from an `AddressOperand`. All three variants
+/// carry one.
+fn address_base(addr: &AddressOperand) -> Register {
+    match addr {
+        AddressOperand::Imm { base, .. }
+        | AddressOperand::Reg { base, .. }
+        | AddressOperand::Ext { base, .. } => *base,
     }
 }
 
@@ -1069,7 +1402,64 @@ impl fmt::Display for Instruction {
             }
             Instruction::Bl { target } => write!(f, "bl {}", target),
             Instruction::Br { rn } => write!(f, "br {}", rn),
+
+            Instruction::Ldr { rt, addr, width } => {
+                write!(f, "{} {}, {}", ldr_mnemonic(*width), rt, addr)
+            }
+            Instruction::Ldrs { rt, addr, width } => {
+                write!(f, "{} {}, {}", ldrs_mnemonic(*width), rt, addr)
+            }
+            Instruction::Str { rt, addr, width } => {
+                write!(f, "{} {}, {}", str_mnemonic(*width), rt, addr)
+            }
+            Instruction::Ldp {
+                rt1,
+                rt2,
+                addr,
+                signed,
+                ..
+            } => write!(
+                f,
+                "{} {}, {}, {}",
+                if *signed { "ldpsw" } else { "ldp" },
+                rt1,
+                rt2,
+                addr
+            ),
+            Instruction::Stp { rt1, rt2, addr, .. } => write!(f, "stp {}, {}, {}", rt1, rt2, addr),
         }
+    }
+}
+
+/// Mnemonic for an LDR-family instruction at the given access width.
+/// Zero-extending loads only — `ldr` is the X/W form, `ldrb` / `ldrh` are
+/// the byte / half forms.
+fn ldr_mnemonic(width: AccessWidth) -> &'static str {
+    match width {
+        AccessWidth::Byte => "ldrb",
+        AccessWidth::Half => "ldrh",
+        AccessWidth::Word | AccessWidth::Extended => "ldr",
+    }
+}
+
+/// Mnemonic for the sign-extending load family. Always X-form destination;
+/// `Extended` width is meaningless for LDRS (no LDRSX exists — LDR handles
+/// the 64-bit zero-extending case).
+fn ldrs_mnemonic(width: AccessWidth) -> &'static str {
+    match width {
+        AccessWidth::Byte => "ldrsb",
+        AccessWidth::Half => "ldrsh",
+        AccessWidth::Word => "ldrsw",
+        AccessWidth::Extended => "ldrsw", // Should be rejected by is_encodable
+    }
+}
+
+/// Mnemonic for the store family.
+fn str_mnemonic(width: AccessWidth) -> &'static str {
+    match width {
+        AccessWidth::Byte => "strb",
+        AccessWidth::Half => "strh",
+        AccessWidth::Word | AccessWidth::Extended => "str",
     }
 }
 
@@ -1132,6 +1522,640 @@ mod tests {
             rm: Operand::Register(Register::X1),
         };
         assert_eq!(cmp.destination(), None);
+    }
+
+    #[test]
+    fn destinations_returns_single_element_for_one_dest_variant() {
+        let add = Instruction::Add {
+            rd: Register::X5,
+            rn: Register::X1,
+            rm: Operand::Immediate(10),
+        };
+        assert_eq!(add.destinations(), vec![Register::X5]);
+    }
+
+    #[test]
+    fn destinations_returns_empty_for_zero_dest_variant() {
+        let cmp = Instruction::Cmp {
+            rn: Register::X0,
+            rm: Operand::Register(Register::X1),
+        };
+        assert!(cmp.destinations().is_empty());
+    }
+
+    #[test]
+    fn ldr_offset_mode_writes_only_rt() {
+        let ldr = Instruction::Ldr {
+            rt: Register::X0,
+            addr: AddressOperand::Imm {
+                base: Register::X1,
+                offset: 8,
+                mode: IndexMode::Offset,
+            },
+            width: AccessWidth::Extended,
+        };
+        assert_eq!(ldr.destinations(), vec![Register::X0]);
+    }
+
+    #[test]
+    fn ldr_pre_index_writes_both_rt_and_base() {
+        let ldr = Instruction::Ldr {
+            rt: Register::X0,
+            addr: AddressOperand::Imm {
+                base: Register::X1,
+                offset: 8,
+                mode: IndexMode::PreIndex,
+            },
+            width: AccessWidth::Extended,
+        };
+        assert_eq!(ldr.destinations(), vec![Register::X0, Register::X1]);
+    }
+
+    #[test]
+    fn ldr_post_index_writes_both_rt_and_base() {
+        let ldr = Instruction::Ldr {
+            rt: Register::X0,
+            addr: AddressOperand::Imm {
+                base: Register::X1,
+                offset: 8,
+                mode: IndexMode::PostIndex,
+            },
+            width: AccessWidth::Extended,
+        };
+        assert_eq!(ldr.destinations(), vec![Register::X0, Register::X1]);
+    }
+
+    #[test]
+    fn ldrs_byte_width_displays_as_ldrsb() {
+        let ldrs = Instruction::Ldrs {
+            rt: Register::X0,
+            addr: AddressOperand::Imm {
+                base: Register::X1,
+                offset: 4,
+                mode: IndexMode::Offset,
+            },
+            width: AccessWidth::Byte,
+        };
+        assert_eq!(format!("{}", ldrs), "ldrsb x0, [x1, #4]");
+    }
+
+    #[test]
+    fn ldrs_word_width_displays_as_ldrsw() {
+        let ldrs = Instruction::Ldrs {
+            rt: Register::X0,
+            addr: AddressOperand::Imm {
+                base: Register::X1,
+                offset: 0,
+                mode: IndexMode::Offset,
+            },
+            width: AccessWidth::Word,
+        };
+        assert_eq!(format!("{}", ldrs), "ldrsw x0, [x1]");
+    }
+
+    #[test]
+    fn str_offset_mode_has_no_destinations() {
+        let st = Instruction::Str {
+            rt: Register::X0,
+            addr: AddressOperand::Imm {
+                base: Register::X1,
+                offset: 0,
+                mode: IndexMode::Offset,
+            },
+            width: AccessWidth::Extended,
+        };
+        assert!(st.destinations().is_empty());
+    }
+
+    #[test]
+    fn str_pre_index_writes_only_base_through_writeback() {
+        let st = Instruction::Str {
+            rt: Register::X0,
+            addr: AddressOperand::Imm {
+                base: Register::X1,
+                offset: 8,
+                mode: IndexMode::PreIndex,
+            },
+            width: AccessWidth::Extended,
+        };
+        assert_eq!(st.destinations(), vec![Register::X1]);
+    }
+
+    #[test]
+    fn str_reads_rt_and_base() {
+        let st = Instruction::Str {
+            rt: Register::X0,
+            addr: AddressOperand::Imm {
+                base: Register::X1,
+                offset: 0,
+                mode: IndexMode::Offset,
+            },
+            width: AccessWidth::Extended,
+        };
+        let sources = st.source_registers();
+        assert!(sources.contains(&Register::X0));
+        assert!(sources.contains(&Register::X1));
+    }
+
+    #[test]
+    fn str_byte_width_displays_as_strb() {
+        let st = Instruction::Str {
+            rt: Register::X0,
+            addr: AddressOperand::Imm {
+                base: Register::X1,
+                offset: 4,
+                mode: IndexMode::Offset,
+            },
+            width: AccessWidth::Byte,
+        };
+        assert_eq!(format!("{}", st), "strb x0, [x1, #4]");
+    }
+
+    #[test]
+    fn ldp_offset_writes_both_rt1_and_rt2() {
+        let ldp = Instruction::Ldp {
+            rt1: Register::X0,
+            rt2: Register::X1,
+            addr: AddressOperand::Imm {
+                base: Register::SP,
+                offset: 16,
+                mode: IndexMode::Offset,
+            },
+            width: AccessWidth::Extended,
+            signed: false,
+        };
+        assert_eq!(ldp.destinations(), vec![Register::X0, Register::X1]);
+    }
+
+    #[test]
+    fn ldp_writeback_adds_base_to_destinations() {
+        let ldp = Instruction::Ldp {
+            rt1: Register::X0,
+            rt2: Register::X1,
+            addr: AddressOperand::Imm {
+                base: Register::SP,
+                offset: -16,
+                mode: IndexMode::PreIndex,
+            },
+            width: AccessWidth::Extended,
+            signed: false,
+        };
+        assert_eq!(
+            ldp.destinations(),
+            vec![Register::X0, Register::X1, Register::SP]
+        );
+    }
+
+    #[test]
+    fn ldp_signed_word_width_displays_as_ldpsw() {
+        let ldp = Instruction::Ldp {
+            rt1: Register::X0,
+            rt2: Register::X1,
+            addr: AddressOperand::Imm {
+                base: Register::SP,
+                offset: 0,
+                mode: IndexMode::Offset,
+            },
+            width: AccessWidth::Word,
+            signed: true,
+        };
+        assert_eq!(format!("{}", ldp), "ldpsw x0, x1, [sp]");
+    }
+
+    #[test]
+    fn ldp_unsigned_extended_displays_as_ldp() {
+        let ldp = Instruction::Ldp {
+            rt1: Register::X0,
+            rt2: Register::X1,
+            addr: AddressOperand::Imm {
+                base: Register::SP,
+                offset: 16,
+                mode: IndexMode::Offset,
+            },
+            width: AccessWidth::Extended,
+            signed: false,
+        };
+        assert_eq!(format!("{}", ldp), "ldp x0, x1, [sp, #16]");
+    }
+
+    #[test]
+    fn str_xzr_is_encodable() {
+        // ARM ARM C6.2.205: `str xzr, [x0]` stores a zero doubleword.
+        // Previously rejected because is_encodable_ldr_like bailed on
+        // `rt == XZR` (codex P2).
+        let str_xzr = Instruction::Str {
+            rt: Register::XZR,
+            addr: AddressOperand::Imm {
+                base: Register::X0,
+                offset: 0,
+                mode: IndexMode::Offset,
+            },
+            width: AccessWidth::Extended,
+        };
+        assert!(str_xzr.is_encodable_aarch64());
+    }
+
+    #[test]
+    fn ldr_xzr_is_encodable() {
+        // ARM ARM C6.2.131: `ldr xzr, [x0]` is legal — the loaded value
+        // is discarded (write to ZR has no architectural effect).
+        let ldr_xzr = Instruction::Ldr {
+            rt: Register::XZR,
+            addr: AddressOperand::Imm {
+                base: Register::X0,
+                offset: 0,
+                mode: IndexMode::Offset,
+            },
+            width: AccessWidth::Extended,
+        };
+        assert!(ldr_xzr.is_encodable_aarch64());
+    }
+
+    #[test]
+    fn ldr_with_sp_index_rejected() {
+        // SP is encoded via the XSP slot (base only), not the Rm slot.
+        // `register_to_dynasm(SP)` returns None, so the assembler errors;
+        // reject at IR layer to keep parse/encode in sync (codex P1).
+        let ldr = Instruction::Ldr {
+            rt: Register::X0,
+            addr: AddressOperand::Reg {
+                base: Register::X1,
+                idx: Register::SP,
+                shift: 0,
+            },
+            width: AccessWidth::Extended,
+        };
+        assert!(!ldr.is_encodable_aarch64());
+    }
+
+    #[test]
+    fn ldr_with_sp_index_via_ext_mode_rejected() {
+        use crate::ir::ExtendKind;
+        let ldr = Instruction::Ldr {
+            rt: Register::X0,
+            addr: AddressOperand::Ext {
+                base: Register::X1,
+                idx: Register::SP,
+                kind: ExtendKind::Uxtx,
+                shift: 0,
+            },
+            width: AccessWidth::Extended,
+        };
+        assert!(!ldr.is_encodable_aarch64());
+    }
+
+    #[test]
+    fn pair_byte_width_rejected_at_encodability() {
+        // LDP/STP have no Byte form at the architecture level.
+        let stp_byte = Instruction::Stp {
+            rt1: Register::X0,
+            rt2: Register::X1,
+            addr: AddressOperand::Imm {
+                base: Register::X2,
+                offset: 0,
+                mode: IndexMode::Offset,
+            },
+            width: AccessWidth::Byte,
+        };
+        assert!(!stp_byte.is_encodable_aarch64());
+    }
+
+    #[test]
+    fn pair_half_width_rejected_at_encodability() {
+        let ldp_half = Instruction::Ldp {
+            rt1: Register::X0,
+            rt2: Register::X1,
+            addr: AddressOperand::Imm {
+                base: Register::X2,
+                offset: 0,
+                mode: IndexMode::Offset,
+            },
+            width: AccessWidth::Half,
+            signed: false,
+        };
+        assert!(!ldp_half.is_encodable_aarch64());
+    }
+
+    #[test]
+    fn pair_reg_offset_mode_rejected_at_encodability() {
+        let ldp = Instruction::Ldp {
+            rt1: Register::X0,
+            rt2: Register::X1,
+            addr: AddressOperand::Reg {
+                base: Register::X2,
+                idx: Register::X3,
+                shift: 0,
+            },
+            width: AccessWidth::Extended,
+            signed: false,
+        };
+        assert!(!ldp.is_encodable_aarch64());
+        let stp = Instruction::Stp {
+            rt1: Register::X0,
+            rt2: Register::X1,
+            addr: AddressOperand::Reg {
+                base: Register::X2,
+                idx: Register::X3,
+                shift: 3,
+            },
+            width: AccessWidth::Word,
+        };
+        assert!(!stp.is_encodable_aarch64());
+    }
+
+    #[test]
+    fn pair_ext_mode_rejected_at_encodability() {
+        use crate::ir::ExtendKind;
+        let ldp = Instruction::Ldp {
+            rt1: Register::X0,
+            rt2: Register::X1,
+            addr: AddressOperand::Ext {
+                base: Register::X2,
+                idx: Register::X3,
+                kind: ExtendKind::Uxtw,
+                shift: 0,
+            },
+            width: AccessWidth::Extended,
+            signed: false,
+        };
+        assert!(!ldp.is_encodable_aarch64());
+    }
+
+    #[test]
+    fn pair_imm_offset_out_of_range_rejected() {
+        // 7-bit signed scaled immediate: at width=Extended (×8) the legal
+        // range is -512..=504 in steps of 8; 512 is just out of range.
+        let ldp = Instruction::Ldp {
+            rt1: Register::X0,
+            rt2: Register::X1,
+            addr: AddressOperand::Imm {
+                base: Register::SP,
+                offset: 512,
+                mode: IndexMode::Offset,
+            },
+            width: AccessWidth::Extended,
+            signed: false,
+        };
+        assert!(!ldp.is_encodable_aarch64());
+    }
+
+    #[test]
+    fn pair_imm_offset_unscaled_rejected() {
+        // Offset must be divisible by access width. 12 % 8 != 0.
+        let ldp = Instruction::Ldp {
+            rt1: Register::X0,
+            rt2: Register::X1,
+            addr: AddressOperand::Imm {
+                base: Register::SP,
+                offset: 12,
+                mode: IndexMode::Offset,
+            },
+            width: AccessWidth::Extended,
+            signed: false,
+        };
+        assert!(!ldp.is_encodable_aarch64());
+    }
+
+    #[test]
+    fn pair_imm_offset_in_range_accepted() {
+        // Boundary check: scaled = 63 (max positive) at width=Extended.
+        let ldp = Instruction::Ldp {
+            rt1: Register::X0,
+            rt2: Register::X1,
+            addr: AddressOperand::Imm {
+                base: Register::SP,
+                offset: 504,
+                mode: IndexMode::Offset,
+            },
+            width: AccessWidth::Extended,
+            signed: false,
+        };
+        assert!(ldp.is_encodable_aarch64());
+    }
+
+    #[test]
+    fn stp_offset_has_no_destinations() {
+        let stp = Instruction::Stp {
+            rt1: Register::X0,
+            rt2: Register::X1,
+            addr: AddressOperand::Imm {
+                base: Register::SP,
+                offset: 16,
+                mode: IndexMode::Offset,
+            },
+            width: AccessWidth::Extended,
+        };
+        assert!(stp.destinations().is_empty());
+    }
+
+    #[test]
+    fn stp_pre_index_writes_base_through_writeback() {
+        let stp = Instruction::Stp {
+            rt1: Register::X29,
+            rt2: Register::X30,
+            addr: AddressOperand::Imm {
+                base: Register::SP,
+                offset: -16,
+                mode: IndexMode::PreIndex,
+            },
+            width: AccessWidth::Extended,
+        };
+        assert_eq!(stp.destinations(), vec![Register::SP]);
+    }
+
+    #[test]
+    fn stp_reads_both_rt1_and_rt2_plus_base() {
+        let stp = Instruction::Stp {
+            rt1: Register::X29,
+            rt2: Register::X30,
+            addr: AddressOperand::Imm {
+                base: Register::SP,
+                offset: 0,
+                mode: IndexMode::Offset,
+            },
+            width: AccessWidth::Extended,
+        };
+        let sources = stp.source_registers();
+        assert!(sources.contains(&Register::X29));
+        assert!(sources.contains(&Register::X30));
+        assert!(sources.contains(&Register::SP));
+    }
+
+    #[test]
+    fn stp_pre_index_displays_with_trailing_bang() {
+        let stp = Instruction::Stp {
+            rt1: Register::X29,
+            rt2: Register::X30,
+            addr: AddressOperand::Imm {
+                base: Register::SP,
+                offset: -16,
+                mode: IndexMode::PreIndex,
+            },
+            width: AccessWidth::Extended,
+        };
+        assert_eq!(format!("{}", stp), "stp x29, x30, [sp, #-16]!");
+    }
+
+    // ---- is_encodable_aarch64 rules for memory ops ----
+
+    #[test]
+    fn ldr_rejects_xzr_base() {
+        let ldr = Instruction::Ldr {
+            rt: Register::X0,
+            addr: AddressOperand::Imm {
+                base: Register::XZR,
+                offset: 0,
+                mode: IndexMode::Offset,
+            },
+            width: AccessWidth::Extended,
+        };
+        assert!(!ldr.is_encodable_aarch64());
+    }
+
+    #[test]
+    fn ldr_accepts_sp_base() {
+        let ldr = Instruction::Ldr {
+            rt: Register::X0,
+            addr: AddressOperand::Imm {
+                base: Register::SP,
+                offset: 0,
+                mode: IndexMode::Offset,
+            },
+            width: AccessWidth::Extended,
+        };
+        assert!(ldr.is_encodable_aarch64());
+    }
+
+    #[test]
+    fn ldr_rejects_writeback_when_rt_equals_base() {
+        let ldr_pre = Instruction::Ldr {
+            rt: Register::X1,
+            addr: AddressOperand::Imm {
+                base: Register::X1,
+                offset: 8,
+                mode: IndexMode::PreIndex,
+            },
+            width: AccessWidth::Extended,
+        };
+        assert!(!ldr_pre.is_encodable_aarch64());
+
+        let ldr_post = Instruction::Ldr {
+            rt: Register::X1,
+            addr: AddressOperand::Imm {
+                base: Register::X1,
+                offset: 8,
+                mode: IndexMode::PostIndex,
+            },
+            width: AccessWidth::Extended,
+        };
+        assert!(!ldr_post.is_encodable_aarch64());
+    }
+
+    #[test]
+    fn ldr_offset_mode_allows_rt_equals_base() {
+        // Offset mode does not writeback, so rt==base is fine.
+        let ldr = Instruction::Ldr {
+            rt: Register::X1,
+            addr: AddressOperand::Imm {
+                base: Register::X1,
+                offset: 0,
+                mode: IndexMode::Offset,
+            },
+            width: AccessWidth::Extended,
+        };
+        assert!(ldr.is_encodable_aarch64());
+    }
+
+    #[test]
+    fn ldp_rejects_same_pair_registers() {
+        let ldp = Instruction::Ldp {
+            rt1: Register::X0,
+            rt2: Register::X0,
+            addr: AddressOperand::Imm {
+                base: Register::SP,
+                offset: 0,
+                mode: IndexMode::Offset,
+            },
+            width: AccessWidth::Extended,
+            signed: false,
+        };
+        assert!(!ldp.is_encodable_aarch64());
+    }
+
+    #[test]
+    fn stp_allows_same_pair_registers() {
+        // STP X0, X0, [base] is well-defined (stores X0 twice).
+        let stp = Instruction::Stp {
+            rt1: Register::X0,
+            rt2: Register::X0,
+            addr: AddressOperand::Imm {
+                base: Register::SP,
+                offset: 0,
+                mode: IndexMode::Offset,
+            },
+            width: AccessWidth::Extended,
+        };
+        assert!(stp.is_encodable_aarch64());
+    }
+
+    #[test]
+    fn ldp_writeback_rejects_base_equals_either_rt() {
+        let ldp = Instruction::Ldp {
+            rt1: Register::SP,
+            rt2: Register::X1,
+            addr: AddressOperand::Imm {
+                base: Register::SP,
+                offset: -16,
+                mode: IndexMode::PreIndex,
+            },
+            width: AccessWidth::Extended,
+            signed: false,
+        };
+        assert!(!ldp.is_encodable_aarch64());
+    }
+
+    #[test]
+    fn ldp_signed_only_valid_at_word_width() {
+        let ldpsw_word = Instruction::Ldp {
+            rt1: Register::X0,
+            rt2: Register::X1,
+            addr: AddressOperand::Imm {
+                base: Register::SP,
+                offset: 0,
+                mode: IndexMode::Offset,
+            },
+            width: AccessWidth::Word,
+            signed: true,
+        };
+        assert!(ldpsw_word.is_encodable_aarch64());
+
+        let ldpsw_extended = Instruction::Ldp {
+            rt1: Register::X0,
+            rt2: Register::X1,
+            addr: AddressOperand::Imm {
+                base: Register::SP,
+                offset: 0,
+                mode: IndexMode::Offset,
+            },
+            width: AccessWidth::Extended,
+            signed: true,
+        };
+        assert!(!ldpsw_extended.is_encodable_aarch64());
+    }
+
+    #[test]
+    fn ldrs_rejects_extended_width() {
+        // No LDRSX exists — extended-width zero-extends via LDR, not LDRS.
+        let bad = Instruction::Ldrs {
+            rt: Register::X0,
+            addr: AddressOperand::Imm {
+                base: Register::SP,
+                offset: 0,
+                mode: IndexMode::Offset,
+            },
+            width: AccessWidth::Extended,
+        };
+        assert!(!bad.is_encodable_aarch64());
     }
 
     #[test]
@@ -2674,5 +3698,44 @@ mod tests {
             }
             .is_encodable_aarch64()
         );
+    }
+
+    // --- split_terminator_x86 ---
+
+    #[test]
+    fn split_terminator_x86_peels_trailing_jcc() {
+        use crate::isa::x86::{X86Condition, X86Instruction, X86Register};
+        let seq = vec![
+            X86Instruction::CmpReg {
+                rn: X86Register::RAX,
+                rs: X86Register::RBX,
+            },
+            X86Instruction::Jcc {
+                cond: X86Condition::E,
+            },
+        ];
+        let (prefix, term) = split_terminator_x86(&seq);
+        assert_eq!(prefix.len(), 1);
+        assert!(matches!(prefix[0], X86Instruction::CmpReg { .. }));
+        assert!(matches!(term, Some(X86Instruction::Jcc { .. })));
+    }
+
+    #[test]
+    fn split_terminator_x86_returns_none_when_no_terminator() {
+        use crate::isa::x86::{X86Instruction, X86Register};
+        let seq = vec![X86Instruction::MovReg {
+            rd: X86Register::RAX,
+            rs: X86Register::RBX,
+        }];
+        let (prefix, term) = split_terminator_x86(&seq);
+        assert_eq!(prefix.len(), 1);
+        assert!(term.is_none());
+    }
+
+    #[test]
+    fn split_terminator_x86_handles_empty_sequence() {
+        let (prefix, term) = split_terminator_x86(&[]);
+        assert!(prefix.is_empty());
+        assert!(term.is_none());
     }
 }

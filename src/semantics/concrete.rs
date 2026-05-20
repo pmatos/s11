@@ -1,5 +1,6 @@
 //! Concrete interpreter for fast validation of instruction sequences
 
+use crate::ir::types::{AccessWidth, AddressOperand, IndexMode};
 use crate::ir::{Condition, Instruction, Operand, Register, ShiftKind};
 use crate::semantics::live_out::RegisterSet;
 use crate::semantics::state::{ConcreteMachineState, ConcreteValue, ConditionFlags};
@@ -525,8 +526,151 @@ pub fn apply_instruction_concrete(
             "Branches are terminators; strip them before apply_sequence_concrete. Reached: {:?}",
             instruction
         ),
+        // Memory ops (issue #68). Concrete semantics for LDR-family land in
+        // step 6; until the memory model is plumbed onto ConcreteMachineState
+        // there is no way to evaluate these and callers should not synthesise
+        // them yet.
+        Instruction::Ldr { rt, addr, width } => {
+            let (effective, writeback) = compute_address(&state, addr);
+            let raw = state.read_bytes(effective, *width);
+            let value = zero_extend_load(raw, *width);
+            state.set_register(*rt, ConcreteValue::new(value));
+            if let Some((base, new_base)) = writeback {
+                state.set_register(base, ConcreteValue::new(new_base));
+            }
+        }
+        Instruction::Ldrs { rt, addr, width } => {
+            let (effective, writeback) = compute_address(&state, addr);
+            let raw = state.read_bytes(effective, *width);
+            let value = sign_extend_load(raw, *width);
+            state.set_register(*rt, ConcreteValue::new(value));
+            if let Some((base, new_base)) = writeback {
+                state.set_register(base, ConcreteValue::new(new_base));
+            }
+        }
+        Instruction::Str { rt, addr, width } => {
+            let (effective, writeback) = compute_address(&state, addr);
+            let value = state.get_register(*rt).as_u64();
+            state.write_bytes(effective, value, *width);
+            if let Some((base, new_base)) = writeback {
+                state.set_register(base, ConcreteValue::new(new_base));
+            }
+        }
+        Instruction::Ldp {
+            rt1,
+            rt2,
+            addr,
+            width,
+            signed,
+        } => {
+            let (effective, writeback) = compute_address(&state, addr);
+            let bytes = width.bytes() as u64;
+            let raw1 = state.read_bytes(effective, *width);
+            let raw2 = state.read_bytes(effective.wrapping_add(bytes), *width);
+            let (v1, v2) = if *signed {
+                (
+                    sign_extend_load(raw1, *width),
+                    sign_extend_load(raw2, *width),
+                )
+            } else {
+                (
+                    zero_extend_load(raw1, *width),
+                    zero_extend_load(raw2, *width),
+                )
+            };
+            state.set_register(*rt1, ConcreteValue::new(v1));
+            state.set_register(*rt2, ConcreteValue::new(v2));
+            if let Some((base, new_base)) = writeback {
+                state.set_register(base, ConcreteValue::new(new_base));
+            }
+        }
+        Instruction::Stp {
+            rt1,
+            rt2,
+            addr,
+            width,
+        } => {
+            let (effective, writeback) = compute_address(&state, addr);
+            let bytes = width.bytes() as u64;
+            let v1 = state.get_register(*rt1).as_u64();
+            let v2 = state.get_register(*rt2).as_u64();
+            state.write_bytes(effective, v1, *width);
+            state.write_bytes(effective.wrapping_add(bytes), v2, *width);
+            if let Some((base, new_base)) = writeback {
+                state.set_register(base, ConcreteValue::new(new_base));
+            }
+        }
     }
     state
+}
+
+/// Compute the effective address used by a memory access, together with
+/// any writeback `(base, new_base_value)` that must be committed to the
+/// register file. PreIndex updates the base *before* the access; the new
+/// value is also the effective address. PostIndex uses the original base
+/// as the effective address and updates afterwards.
+fn compute_address(
+    state: &ConcreteMachineState,
+    addr: &AddressOperand,
+) -> (u64, Option<(Register, u64)>) {
+    match addr {
+        AddressOperand::Imm { base, offset, mode } => {
+            let base_val = state.get_register(*base).as_u64();
+            let updated = base_val.wrapping_add(*offset as u64);
+            match mode {
+                IndexMode::Offset => (updated, None),
+                IndexMode::PreIndex => (updated, Some((*base, updated))),
+                IndexMode::PostIndex => (base_val, Some((*base, updated))),
+            }
+        }
+        AddressOperand::Reg { base, idx, shift } => {
+            let base_val = state.get_register(*base).as_u64();
+            let idx_val = state.get_register(*idx).as_u64();
+            (base_val.wrapping_add(idx_val << *shift), None)
+        }
+        AddressOperand::Ext {
+            base,
+            idx,
+            kind,
+            shift,
+        } => {
+            let base_val = state.get_register(*base).as_u64();
+            let idx_val = state.get_register(*idx).as_u64();
+            let extended = match kind {
+                crate::ir::ExtendKind::Uxtw => idx_val & 0xFFFF_FFFF,
+                crate::ir::ExtendKind::Sxtw => (idx_val as i32) as i64 as u64,
+                crate::ir::ExtendKind::Uxtx => idx_val,
+                crate::ir::ExtendKind::Sxtx => idx_val,
+                // Byte/half kinds are rejected by is_encodable for memory
+                // operands; treat as zero-extend to keep the eval total.
+                crate::ir::ExtendKind::Uxtb => idx_val & 0xFF,
+                crate::ir::ExtendKind::Uxth => idx_val & 0xFFFF,
+                crate::ir::ExtendKind::Sxtb => (idx_val as i8) as i64 as u64,
+                crate::ir::ExtendKind::Sxth => (idx_val as i16) as i64 as u64,
+            };
+            (base_val.wrapping_add(extended << *shift), None)
+        }
+    }
+}
+
+/// Zero-extend the low `width.bytes() * 8` bits of `raw` to u64.
+fn zero_extend_load(raw: u64, width: AccessWidth) -> u64 {
+    match width {
+        AccessWidth::Byte => raw & 0xFF,
+        AccessWidth::Half => raw & 0xFFFF,
+        AccessWidth::Word => raw & 0xFFFF_FFFF,
+        AccessWidth::Extended => raw,
+    }
+}
+
+/// Sign-extend the low `width.bytes() * 8` bits of `raw` to u64.
+fn sign_extend_load(raw: u64, width: AccessWidth) -> u64 {
+    match width {
+        AccessWidth::Byte => (raw as i8) as i64 as u64,
+        AccessWidth::Half => (raw as i16) as i64 as u64,
+        AccessWidth::Word => (raw as i32) as i64 as u64,
+        AccessWidth::Extended => raw,
+    }
 }
 
 /// Evaluate a condition code against the current flags
@@ -576,7 +720,13 @@ pub fn apply_sequence_concrete(
 }
 
 /// Check if two concrete states are equal for the specified live-out registers,
-/// optionally including the NZCV condition flags.
+/// optionally including the NZCV condition flags and the whole memory map.
+///
+/// `memory_live` is derived automatically by callers from whether either
+/// sequence touches memory (see ADR-0007). When set, every memory cell
+/// must agree between the two states — equivalently, the two `BTreeMap`s
+/// must be structurally equal (prune-on-write guarantees structural ==
+/// semantic equality).
 ///
 /// TODO(#282): The explicit `flags_live` parameter is now redundant with
 /// `live_out.flags_live()` for every caller except the stochastic backend
@@ -586,6 +736,7 @@ pub fn states_equal_for_live_out(
     state2: &ConcreteMachineState,
     live_out: &RegisterSet<Register>,
     flags_live: bool,
+    memory_live: bool,
 ) -> bool {
     for reg in live_out.iter() {
         if state1.get_register(*reg) != state2.get_register(*reg) {
@@ -593,6 +744,9 @@ pub fn states_equal_for_live_out(
         }
     }
     if flags_live && state1.get_flags() != state2.get_flags() {
+        return false;
+    }
+    if memory_live && state1.memory() != state2.memory() {
         return false;
     }
     true
@@ -974,7 +1128,7 @@ mod tests {
 
         let live_out = RegisterSet::<Register>::from_registers(vec![Register::X0]);
         assert!(states_equal_for_live_out(
-            &state1, &state2, &live_out, false
+            &state1, &state2, &live_out, false, false
         ));
     }
 
@@ -985,7 +1139,7 @@ mod tests {
 
         let live_out = RegisterSet::<Register>::from_registers(vec![Register::X0]);
         assert!(!states_equal_for_live_out(
-            &state1, &state2, &live_out, false
+            &state1, &state2, &live_out, false, false
         ));
     }
 
@@ -1032,7 +1186,7 @@ mod tests {
 
         let live_out = RegisterSet::<Register>::from_registers(vec![Register::X0]);
         assert!(states_equal_for_live_out(
-            &state1, &state2, &live_out, false
+            &state1, &state2, &live_out, false, false
         ));
     }
 
@@ -2306,5 +2460,163 @@ mod tests {
         };
         let after = apply_instruction_concrete(state, &instr);
         assert_eq!(after.get_register(Register::X0).as_u64(), 1);
+    }
+
+    // ---- Memory ops (issue #68 step 6) ----
+
+    #[test]
+    fn str_then_ldr_round_trips_via_memory() {
+        use crate::ir::types::{AccessWidth, AddressOperand, IndexMode};
+        let state = state_with(vec![
+            (Register::X0, 0xDEADBEEF_CAFEBABE),
+            (Register::X1, 0x1000),
+        ]);
+        // STR x0, [x1] ; LDR x2, [x1]
+        let seq = vec![
+            Instruction::Str {
+                rt: Register::X0,
+                addr: AddressOperand::Imm {
+                    base: Register::X1,
+                    offset: 0,
+                    mode: IndexMode::Offset,
+                },
+                width: AccessWidth::Extended,
+            },
+            Instruction::Ldr {
+                rt: Register::X2,
+                addr: AddressOperand::Imm {
+                    base: Register::X1,
+                    offset: 0,
+                    mode: IndexMode::Offset,
+                },
+                width: AccessWidth::Extended,
+            },
+        ];
+        let after = apply_sequence_concrete(state, &seq);
+        assert_eq!(
+            after.get_register(Register::X2).as_u64(),
+            0xDEADBEEF_CAFEBABE
+        );
+    }
+
+    #[test]
+    fn ldrb_zero_extends() {
+        use crate::ir::types::{AccessWidth, AddressOperand, IndexMode};
+        let mut state = state_with(vec![(Register::X1, 0x1000)]);
+        state.write_bytes(0x1000, 0xFF, AccessWidth::Byte);
+        let instr = Instruction::Ldr {
+            rt: Register::X0,
+            addr: AddressOperand::Imm {
+                base: Register::X1,
+                offset: 0,
+                mode: IndexMode::Offset,
+            },
+            width: AccessWidth::Byte,
+        };
+        let after = apply_instruction_concrete(state, &instr);
+        assert_eq!(after.get_register(Register::X0).as_u64(), 0xFF);
+    }
+
+    #[test]
+    fn ldrsb_sign_extends() {
+        use crate::ir::types::{AccessWidth, AddressOperand, IndexMode};
+        let mut state = state_with(vec![(Register::X1, 0x1000)]);
+        state.write_bytes(0x1000, 0xFF, AccessWidth::Byte);
+        let instr = Instruction::Ldrs {
+            rt: Register::X0,
+            addr: AddressOperand::Imm {
+                base: Register::X1,
+                offset: 0,
+                mode: IndexMode::Offset,
+            },
+            width: AccessWidth::Byte,
+        };
+        let after = apply_instruction_concrete(state, &instr);
+        assert_eq!(after.get_register(Register::X0).as_u64(), u64::MAX);
+    }
+
+    #[test]
+    fn pre_index_writeback_updates_base_before_access() {
+        use crate::ir::types::{AccessWidth, AddressOperand, IndexMode};
+        let mut state = state_with(vec![(Register::X0, 0x42), (Register::X1, 0x1000)]);
+        state.write_bytes(0x1008, 0x99, AccessWidth::Byte);
+        // LDR x2, [x1, #8]! — effective address is x1+8=0x1008, x1 updated to 0x1008.
+        let instr = Instruction::Ldr {
+            rt: Register::X2,
+            addr: AddressOperand::Imm {
+                base: Register::X1,
+                offset: 8,
+                mode: IndexMode::PreIndex,
+            },
+            width: AccessWidth::Byte,
+        };
+        let after = apply_instruction_concrete(state, &instr);
+        assert_eq!(after.get_register(Register::X2).as_u64(), 0x99);
+        assert_eq!(after.get_register(Register::X1).as_u64(), 0x1008);
+    }
+
+    #[test]
+    fn post_index_writeback_uses_old_address_then_updates() {
+        use crate::ir::types::{AccessWidth, AddressOperand, IndexMode};
+        let mut state = state_with(vec![(Register::X1, 0x1000)]);
+        state.write_bytes(0x1000, 0x77, AccessWidth::Byte);
+        // LDR x0, [x1], #16 — read at original x1=0x1000, then x1 ← 0x1010.
+        let instr = Instruction::Ldr {
+            rt: Register::X0,
+            addr: AddressOperand::Imm {
+                base: Register::X1,
+                offset: 16,
+                mode: IndexMode::PostIndex,
+            },
+            width: AccessWidth::Byte,
+        };
+        let after = apply_instruction_concrete(state, &instr);
+        assert_eq!(after.get_register(Register::X0).as_u64(), 0x77);
+        assert_eq!(after.get_register(Register::X1).as_u64(), 0x1010);
+    }
+
+    #[test]
+    fn ldp_reads_two_consecutive_words() {
+        use crate::ir::types::{AccessWidth, AddressOperand, IndexMode};
+        let mut state = state_with(vec![(Register::X2, 0x1000)]);
+        state.write_bytes(0x1000, 0x1111, AccessWidth::Extended);
+        state.write_bytes(0x1008, 0x2222, AccessWidth::Extended);
+        let instr = Instruction::Ldp {
+            rt1: Register::X0,
+            rt2: Register::X1,
+            addr: AddressOperand::Imm {
+                base: Register::X2,
+                offset: 0,
+                mode: IndexMode::Offset,
+            },
+            width: AccessWidth::Extended,
+            signed: false,
+        };
+        let after = apply_instruction_concrete(state, &instr);
+        assert_eq!(after.get_register(Register::X0).as_u64(), 0x1111);
+        assert_eq!(after.get_register(Register::X1).as_u64(), 0x2222);
+    }
+
+    #[test]
+    fn stp_writes_two_consecutive_words() {
+        use crate::ir::types::{AccessWidth, AddressOperand, IndexMode};
+        let state = state_with(vec![
+            (Register::X0, 0xAAAA),
+            (Register::X1, 0xBBBB),
+            (Register::X2, 0x1000),
+        ]);
+        let instr = Instruction::Stp {
+            rt1: Register::X0,
+            rt2: Register::X1,
+            addr: AddressOperand::Imm {
+                base: Register::X2,
+                offset: 0,
+                mode: IndexMode::Offset,
+            },
+            width: AccessWidth::Extended,
+        };
+        let after = apply_instruction_concrete(state, &instr);
+        assert_eq!(after.read_bytes(0x1000, AccessWidth::Extended), 0xAAAA);
+        assert_eq!(after.read_bytes(0x1008, AccessWidth::Extended), 0xBBBB);
     }
 }

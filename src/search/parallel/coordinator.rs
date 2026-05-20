@@ -107,9 +107,13 @@ fn run_coordinator(
         // Check if we've exceeded timeout
         if deadline.is_some_and(|d| Instant::now() >= d) {
             channels.shared.signal_stop();
-            // Broadcast stop to all workers
+            // Broadcast stop to all workers. `try_send` is intentional: the
+            // per-worker bounded(8) channel may already be full of advisory
+            // `BetterSolution` broadcasts, and `signal_stop()` above is the
+            // authoritative cancellation path (workers poll it via
+            // `config.stop_flag`). Dropping a redundant `Stop` is safe.
             for tx in &channels.to_workers {
-                let _ = tx.send(CoordinatorMessage::Stop);
+                let _ = tx.try_send(CoordinatorMessage::Stop);
             }
         }
 
@@ -126,10 +130,16 @@ fn run_coordinator(
                     // Check if this is actually better than current best
                     if channels.shared.try_update(cost) {
                         if config.solution_sharing {
-                            // Broadcast to other workers
+                            // Broadcast to other workers. `try_send` is
+                            // intentional: workers do not currently consume
+                            // `BetterSolution`, so the bounded(8) channel
+                            // can backfill. The blocking variant would stall
+                            // the coordinator while workers are still in
+                            // their inner search loop. Dropping a missed
+                            // advisory broadcast is safe.
                             for (i, tx) in channels.to_workers.iter().enumerate() {
                                 if i != worker_id {
-                                    let _ = tx.send(CoordinatorMessage::BetterSolution {
+                                    let _ = tx.try_send(CoordinatorMessage::BetterSolution {
                                         sequence: sequence.clone(),
                                         cost,
                                     });
@@ -152,10 +162,11 @@ fn run_coordinator(
                     candidates_evaluated,
                 } => {
                     finished_count += 1;
-                    let mut stats = SearchStatistics::new(Algorithm::Stochastic);
+                    let algorithm = worker_algorithm(worker_id, config);
+                    let mut stats = SearchStatistics::new(algorithm);
                     stats.candidates_evaluated = candidates_evaluated;
                     stats.elapsed_time = start_time.elapsed();
-                    worker_stats.push((worker_id, Algorithm::Stochastic, stats));
+                    worker_stats.push((worker_id, algorithm, stats));
 
                     if finished_count >= total_workers {
                         break;
@@ -207,6 +218,21 @@ fn run_coordinator(
     }
 }
 
+/// Single source of truth for which algorithm a worker runs.
+///
+/// Mirrors the contract encoded by [`ParallelConfig::num_stochastic_workers`]:
+/// a worker is symbolic only when `include_symbolic` is set, more than one
+/// worker is configured, and this is worker 0. With a single worker the lone
+/// worker is stochastic regardless of `include_symbolic`, so CLI knobs like
+/// `--beta`, `--iterations`, and `--seed` are not silently ignored.
+fn worker_algorithm(worker_id: usize, parallel_config: &ParallelConfig) -> Algorithm {
+    if parallel_config.include_symbolic && parallel_config.num_workers > 1 && worker_id == 0 {
+        Algorithm::Symbolic
+    } else {
+        Algorithm::Stochastic
+    }
+}
+
 /// Worker function that runs a search algorithm.
 fn run_worker(
     worker_id: usize,
@@ -216,10 +242,18 @@ fn run_worker(
     parallel_config: &ParallelConfig,
     channels: WorkerChannels,
 ) {
-    let is_symbolic_worker = parallel_config.include_symbolic && worker_id == 0;
+    let is_symbolic_worker = matches!(
+        worker_algorithm(worker_id, parallel_config),
+        Algorithm::Symbolic
+    );
 
-    // Build worker-specific config
-    let mut config = search_config.clone();
+    // Build worker-specific config. Inject the coordinator's cooperative-
+    // cancel flag so the inner search loops (`StochasticSearch::search`,
+    // `SymbolicSearch::search`) honour `SharedBest::signal_stop` even when
+    // `config.timeout` is `None` (issue #243).
+    let mut config = search_config
+        .clone()
+        .with_stop_flag(channels.shared.stop_flag());
 
     if is_symbolic_worker {
         // Run symbolic search
@@ -355,6 +389,103 @@ mod tests {
         assert!(result.total_statistics.elapsed_time.as_nanos() > 0);
     }
 
+    // Issue #244 regression: hybrid dispatch must follow the contract pinned by
+    // ParallelConfig::num_stochastic_workers. Worker 0 is symbolic only when
+    // include_symbolic && num_workers > 1; otherwise the lone worker must run
+    // stochastic so the user's --beta/--iterations/--seed knobs take effect.
+
+    #[test]
+    fn test_two_workers_with_symbolic_reports_one_symbolic_one_stochastic() {
+        let target = mov_add_sequence();
+        let live_out = LiveOut::from_registers(vec![Register::X0]);
+
+        // Keep the symbolic worker's solver budget tight so it terminates
+        // quickly under Z3 on this trivial target.
+        let symbolic_cfg = crate::search::config::SymbolicConfig::default()
+            .with_timeout(Duration::from_millis(250));
+        let search_config = SearchConfig::default()
+            .with_registers(vec![Register::X0, Register::X1])
+            .with_immediates(vec![0, 1, 2])
+            .with_stochastic(StochasticConfig::default().with_iterations(200))
+            .with_symbolic(symbolic_cfg);
+
+        let parallel_config = ParallelConfig::default()
+            .with_workers(2)
+            .with_symbolic(true)
+            .with_seed(42)
+            .with_timeout(Duration::from_secs(10));
+
+        let result = run_parallel_search(&target, &live_out, &search_config, &parallel_config);
+
+        assert_eq!(result.worker_statistics.len(), 2);
+        let mut pairs: Vec<(usize, Algorithm)> = result
+            .worker_statistics
+            .iter()
+            .map(|(id, alg, _)| (*id, *alg))
+            .collect();
+        pairs.sort_by_key(|(id, _)| *id);
+        assert_eq!(
+            pairs,
+            vec![(0, Algorithm::Symbolic), (1, Algorithm::Stochastic)],
+            "expected worker 0 = Symbolic, worker 1 = Stochastic, got {:?}",
+            pairs,
+        );
+    }
+
+    #[test]
+    fn test_single_worker_with_symbolic_is_stochastic() {
+        let target = mov_add_sequence();
+        let live_out = LiveOut::from_registers(vec![Register::X0]);
+
+        let search_config = SearchConfig::default()
+            .with_registers(vec![Register::X0, Register::X1])
+            .with_immediates(vec![0, 1, 2])
+            .with_stochastic(StochasticConfig::default().with_iterations(200));
+
+        // include_symbolic = true but num_workers = 1: per the contract pinned
+        // by ParallelConfig::num_stochastic_workers, the lone worker must be
+        // stochastic. Before the fix, coordinator.rs dispatched worker 0 to
+        // SymbolicSearch and reported Stochastic anyway via a hardcoded label.
+        let parallel_config = ParallelConfig::default()
+            .with_workers(1)
+            .with_symbolic(true)
+            .with_seed(42)
+            .with_timeout(Duration::from_secs(5));
+
+        let result = run_parallel_search(&target, &live_out, &search_config, &parallel_config);
+
+        assert_eq!(result.worker_statistics.len(), 1);
+        assert_eq!(result.worker_statistics[0].0, 0);
+        assert_eq!(
+            result.worker_statistics[0].1,
+            Algorithm::Stochastic,
+            "single hybrid worker must run stochastic, got {:?}",
+            result.worker_statistics[0].1,
+        );
+    }
+
+    #[test]
+    fn test_single_worker_without_symbolic_stays_stochastic() {
+        let target = mov_add_sequence();
+        let live_out = LiveOut::from_registers(vec![Register::X0]);
+
+        let search_config = SearchConfig::default()
+            .with_registers(vec![Register::X0, Register::X1])
+            .with_immediates(vec![0, 1, 2])
+            .with_stochastic(StochasticConfig::default().with_iterations(200));
+
+        let parallel_config = ParallelConfig::default()
+            .with_workers(1)
+            .with_symbolic(false)
+            .with_seed(42)
+            .with_timeout(Duration::from_secs(5));
+
+        let result = run_parallel_search(&target, &live_out, &search_config, &parallel_config);
+
+        assert_eq!(result.worker_statistics.len(), 1);
+        assert_eq!(result.worker_statistics[0].1, Algorithm::Stochastic);
+    }
+
     #[test]
     fn test_parallel_search_multiple_workers() {
         let target = mov_add_sequence();
@@ -377,14 +508,104 @@ mod tests {
         assert!(result.total_statistics.candidates_evaluated > 0);
     }
 
+    /// Regression for issue #243: the coordinator must use `try_send`, not
+    /// blocking `send`, when broadcasting to per-worker channels — otherwise
+    /// a backlog of `BetterSolution` messages can stall the coordinator
+    /// while workers are still in their inner search loop.
+    ///
+    /// We test the channel contract directly: fill a single bounded(8)
+    /// channel with 8 messages, then assert that a 9th `try_send` returns
+    /// `Err(TrySendError::Full)` instead of blocking. This pins the
+    /// non-blocking property the coordinator now relies on.
+    #[test]
+    fn coordinator_does_not_stall_when_worker_channels_full() {
+        use crate::ir::{Operand, Register};
+        use crate::search::parallel::channel::{
+            CoordinatorMessage, WorkerMessage, create_channels,
+        };
+        use crossbeam_channel::TrySendError;
+
+        let (coordinator, _workers) = create_channels(1);
+        let tx = &coordinator.to_workers[0];
+
+        let seq = vec![Instruction::Add {
+            rd: Register::X0,
+            rn: Register::X1,
+            rm: Operand::Immediate(1),
+        }];
+
+        // Fill the bounded(8) channel.
+        for cost in 0..8 {
+            tx.try_send(CoordinatorMessage::BetterSolution {
+                sequence: seq.clone(),
+                cost,
+            })
+            .expect("first 8 sends should fit in the bounded(8) channel");
+        }
+
+        // 9th `try_send` must fail with Full, not block.
+        let err = tx
+            .try_send(CoordinatorMessage::BetterSolution {
+                sequence: seq.clone(),
+                cost: 8,
+            })
+            .expect_err("9th try_send should fail because channel is full");
+        assert!(matches!(err, TrySendError::Full(_)));
+
+        // Stop broadcasts must also fall through to try_send drop-on-full.
+        let err = tx
+            .try_send(CoordinatorMessage::Stop)
+            .expect_err("Stop try_send should also fail when channel is full");
+        assert!(matches!(err, TrySendError::Full(_)));
+
+        // Sanity: no worker-side message dropped on the coordinator->worker
+        // channel; the worker→coordinator channel is unaffected.
+        let _ = WorkerMessage::Finished {
+            worker_id: 0,
+            candidates_evaluated: 0,
+        };
+    }
+
+    /// Regression for issue #243: hybrid coordinator with `Duration::ZERO`
+    /// timeout and unbounded worker iterations (no `SearchConfig::timeout`)
+    /// must return promptly. Pre-fix, the workers ignored the coordinator's
+    /// `signal_stop` and burned through `u64::MAX / 4` MCMC iterations.
+    #[test]
+    fn coordinator_timeout_zero_returns_promptly_with_no_search_timeout() {
+        let target = mov_add_sequence();
+        let live_out = LiveOut::from_registers(vec![Register::X0]);
+
+        let search_config = SearchConfig::default()
+            .with_timeout_option(None)
+            .with_registers(vec![Register::X0, Register::X1])
+            .with_immediates(vec![0, 1, 2])
+            .with_stochastic(StochasticConfig::default().with_iterations(u64::MAX / 4));
+
+        let parallel_config = ParallelConfig::default()
+            .with_workers(2)
+            .with_symbolic(false)
+            .with_timeout(Duration::ZERO);
+
+        let start = Instant::now();
+        let _result = run_parallel_search(&target, &live_out, &search_config, &parallel_config);
+        let elapsed = start.elapsed();
+
+        assert!(
+            elapsed < Duration::from_secs(1),
+            "expected run_parallel_search to return within 1 s when the \
+             coordinator deadline is Duration::ZERO; took {:?}",
+            elapsed,
+        );
+    }
+
     // Issue #77 stage 1 step 2 safety net:
     // verify that every spawned worker reports Finished and that no per-worker
     // statistics are silently dropped. Stage 1 step 12 genericises the
     // coordinator + channel types over <I: ISA>; this test must keep passing
     // through that refactor. Iteration count is sized so all workers finish
-    // naturally well inside the timeout (the current stochastic worker does
-    // not check CoordinatorMessage::Stop mid-search; timeout-driven shutdown
-    // is out of scope here).
+    // naturally well inside the timeout — keeping completion deterministic
+    // for this assertion. (Timeout-driven shutdown is now covered by
+    // `coordinator_timeout_zero_returns_promptly_with_no_search_timeout`.)
     #[test]
     fn test_parallel_search_no_dropped_finished_messages() {
         let target = mov_add_sequence();

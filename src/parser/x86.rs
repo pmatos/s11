@@ -10,8 +10,35 @@
 
 #![allow(dead_code)]
 
-use crate::isa::x86::{X86Instruction, X86Operand, X86Register};
+use crate::isa::x86::{X86Condition, X86Instruction, X86Operand, X86Register};
 use crate::parser::ParseError;
+
+/// Parse a condition-code suffix from a CMOVcc / Jcc mnemonic. Accepts
+/// the canonical 16 codes plus the most common GAS aliases
+/// (`z`/`nz`/`nae`/`nb`/`nc`/`pe`/`po`/`nge`/`nl`/`ng`/`nle`).
+/// Returns `Err` on anything unrecognised so callers surface bad input
+/// instead of silently dropping the instruction.
+pub fn parse_x86_condition(suffix: &str) -> Result<X86Condition, String> {
+    match suffix.trim().to_lowercase().as_str() {
+        "e" | "z" => Ok(X86Condition::E),
+        "ne" | "nz" => Ok(X86Condition::NE),
+        "b" | "c" | "nae" => Ok(X86Condition::B),
+        "ae" | "nb" | "nc" => Ok(X86Condition::AE),
+        "be" | "na" => Ok(X86Condition::BE),
+        "a" | "nbe" => Ok(X86Condition::A),
+        "l" | "nge" => Ok(X86Condition::L),
+        "ge" | "nl" => Ok(X86Condition::GE),
+        "le" | "ng" => Ok(X86Condition::LE),
+        "g" | "nle" => Ok(X86Condition::G),
+        "s" => Ok(X86Condition::S),
+        "ns" => Ok(X86Condition::NS),
+        "o" => Ok(X86Condition::O),
+        "no" => Ok(X86Condition::NO),
+        "p" | "pe" => Ok(X86Condition::P),
+        "np" | "po" => Ok(X86Condition::NP),
+        other => Err(format!("unknown x86 condition suffix: '{}'", other)),
+    }
+}
 
 /// Parse a single x86 register name (case-insensitive).
 ///
@@ -88,6 +115,51 @@ pub fn x86_ir_from_mnemonic(
     op_str: &str,
 ) -> Result<Option<X86Instruction>, String> {
     let mnemonic = mnemonic.trim().to_lowercase();
+
+    // CMOVcc — strip "cmov" prefix, parse suffix, expect
+    // two register operands. Unknown suffixes are errors, not Ok(None).
+    if let Some(suffix) = mnemonic.strip_prefix("cmov") {
+        let cond = parse_x86_condition(suffix)?;
+        let parts: Vec<&str> = op_str.split(',').map(|s| s.trim()).collect();
+        if parts.len() != 2 {
+            return Err(format!(
+                "cmov{} expects 2 operands, got {}",
+                suffix,
+                parts.len()
+            ));
+        }
+        let rd = parse_x86_register(parts[0])?;
+        let rs = parse_x86_register(parts[1])?;
+        return Ok(Some(X86Instruction::Cmov { rd, rs, cond }));
+    }
+
+    // Jcc — strip "j" prefix (excluding "jmp"), parse suffix,
+    // validate the operand is a numeric target then discard it.
+    // Mnemonics like `jrcxz`/`jecxz` start with 'j' but aren't
+    // flag-based conditional branches — `parse_x86_condition` rejects
+    // their suffixes. Fall back to `Ok(None)` for those (same shape
+    // unsupported mnemonics like `lea` get) instead of erroring; that
+    // way `convert_to_x86_ir`'s unified "unsupported mnemonic" branch
+    // produces an actionable window-rejection error.
+    if mnemonic != "jmp"
+        && let Some(suffix) = mnemonic.strip_prefix('j')
+    {
+        let Ok(cond) = parse_x86_condition(suffix) else {
+            return Ok(None);
+        };
+        let op = op_str.trim();
+        if op.is_empty() {
+            return Err(format!("j{} expects a target operand", suffix));
+        }
+        // Capstone renders Jcc targets as absolute addresses. Validate
+        // the operand parses as an immediate; if Capstone ever switches
+        // to labels we want the failure to surface here rather than
+        // silently producing a Jcc with a corrupted target reading.
+        parse_x86_immediate(op)
+            .map_err(|e| format!("j{} target must be numeric: {}", suffix, e))?;
+        return Ok(Some(X86Instruction::Jcc { cond }));
+    }
+
     // Reject unsupported mnemonics before attempting operand parsing so
     // shapes outside the minimal core (e.g. LEA `rax, [rbx+1]`) surface
     // as "unsupported mnemonic" rather than a confusing downstream
@@ -154,9 +226,10 @@ pub fn x86_ir_from_mnemonic(
 /// for the AArch64 path.
 ///
 /// Recognised lines: empty, comments (`;`, `//`, `#`), labels
-/// (`name:`), directives (`.foo`), and 2-operand instructions whose
-/// mnemonic is one of the seven the minimal-core IR supports
-/// (mov, add, sub, and, or, xor, cmp). Anything else is a parse error.
+/// (`name:`), directives (`.foo`), and instructions whose mnemonic is
+/// one of the nine supported families (mov, add, sub, and, or, xor,
+/// cmp plus the conditional cmovCC and jCC variants). Anything else is
+/// a parse error.
 pub fn parse_x86_assembly_string(
     content: &str,
     source_name: String,
@@ -464,5 +537,177 @@ mod tests {
                 },
             ]
         );
+    }
+
+    // --- CMOV / Jcc mnemonic parsing ---
+
+    #[test]
+    fn parses_cmove_rax_rbx() {
+        use crate::isa::x86::X86Condition;
+        let r = x86_ir_from_mnemonic("cmove", "rax, rbx").unwrap();
+        assert_eq!(
+            r,
+            Some(X86Instruction::Cmov {
+                rd: X86Register::RAX,
+                rs: X86Register::RBX,
+                cond: X86Condition::E
+            })
+        );
+    }
+
+    #[test]
+    fn parses_all_canonical_cmov_suffixes() {
+        use crate::isa::x86::X86Condition;
+        let cases = [
+            ("cmove", X86Condition::E),
+            ("cmovne", X86Condition::NE),
+            ("cmovb", X86Condition::B),
+            ("cmovae", X86Condition::AE),
+            ("cmovbe", X86Condition::BE),
+            ("cmova", X86Condition::A),
+            ("cmovl", X86Condition::L),
+            ("cmovge", X86Condition::GE),
+            ("cmovle", X86Condition::LE),
+            ("cmovg", X86Condition::G),
+            ("cmovs", X86Condition::S),
+            ("cmovns", X86Condition::NS),
+            ("cmovo", X86Condition::O),
+            ("cmovno", X86Condition::NO),
+            ("cmovp", X86Condition::P),
+            ("cmovnp", X86Condition::NP),
+        ];
+        for (mn, cond) in cases {
+            let r = x86_ir_from_mnemonic(mn, "rax, rbx").unwrap().unwrap();
+            assert_eq!(
+                r,
+                X86Instruction::Cmov {
+                    rd: X86Register::RAX,
+                    rs: X86Register::RBX,
+                    cond
+                },
+                "parsing {} failed",
+                mn
+            );
+        }
+    }
+
+    #[test]
+    fn cmov_with_unknown_suffix_errors() {
+        // `cmovxx` is not a real x86 mnemonic; parser must surface the
+        // failure instead of silently producing Ok(None).
+        let r = x86_ir_from_mnemonic("cmovxx", "rax, rbx");
+        assert!(r.is_err(), "expected Err, got {:?}", r);
+    }
+
+    #[test]
+    fn parses_je_as_jcc_e() {
+        use crate::isa::x86::X86Condition;
+        let r = x86_ir_from_mnemonic("je", "0x1234").unwrap();
+        assert_eq!(
+            r,
+            Some(X86Instruction::Jcc {
+                cond: X86Condition::E
+            })
+        );
+    }
+
+    #[test]
+    fn parses_all_canonical_jcc_suffixes() {
+        use crate::isa::x86::X86Condition;
+        let cases = [
+            ("je", X86Condition::E),
+            ("jne", X86Condition::NE),
+            ("jb", X86Condition::B),
+            ("jae", X86Condition::AE),
+            ("jbe", X86Condition::BE),
+            ("ja", X86Condition::A),
+            ("jl", X86Condition::L),
+            ("jge", X86Condition::GE),
+            ("jle", X86Condition::LE),
+            ("jg", X86Condition::G),
+            ("js", X86Condition::S),
+            ("jns", X86Condition::NS),
+            ("jo", X86Condition::O),
+            ("jno", X86Condition::NO),
+            ("jp", X86Condition::P),
+            ("jnp", X86Condition::NP),
+        ];
+        for (mn, cond) in cases {
+            let r = x86_ir_from_mnemonic(mn, "0x4242").unwrap().unwrap();
+            assert_eq!(r, X86Instruction::Jcc { cond }, "parsing {} failed", mn);
+        }
+    }
+
+    #[test]
+    fn jmp_is_not_parsed_as_jcc() {
+        // The unconditional JMP is not in scope; must not be claimed.
+        let r = x86_ir_from_mnemonic("jmp", "0x100").unwrap();
+        assert_eq!(r, None);
+    }
+
+    #[test]
+    fn jrcxz_and_jecxz_fall_through_to_ok_none() {
+        // jrcxz / jecxz appear in real compiled binaries. They start
+        // with 'j' but aren't conditional branches with a flag-based
+        // condition code, so they fall outside the Jcc IR. Returning
+        // Err here would propagate through convert_to_x86_ir and refuse
+        // the whole window; Ok(None) lets convert_to_x86_ir reject the
+        // window with a clean "unsupported mnemonic" error instead.
+        for mn in ["jrcxz", "jecxz", "jcxz"] {
+            let r = x86_ir_from_mnemonic(mn, "0x100");
+            assert_eq!(
+                r,
+                Ok(None),
+                "{} should be Ok(None), not propagate an unknown-suffix Err",
+                mn
+            );
+        }
+    }
+
+    #[test]
+    fn jcc_with_non_numeric_operand_errors() {
+        // Capstone always renders Jcc targets as numeric addresses.
+        // Anything else is a sign the disassembly format changed —
+        // surface it loudly.
+        let r = x86_ir_from_mnemonic("je", "label");
+        assert!(r.is_err(), "expected Err, got {:?}", r);
+    }
+
+    #[test]
+    fn jcc_gas_aliases_normalize_to_canonical_conditions() {
+        // GAS aliases (jc → jb, jz → je, jnae → jb, jnle → jg, etc.)
+        // must produce the same Jcc IR as their canonical spelling so
+        // the optimizer sees identical sequences regardless of which
+        // form the upstream toolchain emitted.
+        use crate::isa::x86::X86Condition;
+        let alias_cases = [
+            ("jc", X86Condition::B),
+            ("jz", X86Condition::E),
+            ("jnz", X86Condition::NE),
+            ("jnae", X86Condition::B),
+            ("jnb", X86Condition::AE),
+            ("jnc", X86Condition::AE),
+            ("jna", X86Condition::BE),
+            ("jnbe", X86Condition::A),
+            ("jnge", X86Condition::L),
+            ("jnl", X86Condition::GE),
+            ("jng", X86Condition::LE),
+            ("jnle", X86Condition::G),
+            ("jpe", X86Condition::P),
+            ("jpo", X86Condition::NP),
+        ];
+        for (mn, expected_cond) in alias_cases {
+            let r = x86_ir_from_mnemonic(mn, "0x100")
+                .unwrap_or_else(|e| panic!("parse {}: {}", mn, e))
+                .unwrap_or_else(|| panic!("parse {} produced None", mn));
+            assert_eq!(
+                r,
+                X86Instruction::Jcc {
+                    cond: expected_cond
+                },
+                "alias {} should normalize to canonical cond",
+                mn
+            );
+        }
     }
 }

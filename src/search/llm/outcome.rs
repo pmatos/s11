@@ -120,11 +120,14 @@ mod tests {
             rd: Register::X0,
             imm: 1,
         }];
-        let (outcome, metrics) = classify(&target, "ldr x0, [x1]", &live_out_x0());
+        // NEON FADD is unsupported by the parser today; use it as the
+        // canonical unsupported mnemonic so the test does not fight the
+        // memory-ops support added in issue #68.
+        let (outcome, metrics) = classify(&target, "fadd v0.4s, v1.4s, v2.4s", &live_out_x0());
         assert_eq!(
             outcome,
             IterationOutcome::ParseFail {
-                unsupported_mnemonics: vec!["ldr".to_string()]
+                unsupported_mnemonics: vec!["fadd".to_string()]
             }
         );
         assert!(metrics.is_none(), "parse-fail must not invoke verifier");
@@ -134,13 +137,13 @@ mod tests {
     fn parse_fail_collects_all_unsupported_mnemonics_in_response() {
         // Response with three different unsupported instructions interleaved
         // with one supported `mov`. All three unsupported should be captured.
-        // (Note: branch mnemonics like `b`, `bl`, etc. are supported since
-        // issue #69; use memory ops as the unsupported set instead.)
+        // Use NEON forms; memory ops were promoted to supported in issue #68.
         let target = vec![Instruction::MovImm {
             rd: Register::X0,
             imm: 1,
         }];
-        let raw = "ldr x0, [x1]\nmov x0, x1\nstr x2, [x3]\nldp x4, x5, [x6]\n";
+        let raw =
+            "fadd v0.4s, v1.4s, v2.4s\nmov x0, x1\nfmla v3.4s, v4.4s, v5.4s\nld1 {v6.16b}, [x7]\n";
         let (outcome, metrics) = classify(&target, raw, &live_out_x0());
         let mnemonics = match outcome {
             IterationOutcome::ParseFail {
@@ -149,18 +152,18 @@ mod tests {
             other => panic!("expected ParseFail, got {:?}", other),
         };
         assert!(
-            mnemonics.contains(&"ldr".to_string()),
-            "ldr missing from {:?}",
+            mnemonics.contains(&"fadd".to_string()),
+            "fadd missing from {:?}",
             mnemonics
         );
         assert!(
-            mnemonics.contains(&"str".to_string()),
-            "str missing from {:?}",
+            mnemonics.contains(&"fmla".to_string()),
+            "fmla missing from {:?}",
             mnemonics
         );
         assert!(
-            mnemonics.contains(&"ldp".to_string()),
-            "ldp missing from {:?}",
+            mnemonics.contains(&"ld1".to_string()),
+            "ld1 missing from {:?}",
             mnemonics
         );
         assert!(metrics.is_none());

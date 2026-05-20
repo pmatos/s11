@@ -11,6 +11,8 @@ PR #78 deferred this as issue #81 with the note that once the live-out contract 
 
 ADR-0004 §5 commits to replacing `LiveOut` and `X86LiveOutMask` with the generic `RegisterSet<R>` (`src/semantics/live_out.rs`). That migration has since landed: the CLI parser now produces a `LiveOut` (= `RegisterSet<Register>`) directly with `flags_live` set on the mask, and the `bool` was dropped from `parse_live_out_contract`'s return type. The grammar itself is unchanged.
 
+This ADR also supersedes the equivalence-semantics portion of [ADR-0002](0002-mvp-restricts-flags-live-out.md) (the paragraph that described NZCV as unmodeled by the equivalence pipeline); see the Amendment block on that ADR for the delta. ADR-0002 remains the authority for the LLM-flow refusal of flag-live-out targets.
+
 ## Decision
 
 1. Add a free function `validation::live_out::parse_live_out_contract(s: &str) -> Result<LiveOut, ParseRegisterSetError>` implementing the grammar `<regs>` or `<regs>;<flags>`:

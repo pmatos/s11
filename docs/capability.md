@@ -31,6 +31,12 @@ Rewritable straight-line mnemonics accepted by the parser and Capstone bridge:
   `rev16`
 - Standalone extend aliases: `uxtb`, `uxth`, `sxtb`, `sxth`, `sxtw`
 - Bit-field aliases: `ubfx`, `sbfx`, `bfi`, `bfxil`, `ubfiz`, `sbfiz`
+- Memory loads and stores (issue #68, [ADR-0007](adr/0007-memory-model.md);
+  byte-addressed Z3-array memory model with sound full aliasing, whole-memory
+  live-out auto-derived): `ldr`, `ldrb`, `ldrh`, `ldrsb`, `ldrsh`, `ldrsw`,
+  `str`, `strb`, `strh`, `ldp`, `stp`, `ldpsw` — accepted in immediate-offset,
+  pre-index, post-index, register-offset, and register-extend addressing
+  forms, in both `W` and `X` widths
 
 Fixed control-flow terminators:
 
@@ -38,7 +44,8 @@ Fixed control-flow terminators:
 
 Known gaps:
 
-- Memory operations such as `ldr` and `str` are not supported.
+- `LDUR`, `STUR`, and `LDR (literal)` are out of scope (see ADR-0007 §9) and
+  remain unsupported.
 - The optimizer does not rewrite across control-flow boundaries; terminators
   are part of the parsed sequence but not produced by search.
 

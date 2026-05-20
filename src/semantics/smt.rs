@@ -2,12 +2,13 @@
 
 #![allow(dead_code)]
 
-use crate::ir::{Instruction, Operand, Register};
+use crate::ir::types::{AccessWidth, AddressOperand, IndexMode};
+use crate::ir::{ExtendKind, Instruction, Operand, Register};
 use crate::semantics::live_out::RegisterSet;
 use std::collections::HashMap;
 use std::time::Duration;
-use z3::ast::BV;
-use z3::{Params, Solver};
+use z3::ast::{Array, BV};
+use z3::{Params, Solver, Sort};
 
 /// Reverse the byte order of a 64-bit BV by concatenating its 8 byte slices
 /// with byte 0 placed in the most-significant position.
@@ -137,6 +138,12 @@ pub struct MachineState {
     pub z: BV,
     pub c: BV,
     pub v: BV,
+    /// Byte-addressed memory. Domain is BV<64> (the address); range is
+    /// BV<8> (the byte). Sound aliasing comes for free from Z3's array
+    /// theory — every possible overlap of two `store(addr, byte)`
+    /// operations is reasoned over without disjointness preconditions.
+    /// See ADR-0007.
+    pub memory: Array,
     width: u32,
 }
 
@@ -165,12 +172,22 @@ impl MachineState {
         let c = BV::new_const(format!("{}_c", prefix), 1);
         let v = BV::new_const(format!("{}_v", prefix), 1);
 
+        // Sparse symbolic memory: BV64 → BV8. The byte at address `a` is
+        // `memory.select(BV::from_u64(a, 64))`. Z3's array theory handles
+        // every aliasing case without disjointness preconditions.
+        let memory = Array::new_const(
+            format!("{}_mem", prefix),
+            &Sort::bitvector(64),
+            &Sort::bitvector(8),
+        );
+
         MachineState {
             registers,
             n,
             z,
             c,
             v,
+            memory,
             width,
         }
     }
@@ -204,6 +221,106 @@ impl MachineState {
         self.z = z;
         self.c = c;
         self.v = v;
+    }
+
+    /// Read `n` consecutive bytes starting at `addr_bv`, little-endian.
+    /// Returns a `(8 * n)`-bit BV whose low byte is at `addr+0` and whose
+    /// high byte is at `addr+n-1`. Used by the LDR-family arms.
+    pub fn select_n(&self, addr_bv: &BV, n: u32) -> BV {
+        assert!(n >= 1);
+        let addr0 = addr_bv.clone();
+        let byte0 = self
+            .memory
+            .select(&addr0)
+            .as_bv()
+            .expect("array<BV64,BV8>::select must return BV<8>");
+        let mut result = byte0;
+        for i in 1..n {
+            let offset = BV::from_u64(i as u64, 64);
+            let idx = addr_bv.bvadd(&offset);
+            let byte = self
+                .memory
+                .select(&idx)
+                .as_bv()
+                .expect("array<BV64,BV8>::select must return BV<8>");
+            // Byte at addr+i is the next byte up — concat in the high position.
+            result = byte.concat(&result);
+        }
+        result
+    }
+
+    /// Store the low `n` bytes of `value` to memory at `addr_bv`,
+    /// little-endian. Replaces `self.memory` with the chained-store result.
+    pub fn store_n(&mut self, addr_bv: &BV, value: &BV, n: u32) {
+        assert!(n >= 1);
+        let mut mem = self.memory.clone();
+        for i in 0..n {
+            let byte = value.extract(8 * i + 7, 8 * i);
+            let idx = if i == 0 {
+                addr_bv.clone()
+            } else {
+                let offset = BV::from_u64(i as u64, 64);
+                addr_bv.bvadd(&offset)
+            };
+            mem = mem.store(&idx, &byte);
+        }
+        self.memory = mem;
+    }
+
+    /// Evaluate the effective address of an `AddressOperand`. Mirrors the
+    /// concrete `compute_address` helper; returns the address as a BV64
+    /// plus an optional `(base, new_base_value)` writeback that the caller
+    /// commits to the register file.
+    pub fn eval_address(&self, addr: &AddressOperand) -> (BV, Option<(Register, BV)>) {
+        match addr {
+            AddressOperand::Imm { base, offset, mode } => {
+                let base_bv = self.get_register(*base).clone();
+                let off_bv = BV::from_i64(*offset, 64);
+                let updated = base_bv.bvadd(&off_bv);
+                match mode {
+                    IndexMode::Offset => (updated, None),
+                    IndexMode::PreIndex => (updated.clone(), Some((*base, updated))),
+                    IndexMode::PostIndex => (base_bv, Some((*base, updated))),
+                }
+            }
+            AddressOperand::Reg { base, idx, shift } => {
+                let base_bv = self.get_register(*base).clone();
+                let idx_bv = self.get_register(*idx).clone();
+                let shifted = if *shift == 0 {
+                    idx_bv
+                } else {
+                    idx_bv.bvshl(BV::from_u64(*shift as u64, 64))
+                };
+                (base_bv.bvadd(&shifted), None)
+            }
+            AddressOperand::Ext {
+                base,
+                idx,
+                kind,
+                shift,
+            } => {
+                let base_bv = self.get_register(*base).clone();
+                let idx_bv = self.get_register(*idx).clone();
+                let extended = match kind {
+                    ExtendKind::Uxtw => idx_bv.extract(31, 0).zero_ext(32),
+                    ExtendKind::Sxtw => idx_bv.extract(31, 0).sign_ext(32),
+                    ExtendKind::Uxtx | ExtendKind::Sxtx => idx_bv,
+                    // Byte/half extends are rejected by is_encodable for
+                    // memory operands; the SMT path defaults to UXT to
+                    // keep apply_instruction total.
+                    ExtendKind::Uxtb => idx_bv.extract(7, 0).zero_ext(56),
+                    ExtendKind::Uxth => idx_bv.extract(15, 0).zero_ext(48),
+                    ExtendKind::Sxtb => idx_bv.extract(7, 0).sign_ext(56),
+                    ExtendKind::Sxth => idx_bv.extract(15, 0).sign_ext(48),
+                };
+                let shifted = if *shift == 0 {
+                    extended
+                } else {
+                    extended.bvshl(BV::from_u64(*shift as u64, 64))
+                };
+                (base_bv.bvadd(&shifted), None)
+            }
+        }
     }
 
     /// Evaluate an operand to get its value
@@ -398,22 +515,26 @@ pub fn apply_instruction(mut state: MachineState, instruction: &Instruction) -> 
         }
         Instruction::Lsl { rd, rn, shift } => {
             let value = state.get_register(*rn).clone();
-            let shift_amount = state.eval_operand(shift);
-            // LSL is logical shift left
+            // AArch64 variable shifts consume only the low log2(width) bits
+            // (concrete.rs masks with `& 63`). Z3's `bvshl` zeroes the result
+            // when the shift amount is >= width, so we must mask first to
+            // keep SMT and concrete in agreement (issue #241).
+            let mask = BV::from_u64((width - 1) as u64, width);
+            let shift_amount = state.eval_operand(shift).bvand(&mask);
             let result = value.bvshl(&shift_amount);
             state.set_register(*rd, result);
         }
         Instruction::Lsr { rd, rn, shift } => {
             let value = state.get_register(*rn).clone();
-            let shift_amount = state.eval_operand(shift);
-            // LSR is logical shift right
+            let mask = BV::from_u64((width - 1) as u64, width);
+            let shift_amount = state.eval_operand(shift).bvand(&mask);
             let result = value.bvlshr(&shift_amount);
             state.set_register(*rd, result);
         }
         Instruction::Asr { rd, rn, shift } => {
             let value = state.get_register(*rn).clone();
-            let shift_amount = state.eval_operand(shift);
-            // ASR is arithmetic shift right
+            let mask = BV::from_u64((width - 1) as u64, width);
+            let shift_amount = state.eval_operand(shift).bvand(&mask);
             let result = value.bvashr(&shift_amount);
             state.set_register(*rd, result);
         }
@@ -852,8 +973,111 @@ pub fn apply_instruction(mut state: MachineState, instruction: &Instruction) -> 
             "Branches are terminators; strip them before SMT apply_sequence. Reached: {:?}",
             instruction
         ),
+        // Memory ops (issue #68). SMT lowering arrives in step 7 alongside
+        // the `Array<BV64, BV8>` field on `MachineState`.
+        Instruction::Ldr { rt, addr, width } => {
+            let (effective, writeback) = state.eval_address(addr);
+            let raw = state.select_n(&effective, width.bytes());
+            let extended = ldr_zero_extend(&raw, *width, state.width);
+            state.set_register(*rt, extended);
+            if let Some((base, new_base)) = writeback {
+                state.set_register(base, new_base);
+            }
+        }
+        Instruction::Ldrs { rt, addr, width } => {
+            let (effective, writeback) = state.eval_address(addr);
+            let raw = state.select_n(&effective, width.bytes());
+            let extended = ldr_sign_extend(&raw, *width, state.width);
+            state.set_register(*rt, extended);
+            if let Some((base, new_base)) = writeback {
+                state.set_register(base, new_base);
+            }
+        }
+        Instruction::Str { rt, addr, width } => {
+            let (effective, writeback) = state.eval_address(addr);
+            let value = state.get_register(*rt).clone();
+            let bits = width.bytes() * 8;
+            let low = value.extract(bits - 1, 0);
+            state.store_n(&effective, &low, width.bytes());
+            if let Some((base, new_base)) = writeback {
+                state.set_register(base, new_base);
+            }
+        }
+        Instruction::Ldp {
+            rt1,
+            rt2,
+            addr,
+            width,
+            signed,
+        } => {
+            let (effective, writeback) = state.eval_address(addr);
+            let bytes = width.bytes();
+            let raw1 = state.select_n(&effective, bytes);
+            let offset = BV::from_u64(bytes as u64, 64);
+            let effective2 = effective.bvadd(&offset);
+            let raw2 = state.select_n(&effective2, bytes);
+            let (v1, v2) = if *signed {
+                (
+                    ldr_sign_extend(&raw1, *width, state.width),
+                    ldr_sign_extend(&raw2, *width, state.width),
+                )
+            } else {
+                (
+                    ldr_zero_extend(&raw1, *width, state.width),
+                    ldr_zero_extend(&raw2, *width, state.width),
+                )
+            };
+            state.set_register(*rt1, v1);
+            state.set_register(*rt2, v2);
+            if let Some((base, new_base)) = writeback {
+                state.set_register(base, new_base);
+            }
+        }
+        Instruction::Stp {
+            rt1,
+            rt2,
+            addr,
+            width,
+        } => {
+            let (effective, writeback) = state.eval_address(addr);
+            let bytes = width.bytes();
+            let bits = bytes * 8;
+            let v1 = state.get_register(*rt1).clone();
+            let v2 = state.get_register(*rt2).clone();
+            let low1 = v1.extract(bits - 1, 0);
+            let low2 = v2.extract(bits - 1, 0);
+            state.store_n(&effective, &low1, bytes);
+            let offset = BV::from_u64(bytes as u64, 64);
+            let effective2 = effective.bvadd(&offset);
+            state.store_n(&effective2, &low2, bytes);
+            if let Some((base, new_base)) = writeback {
+                state.set_register(base, new_base);
+            }
+        }
     }
     state
+}
+
+/// Zero-extend the low `width.bytes() * 8` bits of `raw` to `target_width`.
+fn ldr_zero_extend(raw: &BV, width: AccessWidth, target_width: u32) -> BV {
+    let raw_bits = width.bytes() * 8;
+    let pad = target_width - raw_bits;
+    if pad == 0 {
+        raw.clone()
+    } else {
+        raw.zero_ext(pad)
+    }
+}
+
+/// Sign-extend the low `width.bytes() * 8` bits of `raw` to `target_width`.
+fn ldr_sign_extend(raw: &BV, width: AccessWidth, target_width: u32) -> BV {
+    let raw_bits = width.bytes() * 8;
+    let pad = target_width - raw_bits;
+    if pad == 0 {
+        raw.clone()
+    } else {
+        raw.sign_ext(pad)
+    }
 }
 
 /// Apply a sequence of instructions to a machine state
@@ -894,12 +1118,14 @@ pub fn states_not_equal(state1: &MachineState, state2: &MachineState) -> z3::ast
     let sp_not_equal = sp1.eq(sp2).not();
     not_equal = z3::ast::Bool::or(&[&not_equal, &sp_not_equal]);
 
-    // And the NZCV flag bits.
-    z3::ast::Bool::or(&[&not_equal, &flags_not_equal(state1, state2)])
+    // And the NZCV flag bits and the whole memory array.
+    not_equal = z3::ast::Bool::or(&[&not_equal, &flags_not_equal(state1, state2)]);
+    z3::ast::Bool::or(&[&not_equal, &state1.memory.eq(&state2.memory).not()])
 }
 
 /// Check if two machine states are not equal for the specified live-out
-/// registers, optionally including the NZCV flag bits.
+/// registers, optionally including the NZCV flag bits and the whole memory
+/// image (see ADR-0007).
 ///
 /// TODO(#282): The explicit `flags_live` parameter duplicates
 /// `live_out.flags_live()` for every non-stochastic caller. Tracked for
@@ -909,6 +1135,7 @@ pub fn states_not_equal_for_live_out(
     state2: &MachineState,
     live_out: &RegisterSet<Register>,
     flags_live: bool,
+    memory_live: bool,
 ) -> z3::ast::Bool {
     let mut not_equal = z3::ast::Bool::from_bool(false);
 
@@ -921,6 +1148,10 @@ pub fn states_not_equal_for_live_out(
 
     if flags_live {
         not_equal = z3::ast::Bool::or(&[&not_equal, &flags_not_equal(state1, state2)]);
+    }
+
+    if memory_live {
+        not_equal = z3::ast::Bool::or(&[&not_equal, &state1.memory.eq(&state2.memory).not()]);
     }
 
     not_equal
@@ -2151,12 +2382,9 @@ mod tests {
     #[test]
     fn test_lsl_imm_concrete_smt_parity() {
         // LSL is width-sensitive: concrete (concrete.rs:84-88) masks the shift
-        // amount with `& 63` before applying. SMT relies on Z3 bvshl with a
-        // 64-bit shift operand. For shift in [0, 63] the two paths agree; the
-        // width-aware refactor in Step 6 must preserve that. Shift values >= 64
-        // are a known latent divergence in the SMT lowering (Z3 bvshl returns 0
-        // while AArch64 architecturally shifts by `shift & 63`) and are NOT
-        // tested here; addressing it is out of scope for the NFC stage.
+        // amount with `& 63` before applying. After the issue-#241 fix the
+        // SMT lowering masks the shift operand with `width - 1` too, so the
+        // two paths agree for all shift values including >= 64.
         let values: &[u64] = &[
             0,
             1,
@@ -2164,7 +2392,7 @@ mod tests {
             0x8000_0000_0000_0000,
             0x1234_5678_9ABC_DEF0,
         ];
-        let shifts: &[i64] = &[0, 1, 5, 16, 32, 63];
+        let shifts: &[i64] = &[0, 1, 5, 16, 32, 63, 64, 65, 127];
         for &v1 in values {
             for &shift in shifts {
                 let instr = Instruction::Lsl {
@@ -2187,7 +2415,7 @@ mod tests {
             0x8000_0000_0000_0000,
             0x1234_5678_9ABC_DEF0,
         ];
-        let shifts: &[i64] = &[0, 1, 5, 16, 32, 63];
+        let shifts: &[i64] = &[0, 1, 5, 16, 32, 63, 64, 65, 127];
         for &v1 in values {
             for &shift in shifts {
                 let instr = Instruction::Lsr {
@@ -2196,6 +2424,93 @@ mod tests {
                     shift: Operand::Immediate(shift),
                 };
                 assert_concrete_smt_parity(&instr, &[(Register::X1, v1)], Register::X0);
+            }
+        }
+    }
+
+    #[test]
+    fn test_lsl_reg_concrete_smt_parity() {
+        // Register-form LSL: shift amount comes from a register and may
+        // legitimately hold values >= 64. Issue #241: SMT lowering must
+        // mask with `width - 1` to mirror AArch64's `shift & 63`.
+        let instr = Instruction::Lsl {
+            rd: Register::X0,
+            rn: Register::X1,
+            shift: Operand::Register(Register::X2),
+        };
+        let values: &[u64] = &[
+            0,
+            1,
+            5,
+            0xFFFF_FFFF_FFFF_FFFF,
+            0x8000_0000_0000_0000,
+            0x1234_5678_9ABC_DEF0,
+        ];
+        let shifts: &[u64] = &[0, 1, 5, 63, 64, 65, 127, 128, u64::MAX];
+        for &v1 in values {
+            for &s in shifts {
+                assert_concrete_smt_parity(
+                    &instr,
+                    &[(Register::X1, v1), (Register::X2, s)],
+                    Register::X0,
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_lsr_reg_concrete_smt_parity() {
+        // Register-form LSR: mirrors LSL coverage.
+        let instr = Instruction::Lsr {
+            rd: Register::X0,
+            rn: Register::X1,
+            shift: Operand::Register(Register::X2),
+        };
+        let values: &[u64] = &[
+            0,
+            1,
+            5,
+            0xFFFF_FFFF_FFFF_FFFF,
+            0x8000_0000_0000_0000,
+            0x1234_5678_9ABC_DEF0,
+        ];
+        let shifts: &[u64] = &[0, 1, 5, 63, 64, 65, 127, 128, u64::MAX];
+        for &v1 in values {
+            for &s in shifts {
+                assert_concrete_smt_parity(
+                    &instr,
+                    &[(Register::X1, v1), (Register::X2, s)],
+                    Register::X0,
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_asr_reg_concrete_smt_parity() {
+        // Register-form ASR exercises sign-fill in addition to the issue
+        // #241 mask, so negative dividends are added to the matrix.
+        let instr = Instruction::Asr {
+            rd: Register::X0,
+            rn: Register::X1,
+            shift: Operand::Register(Register::X2),
+        };
+        let values: &[u64] = &[
+            0,
+            1,
+            (-1_i64) as u64,
+            (-16_i64) as u64,
+            0x8000_0000_0000_0000,
+            0x1234_5678_9ABC_DEF0,
+        ];
+        let shifts: &[u64] = &[0, 1, 5, 63, 64, 65, 127, 128, u64::MAX];
+        for &v1 in values {
+            for &s in shifts {
+                assert_concrete_smt_parity(
+                    &instr,
+                    &[(Register::X1, v1), (Register::X2, s)],
+                    Register::X0,
+                );
             }
         }
     }
@@ -3190,6 +3505,7 @@ mod tests {
         // ASR is sign-sensitive: concrete (concrete.rs:96-101) routes through
         // `as_i64() >> shift` then back to u64; SMT uses Z3 `bvashr` which
         // sign-preserves. Negative inputs (MSB set) must keep the sign bit.
+        // Shifts >= 64 exercise the issue-#241 mask path.
         let values: &[u64] = &[
             0,
             1,
@@ -3198,7 +3514,7 @@ mod tests {
             0x4000_0000_0000_0000, // positive, MSB-1 set
             0x1234_5678_9ABC_DEF0,
         ];
-        let shifts: &[i64] = &[0, 1, 5, 16, 32, 63];
+        let shifts: &[i64] = &[0, 1, 5, 16, 32, 63, 64, 65, 127];
         for &v1 in values {
             for &shift in shifts {
                 let instr = Instruction::Asr {
@@ -3209,5 +3525,104 @@ mod tests {
                 assert_concrete_smt_parity(&instr, &[(Register::X1, v1)], Register::X0);
             }
         }
+    }
+
+    // ---- Memory ops (issue #68 step 7) ----
+
+    /// `STR x0, [x1]; LDR x2, [x1]` must yield `x2 == x0` under Z3 array
+    /// extensionality, even with arbitrary aliasing of `x1` against other
+    /// addresses (none used here). This is the tracer-bullet test for the
+    /// sound aliasing model from ADR-0007.
+    #[test]
+    fn str_then_ldr_round_trips_via_z3_array() {
+        use crate::ir::types::{AccessWidth, AddressOperand, IndexMode};
+
+        let pre = MachineState::new_symbolic("pre");
+        let seq = vec![
+            Instruction::Str {
+                rt: Register::X0,
+                addr: AddressOperand::Imm {
+                    base: Register::X1,
+                    offset: 0,
+                    mode: IndexMode::Offset,
+                },
+                width: AccessWidth::Extended,
+            },
+            Instruction::Ldr {
+                rt: Register::X2,
+                addr: AddressOperand::Imm {
+                    base: Register::X1,
+                    offset: 0,
+                    mode: IndexMode::Offset,
+                },
+                width: AccessWidth::Extended,
+            },
+        ];
+        let post = apply_sequence(pre.clone(), &seq);
+        let x0_pre = pre.get_register(Register::X0);
+        let x2_post = post.get_register(Register::X2);
+
+        let solver = Solver::new();
+        solver.assert(x0_pre.eq(x2_post).not());
+        assert_eq!(
+            solver.check(),
+            SatResult::Unsat,
+            "STR-then-LDR round-trip must imply x2 == x0 unconditionally"
+        );
+    }
+
+    /// `STR x0, [x1]; STRH w0, [x1, #2]; LDR x2, [x1]` must reflect the
+    /// half-word overlap precisely — bytes 0,1,4,5,6,7 stay from x0 while
+    /// bytes 2,3 come from w0. The byte-addressed array makes this fall
+    /// out for free.
+    #[test]
+    fn overlapping_stores_resolve_per_byte_in_smt() {
+        use crate::ir::types::{AccessWidth, AddressOperand, IndexMode};
+
+        let pre = MachineState::new_symbolic("pre");
+        let seq = vec![
+            Instruction::Str {
+                rt: Register::X0,
+                addr: AddressOperand::Imm {
+                    base: Register::X1,
+                    offset: 0,
+                    mode: IndexMode::Offset,
+                },
+                width: AccessWidth::Extended,
+            },
+            Instruction::Str {
+                rt: Register::X0,
+                addr: AddressOperand::Imm {
+                    base: Register::X1,
+                    offset: 2,
+                    mode: IndexMode::Offset,
+                },
+                width: AccessWidth::Half,
+            },
+            Instruction::Ldr {
+                rt: Register::X2,
+                addr: AddressOperand::Imm {
+                    base: Register::X1,
+                    offset: 0,
+                    mode: IndexMode::Offset,
+                },
+                width: AccessWidth::Extended,
+            },
+        ];
+        let post = apply_sequence(pre.clone(), &seq);
+        // The Z3 solver must be able to verify the load returns the expected
+        // mixed bytes. We just check satisfiability of a concrete example.
+        let solver = Solver::new();
+        let x0_pre = pre.get_register(Register::X0);
+        let zero = BV::from_u64(0, 64);
+        solver.assert(x0_pre.eq(BV::from_u64(0xDEADBEEF_CAFEBABE, 64)));
+        solver.assert(pre.get_register(Register::X1).eq(&zero));
+        // Expected: low 2 bytes of x2 from x0 low 2 bytes = 0xBABE
+        // Then bytes 2..3 from x0 low 2 bytes (re-stored) = 0xBABE
+        // Then bytes 4..7 from x0 high 4 bytes = 0xDEADBEEF
+        let x2_post = post.get_register(Register::X2);
+        let expected = BV::from_u64(0xDEAD_BEEF_BABE_BABE, 64);
+        solver.assert(x2_post.eq(&expected));
+        assert_eq!(solver.check(), SatResult::Sat);
     }
 }

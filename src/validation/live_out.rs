@@ -134,15 +134,33 @@ pub fn parse_live_out_contract(s: &str) -> Result<LiveOut, ParseRegisterSetError
     Ok(regs.with_flags(flags_live))
 }
 
-/// Compute the set of registers written by a sequence of instructions
+/// Compute the set of registers written by a sequence of instructions.
+/// Uses `destinations()` so memory ops with writeback (PreIndex / PostIndex)
+/// or pair loads (LDP) contribute multiple registers per instruction.
 pub fn compute_written_registers(instructions: &[Instruction]) -> RegisterSet<Register> {
     let mut mask = RegisterSet::empty();
     for instr in instructions {
-        if let Some(dest) = instr.destination() {
+        for dest in instr.destinations() {
             mask.add(dest);
         }
     }
     mask
+}
+
+/// Returns true if the sequence contains any memory-touching instruction.
+/// Drives the auto-derivation of `EquivalenceConfig::memory_live` (and the
+/// `fast_only` carve-out) in `check_equivalence_with_config`. See ADR-0007.
+pub fn touches_memory(instructions: &[Instruction]) -> bool {
+    instructions.iter().any(|i| {
+        matches!(
+            i,
+            Instruction::Ldr { .. }
+                | Instruction::Ldrs { .. }
+                | Instruction::Str { .. }
+                | Instruction::Ldp { .. }
+                | Instruction::Stp { .. }
+        )
+    })
 }
 
 /// Returns true if NZCV may be observable after the sequence executes.
@@ -206,7 +224,7 @@ pub fn compute_live_in_registers(instructions: &[Instruction]) -> RegisterSet<Re
                 live_in.add(src);
             }
         }
-        if let Some(dest) = instr.destination() {
+        for dest in instr.destinations() {
             written.add(dest);
         }
     }
@@ -217,11 +235,17 @@ pub fn compute_live_in_registers(instructions: &[Instruction]) -> RegisterSet<Re
 /// Build an `X86LiveOutMask` from a target sequence by treating every
 /// written register as live-out and declaring EFLAGS live whenever the
 /// target contains any instruction with observable side effects (i.e.
-/// any non-MOV variant — see `InstructionType::has_side_effects` for
-/// the contract).
+/// any non-MOV / non-CMOV / non-Jcc variant — see
+/// `InstructionType::has_side_effects` for the contract).
 ///
-/// Mirrors the ad-hoc construction inside `find_shorter_equivalent_x86`
-/// (`src/main.rs`) so search algorithms reuse the same liveness rule.
+/// **Asymmetry:** CMOV and Jcc READ EFLAGS but report
+/// `has_side_effects=false` (they don't write flags), so a CMOV-only or
+/// Jcc-only target gets `flags_live=false` from this helper.
+/// `find_shorter_equivalent_x86` (`src/main.rs`) compensates by
+/// dropping `.fast_only()` when the target contains any flag-reader,
+/// forcing the SMT path to fully account for incoming EFLAGS. Direct
+/// callers that bypass that helper must apply their own equivalent
+/// guard if their downstream code reads flags.
 pub fn x86_live_out_from_target(
     target: &[crate::isa::x86::X86Instruction],
 ) -> crate::semantics::state::X86LiveOutMask {

@@ -17,13 +17,13 @@ A `Vec<Instruction>` produced by a search algorithm as a potential replacement f
 A candidate that is both **strictly cheaper** than the target and **proven equivalent** on the live-out contract. The metric of "cheaper" is search-config dependent (cost model in `src/semantics/cost.rs`, or byte count for the LLM-assisted flow).
 
 ### Live-out
-The observable architectural state whose values must agree between target and candidate after execution. Today this is represented by `LiveOut` in `src/semantics/live_out.rs`; its only populated slice is `LiveOutRegisters`. The intended concept is broader than registers: condition state, memory, and PC can also be live-out when downstream code observes them.
+The observable architectural state whose values must agree between target and candidate after execution. Today this is represented by `LiveOut` in `src/semantics/live_out.rs`; it populates two slices — a register set (`RegisterSet<R>` per ADR-0004 §5) and the AArch64 NZCV `flags_live` bit (ADR-0006). The intended concept is still broader: memory and PC can also be live-out when downstream code observes them, and they remain unmodeled.
 
 ### Live-out registers
 The register slice of the live-out contract. Represented by `LiveOutRegisters`, a set of architectural registers whose values must agree between target and candidate after execution. This is not the whole live-out concept.
 
 ### Observable state
-Any architectural state a downstream context can observe after the target executes. Registers are the only fully modeled observable state today. Condition state is the next known slice. Memory and PC are intentionally reserved in the term so the live-out contract can grow without being renamed.
+Any architectural state a downstream context can observe after the target executes. Registers and AArch64 condition state (NZCV) are modeled today (the latter via `LiveOut.flags_live`, ADR-0006). Memory and PC are intentionally reserved in the term so the live-out contract can grow without being renamed.
 
 ### Condition state
 Architecture-specific predicate or flag state that later instructions can read. On AArch64 this is NZCV. On a RISC-V integer subset there may be no condition state. Future architectures can map this term to their own flag or predicate state without changing the shared live-out vocabulary.
@@ -50,8 +50,8 @@ A `SearchAlgorithm` impl that delegates candidate generation to the OpenAI Codex
 
 **Deliverable:** local-only. A bash/`just` target that runs the search across a fixed corpus of 5–10 small asm targets known to be optimizable (drawn from existing equivalence tests). No CI, no mocked Codex backend, no `CandidateGenerator` trait abstraction.
 
-### Flags-live-out (MVP exclusion)
-For the LLM-assisted search MVP only, targets whose final architectural state includes meaningful AArch64 condition state (NZCV) are **refused** rather than processed. `LiveOut` does not currently populate a condition-state slice, and adding condition state to the live-out contract would require co-ordinated changes to the equivalence internals — out of scope for the MVP. The LLM flow detects flags-live-out by static inspection of the target and bails with an explicit message. See ADR-0002.
+### Flags-live-out (LLM-flow exclusion)
+AArch64 condition state (NZCV) is part of the equivalence contract via `LiveOut.flags_live` (set from the `;nzcv` suffix to `equiv --live-out` per ADR-0006). The fast and SMT equivalence paths both consume the bit. *Separately*, the LLM-assisted search flow statically refuses targets whose final state includes flag liveness (any flag-writing instruction in the sequence — see `flags_live_out` in `src/validation/live_out.rs`) and bails before invoking Codex. This is a conservative policy choice, not a soundness workaround, and is the only remaining surface on which ADR-0002 is authoritative. See ADR-0002 (as amended) and ADR-0006.
 
 ### Subset hint (intentionally absent)
 The LLM prompt does **not** enumerate the maintained AArch64 subset s11's parser accepts (see [docs/capability.md](docs/capability.md)). The model is invited to use any AArch64 mnemonic it knows. Outputs that use unsupported instructions are recorded as a research signal (which mnemonics the model "wanted" to reach for), not treated as wasted calls. See ADR-0003.
