@@ -5,7 +5,7 @@ Date: 2026-05-07
 
 ## Context
 
-`parse_assembly_string` in `src/parser/mod.rs` accepts only a 20-opcode subset of AArch64 (MOV, ADD, SUB, AND, ORR, EOR, LSL, LSR, ASR, MUL, SDIV, UDIV, CMP, CMN, TST, CSEL, CSINC, CSINV, CSNEG). The LLM-assisted search algorithm could either:
+`parse_assembly_string` in `src/parser/mod.rs` accepts the maintained AArch64 subset documented in [`docs/capability.md`](../capability.md). The LLM-assisted search algorithm could either:
 
 1. **Tell the model about the subset** (a ~40-token instruction in the system prompt), reducing parse-rejection rate but biasing the model toward its training distribution within that subset.
 2. **Say nothing about the subset**, allowing the model to use any AArch64 mnemonic it knows. Many completions will be rejected at the parse stage. The rejected mnemonics are themselves informative: the model is implicitly voting for which instructions s11 should support next.

@@ -18,7 +18,7 @@ the equivalence pipeline handles NZCV.
 
 ## Context
 
-At the time this ADR was accepted, `LiveOut` (`src/semantics/live_out.rs`) named the broad live-out contract, but its only populated slice was the register-only `LiveOutRegisters`. It did not encode whether AArch64 condition state (NZCV) was part of the broader live-out contract. The 20-opcode subset includes flag writers (`CMP`, `CMN`, `TST`) and flag readers (`CSEL`, `CSINC`, `CSINV`, `CSNEG`); a target whose final instruction is `CMP` (for example) has condition state as a real downstream output even though no register value reflects it. (See the Amendment above for the present state of this part of the contract.)
+At the time this ADR was accepted, `LiveOut` (`src/semantics/live_out.rs`) named the broad live-out contract, but its only populated slice was the register-only `LiveOutRegisters`. It did not encode whether AArch64 condition state (NZCV) was part of the broader live-out contract. The AArch64 subset includes flag writers (`CMP`, `CMN`, `TST`) and flag readers (`CSEL`, `CSINC`, `CSINV`, `CSNEG`); a target whose final instruction is `CMP` (for example) has condition state as a real downstream output even though no register value reflects it. (See the Amendment above for the present state of this part of the contract.)
 
 `EquivalenceConfig` and all four search algorithms threaded `LiveOut` through, but equivalence at that time checked only its `LiveOutRegisters` slice; none of them checked NZCV equivalence. That was a pre-existing soundness gap with respect to condition-state live-out, but only mattered for the LLM flow because the LLM is the only generator that might *legitimately* drop a final flag-setting instruction (the others enumerate from a pool that includes it).
 
