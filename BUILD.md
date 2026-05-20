@@ -1,6 +1,9 @@
 # Build Documentation
 
-This document explains how to build and run the AArch64 Super-Optimizer MVP.
+This document explains how to build and run s11, the AArch64 / x86
+superoptimizer. For the up-to-date list of supported instructions and
+search algorithms, see [`README.md`](README.md); this file only covers
+build, run, and test mechanics.
 
 ## Prerequisites
 
@@ -36,7 +39,7 @@ just clean
 ### Running the Application
 
 ```bash
-# Build and run in debug mode
+# Build and run in debug mode (prints clap help when given no subcommand)
 just run
 
 # Build and run in release mode (recommended for performance testing)
@@ -86,7 +89,7 @@ cargo clean
 ### Running the Application
 
 ```bash
-# Run in debug mode
+# Run in debug mode (prints clap help when given no subcommand)
 cargo run
 
 # Run in release mode
@@ -117,56 +120,66 @@ cargo test
 # Check that everything compiles
 just check
 
-# Run the application
+# Show the available subcommands (s11 with no args prints help)
 just run
 
-# Build optimized version and run
-just run-release
+# Build optimized version
+just release
 ```
 
-## Current Functionality
+## Usage Examples
 
-The MVP demonstrates:
-1. **ELF Binary Analysis**: Read and disassemble AArch64 ELF binaries
-2. **IR Representation**: Basic AArch64 instructions (ADD, MOV with register/immediate variants)
-3. **Pattern Recognition**: Hardcoded equivalence patterns for demonstration
-4. **Enumerative Search**: Searches for shorter equivalent instruction sequences
+s11 is a subcommand-driven CLI. Run `s11 --help` (or `cargo run -- --help`)
+for the full list; the common entry points are `disasm`, `opt`, and
+`equiv`. See [`README.md`](README.md) for an overview of the algorithm
+and flag surface.
 
-### Usage Examples
+### Disassemble an ELF binary
 
-#### Analyze AArch64 ELF Binary
 ```bash
-# Analyze a binary file
-cargo run -- --binary /path/to/aarch64_binary
+# Pretty-print .text for an AArch64 or x86 ELF
+cargo run -- disasm /path/to/binary
 
 # Or using just
-just run -- --binary /path/to/aarch64_binary
+just analyze /path/to/binary
 ```
+
+`disasm` auto-detects the architecture from the ELF header; pass
+`--arch x86-64` (etc.) if you want to override.
+
+### Optimize a window of instructions
+
+```bash
+# Search for a cheaper equivalent of the instructions between two
+# addresses (hex, inside .text). Use `disasm` first to find the
+# boundaries you care about.
+cargo run -- opt /path/to/binary \
+    --start-addr 0x740 --end-addr 0x758 \
+    --algorithm hybrid --cores 4 --timeout 30
+```
+
+The `opt` subcommand has many more flags (cost metric, MCMC tuning, SMT
+timeout, ...) - see `cargo run -- opt --help` and `README.md` for the
+full table.
 
 ### Example Output
 
-**Binary Analysis:**
-```
-AArch64 Super-Optimizer MVP
-Analyzing ELF binary: test_binary
-ELF Header:
-  Architecture: AArch64
-  Entry point: 0x600
-  Type: Shared object
+`disasm` prints one instruction per line as `addr: bytes mnemonic operands`:
 
-Text sections:
-Section: .text (offset: 0x600, size: 328 bytes)
-Disassembly:
-  0x00000724: mov	w0, #5
-  0x00000728: str	w0, [sp, #0xc]
-  0x0000072c: ldr	w0, [sp, #0xc]
-  0x00000730: add	w0, w0, #1
-  ...
+```
+0x598: 3f2303d5 paciasp
+0x59c: fd7bbfa9 stp x29, x30, [sp, #-0x10]!
+0x5a0: fd030091 mov x29, sp
+0x5a4: 34000094 bl #0x674
+0x5a8: fd7bc1a8 ldp x29, x30, [sp], #0x10
+0x5ac: bf2303d5 autiasp
+0x5b0: c0035fd6 ret
+...
 ```
 
 ## Testing
 
-The repository includes a comprehensive test suite with C programs compiled for AArch64:
+The repository includes a comprehensive test suite with C programs compiled for AArch64 (and x86 where the host toolchain supports it):
 
 ### Build Test Binaries
 ```bash
@@ -178,7 +191,7 @@ This creates binaries in the `binaries/` directory:
 - `simple_*`: Basic arithmetic operations
 - `functions_*`: Function calls and loops
 - `loops_*`: Control flow and loops
-- `optimizable_*`: Code with obvious optimization opportunities  
+- `optimizable_*`: Code with obvious optimization opportunities
 - `arrays_*`: Array operations
 
 Each test has three versions: `_debug` (O0), `_opt` (O2), and `_opt3` (O3).
@@ -191,20 +204,23 @@ Each test has three versions: `_debug` (O0), `_opt` (O2), and `_opt3` (O3).
 
 ### Individual Tests
 ```bash
-# Test specific binaries
+# Disassemble a specific binary
 just analyze binaries/simple_debug
 just analyze binaries/simple_opt
 
 # Compare debug vs optimized versions
-cargo run -- --binary binaries/functions_debug
-cargo run -- --binary binaries/functions_opt
+cargo run -- disasm binaries/functions_debug
+cargo run -- disasm binaries/functions_opt
 ```
 
 ### Expected Results
 
-The test suite demonstrates:
-- **Simple arithmetic**: `5+3` optimized from multiple instructions to `mov w0, #8`
-- **Function inlining**: Complex function calls optimized to single constants
-- **Loop unrolling**: Multiplication loops replaced with `mul` instructions
-- **Dead code elimination**: Unused variables completely removed
-- **Constant folding**: Compile-time arithmetic evaluation
+The test suite demonstrates that s11 can:
+- Disassemble AArch64 and x86 ELF binaries across optimization levels.
+- Find shorter or cheaper equivalent instruction windows via `opt`
+  (enumerative, stochastic, symbolic, and - on AArch64 - hybrid / LLM
+  search).
+- Prove equivalence of two assembly sequences via `equiv` and an
+  explicit live-out set.
+
+See `README.md` for worked examples of the kinds of rewrites s11 finds.

@@ -4,6 +4,8 @@
 
 use crate::ir::Register;
 use crate::semantics::cost::CostMetric;
+use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
 use std::time::Duration;
 
 /// Search algorithm selection
@@ -344,6 +346,13 @@ pub struct SearchConfig {
     pub llm: LlmConfig,
     /// Verbose output during search
     pub verbose: bool,
+    /// Cooperative-cancel flag shared with an external coordinator.
+    ///
+    /// Single-threaded search callers leave this `None`; the parallel
+    /// coordinator (`run_parallel_search`) clones `SharedBest::stop_flag()`
+    /// into the per-worker config so the inner search loop can poll
+    /// cancellation alongside its own `timeout` check.
+    pub stop_flag: Option<Arc<AtomicBool>>,
 }
 
 impl Default for SearchConfig {
@@ -371,6 +380,7 @@ impl Default for SearchConfig {
             symbolic: SymbolicConfig::default(),
             llm: LlmConfig::default(),
             verbose: false,
+            stop_flag: None,
         }
     }
 }
@@ -444,6 +454,17 @@ impl SearchConfig {
     /// Set the x86 register pool (issue #73).
     pub fn with_x86_registers(mut self, registers: Vec<crate::isa::x86::X86Register>) -> Self {
         self.x86_available_registers = registers;
+        self
+    }
+
+    /// Attach a cooperative-cancel flag observable by the inner search loop.
+    ///
+    /// The flag is shared by `Arc`; cloning the resulting `SearchConfig`
+    /// preserves the same underlying `AtomicBool`. Single-threaded callers
+    /// can leave this unset and the search loops fall back to their usual
+    /// `config.timeout` deadline.
+    pub fn with_stop_flag(mut self, flag: Arc<AtomicBool>) -> Self {
+        self.stop_flag = Some(flag);
         self
     }
 
@@ -607,6 +628,37 @@ mod tests {
         assert_eq!("linear".parse::<SearchMode>().unwrap(), SearchMode::Linear);
         assert_eq!("binary".parse::<SearchMode>().unwrap(), SearchMode::Binary);
         assert!("diagonal".parse::<SearchMode>().is_err());
+    }
+
+    #[test]
+    fn search_config_with_stop_flag_round_trips() {
+        use std::sync::atomic::Ordering;
+
+        // Default config has no stop flag.
+        assert!(SearchConfig::default().stop_flag.is_none());
+
+        let flag = Arc::new(AtomicBool::new(false));
+        let config = SearchConfig::default().with_stop_flag(Arc::clone(&flag));
+        let cloned = config.clone();
+
+        // Both the config field and the clone observe the same `AtomicBool`.
+        flag.store(true, Ordering::SeqCst);
+        assert!(
+            config
+                .stop_flag
+                .as_ref()
+                .map(|f| f.load(Ordering::SeqCst))
+                .unwrap_or(false),
+            "original config should observe the signalled flag",
+        );
+        assert!(
+            cloned
+                .stop_flag
+                .as_ref()
+                .map(|f| f.load(Ordering::SeqCst))
+                .unwrap_or(false),
+            "cloned config should observe the same flag (Arc-shared, not deep-copied)",
+        );
     }
 
     #[test]

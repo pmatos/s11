@@ -223,7 +223,12 @@ pub fn check_equivalence(seq1: &[Instruction], seq2: &[Instruction]) -> Equivale
     }
 
     // Unmasked entry point compares full state including NZCV (see
-    // `states_not_equal`); flags are always observable here.
+    // `states_not_equal`); flags are always observable here. Issue #240's
+    // terminator-input augmentation lives on the configured entry point
+    // (`check_equivalence_with_config_metrics`) only — this unmasked path is
+    // sound by construction because every register and flag is already part
+    // of the comparison. Anyone reintroducing a masked entry point here must
+    // route through `augment_config_for_terminator` to preserve that.
     if let Some(early) = pre_smt_guard(prefix1, prefix2, true) {
         return early;
     }
@@ -441,6 +446,37 @@ pub fn check_equivalence_with_config(
     result
 }
 
+/// Issue #240: derive the prefix's effective live-out contract from the
+/// caller-supplied config and the stripped trailing terminator.
+///
+/// `split_terminator` peels the terminator off both sequences before the
+/// prefixes are compared, but conditional / register-consuming terminators
+/// read prefix-produced state: `BCond` reads NZCV; `Cbz`/`Cbnz`/`Ret`/`Br`
+/// read a register; `Tbz`/`Tbnz` read a register. If those inputs aren't in
+/// the caller's mask the verifier can approve two prefixes whose reattached
+/// terminator would branch differently. This helper unions the terminator's
+/// source registers into `live_out` and ORs in `terminator.reads_flags()`,
+/// matching the discipline of `EquivalenceConfig::live_out`'s one-way ratchet
+/// (flag liveness is monotonically additive, never silently cleared).
+///
+/// Idempotent: a config already augmented for the same terminator is a
+/// fixed point — set union plus an OR cannot change a contract twice.
+fn augment_config_for_terminator(
+    config: &EquivalenceConfig,
+    terminator: &Instruction,
+) -> EquivalenceConfig {
+    let mut live_out = config.live_out.clone();
+    for reg in terminator.source_registers() {
+        live_out.add(reg);
+    }
+    let flags_live = live_out.flags_live() || terminator.reads_flags();
+    let live_out = live_out.with_flags(flags_live);
+    EquivalenceConfig {
+        live_out,
+        ..config.clone()
+    }
+}
+
 /// Like `check_equivalence_with_config`, but also reports per-call metrics
 /// including the SMT formula size in bytes. Use this only when the metrics
 /// are actually consumed — `solver.to_string()` is non-trivial work compared
@@ -484,15 +520,32 @@ pub fn check_equivalence_with_config_metrics(
         config
     };
 
-    if let Some(early) = pre_smt_guard(prefix1, prefix2, config.live_out.flags_live()) {
+    // Issue #240: the reattached terminator consumes prefix-produced state —
+    // `BCond` reads NZCV; `Cbz`/`Cbnz`/`Ret`/`Br` read a register;
+    // `Tbz`/`Tbnz` read a register. The caller's `live_out` only covers what
+    // the *prefix* must agree on post-execution; we extend it here with the
+    // terminator's input contract so two prefixes that produce different
+    // branch-predicate inputs aren't accepted as equivalent. Built once and
+    // reused for the pre-SMT guard, fast path, and SMT builder so the
+    // augmentation is canonical across all three.
+    let augmented_owned;
+    let effective_config: &EquivalenceConfig = match terminator1 {
+        Some(t) => {
+            augmented_owned = augment_config_for_terminator(config, t);
+            &augmented_owned
+        }
+        None => config,
+    };
+
+    if let Some(early) = pre_smt_guard(prefix1, prefix2, effective_config.live_out.flags_live()) {
         return (early, metrics);
     }
 
-    if let Some(fast) = run_fast_path(prefix1, prefix2, config) {
+    if let Some(fast) = run_fast_path(prefix1, prefix2, effective_config) {
         return (fast, metrics);
     }
 
-    let solver = build_smt_solver(prefix1, prefix2, config);
+    let solver = build_smt_solver(prefix1, prefix2, effective_config);
     let smt_start = std::time::Instant::now();
     let sat_result = solver.check();
     let smt_elapsed = smt_start.elapsed();
@@ -2439,6 +2492,52 @@ mod tests {
         );
     }
 
+    /// Issue #241 regression: AArch64 variable LSL consumes only the low 6
+    /// bits of the shift amount, so `lsl x0, x1, x2` differs from a sequence
+    /// that forces x0 to zero whenever x2 >= 64. Before the fix the SMT
+    /// lowering matched Z3's `bvshl` (which zeroes when shift >= width),
+    /// so the equivalence checker certified the rewrite. With the shift
+    /// amount masked to `width - 1`, the divergence at `x2 = 64` is visible
+    /// either as a fast-path counterexample (random tester edge values) or
+    /// a full SMT refutation.
+    #[test]
+    fn test_lsl_reg_shift_amount_masked_for_equivalence() {
+        use crate::ir::types::Condition;
+
+        let target = vec![Instruction::Lsl {
+            rd: Register::X0,
+            rn: Register::X1,
+            shift: Operand::Register(Register::X2),
+        }];
+        let candidate = vec![
+            Instruction::Lsl {
+                rd: Register::X0,
+                rn: Register::X1,
+                shift: Operand::Register(Register::X2),
+            },
+            Instruction::Cmp {
+                rn: Register::X2,
+                rm: Operand::Immediate(64),
+            },
+            Instruction::Csel {
+                rd: Register::X0,
+                rn: Register::XZR,
+                rm: Register::X0,
+                cond: Condition::CS,
+            },
+        ];
+        let config = EquivalenceConfig::with_live_out(LiveOut::from_registers(vec![Register::X0]));
+        let result = check_equivalence_with_config(&target, &candidate, &config);
+        assert!(
+            matches!(
+                result,
+                EquivalenceResult::NotEquivalent | EquivalenceResult::NotEquivalentFast(_)
+            ),
+            "expected NotEquivalent or NotEquivalentFast for shift-mask divergence, got {:?}",
+            result
+        );
+    }
+
     // ===== Issue #69: terminator-identity precheck =====
 
     use crate::ir::LabelId;
@@ -2510,6 +2609,98 @@ mod tests {
             matches!(result, EquivalenceResult::Equivalent),
             "got {:?}",
             result
+        );
+    }
+
+    // Issue #240: when two sequences end in the same terminator, the prefix
+    // contract must be augmented with the terminator's input registers and
+    // flag reads. Otherwise a caller-supplied live-out that does not declare
+    // those inputs lets the equivalence layer accept prefixes that produce
+    // different branch behaviour with the same terminator.
+
+    /// Repro from issue #240: identical `cbz x0, L` terminators with prefixes
+    /// that disagree on x0 (one writes x1=7, the other writes x1=7 and then
+    /// x0=0). With `LiveOut = {X1}` and flags dead, the bug accepted them as
+    /// equivalent. The fix augments the prefix live-out with the terminator's
+    /// source registers (x0 here), so the fast path catches the divergence.
+    #[test]
+    fn check_equivalence_with_config_rejects_cbz_input_clobber() {
+        let term = Instruction::Cbz {
+            rn: Register::X0,
+            target: LabelId(0x1000),
+        };
+        let seq1 = vec![
+            Instruction::MovImm {
+                rd: Register::X1,
+                imm: 7,
+            },
+            term,
+        ];
+        let seq2 = vec![
+            Instruction::MovImm {
+                rd: Register::X1,
+                imm: 7,
+            },
+            Instruction::MovImm {
+                rd: Register::X0,
+                imm: 0,
+            },
+            term,
+        ];
+        let config = EquivalenceConfig::with_live_out(LiveOut::from_registers(vec![Register::X1]));
+        let result = check_equivalence_with_config(&seq1, &seq2, &config);
+        assert!(
+            matches!(
+                result,
+                EquivalenceResult::NotEquivalent | EquivalenceResult::NotEquivalentFast(_)
+            ),
+            "expected rejection for cbz-input clobber under {{X1}} live-out, got {:?}",
+            result
+        );
+    }
+
+    /// Repro from issue #240: identical `b.eq L` terminators with prefixes
+    /// that produce different NZCV (`cmp x0,#1` vs `cmp x0,#2`). With
+    /// `LiveOut = {}` and `flags_live = false`, the bug accepted them as
+    /// equivalent. The fix forces `flags_live = true` when the terminator
+    /// reads flags (BCond), so SMT proves the NZCV divergence.
+    ///
+    /// `flag_writers_diverge` returns false here (both prefixes write flags),
+    /// so the pre-SMT guard does not fire — we must reach the solver.
+    /// Pinned by asserting `metrics.smt_called == true`.
+    #[test]
+    fn check_equivalence_with_config_rejects_bcond_flag_divergence() {
+        let term = Instruction::BCond {
+            target: LabelId(0x1000),
+            cond: Condition::EQ,
+        };
+        let seq1 = vec![
+            Instruction::Cmp {
+                rn: Register::X0,
+                rm: Operand::Immediate(1),
+            },
+            term,
+        ];
+        let seq2 = vec![
+            Instruction::Cmp {
+                rn: Register::X0,
+                rm: Operand::Immediate(2),
+            },
+            term,
+        ];
+        let config = EquivalenceConfig::with_live_out(LiveOut::from_registers(vec![]));
+        let (result, metrics) = check_equivalence_with_config_metrics(&seq1, &seq2, &config);
+        assert!(
+            matches!(
+                result,
+                EquivalenceResult::NotEquivalent | EquivalenceResult::NotEquivalentFast(_)
+            ),
+            "expected rejection for b.eq with NZCV divergence under empty live-out, got {:?}",
+            result
+        );
+        assert!(
+            metrics.smt_called,
+            "SMT must be invoked to refute NZCV divergence reachable only via the augmented flags-live contract"
         );
     }
 

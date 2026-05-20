@@ -56,15 +56,18 @@ pub enum CoordinatorMessage {
 pub struct SharedBest {
     /// Current best cost (AtomicU64::MAX means no solution yet).
     pub best_cost: AtomicU64,
-    /// Flag to signal all workers to stop.
-    pub should_stop: AtomicBool,
+    /// Flag to signal all workers to stop. Held in an `Arc` so workers can
+    /// take an independently-owned handle via [`SharedBest::stop_flag`] and
+    /// poll it from inside their search loops without needing a reference
+    /// back to the parent `SharedBest`.
+    pub should_stop: Arc<AtomicBool>,
 }
 
 impl Default for SharedBest {
     fn default() -> Self {
         Self {
             best_cost: AtomicU64::new(u64::MAX),
-            should_stop: AtomicBool::new(false),
+            should_stop: Arc::new(AtomicBool::new(false)),
         }
     }
 }
@@ -102,6 +105,18 @@ impl SharedBest {
     /// Get the current best cost (u64::MAX if none found).
     pub fn current_best(&self) -> u64 {
         self.best_cost.load(Ordering::SeqCst)
+    }
+
+    /// Clone the cooperative-cancel flag for an independent observer.
+    ///
+    /// The returned `Arc<AtomicBool>` shares the same underlying flag as the
+    /// `SharedBest` it was cloned from; calling [`SharedBest::signal_stop`]
+    /// (on any clone of the parent `Arc<SharedBest>`) is observable through
+    /// the returned handle. Workers embed this in their `SearchConfig` so the
+    /// inner search loop can poll cancellation without holding a reference
+    /// back to the coordinator.
+    pub fn stop_flag(&self) -> Arc<AtomicBool> {
+        Arc::clone(&self.should_stop)
     }
 }
 
@@ -189,6 +204,27 @@ mod tests {
         assert!(!shared.should_stop());
         shared.signal_stop();
         assert!(shared.should_stop());
+    }
+
+    /// `stop_flag()` returns an independently-owned handle that observes
+    /// signals from any clone of the parent `Arc<SharedBest>`. This pins the
+    /// contract used by parallel workers: a worker keeps the flag in its
+    /// `SearchConfig` and polls it after the coordinator has flipped it.
+    #[test]
+    fn shared_best_stop_flag_clone_is_observed() {
+        let shared = Arc::new(SharedBest::default());
+        let flag = shared.stop_flag();
+        assert!(!flag.load(Ordering::SeqCst));
+
+        // Cloning the parent `Arc<SharedBest>` and signalling through the
+        // clone must still be observable through the previously-taken flag
+        // handle.
+        let other = Arc::clone(&shared);
+        // Drop the original to confirm the flag handle owns its own slot.
+        drop(shared);
+        other.signal_stop();
+
+        assert!(flag.load(Ordering::SeqCst));
     }
 
     #[test]

@@ -540,6 +540,38 @@ fn live_out_for_optimization_prefix(
     LiveOut::from_registers(live_registers)
 }
 
+/// Build the per-worker `SearchConfig` consumed by the hybrid parallel
+/// coordinator.
+///
+/// Issue #243: the CLI used to forget to propagate `options.timeout` into the
+/// `SearchConfig`, which left workers running with the default 60 s timeout
+/// even when the user passed a smaller `--timeout`. The coordinator-level
+/// `ParallelConfig::timeout` still acts as the primary deadline (now wired
+/// through `SharedBest::should_stop`); the search-config timeout is a
+/// per-worker backstop in case the coordinator itself stalls.
+fn build_hybrid_search_config(
+    options: &OptimizationOptions,
+    available_registers: Vec<Register>,
+    available_immediates: Vec<i64>,
+) -> SearchConfig {
+    let stochastic_config = StochasticConfig::default()
+        .with_beta(options.beta)
+        .with_iterations(options.iterations);
+
+    let symbolic_config = SymbolicConfig::default()
+        .with_search_mode(options.search_mode)
+        .with_timeout(options.solver_timeout);
+
+    SearchConfig::default()
+        .with_stochastic(stochastic_config)
+        .with_symbolic(symbolic_config)
+        .with_cost_metric(options.cost_metric)
+        .with_verbose(options.verbose)
+        .with_registers(available_registers)
+        .with_immediates(available_immediates)
+        .with_timeout_option(options.timeout)
+}
+
 /// Run optimization using the selected algorithm.
 ///
 /// Issue #69: if `target` ends in a terminator (branch / control-flow
@@ -719,21 +751,8 @@ fn run_optimization(
                 println!("  Base seed: {}", seed);
             }
 
-            let stochastic_config = StochasticConfig::default()
-                .with_beta(options.beta)
-                .with_iterations(options.iterations);
-
-            let symbolic_config = SymbolicConfig::default()
-                .with_search_mode(options.search_mode)
-                .with_timeout(options.solver_timeout);
-
-            let config = SearchConfig::default()
-                .with_stochastic(stochastic_config)
-                .with_symbolic(symbolic_config)
-                .with_cost_metric(options.cost_metric)
-                .with_verbose(options.verbose)
-                .with_registers(available_registers)
-                .with_immediates(available_immediates);
+            let config =
+                build_hybrid_search_config(options, available_registers, available_immediates);
 
             let parallel_config = ParallelConfig::default()
                 .with_workers(num_cores)
@@ -2404,6 +2423,28 @@ mod cli_helper_tests {
         stats.iterations = 10;
         stats.accepted_proposals = 5;
         print_search_statistics(&stats);
+    }
+
+    /// Regression for issue #243: the hybrid `SearchConfig` must inherit
+    /// `options.timeout` from the CLI, otherwise workers run with the
+    /// default 60 s timeout and the per-worker search loop is unbounded
+    /// (the coordinator-level deadline is now the primary cancel path, but
+    /// this stays as a backstop).
+    #[test]
+    fn build_hybrid_search_config_propagates_timeout() {
+        let mut opts = options_for(Algorithm::Hybrid);
+        opts.timeout = Some(Duration::from_millis(7));
+
+        let regs = vec![Register::X0];
+        let imms = vec![0, 1];
+        let config = build_hybrid_search_config(&opts, regs, imms);
+
+        assert_eq!(config.timeout, Some(Duration::from_millis(7)));
+
+        // None should propagate too.
+        opts.timeout = None;
+        let config = build_hybrid_search_config(&opts, vec![Register::X0], vec![0]);
+        assert_eq!(config.timeout, None);
     }
 
     #[test]
