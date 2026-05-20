@@ -421,7 +421,9 @@ ISA support matrix.
 s11's AArch64 parser and ELF/Capstone bridge accept the same maintained
 straight-line instruction set plus fixed control-flow terminators. Search
 rewrites only the straight-line prefix; supported terminators are parsed and
-held fixed. Memory operations such as `LDR` and `STR` are still unsupported.
+held fixed. See [docs/capability.md](docs/capability.md) for the canonical
+mnemonic matrix (including the load/store family added in ADR-0007); `LDUR`,
+`STUR`, and `LDR (literal)` remain out of scope.
 
 x86-64 and x86-32 support the documented `MOV` / `ADD` / `SUB` / `AND` / `OR`
 / `XOR` / `CMP` families through enumerative, stochastic, and symbolic search.
@@ -441,7 +443,7 @@ Hybrid and LLM remain AArch64-only.
 
 ## Known Limitations
 
-- Memory operations (LDR, STR) are not supported
+- `LDUR`, `STUR`, and `LDR (literal)` remain unsupported — see [ADR-0007 §9](docs/adr/0007-memory-model.md); the supported load/store family is listed in [docs/capability.md](docs/capability.md)
 - Supported control-flow terminators are parsed and held fixed; search does not rewrite across them
 - Some immediate values may not be encodable in optimized forms
 - Condition flags are approximated in SMT mode
