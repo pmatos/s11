@@ -437,7 +437,10 @@ mod tests {
             algorithm: Algorithm::Enumerative,
             cost_metric: CostMetric::InstructionCount,
             seed: 42,
-            timeout: Duration::from_secs(30),
+            // Coverage instrumentation can make the enumerative verifier much
+            // slower than a normal test binary. Keep this regression about the
+            // emitted metrics, not the wall-clock budget.
+            timeout: Duration::from_secs(120),
         };
 
         let record = run_bench(&spec);

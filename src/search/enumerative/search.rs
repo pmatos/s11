@@ -333,9 +333,10 @@ mod tests {
 
     #[test]
     fn statistics_aggregate_smt_elapsed() {
-        // Reuse the same length-3 target as `finds_length_two_rewrite` —
-        // proven to drive at least one SMT equivalence check during the
-        // length-2 sweep. After the search returns, the cumulative SMT
+        // Use the same small mov/add fusion as the bench-support smoke test:
+        // it drives at least one SMT equivalence check without spending most
+        // of the test's wall-clock budget in enumeration. After the search
+        // returns, the cumulative SMT
         // wall time must be non-zero, and it must be <= the overall search
         // elapsed (sanity check on aggregation correctness).
         //
@@ -351,21 +352,16 @@ mod tests {
                 rd: Register::X0,
                 rn: Register::X1,
             },
-            Instruction::Eor {
+            Instruction::Add {
                 rd: Register::X0,
                 rn: Register::X0,
-                rm: Operand::Register(Register::X0),
-            },
-            Instruction::Eor {
-                rd: Register::X2,
-                rn: Register::X2,
-                rm: Operand::Register(Register::X2),
+                rm: Operand::Immediate(1),
             },
         ];
-        let live_out = LiveOut::from_registers(vec![Register::X0, Register::X2]);
+        let live_out = LiveOut::from_registers(vec![Register::X0]);
         let config = SearchConfig::default()
-            .with_registers(vec![Register::X0, Register::X1, Register::X2])
-            .with_immediates(vec![0, 1])
+            .with_registers(vec![Register::X0, Register::X1])
+            .with_immediates(vec![1])
             .with_timeout(std::time::Duration::from_secs(30))
             .with_cores(Some(1));
 
