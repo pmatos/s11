@@ -1258,6 +1258,61 @@ mod tests {
     }
 
     #[test]
+    fn test_generate_random_reaches_madd_family() {
+        let ids = random_opcode_ids(0x66, 5_000);
+        for (label, instr) in [
+            (
+                "Madd",
+                Instruction::Madd {
+                    rd: Register::X0,
+                    rn: Register::X1,
+                    rm: Register::X2,
+                    ra: Register::X0,
+                },
+            ),
+            (
+                "Msub",
+                Instruction::Msub {
+                    rd: Register::X0,
+                    rn: Register::X1,
+                    rm: Register::X2,
+                    ra: Register::X0,
+                },
+            ),
+            (
+                "Mneg",
+                Instruction::Mneg {
+                    rd: Register::X0,
+                    rn: Register::X1,
+                    rm: Register::X2,
+                },
+            ),
+            (
+                "Smulh",
+                Instruction::Smulh {
+                    rd: Register::X0,
+                    rn: Register::X1,
+                    rm: Register::X2,
+                },
+            ),
+            (
+                "Umulh",
+                Instruction::Umulh {
+                    rd: Register::X0,
+                    rn: Register::X1,
+                    rm: Register::X2,
+                },
+            ),
+        ] {
+            assert!(
+                ids.contains(&opcode_id(&instr)),
+                "random never produced {}",
+                label
+            );
+        }
+    }
+
+    #[test]
     fn test_generate_all_instructions_contains_csel_family() {
         let instrs = generate_all_instructions(&default_registers(), &default_immediates());
         assert!(instrs.iter().any(|i| matches!(i, Instruction::Csel { .. })));
