@@ -5,7 +5,8 @@
 //! `X86_64` and `X86_32` ISA marker structs.
 //!
 //! **Initial instruction set**: MOV, ADD, SUB, AND, OR, XOR, CMP — each with
-//! register and immediate forms (14 variants total: 7 mnemonics × 2 forms).
+//! register and immediate forms — plus rewritable CMOVcc and fixed Jcc
+//! terminators.
 
 // x86 register names are conventionally uppercase (RAX, RBX, ...) in every
 // Intel/AMD manual, Capstone disassembly output, GAS/Intel syntax, and gdb
@@ -46,6 +47,27 @@ pub enum X86Condition {
     NO, // not overflow            (OF=0)
     P,  // parity-even             (PF=1)
     NP, // parity-odd              (PF=0)
+}
+
+impl X86Condition {
+    pub const ALL: [Self; 16] = [
+        Self::E,
+        Self::NE,
+        Self::B,
+        Self::AE,
+        Self::BE,
+        Self::A,
+        Self::L,
+        Self::GE,
+        Self::LE,
+        Self::G,
+        Self::S,
+        Self::NS,
+        Self::O,
+        Self::NO,
+        Self::P,
+        Self::NP,
+    ];
 }
 
 impl fmt::Display for X86Condition {
@@ -643,7 +665,7 @@ impl crate::isa::traits::Assembler<X86Instruction> for X86_64 {
     }
 
     fn can_assemble(&self, _instruction: &X86Instruction) -> bool {
-        // The 14 x86 mnemonics in this enum are all encodable in 64-bit mode.
+        // Every x86 variant in this enum is encodable in 64-bit mode.
         true
     }
 }
@@ -742,11 +764,12 @@ impl X86Mutator {
     }
 
     fn random_instruction<R: rand::RngExt>(&self, rng: &mut R) -> X86Instruction {
-        // 14 variants: 7 reg-reg + 7 reg-imm.
-        let opcode = rng.random_range(0..14u32);
+        // Rewritable variants only: 7 reg-reg + 7 reg-imm + CMOVcc.
+        let opcode = rng.random_range(0..15u32);
         let rd = self.pick_register(rng);
         let rs = self.pick_register(rng);
         let imm = self.pick_immediate(rng);
+        let cond = X86Condition::ALL[rng.random_range(0..X86Condition::ALL.len())];
         match opcode {
             0 => X86Instruction::MovReg { rd, rs },
             1 => X86Instruction::MovImm { rd, imm },
@@ -761,7 +784,8 @@ impl X86Mutator {
             10 => X86Instruction::XorReg { rd, rs },
             11 => X86Instruction::XorImm { rd, imm },
             12 => X86Instruction::CmpReg { rn: rd, rs },
-            _ => X86Instruction::CmpImm { rn: rd, imm },
+            13 => X86Instruction::CmpImm { rn: rd, imm },
+            _ => X86Instruction::Cmov { rd, rs, cond },
         }
     }
 
@@ -941,18 +965,18 @@ impl crate::isa::traits::ISAMutator<X86Instruction> for X86Mutator {
     }
 }
 
-/// Stateless generator producing every reg/imm combination of the 14 x86
-/// variants for a given register and immediate pool. Mirrors
-/// `RiscVInstructionGenerator` in shape and complexity.
+/// Stateless generator producing every rewritable x86 variant for a
+/// given register and immediate pool. Jcc is intentionally excluded:
+/// it is a fixed terminator, not a search candidate.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct X86InstructionGenerator;
 
-const X86_OPCODE_COUNT: u8 = 14;
+const X86_REWRITABLE_OPCODE_COUNT: u8 = 15;
 
 impl InstructionGenerator<X86Instruction> for X86InstructionGenerator {
     fn generate_all(&self, registers: &[X86Register], immediates: &[i64]) -> Vec<X86Instruction> {
         let mut out = Vec::new();
-        // Register-register variants (7 mnemonics).
+        // Register-register variants (7 data mnemonics).
         for &rd in registers {
             for &rs in registers {
                 out.push(X86Instruction::MovReg { rd, rs });
@@ -964,7 +988,7 @@ impl InstructionGenerator<X86Instruction> for X86InstructionGenerator {
                 out.push(X86Instruction::CmpReg { rn: rd, rs });
             }
         }
-        // Register-immediate variants (7 mnemonics).
+        // Register-immediate variants (7 data mnemonics).
         for &rd in registers {
             for &imm in immediates {
                 out.push(X86Instruction::MovImm { rd, imm });
@@ -976,6 +1000,15 @@ impl InstructionGenerator<X86Instruction> for X86InstructionGenerator {
                 out.push(X86Instruction::CmpImm { rn: rd, imm });
             }
         }
+        // CMOVcc is rewritable and reads flags, so enumerate every
+        // condition for each register pair. Jcc remains excluded.
+        for &rd in registers {
+            for &rs in registers {
+                for &cond in &X86Condition::ALL {
+                    out.push(X86Instruction::Cmov { rd, rs, cond });
+                }
+            }
+        }
         out
     }
 
@@ -985,10 +1018,11 @@ impl InstructionGenerator<X86Instruction> for X86InstructionGenerator {
         registers: &[X86Register],
         immediates: &[i64],
     ) -> X86Instruction {
-        let opcode = rng.random_range(0..X86_OPCODE_COUNT);
+        let opcode = rng.random_range(0..X86_REWRITABLE_OPCODE_COUNT);
         let rd = registers[rng.random_range(0..registers.len())];
         let rs = registers[rng.random_range(0..registers.len())];
         let imm = immediates[rng.random_range(0..immediates.len())];
+        let cond = X86Condition::ALL[rng.random_range(0..X86Condition::ALL.len())];
         match opcode {
             0 => X86Instruction::MovReg { rd, rs },
             1 => X86Instruction::MovImm { rd, imm },
@@ -1004,6 +1038,7 @@ impl InstructionGenerator<X86Instruction> for X86InstructionGenerator {
             11 => X86Instruction::XorImm { rd, imm },
             12 => X86Instruction::CmpReg { rn: rd, rs },
             13 => X86Instruction::CmpImm { rn: rd, imm },
+            14 => X86Instruction::Cmov { rd, rs, cond },
             _ => unreachable!("opcode out of range"),
         }
     }
@@ -1035,7 +1070,7 @@ impl InstructionGenerator<X86Instruction> for X86InstructionGenerator {
     }
 
     fn opcode_count(&self) -> u8 {
-        X86_OPCODE_COUNT
+        X86_REWRITABLE_OPCODE_COUNT
     }
 }
 
@@ -1152,6 +1187,49 @@ mod tests {
     }
 
     #[test]
+    fn x86_generator_includes_cmov_but_excludes_jcc() {
+        use crate::isa::traits::InstructionGenerator;
+        let regs = [X86Register::RAX, X86Register::RBX];
+        let imms = [0i64];
+        let all = X86InstructionGenerator.generate_all(&regs, &imms);
+
+        assert!(
+            all.contains(&X86Instruction::Cmov {
+                rd: X86Register::RAX,
+                rs: X86Register::RBX,
+                cond: X86Condition::E,
+            }),
+            "trait generator must enumerate CMOVcc candidates"
+        );
+        assert!(
+            all.iter()
+                .all(|instr| !matches!(instr, X86Instruction::Jcc { .. })),
+            "trait generator must not enumerate fixed Jcc terminators"
+        );
+    }
+
+    #[test]
+    fn x86_generator_random_can_emit_cmov_without_emitting_jcc() {
+        use crate::isa::traits::InstructionGenerator;
+        use rand::SeedableRng;
+        let mut rng = rand_chacha::ChaCha8Rng::seed_from_u64(74);
+        let regs = [X86Register::RAX, X86Register::RBX];
+        let imms = [0i64, 1];
+        let mut saw_cmov = false;
+
+        for _ in 0..2000 {
+            let instr = X86InstructionGenerator.generate_random(&mut rng, &regs, &imms);
+            saw_cmov |= matches!(instr, X86Instruction::Cmov { .. });
+            assert!(
+                !matches!(instr, X86Instruction::Jcc { .. }),
+                "random trait generator must not emit fixed Jcc terminators"
+            );
+        }
+
+        assert!(saw_cmov, "random trait generator never emitted CMOVcc");
+    }
+
+    #[test]
     fn x86_generator_random_within_opcode_range() {
         use crate::isa::traits::{InstructionGenerator, InstructionType};
         use rand::SeedableRng;
@@ -1249,10 +1327,15 @@ mod tests {
             X86Instruction::XorImm { rd, imm: 0 },
             X86Instruction::CmpReg { rn: rd, rs },
             X86Instruction::CmpImm { rn: rd, imm: 0 },
+            X86Instruction::Cmov {
+                rd,
+                rs,
+                cond: X86Condition::E,
+            },
         ];
 
-        // 7 mnemonics × {reg, imm} forms = 14 variants.
-        assert_eq!(variants.len(), 14);
+        // Rewritable non-terminator variants: 14 data forms + CMOVcc.
+        assert_eq!(variants.len(), 15);
         let ids: Vec<u8> = variants
             .iter()
             .map(<X86Instruction as InstructionType>::opcode_id)
@@ -1275,15 +1358,17 @@ mod tests {
             );
         }
 
-        // EFLAGS side-effects: every variant except MOV mutates EFLAGS.
+        // EFLAGS side-effects: MOV and CMOV do not mutate EFLAGS.
         for v in variants.iter() {
-            let is_mov = matches!(
+            let leaves_flags = matches!(
                 v,
-                X86Instruction::MovReg { .. } | X86Instruction::MovImm { .. }
+                X86Instruction::MovReg { .. }
+                    | X86Instruction::MovImm { .. }
+                    | X86Instruction::Cmov { .. }
             );
             assert_eq!(
                 <X86Instruction as InstructionType>::has_side_effects(v),
-                !is_mov,
+                !leaves_flags,
                 "has_side_effects wrong for {:?}",
                 v
             );
