@@ -1448,13 +1448,9 @@ mod tests {
         let live_out = RegisterSet::<Register>::from_registers(vec![Register::X0]);
 
         let solver = Solver::new();
-        solver.assert(&states_not_equal_for_live_out(
-            &state_cls,
-            &state_signfold_clz,
-            &live_out,
-            false,
-            false,
-        ));
+        let diseq =
+            states_not_equal_for_live_out(&state_cls, &state_signfold_clz, &live_out, false, false);
+        solver.assert(diseq);
         assert_eq!(
             solver.check(),
             SatResult::Unsat,
