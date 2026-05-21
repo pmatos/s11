@@ -736,7 +736,8 @@ fn is_extend_keyword(kw: &str) -> bool {
 ///   - `[Xn, #imm]!`                   → Imm { mode=PreIndex }
 ///   - `[Xn], #imm` (two tokens)       → Imm { mode=PostIndex }
 ///   - `[Xn, Xm]`                      → Reg { shift=0 }
-///   - `[Xn, Xm, LSL #shift]`          → Reg { shift }
+///   - `[Xn, Xm, LSL #shift]`          → Reg { shift }, where shift is 0 or
+///     log2(access bytes)
 ///   - `[Xn, {W|X}m, UXTW/SXTW/UXTX/SXTX{ #shift}]`  → Ext
 ///
 /// Returns the parsed operand and the number of input tokens consumed (1 for
@@ -744,6 +745,7 @@ fn is_extend_keyword(kw: &str) -> bool {
 /// See ADR-0007.
 fn parse_memory_operand(
     tokens: &[&str],
+    width: crate::ir::types::AccessWidth,
 ) -> Result<(crate::ir::types::AddressOperand, usize), String> {
     use crate::ir::types::{AddressOperand, ExtendKind, IndexMode};
 
@@ -800,7 +802,7 @@ fn parse_memory_operand(
         if kw.eq_ignore_ascii_case("lsl") {
             let idx = parse_register(inner_parts[1])
                 .map_err(|e| format!("invalid index register in memory operand: {}", e))?;
-            let shift = parse_lsl_amount(third)?;
+            let shift = parse_memory_lsl_amount(third, width)?;
             AddressOperand::Reg { base, idx, shift }
         } else if is_extend_keyword(kw) {
             let idx = parse_w_or_x_register(inner_parts[1])
@@ -893,6 +895,32 @@ fn parse_lsl_amount(tail: &str) -> Result<u8, String> {
     Ok(amt as u8)
 }
 
+/// Parse the narrower `LSL #N` tail accepted by memory register-offset forms.
+fn parse_memory_lsl_amount(tail: &str, width: crate::ir::types::AccessWidth) -> Result<u8, String> {
+    let shift = parse_lsl_amount(tail)?;
+    let scaled_shift = match width {
+        crate::ir::types::AccessWidth::Byte => 0,
+        crate::ir::types::AccessWidth::Half => 1,
+        crate::ir::types::AccessWidth::Word => 2,
+        crate::ir::types::AccessWidth::Extended => 3,
+    };
+
+    if shift == 0 || shift == scaled_shift {
+        return Ok(shift);
+    }
+
+    let access_bytes = 1u8 << scaled_shift;
+    let expected = if scaled_shift == 0 {
+        "0".to_string()
+    } else {
+        format!("0 or {}", scaled_shift)
+    };
+    Err(format!(
+        "memory LSL amount {} invalid for {}-byte access (expected {})",
+        shift, access_bytes, expected
+    ))
+}
+
 /// Parse a `<extend> #shift` tail used in memory operands. Returns the
 /// extend kind plus the optional shift (defaults to 0 if absent).
 fn parse_memory_extend_tail(tail: &str) -> Result<(crate::ir::types::ExtendKind, u8), String> {
@@ -956,7 +984,7 @@ fn parse_single_reg_mem(
     }
     let rt =
         parse_w_or_x_register(operands[0]).map_err(|e| format!("{}: invalid Xt: {}", mnem, e))?;
-    let (addr, consumed) = parse_memory_operand(&operands[1..])?;
+    let (addr, consumed) = parse_memory_operand(&operands[1..], width)?;
     if 1 + consumed != operands.len() {
         return Err(format!(
             "{} has {} operands, expected {}",
@@ -989,7 +1017,7 @@ fn parse_pair_mem(
         .map_err(|e| format!("{}: invalid first register: {}", mnem, e))?;
     let rt2 = parse_w_or_x_register(operands[1])
         .map_err(|e| format!("{}: invalid second register: {}", mnem, e))?;
-    let (addr, consumed) = parse_memory_operand(&operands[2..])?;
+    let (addr, consumed) = parse_memory_operand(&operands[2..], width)?;
     if 2 + consumed != operands.len() {
         return Err(format!(
             "{} has {} operands, expected {}",
@@ -1953,6 +1981,22 @@ mod tests {
     fn test_parse_shifted_register_amount_out_of_range() {
         // amount > 63 must be rejected.
         assert!(parse_line("add x0, x1, x2, lsl #64").is_err());
+    }
+
+    #[test]
+    fn test_parse_shifted_register_accepts_max_lsl_amount() {
+        let instr = parse_one("add x0, x1, x2, lsl #63");
+        match instr {
+            Instruction::Add { rm, .. } => assert_eq!(
+                rm,
+                Operand::ShiftedRegister {
+                    reg: Register::X2,
+                    kind: ShiftKind::Lsl,
+                    amount: 63,
+                }
+            ),
+            other => panic!("expected add, got {other:?}"),
+        }
     }
 
     #[test]
@@ -2990,6 +3034,54 @@ mod tests {
                 width: AccessWidth::Extended,
             }
         );
+    }
+
+    #[test]
+    fn parse_memory_register_offset_lsl_rejects_illegal_shift_for_access_width() {
+        for (text, expected) in [
+            ("ldrb x0, [x1, x2, lsl #1]", "expected 0"),
+            ("ldrh x0, [x1, x2, lsl #2]", "expected 0 or 1"),
+            ("ldr w0, [x1, x2, lsl #3]", "expected 0 or 2"),
+            ("ldr x0, [x1, x2, lsl #17]", "expected 0 or 3"),
+            ("str x0, [x1, x2, lsl #2]", "expected 0 or 3"),
+        ] {
+            let err = parse_line(text).expect_err("memory LSL shift should be rejected");
+            let msg = err.to_string();
+            assert!(
+                msg.contains("memory LSL amount"),
+                "{text}: error should name memory LSL amount, got {msg}"
+            );
+            assert!(
+                msg.contains(expected),
+                "{text}: error should mention {expected}, got {msg}"
+            );
+        }
+    }
+
+    #[test]
+    fn parse_memory_register_offset_lsl_accepts_legal_shift_for_access_width() {
+        use crate::ir::types::AddressOperand;
+
+        for (text, expected_shift) in [
+            ("ldrb x0, [x1, x2, lsl #0]", 0),
+            ("ldrh x0, [x1, x2, lsl #1]", 1),
+            ("ldr w0, [x1, x2, lsl #2]", 2),
+            ("ldr x0, [x1, x2, lsl #3]", 3),
+        ] {
+            let instr = parse_one(text);
+            let Instruction::Ldr { addr, .. } = instr else {
+                panic!("{text}: expected ldr-like instruction, got {instr:?}");
+            };
+            assert_eq!(
+                addr,
+                AddressOperand::Reg {
+                    base: Register::X1,
+                    idx: Register::X2,
+                    shift: expected_shift,
+                },
+                "{text}"
+            );
+        }
     }
 
     #[test]
