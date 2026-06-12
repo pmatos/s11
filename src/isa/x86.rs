@@ -971,6 +971,9 @@ impl crate::isa::traits::ISAMutator<X86Instruction> for X86Mutator {
 #[derive(Clone, Copy, Debug, Default)]
 pub struct X86InstructionGenerator;
 
+// One entry per rewritable opcode family: 7 reg-reg + 7 reg-imm + CMOVcc.
+// CMOVcc counts as a single family here even though `generate_all` expands
+// it across all 16 `X86Condition::ALL` variants per register pair.
 const X86_REWRITABLE_OPCODE_COUNT: u8 = 15;
 
 impl InstructionGenerator<X86Instruction> for X86InstructionGenerator {
