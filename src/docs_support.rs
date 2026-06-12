@@ -17,4 +17,14 @@ pub const AARCH64_FIXED_TERMINATORS: &[&str] = &[
     "b", "b.<cond>", "bl", "br", "ret", "cbz", "cbnz", "tbz", "tbnz",
 ];
 
-pub const X86_SUPPORTED_MNEMONICS: &[&str] = &["mov", "add", "sub", "and", "or", "xor", "cmp"];
+pub const X86_SUPPORTED_MNEMONICS: &[&str] = &[
+    "mov",
+    "add",
+    "sub",
+    "and",
+    "or",
+    "xor",
+    "cmp",
+    "cmov<cond>",
+    "j<cond>",
+];

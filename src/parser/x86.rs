@@ -344,7 +344,7 @@ mod tests {
     }
 
     #[test]
-    fn x86_ir_recognises_seven_mnemonics() {
+    fn x86_ir_recognises_supported_mnemonic_families() {
         let cases = [
             (
                 "mov",
@@ -408,6 +408,22 @@ mod tests {
                 X86Instruction::CmpImm {
                     rn: X86Register::RAX,
                     imm: 5,
+                },
+            ),
+            (
+                "cmove",
+                "rax, rbx",
+                X86Instruction::Cmov {
+                    rd: X86Register::RAX,
+                    rs: X86Register::RBX,
+                    cond: X86Condition::E,
+                },
+            ),
+            (
+                "je",
+                "0x10",
+                X86Instruction::Jcc {
+                    cond: X86Condition::E,
                 },
             ),
         ];

@@ -1410,6 +1410,55 @@ mod tests {
     }
 
     #[test]
+    fn test_cls_equivalent_to_clz_of_signfold() {
+        let initial = MachineState::new_symbolic("pre");
+
+        let cls = vec![Instruction::Cls {
+            rd: Register::X0,
+            rn: Register::X1,
+        }];
+        let signfold_clz = vec![
+            Instruction::Asr {
+                rd: Register::X10,
+                rn: Register::X1,
+                shift: Operand::Immediate(63),
+            },
+            Instruction::Eor {
+                rd: Register::X0,
+                rn: Register::X1,
+                rm: Operand::Register(Register::X10),
+            },
+            Instruction::Clz {
+                rd: Register::X0,
+                rn: Register::X0,
+            },
+            Instruction::MovImm {
+                rd: Register::X11,
+                imm: 1,
+            },
+            Instruction::Sub {
+                rd: Register::X0,
+                rn: Register::X0,
+                rm: Operand::Register(Register::X11),
+            },
+        ];
+
+        let state_cls = apply_sequence(initial.clone(), &cls);
+        let state_signfold_clz = apply_sequence(initial, &signfold_clz);
+        let live_out = RegisterSet::<Register>::from_registers(vec![Register::X0]);
+
+        let solver = Solver::new();
+        let diseq =
+            states_not_equal_for_live_out(&state_cls, &state_signfold_clz, &live_out, false, false);
+        solver.assert(diseq);
+        assert_eq!(
+            solver.check(),
+            SatResult::Unsat,
+            "CLS(x) should match CLZ(x XOR (x ASR 63)) - 1 for live-out X0"
+        );
+    }
+
+    #[test]
     fn test_extended_register_acceptance_uxtb() {
         // Issue #60 acceptance: SMT proves
         //   UXTB x10, x2 ; ADD x0, x1, x10
@@ -3617,9 +3666,9 @@ mod tests {
         let zero = BV::from_u64(0, 64);
         solver.assert(x0_pre.eq(BV::from_u64(0xDEADBEEF_CAFEBABE, 64)));
         solver.assert(pre.get_register(Register::X1).eq(&zero));
-        // Expected: low 2 bytes of x2 from x0 low 2 bytes = 0xBABE
-        // Then bytes 2..3 from x0 low 2 bytes (re-stored) = 0xBABE
-        // Then bytes 4..7 from x0 high 4 bytes = 0xDEADBEEF
+        // Expected: bytes 0..=1 from the original 64-bit STR of x0 = 0xBABE
+        // Then bytes 2..=3 from the low 16 bits of x0 stored by STRH at offset 2 = 0xBABE
+        // Then bytes 4..=7 from the original 64-bit STR of x0 = 0xDEADBEEF
         let x2_post = post.get_register(Register::X2);
         let expected = BV::from_u64(0xDEAD_BEEF_BABE_BABE, 64);
         solver.assert(x2_post.eq(&expected));

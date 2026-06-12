@@ -333,12 +333,12 @@ mod tests {
 
     #[test]
     fn statistics_aggregate_smt_elapsed() {
-        // Use the same small mov/add fusion as the bench-support smoke test:
-        // it drives at least one SMT equivalence check without spending most
-        // of the test's wall-clock budget in enumeration. After the search
-        // returns, the cumulative SMT
-        // wall time must be non-zero, and it must be <= the overall search
-        // elapsed (sanity check on aggregation correctness).
+        // Reuse the same length-2 target as `collapses_mov_add_into_single_add`:
+        // it reaches the equivalent `add x0, x1, #1` candidate promptly while
+        // still driving at least one SMT equivalence check. After the search
+        // returns, the cumulative SMT wall time must be non-zero, and it must
+        // be <= the overall search elapsed (sanity check on aggregation
+        // correctness).
         //
         // `cores = Some(1)` is required for the upper-bound assertion: the
         // global rayon pool would let multiple worker threads each spend
@@ -359,11 +359,7 @@ mod tests {
             },
         ];
         let live_out = LiveOut::from_registers(vec![Register::X0]);
-        let config = SearchConfig::default()
-            .with_registers(vec![Register::X0, Register::X1])
-            .with_immediates(vec![1])
-            .with_timeout(std::time::Duration::from_secs(30))
-            .with_cores(Some(1));
+        let config = small_config().with_cores(Some(1));
 
         let mut search = EnumerativeSearch::new();
         let result = search.search(&target, &live_out, &config);
