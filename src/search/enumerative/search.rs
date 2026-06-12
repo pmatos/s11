@@ -333,11 +333,12 @@ mod tests {
 
     #[test]
     fn statistics_aggregate_smt_elapsed() {
-        // Reuse the same length-3 target as `finds_length_two_rewrite` —
-        // proven to drive at least one SMT equivalence check during the
-        // length-2 sweep. After the search returns, the cumulative SMT
-        // wall time must be non-zero, and it must be <= the overall search
-        // elapsed (sanity check on aggregation correctness).
+        // Reuse the same length-2 target as `collapses_mov_add_into_single_add`:
+        // it reaches the equivalent `add x0, x1, #1` candidate promptly while
+        // still driving at least one SMT equivalence check. After the search
+        // returns, the cumulative SMT wall time must be non-zero, and it must
+        // be <= the overall search elapsed (sanity check on aggregation
+        // correctness).
         //
         // `cores = Some(1)` is required for the upper-bound assertion: the
         // global rayon pool would let multiple worker threads each spend
@@ -351,23 +352,14 @@ mod tests {
                 rd: Register::X0,
                 rn: Register::X1,
             },
-            Instruction::Eor {
+            Instruction::Add {
                 rd: Register::X0,
                 rn: Register::X0,
-                rm: Operand::Register(Register::X0),
-            },
-            Instruction::Eor {
-                rd: Register::X2,
-                rn: Register::X2,
-                rm: Operand::Register(Register::X2),
+                rm: Operand::Immediate(1),
             },
         ];
-        let live_out = LiveOut::from_registers(vec![Register::X0, Register::X2]);
-        let config = SearchConfig::default()
-            .with_registers(vec![Register::X0, Register::X1, Register::X2])
-            .with_immediates(vec![0, 1])
-            .with_timeout(std::time::Duration::from_secs(30))
-            .with_cores(Some(1));
+        let live_out = LiveOut::from_registers(vec![Register::X0]);
+        let config = small_config().with_cores(Some(1));
 
         let mut search = EnumerativeSearch::new();
         let result = search.search(&target, &live_out, &config);

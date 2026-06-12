@@ -670,11 +670,15 @@ impl AArch64Assembler {
                 Ok(())
             }
             Instruction::Add { rd, rn, rm } => {
-                let rd_reg = register_to_dynasm(*rd)?;
-                let rn_reg = register_to_dynasm(*rn)?;
-
+                // rd resolution depends on the rm operand shape: the immediate
+                // and extended-register forms encode Rd in the Xn|SP slot
+                // (accept SP, reject XZR), while the register and
+                // shifted-register forms use the plain Xn slot. Resolve rd
+                // inside each arm so the correct encoder gates it.
                 match rm {
                     Operand::Register(rm_reg) => {
+                        let rd_reg = register_to_dynasm(*rd)?;
+                        let rn_reg = register_to_dynasm(*rn)?;
                         let rm_reg_num = register_to_dynasm(*rm_reg)?;
                         dynasm!(ops
                             ; .arch aarch64
@@ -686,9 +690,13 @@ impl AArch64Assembler {
                         if *imm < 0 || *imm > 0xFFF {
                             return Err(format!("Immediate {} out of range for ADD", imm));
                         }
-                        // ADD immediate requires XSP register type (Xn|SP format) per AArch64 spec.
-                        // The X register type only works for register operands, not immediates.
-                        // XSP allows both general-purpose X registers and SP in this encoding.
+                        // ADD immediate uses the Xn|SP register type for both rd
+                        // and rn per AArch64 spec (`ADD <Xd|SP>, <Xn|SP>, #imm`).
+                        // register_to_dynasm_xsp accepts SP (so `ADD SP, SP, #imm`
+                        // encodes) and rejects XZR, which shares index 31 and
+                        // would otherwise silently alias to SP.
+                        let rd_reg = register_to_dynasm_xsp(*rd)?;
+                        let rn_reg = register_to_dynasm_xsp(*rn)?;
                         dynasm!(ops
                             ; .arch aarch64
                             ; add XSP(rd_reg), XSP(rn_reg), #*imm as u32
@@ -696,6 +704,8 @@ impl AArch64Assembler {
                         Ok(())
                     }
                     Operand::ShiftedRegister { reg, kind, amount } => {
+                        let rd_reg = register_to_dynasm(*rd)?;
+                        let rn_reg = register_to_dynasm(*rn)?;
                         let rm_reg_num = register_to_dynasm(*reg)?;
                         emit_shifted_reg_3op_arith!(
                             ops, add, rd_reg, rn_reg, rm_reg_num, kind, *amount
@@ -718,11 +728,13 @@ impl AArch64Assembler {
                 }
             }
             Instruction::Sub { rd, rn, rm } => {
-                let rd_reg = register_to_dynasm(*rd)?;
-                let rn_reg = register_to_dynasm(*rn)?;
-
+                // See the ADD arm: rd is resolved inside each operand branch so
+                // the immediate/extended forms gate it through the Xn|SP encoder
+                // and the register/shifted forms through the plain Xn encoder.
                 match rm {
                     Operand::Register(rm_reg) => {
+                        let rd_reg = register_to_dynasm(*rd)?;
+                        let rn_reg = register_to_dynasm(*rn)?;
                         let rm_reg_num = register_to_dynasm(*rm_reg)?;
                         dynasm!(ops
                             ; .arch aarch64
@@ -734,7 +746,12 @@ impl AArch64Assembler {
                         if *imm < 0 || *imm > 0xFFF {
                             return Err(format!("Immediate {} out of range for SUB", imm));
                         }
-                        // SUB immediate also requires XSP register type (Xn|SP format)
+                        // SUB immediate uses the Xn|SP register type for both rd
+                        // and rn (`SUB <Xd|SP>, <Xn|SP>, #imm`). register_to_dynasm_xsp
+                        // accepts SP (so `SUB SP, SP, #imm` encodes) and rejects
+                        // XZR, which would otherwise alias to SP via index 31.
+                        let rd_reg = register_to_dynasm_xsp(*rd)?;
+                        let rn_reg = register_to_dynasm_xsp(*rn)?;
                         dynasm!(ops
                             ; .arch aarch64
                             ; sub XSP(rd_reg), XSP(rn_reg), #*imm as u32
@@ -742,6 +759,8 @@ impl AArch64Assembler {
                         Ok(())
                     }
                     Operand::ShiftedRegister { reg, kind, amount } => {
+                        let rd_reg = register_to_dynasm(*rd)?;
+                        let rn_reg = register_to_dynasm(*rn)?;
                         let rm_reg_num = register_to_dynasm(*reg)?;
                         emit_shifted_reg_3op_arith!(
                             ops, sub, rd_reg, rn_reg, rm_reg_num, kind, *amount
@@ -2992,6 +3011,67 @@ mod tests {
         }
     }
 
+    /// ADD/SUB immediate-form accepts SP as `rn` for the same `Xn|SP`
+    /// source slot covered by the ADDS/SUBS regression above.
+    #[test]
+    fn test_add_sub_imm_accept_sp_rn() {
+        let mut assembler = AArch64Assembler::new();
+        for instr in [
+            Instruction::Add {
+                rd: Register::X0,
+                rn: Register::SP,
+                rm: Operand::Immediate(8),
+            },
+            Instruction::Sub {
+                rd: Register::X0,
+                rn: Register::SP,
+                rm: Operand::Immediate(8),
+            },
+        ] {
+            let bytes = assembler
+                .assemble_instructions(&[instr], 0)
+                .unwrap_or_else(|e| {
+                    panic!(
+                        "Expected SP-as-rn to encode, got Err({}) for {:?}",
+                        e, instr
+                    )
+                });
+            assert_eq!(bytes.len(), 4);
+        }
+    }
+
+    #[test]
+    fn test_add_imm_sp_rn_roundtrip() {
+        let mut assembler = AArch64Assembler::new();
+        let bytes = assembler
+            .assemble_instructions(
+                &[Instruction::Add {
+                    rd: Register::X0,
+                    rn: Register::SP,
+                    rm: Operand::Immediate(8),
+                }],
+                0,
+            )
+            .expect("ADD imm with SP rn should encode");
+        disassemble_and_verify(&bytes, "add", &["x0", "sp", "#8"]);
+    }
+
+    #[test]
+    fn test_sub_imm_sp_rn_roundtrip() {
+        let mut assembler = AArch64Assembler::new();
+        let bytes = assembler
+            .assemble_instructions(
+                &[Instruction::Sub {
+                    rd: Register::X0,
+                    rn: Register::SP,
+                    rm: Operand::Immediate(8),
+                }],
+                0,
+            )
+            .expect("SUB imm with SP rn should encode");
+        disassemble_and_verify(&bytes, "sub", &["x0", "sp", "#8"]);
+    }
+
     /// Capstone round-trip for ADDS with SP as `rn` — guards against silent
     /// off-by-one in the encoded slot. Capstone must disassemble back to
     /// `adds` with `sp` in the rn position.
@@ -3098,6 +3178,141 @@ mod tests {
             0,
         );
         assert!(ok.is_ok(), "register-form ADDS with XZR should encode");
+    }
+
+    /// ADD/SUB immediate-form `rn` is also `Xn|SP`, so XZR must be rejected
+    /// instead of being encoded as SP.
+    #[test]
+    fn test_add_sub_imm_reject_xzr_rn() {
+        let mut assembler = AArch64Assembler::new();
+        for instr in [
+            Instruction::Add {
+                rd: Register::X0,
+                rn: Register::XZR,
+                rm: Operand::Immediate(1),
+            },
+            Instruction::Sub {
+                rd: Register::X0,
+                rn: Register::XZR,
+                rm: Operand::Immediate(1),
+            },
+        ] {
+            let result = assembler.assemble_instructions(&[instr], 0);
+            assert!(
+                result.is_err(),
+                "Expected encoder to reject {:?}, got {:?}",
+                instr,
+                result
+            );
+        }
+        // Register-form ADD/SUB with XZR as rn must still succeed — the
+        // register-form encoding decodes 31 as XZR correctly.
+        for instr in [
+            Instruction::Add {
+                rd: Register::X0,
+                rn: Register::XZR,
+                rm: Operand::Register(Register::X1),
+            },
+            Instruction::Sub {
+                rd: Register::X0,
+                rn: Register::XZR,
+                rm: Operand::Register(Register::X1),
+            },
+        ] {
+            let result = assembler.assemble_instructions(&[instr], 0);
+            assert!(
+                result.is_ok(),
+                "register-form ADD/SUB with XZR should encode: {:?}",
+                result
+            );
+        }
+    }
+
+    /// ADD/SUB immediate-form `rd` is `Xd|SP`, so SP must be accepted as the
+    /// destination: `ADD SP, SP, #imm` / `SUB SP, SP, #imm` are the canonical
+    /// stack-pointer adjusts. Round-trip through Capstone to pin the slot
+    /// (both rd and rn must decode back to `sp`).
+    #[test]
+    fn test_add_imm_sp_rd_roundtrip() {
+        let mut assembler = AArch64Assembler::new();
+        let bytes = assembler
+            .assemble_instructions(
+                &[Instruction::Add {
+                    rd: Register::SP,
+                    rn: Register::SP,
+                    rm: Operand::Immediate(16),
+                }],
+                0,
+            )
+            .expect("ADD imm with SP as rd and rn should encode");
+        disassemble_and_verify(&bytes, "add", &["sp, sp", "0x10"]);
+    }
+
+    #[test]
+    fn test_sub_imm_sp_rd_roundtrip() {
+        let mut assembler = AArch64Assembler::new();
+        let bytes = assembler
+            .assemble_instructions(
+                &[Instruction::Sub {
+                    rd: Register::SP,
+                    rn: Register::SP,
+                    rm: Operand::Immediate(16),
+                }],
+                0,
+            )
+            .expect("SUB imm with SP as rd and rn should encode");
+        disassemble_and_verify(&bytes, "sub", &["sp, sp", "0x10"]);
+    }
+
+    /// ADD/SUB immediate-form `rd` is `Xd|SP` (register 31 decodes as SP, not
+    /// XZR), so XZR as the destination must be rejected rather than silently
+    /// encoded as SP. `register_to_dynasm(XZR) == Some(31)` previously made the
+    /// shared top-of-arm `rd_reg` binding alias XZR to SP; resolving `rd` via
+    /// `register_to_dynasm_xsp` inside the immediate arm guards against that.
+    #[test]
+    fn test_add_sub_imm_reject_xzr_rd() {
+        let mut assembler = AArch64Assembler::new();
+        for instr in [
+            Instruction::Add {
+                rd: Register::XZR,
+                rn: Register::X0,
+                rm: Operand::Immediate(1),
+            },
+            Instruction::Sub {
+                rd: Register::XZR,
+                rn: Register::X0,
+                rm: Operand::Immediate(1),
+            },
+        ] {
+            let result = assembler.assemble_instructions(&[instr], 0);
+            assert!(
+                result.is_err(),
+                "Expected encoder to reject XZR as rd, got {:?} for {:?}",
+                result,
+                instr
+            );
+        }
+        // Register-form ADD/SUB with XZR as rd must still succeed — the
+        // register-form encoding decodes 31 as XZR correctly.
+        for instr in [
+            Instruction::Add {
+                rd: Register::XZR,
+                rn: Register::X0,
+                rm: Operand::Register(Register::X1),
+            },
+            Instruction::Sub {
+                rd: Register::XZR,
+                rn: Register::X0,
+                rm: Operand::Register(Register::X1),
+            },
+        ] {
+            let result = assembler.assemble_instructions(&[instr], 0);
+            assert!(
+                result.is_ok(),
+                "register-form ADD/SUB with XZR as rd should encode: {:?}",
+                result
+            );
+        }
     }
 
     /// Defense-in-depth: assembler must refuse CSET/CSETM with AL or NV,
