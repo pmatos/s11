@@ -765,7 +765,7 @@ impl X86Mutator {
 
     fn random_instruction<R: rand::RngExt>(&self, rng: &mut R) -> X86Instruction {
         // Rewritable variants only: 7 reg-reg + 7 reg-imm + CMOVcc.
-        let opcode = rng.random_range(0..15u32);
+        let opcode = rng.random_range(0..u32::from(X86_REWRITABLE_OPCODE_COUNT));
         let rd = self.pick_register(rng);
         let rs = self.pick_register(rng);
         let imm = self.pick_immediate(rng);
