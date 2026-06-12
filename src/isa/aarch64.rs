@@ -1979,6 +1979,26 @@ mod tests {
         assert_eq!(imm_op.as_immediate(), Some(42));
         assert!(!imm_op.is_register());
         assert!(imm_op.is_immediate());
+
+        let shifted_op = Operand::ShiftedRegister {
+            reg: Register::X3,
+            kind: crate::ir::ShiftKind::Lsl,
+            amount: 4,
+        };
+        assert_eq!(shifted_op.as_register(), None);
+        assert_eq!(shifted_op.as_immediate(), None);
+        assert!(!shifted_op.is_register());
+        assert!(!shifted_op.is_immediate());
+
+        let extended_op = Operand::ExtendedRegister {
+            reg: Register::X3,
+            kind: crate::ir::ExtendKind::Uxtx,
+            shift: 0,
+        };
+        assert_eq!(extended_op.as_register(), None);
+        assert_eq!(extended_op.as_immediate(), None);
+        assert!(!extended_op.is_register());
+        assert!(!extended_op.is_immediate());
     }
 
     #[test]

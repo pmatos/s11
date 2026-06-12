@@ -63,8 +63,13 @@ pub trait OperandType:
     /// The register type used by this operand
     type Register: RegisterType;
 
-    /// Try to extract this operand as a register
-    /// Note: Implementations should use concrete register types to avoid ambiguity
+    /// Try to extract this operand as a plain register operand.
+    ///
+    /// This is intentionally narrower than "contains a register": ISA-specific
+    /// compound operands that carry registers should return `None` and be
+    /// matched directly by callers that need the full operand structure.
+    ///
+    /// Note: Implementations should use concrete register types to avoid ambiguity.
     fn as_register(&self) -> Option<Self::Register>;
 
     /// Try to extract this operand as an immediate value
@@ -75,7 +80,7 @@ pub trait OperandType:
         self.as_immediate().is_some()
     }
 
-    /// Returns true if this operand is a register
+    /// Returns true if this operand is a plain register operand.
     fn is_register(&self) -> bool {
         self.as_register().is_some()
     }
