@@ -1,6 +1,6 @@
 """Tests for scripts/mutants_summary.py.
 
-Run with: python3 -m unittest scripts/test_mutants_summary.py
+Run with: python3 -m unittest discover -s scripts -p 'test_*.py'
 """
 
 import contextlib
