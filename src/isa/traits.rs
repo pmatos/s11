@@ -68,7 +68,8 @@ pub trait OperandType:
     /// This is intentionally narrower than "contains a register": ISA-specific
     /// compound operands that carry registers should return `None` and be
     /// matched directly by callers that need the full operand structure.
-    /// Note: Implementations should use concrete register types to avoid ambiguity
+    ///
+    /// Note: Implementations should use concrete register types to avoid ambiguity.
     fn as_register(&self) -> Option<Self::Register>;
 
     /// Try to extract this operand as an immediate value
