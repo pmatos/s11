@@ -172,6 +172,21 @@ fn x86_support_is_visible_in_public_docs() {
         );
     }
 
+    for family in ["cmov<cond>", "j<cond>"] {
+        assert!(
+            matrix.contains(&format!("`{family}`")),
+            "docs/capability.md must list x86 family `{family}`"
+        );
+    }
+    assert!(
+        matrix.contains("rewritable") && matrix.contains("`cmov<cond>`"),
+        "docs/capability.md must describe CMOVcc as rewritable"
+    );
+    assert!(
+        matrix.contains("fixed") && matrix.contains("terminator") && matrix.contains("`j<cond>`"),
+        "docs/capability.md must describe Jcc as a fixed terminator"
+    );
+
     for doc in [
         "README.md",
         "TUTORIAL.md",
