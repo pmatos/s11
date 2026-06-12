@@ -1410,6 +1410,55 @@ mod tests {
     }
 
     #[test]
+    fn test_cls_equivalent_to_clz_of_signfold() {
+        let initial = MachineState::new_symbolic("pre");
+
+        let cls = vec![Instruction::Cls {
+            rd: Register::X0,
+            rn: Register::X1,
+        }];
+        let signfold_clz = vec![
+            Instruction::Asr {
+                rd: Register::X10,
+                rn: Register::X1,
+                shift: Operand::Immediate(63),
+            },
+            Instruction::Eor {
+                rd: Register::X0,
+                rn: Register::X1,
+                rm: Operand::Register(Register::X10),
+            },
+            Instruction::Clz {
+                rd: Register::X0,
+                rn: Register::X0,
+            },
+            Instruction::MovImm {
+                rd: Register::X11,
+                imm: 1,
+            },
+            Instruction::Sub {
+                rd: Register::X0,
+                rn: Register::X0,
+                rm: Operand::Register(Register::X11),
+            },
+        ];
+
+        let state_cls = apply_sequence(initial.clone(), &cls);
+        let state_signfold_clz = apply_sequence(initial, &signfold_clz);
+        let live_out = RegisterSet::<Register>::from_registers(vec![Register::X0]);
+
+        let solver = Solver::new();
+        let diseq =
+            states_not_equal_for_live_out(&state_cls, &state_signfold_clz, &live_out, false, false);
+        solver.assert(diseq);
+        assert_eq!(
+            solver.check(),
+            SatResult::Unsat,
+            "CLS(x) should match CLZ(x XOR (x ASR 63)) - 1 for live-out X0"
+        );
+    }
+
+    #[test]
     fn test_extended_register_acceptance_uxtb() {
         // Issue #60 acceptance: SMT proves
         //   UXTB x10, x2 ; ADD x0, x1, x10
