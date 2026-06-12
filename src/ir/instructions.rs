@@ -703,7 +703,7 @@ impl Instruction {
     ///
     /// This validates immediate operand ranges against AArch64 encoding constraints:
     /// - MOV immediate: 0 to 0xFFFF (16-bit)
-    /// - ADD/SUB immediate: 0 to 0xFFF (12-bit unsigned)
+    /// - ADD/SUB immediate: 0 to 0xFFF (12-bit unsigned); rd/rn ≠ XZR (Xn|SP slot, SP allowed)
     /// - CMP/CMN immediate: 0 to 0xFFF (12-bit unsigned)
     /// - LSL/LSR/ASR immediate: 0 to 63
     /// - AND/ORR/EOR immediate: register, or encodable bitmask immediate
@@ -722,7 +722,13 @@ impl Instruction {
             // Shifted-register form forbids SP for any operand (ARM v8 spec).
             Instruction::Add { rd, rn, rm } | Instruction::Sub { rd, rn, rm } => match rm {
                 Operand::Register(_) => true,
-                Operand::Immediate(imm) => *imm >= 0 && *imm <= 0xFFF,
+                // Immediate form: rd and rn occupy the Xn|SP slot, so SP is
+                // permitted but XZR (also reg 31) must be rejected — it would
+                // alias to SP. Mirrors the assembler's register_to_dynasm_xsp
+                // so can_assemble() stays consistent with the real encoder.
+                Operand::Immediate(imm) => {
+                    *imm >= 0 && *imm <= 0xFFF && *rd != Register::XZR && *rn != Register::XZR
+                }
                 Operand::ShiftedRegister { reg, kind, amount } => {
                     *kind != ShiftKind::Ror
                         && *amount <= 63
@@ -2314,6 +2320,54 @@ mod tests {
         };
         assert!(mk_cmp(ShiftKind::Lsl).is_encodable_aarch64());
         assert!(!mk_cmp(ShiftKind::Ror).is_encodable_aarch64());
+    }
+
+    #[test]
+    fn test_is_encodable_add_sub_immediate_rejects_xzr_allows_sp() {
+        // ADD/SUB immediate Rd/Rn occupy the Xn|SP slot: SP is encodable,
+        // XZR is not (it would alias to SP). The predicate must stay in
+        // lockstep with the assembler's register_to_dynasm_xsp behaviour so
+        // can_assemble() never admits candidates the encoder rejects.
+        let add = |rd, rn| Instruction::Add {
+            rd,
+            rn,
+            rm: Operand::Immediate(8),
+        };
+        let sub = |rd, rn| Instruction::Sub {
+            rd,
+            rn,
+            rm: Operand::Immediate(8),
+        };
+
+        // SP as rd and/or rn is encodable.
+        assert!(add(Register::SP, Register::SP).is_encodable_aarch64());
+        assert!(sub(Register::SP, Register::SP).is_encodable_aarch64());
+        assert!(add(Register::X0, Register::SP).is_encodable_aarch64());
+        assert!(sub(Register::X0, Register::SP).is_encodable_aarch64());
+
+        // XZR in either slot is rejected for the immediate form.
+        assert!(!add(Register::XZR, Register::X0).is_encodable_aarch64());
+        assert!(!add(Register::X0, Register::XZR).is_encodable_aarch64());
+        assert!(!sub(Register::XZR, Register::X0).is_encodable_aarch64());
+        assert!(!sub(Register::X0, Register::XZR).is_encodable_aarch64());
+
+        // Register form with XZR stays encodable (plain Xn slot, 31 = XZR).
+        assert!(
+            Instruction::Add {
+                rd: Register::XZR,
+                rn: Register::XZR,
+                rm: Operand::Register(Register::X1),
+            }
+            .is_encodable_aarch64()
+        );
+        assert!(
+            Instruction::Sub {
+                rd: Register::XZR,
+                rn: Register::XZR,
+                rm: Operand::Register(Register::X1),
+            }
+            .is_encodable_aarch64()
+        );
     }
 
     #[test]
