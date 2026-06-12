@@ -3067,10 +3067,11 @@ mod tests {
             ("ldrh x0, [x1, x2, lsl #1]", 1),
             ("ldr w0, [x1, x2, lsl #2]", 2),
             ("ldr x0, [x1, x2, lsl #3]", 3),
+            ("str x0, [x1, x2, lsl #3]", 3),
         ] {
             let instr = parse_one(text);
-            let Instruction::Ldr { addr, .. } = instr else {
-                panic!("{text}: expected ldr-like instruction, got {instr:?}");
+            let (Instruction::Ldr { addr, .. } | Instruction::Str { addr, .. }) = instr else {
+                panic!("{text}: expected ldr/str-like instruction, got {instr:?}");
             };
             assert_eq!(
                 addr,
