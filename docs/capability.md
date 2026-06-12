@@ -54,11 +54,21 @@ Known gaps:
 Status: supported through a parallel x86 pipeline for ELF optimization and
 width-parameterised SMT equivalence.
 
-Supported mnemonic families:
+Rewritable straight-line mnemonic families:
 
 - `mov`, `add`, `sub`, `and`, `or`, `xor`, `cmp`
+- Conditional moves: `cmov<cond>`
 
-Each family has register and immediate forms where the x86 IR models them.
+The data-movement/arithmetic/logical/comparison families have register and
+immediate forms where the x86 IR models them. `cmov<cond>` has register
+operands and reads EFLAGS without modifying them.
+
+Fixed control-flow terminators:
+
+- `j<cond>` — parsed as an opaque trailing terminator and held fixed. Search
+  does not synthesize Jcc, and binary patching preserves the original branch
+  bytes.
+
 x86-64 and x86-32 support enumerative, stochastic, and symbolic search. Hybrid
 and LLM remain AArch64-only.
 

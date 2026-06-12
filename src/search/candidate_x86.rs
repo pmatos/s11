@@ -14,24 +14,7 @@ use rand::RngExt;
 /// Jcc is intentionally *not* enumerated here — it is a terminator
 /// (see `X86Instruction::is_terminator`) and the search pool must
 /// exclude terminators, mirroring the AArch64 branch precedent.
-const CMOV_CONDITIONS: [X86Condition; 16] = [
-    X86Condition::E,
-    X86Condition::NE,
-    X86Condition::B,
-    X86Condition::AE,
-    X86Condition::BE,
-    X86Condition::A,
-    X86Condition::L,
-    X86Condition::GE,
-    X86Condition::LE,
-    X86Condition::G,
-    X86Condition::S,
-    X86Condition::NS,
-    X86Condition::O,
-    X86Condition::NO,
-    X86Condition::P,
-    X86Condition::NP,
-];
+const CMOV_CONDITIONS: [X86Condition; 16] = X86Condition::ALL;
 
 /// Enumerate every reg/reg and reg/imm form of the minimal-core
 /// variants plus CMOV (per condition × register pair) for the given
@@ -134,10 +117,11 @@ pub fn generate_random_x86_instruction<R: RngExt>(
         immediates.to_vec()
     };
 
-    let opcode = rng.random_range(0..14u32);
+    let opcode = rng.random_range(0..15u32);
     let rd = regs[rng.random_range(0..regs.len())];
     let rs = regs[rng.random_range(0..regs.len())];
     let imm = imms[rng.random_range(0..imms.len())];
+    let cond = CMOV_CONDITIONS[rng.random_range(0..CMOV_CONDITIONS.len())];
     match opcode {
         0 => X86Instruction::MovReg { rd, rs },
         1 => X86Instruction::MovImm { rd, imm },
@@ -152,7 +136,8 @@ pub fn generate_random_x86_instruction<R: RngExt>(
         10 => X86Instruction::XorReg { rd, rs },
         11 => X86Instruction::XorImm { rd, imm },
         12 => X86Instruction::CmpReg { rn: rd, rs },
-        _ => X86Instruction::CmpImm { rn: rd, imm },
+        13 => X86Instruction::CmpImm { rn: rd, imm },
+        _ => X86Instruction::Cmov { rd, rs, cond },
     }
 }
 
@@ -289,7 +274,30 @@ mod tests {
     }
 
     #[test]
-    fn covers_eight_mnemonics_after_cmov_added() {
+    fn random_candidate_can_emit_cmov_but_never_jcc() {
+        use rand::SeedableRng;
+        let mut rng = rand_chacha::ChaCha8Rng::seed_from_u64(74);
+        let regs = [X86Register::RAX, X86Register::RBX];
+        let imms = [0i64, 1];
+        let mut saw_cmov = false;
+
+        for _ in 0..2000 {
+            let instr = generate_random_x86_instruction(&mut rng, &regs, &imms, X86Mode::Mode64);
+            saw_cmov |= matches!(instr, X86Instruction::Cmov { .. });
+            assert!(
+                !matches!(instr, X86Instruction::Jcc { .. }),
+                "random x86 candidate generation must not emit Jcc terminators"
+            );
+        }
+
+        assert!(
+            saw_cmov,
+            "random x86 candidate generation never emitted CMOVcc"
+        );
+    }
+
+    #[test]
+    fn covers_rewritable_cmov_without_jcc() {
         let regs = [X86Register::RAX];
         let imms = [0i64];
         let all = generate_all_x86_instructions(&regs, &imms);

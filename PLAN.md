@@ -1,71 +1,103 @@
-# Plan - issue #135: Audit `OperandType::as_register` callers for `ShiftedRegister` awareness
+# Plan — issue #74: x86 CMOVcc, Jcc, and symbolic EFLAGS
 
 ## 1. Problem Restated
 
-`src/isa/aarch64.rs::impl OperandType for Operand` correctly returns `None` for `Operand::ShiftedRegister` because the trait method means "plain register operand", not "operand containing a register". The issue is to audit whether any caller uses `as_register().is_some()` or `is_register()` as a broader "register-capable" predicate, which would accidentally classify `ShiftedRegister` as immediate-like and drop valid AArch64 shifted-register candidates. The live caller graph shows no AArch64 production caller currently does this; implementation should preserve that behavior, add focused characterization coverage, and document the audit result in the PR body rather than changing search semantics.
+The x86 backend can already optimize straight-line integer instructions, but CMP is only soundly useful when the backend also models the EFLAGS it writes and the instructions that read those flags. This issue closes that gap by treating CMOVcc as a rewritable flag-reading instruction, treating Jcc as a fixed trailing terminator whose branch outcome observes the prefix's final EFLAGS, and making concrete plus SMT equivalence reject register or EFLAGS divergence whenever flags are live or a pinned flag-reading terminator makes them observable. Current checkout already contains much of this shape; the implementation stage should complete the remaining gaps and normalize the stale surfaces rather than starting from a blank branch.
 
 ## 2. Files to Touch
 
-Implementation edits:
+No `crates/`, `compiler/`, or `docs/spec/` directories exist in this `s11` checkout, so there is no Rust/self-hosted compiler split and no `docs/spec/*.md` update for this issue. The authoritative docs are `CLAUDE.md`, `docs/capability.md`, and `docs/adr/*.md`.
 
-- `src/isa/aarch64.rs` - extend the existing `tests::test_operand_traits` at lines 1969-1982 with `ShiftedRegister` and `ExtendedRegister` assertions. This is test-only coverage for the trait contract.
-- `src/isa/traits.rs` - clarify the doc comments for `OperandType::as_register` and `OperandType::is_register` at lines 66-80 so future generic callers know this means a plain register operand, not any operand shape that contains a register.
+Production and docs:
 
-Audit-only files to inspect, but not edit unless the audit proves the current premise wrong:
-
-- `src/ir/instructions.rs` - `is_encodable_aarch64` handles shifted-register legality at lines 720-769 and 796-806; `source_registers` extracts inner shifted registers at lines 988-1039; `test_source_registers_shifted_register` starts at line 2185.
-- `src/search/candidate.rs` - candidate enumeration already creates shifted-register forms at lines 100-128 and has a regression test at lines 1325-1341.
-- `src/search/stochastic/mutation.rs` - mutation bridges directly pattern-match shifted/extended register operands at lines 39-47 and can generate shifted-register operands at lines 1007-1039, with coverage at lines 1174-1201.
-- `docs/adr/0004-isa-trait-collapse.md` - decision 4 at lines 34-38 already says `OperandType` is the lowest-common-denominator operand surface and should not grow to losslessly carry richer AArch64 operand grammar.
-
-No `crates/`, `compiler/`, or `docs/spec/` paths exist in this s11 checkout, so there is no Rust/self-hosted compiler split and no spec document update for this audit. No `docs/capability.md` update is required because this does not change supported instructions.
+- `src/isa/x86.rs` — `X86Condition`, `X86Instruction::{Cmov,Jcc}`, destination/source/side-effect/terminator behavior, `FlagsAnalysis::{modifies_flags,reads_flags}`, stochastic `X86Mutator`, and `X86InstructionGenerator` opcode coverage. Clean up stale "14 variants" / "7 mnemonics" comments and tests.
+- `src/parser/x86.rs` — CMOVcc and Jcc suffix parsing, GAS alias normalization, numeric target validation for Jcc, x86 assembly parser coverage.
+- `src/assembler/x86.rs` — x86-64 and x86-32 dynasm encoding for CMOVcc plus placeholder short-form Jcc encoding used only by round-trip tests; production patching must continue pinning original Jcc bytes.
+- `src/ir/instructions.rs` — `split_terminator_x86` tests and comments for trailing Jcc peeling.
+- `src/semantics/state.rs` — `Eflags` helpers. Add accurate AF computation for add/sub (`((lhs ^ rhs ^ result) & 0x10) != 0`) while keeping logical-op AF as the chosen false/undefined model.
+- `src/semantics/concrete_x86.rs` — concrete CMP, arithmetic/logical EFLAGS, CMOV true/false behavior, and live-out comparison including EFLAGS.
+- `src/semantics/smt_x86.rs` — symbolic flag state. Prefer issue-faithful Z3 `Bool` fields for `cf/pf/af/zf/sf/of` instead of five 1-bit BVs; compute them in arithmetic/logical/CMP lowering; make CMOV select through `Bool::ite`.
+- `src/semantics/equivalence.rs` — x86 equivalence must compare flag state when `X86LiveOutMask::flags_live()` is true, force flags live for matching trailing Jcc terminators, randomize initial EFLAGS in the fast path, and keep the SMT path as the authoritative flag proof.
+- `src/search/candidate_x86.rs` — enumerate CMOVcc for search candidates, continue excluding Jcc terminators, and include CMOV in random x86 candidate generation if stochastic search is expected to synthesize it.
+- `src/search/stochastic/backend.rs` — should need little production change if `candidate_x86`/`X86Mutator` are fixed, but keep x86-32 register filtering and terminator handling covered.
+- `src/search/symbolic/backend.rs` — confirm both x86 backends enumerate CMOV candidates and append any target Jcc terminator to proposals before equivalence checking.
+- `src/validation/live_out.rs` — derive x86 `flags_live` from the flag-writer predicate (`FlagsAnalysis::modifies_flags`) rather than relying on broad side-effect wording; keep CMOV/Jcc as flag readers, not flag writers.
+- `src/main.rs` — Capstone-to-x86-IR bridge, x86 basic-block validation, fixed-terminator search/patching, and issue #74 end-to-end tests.
+- `src/semantics/cost_x86.rs` — CMOV and Jcc cost estimates.
+- `src/docs_support.rs` and `docs/capability.md` — list `cmov<cond>` / `j<cond>` support accurately, distinguishing rewritable CMOV from fixed Jcc terminators.
+- `tests/integration/docs_capability.rs` — pin the x86 capability docs so CMOV/Jcc do not drift from the supported source surface.
 
 ## 3. TDD Slices
 
-1. Characterize the AArch64 operand-trait contract.
-   - Test file/location: `src/isa/aarch64.rs::tests::test_operand_traits`.
-   - Behavior under test: `Operand::ShiftedRegister { reg: X3, kind: Lsl, amount: 4 }` and `Operand::ExtendedRegister { reg: X3, kind: Uxtx, shift: 0 }` both return `None` from `as_register()` and `as_immediate()`, and both return `false` from `is_register()` and `is_immediate()`.
-   - Production code: no change expected. If this unexpectedly fails, restore the existing `OperandType for Operand` behavior in `src/isa/aarch64.rs` so both compound operand forms remain distinct from plain registers/immediates.
+1. **Docs and capability red test.**
+   - Test location: `tests/integration/docs_capability.rs::x86_support_is_visible_in_public_docs`.
+   - Behavior: docs must mention the x86 core mnemonics plus CMOVcc support and Jcc as fixed trailing terminators; hybrid/LLM remain AArch64-only.
+   - Production/docs: update `src/docs_support.rs::X86_SUPPORTED_MNEMONICS` and `docs/capability.md`.
 
-2. Clarify the shared trait wording without broadening the trait.
-   - Test file/location: same `src/isa/aarch64.rs::tests::test_operand_traits` characterization from slice 1 remains the guard.
-   - Behavior under test: the trait-level helpers still expose only plain register/immediate operand shapes.
-   - Production code: update only comments in `src/isa/traits.rs` for `as_register()` and `is_register()` to say "plain register operand" and warn that ISA-specific compound operands that contain registers need ISA-specific matching.
+2. **IR and parser suffix coverage.**
+   - Test location: `src/isa/x86.rs::tests` and `src/parser/x86.rs::tests`.
+   - Behavior: all 16 canonical conditions parse for `cmov*` and `j*`; common GAS aliases normalize; CMOV has destination plus `rd,rs` sources; Jcc has no destination/register sources, reads flags, and is a terminator.
+   - Production: `src/isa/x86.rs` and `src/parser/x86.rs`.
 
-3. Re-run the caller audit and keep the result out of production code.
-   - Test file/location: no new test; this is the source audit that closes the investigation request.
-   - Behavior under test: `rg -n "as_register\\(|is_register\\(" src tests benches docs` should show no AArch64 production caller that uses the predicate to decide candidate register capability. The expected non-test production hits are the trait method/default helper and ISA implementations; shifted-register-aware behavior is handled by direct `Operand::ShiftedRegister` pattern matches in the audit-only files above.
-   - Production code: none. Put the grep result summary in the PR body so reviewers can see the audit was deliberate.
+3. **Assembler and Capstone round trips.**
+   - Test location: `src/assembler/x86.rs::tests` plus `src/main.rs` issue #74 round-trip tests.
+   - Behavior: x86-64 and x86-32 CMOV encodes/disassembles/parses back to the same IR; short-form placeholder Jcc encodes for tests; `convert_to_x86_ir` accepts Capstone CMOV/Jcc.
+   - Production: `src/assembler/x86.rs`, `src/parser/x86.rs`, `src/main.rs`.
 
-4. Regression-check the existing shifted-register surfaces.
-   - Test file/location: existing tests `test_source_registers_shifted_register`, `test_generate_all_instructions_contains_shifted_register_add`, and `test_mutate_operand_can_produce_shifted_register`.
-   - Behavior under test: the live-out/source-register path, enumerative candidate generation, and stochastic mutation continue to see `ShiftedRegister` through explicit operand-shape matching rather than through `as_register()`.
-   - Production code: none expected. If any of these fail after slice 2, fix only the local doc/test edit that caused the failure; do not refactor candidate generation or mutation as part of this audit PR.
+4. **Concrete EFLAGS and CMOV semantics.**
+   - Test location: `src/semantics/concrete_x86.rs::tests` and `src/semantics/state.rs::tests`.
+   - Behavior: ADD/SUB/CMP compute CF/PF/AF/ZF/SF/OF at width 32 and 64; logical ops clear CF/OF and use the selected false/undefined AF model; CMOV writes `rd` only when the incoming condition holds and never mutates EFLAGS.
+   - Production: `src/semantics/state.rs` and `src/semantics/concrete_x86.rs`.
+
+5. **Symbolic EFLAGS as Bool state.**
+   - Test location: `src/semantics/smt_x86.rs::tests`.
+   - Behavior: `MachineStateX86::new_symbolic` has symbolic Bool flags `cf/pf/af/zf/sf/of`; symbolic ADD/SUB/CMP/logical flag results match concrete samples; CMOV lowers to `cond.ite(rs, old_rd)` and preserves all flags.
+   - Production: `src/semantics/smt_x86.rs`.
+
+6. **Equivalence with live EFLAGS and fixed Jcc.**
+   - Test location: `src/semantics/equivalence.rs::tests`.
+   - Behavior: with `random_test_count = 0`, SMT rejects two CMPs that differ only in final EFLAGS under `flags_live=true`; without flags live, register-dead CMP-only differences remain equivalent; CMOV vs unconditional MOV is rejected for register live-out because initial flags are symbolic/randomized; matching trailing Jcc terminators force flag equality on prefixes; differing or one-sided Jcc terminators are rejected.
+   - Production: `src/semantics/equivalence.rs` and `src/semantics/smt_x86.rs`.
+
+7. **Search candidate surface.**
+   - Test location: `src/search/candidate_x86.rs::tests`, `src/isa/x86.rs::tests`, and x86 stochastic tests under `src/search/stochastic/`.
+   - Behavior: enumerative/symbolic candidate pools include every CMOV condition for each register pair, never include Jcc, and remain mode32-safe; random x86 candidate/mutator paths can synthesize or preserve CMOV without introducing Jcc.
+   - Production: `src/search/candidate_x86.rs`, `src/isa/x86.rs`, and possibly `src/search/stochastic/backend.rs`.
+
+8. **End-to-end x86 optimizer window behavior.**
+   - Test location: `src/main.rs::tests`.
+   - Behavior: mid-window Jcc is rejected; trailing Jcc is accepted as a pinned terminator; `find_shorter_equivalent_x86` can optimize a prefix while preserving the original Jcc bytes and refusing terminator changes; CMP+CMOV pipelines distinguish different CMOV sources under flags-live/register-live contracts.
+   - Production: `src/main.rs`, `src/ir/instructions.rs`, `src/semantics/equivalence.rs`.
+
+9. **Refactor cleanup and narrow verification.**
+   - Test location: existing unit tests in touched modules.
+   - Behavior: stale assertions that still expect "7 mnemonics", "14 variants", or "CMP symbolic no-op" are updated or deleted only when replaced by the stronger issue #74 assertions.
+   - Production: comments and tests in touched files only.
 
 ## 4. Verification Surface
 
-- No ESBMC, contract, codegen, or C-model verification is involved. This issue is a Rust trait-caller audit and test/doc clarification.
-- No `tests/run/` or `examples/` fixtures need to grow; those directories are absent in this checkout.
-- Targeted checks for the implementation stage:
-  - `cargo test test_operand_traits`
-  - `cargo test test_source_registers_shifted_register`
-  - `cargo test test_generate_all_instructions_contains_shifted_register_add`
-  - `cargo test test_mutate_operand_can_produce_shifted_register`
-- Before publishing a PR, follow the repository policy and run `./ci_check.sh`. If time is tight, at minimum run `cargo test --workspace` plus `cargo fmt -- --check`, but the PR body should say if the full CI script was not run.
+- No ESBMC, contract, C-model, `tests/run/`, or `examples/` work is required in this Rust-only repository slice.
+- Codegen verification is the x86 assembler/Capstone round-trip tests in `src/assembler/x86.rs` and `src/main.rs`; Jcc patching verification must assert original terminator bytes are spliced back rather than re-encoded.
+- Semantic verification is unit-level Z3 proof work in `src/semantics/smt_x86.rs` and `src/semantics/equivalence.rs`, especially tests that force the SMT path by setting `random_test_count = 0`.
+- Search verification should include targeted unit tests plus the existing x86 stochastic/symbolic smoke tests. Do not rely on stochastic discovery as the only proof of correctness.
+- Before PR: run `cargo fmt -- --check`, targeted `cargo test issue_74`, `cargo test x86`, `cargo test --test integration docs_capability`, then the repository-mandated `./ci_check.sh`.
 
 ## 5. Risk Areas
 
-- Do not replace existing `Operand::ShiftedRegister` pattern matches with `as_register()` or `is_register()` during cleanup; that would recreate the exact bug the audit is guarding against.
-- Keep `OperandType` as a lowest-common-denominator trait. Extending it to return inner registers from compound operands conflicts with ADR-0004 and would blur the plain-register contract for x86/RISC-V too.
-- Avoid parser, display, or Capstone conversion edits. This audit does not touch parse-print-parse idempotency or the `convert_to_ir -> parser::parse_line` delegation contract.
-- Avoid search refactors. Candidate generation and mutation already have shifted-register-specific paths; moving those through generic trait helpers risks dropping shift kind/amount information.
-- Clippy risk is low, but new test code should avoid unused imports. Prefer fully qualified `crate::ir::ShiftKind::Lsl` and `crate::ir::ExtendKind::Uxtx` or add imports only if they are used.
-- Binary fixed point, codegen ordering, stack-slot layout, and `BTreeMap` versus `HashMap` concerns are not applicable because this PR should not touch compiler/codegen/data-structure ordering paths.
+- **Bool vs 1-bit BV churn:** converting flags to Z3 `Bool` touches many helper/test expressions. Keep register values as BVs; only flags should become Bools.
+- **AF semantics:** no current condition code reads AF, but `flags_live=true` compares EFLAGS. Model AF deterministically for ADD/SUB/CMP and document logical-op AF as the chosen false/undefined model.
+- **Jcc target opacity:** the IR intentionally discards branch targets. Do not re-encode Jcc into patched binaries; only preserve original bytes for a trailing terminator.
+- **Parse -> print -> parse:** `Display` for Jcc cannot recover a real target. Either keep tests away from Display-as-source for Jcc or choose a documented parseable dummy target; do not accidentally promise target round-tripping that the IR cannot provide.
+- **Search pool blow-up:** CMOV multiplies register pairs by 16 conditions. Keep Jcc out of candidate pools and preserve mode32 register filtering.
+- **Fast-path soundness:** random concrete inputs must vary initial EFLAGS whenever flag readers are involved; otherwise CMOV/Jcc rewrites can pass on the all-zero default flag state.
+- **Trait surface drift:** `InstructionGenerator::opcode_count()` and `X86Instruction::opcode_id()` can become inconsistent if CMOV/Jcc are half-added. Define the invariant around rewritable non-terminators and test it.
+- **Clippy gate:** Z3 Bool/BV refactors commonly create needless borrows, temporary lifetime issues in `Bool::or`, or clone noise; keep fixes local to touched modules.
 
 ## 6. Out of Scope
 
-- Changing `OperandType::as_register` to return the inner register from `ShiftedRegister` or `ExtendedRegister`.
-- Adding a generic "contains register" trait method or visitor.
-- Refactoring AArch64 candidate generation, stochastic mutation, assembler lowering, concrete semantics, SMT semantics, or parser support.
-- Updating `docs/capability.md`, ADRs, CLI docs, benchmarks, or integration fixtures.
-- Any formatting churn outside the two touched files.
+- AArch64 NZCV symbolic modelling improvements, even though this issue informs that future fix.
+- SETcc, ADC/SBB, LAHF/SAHF, shifts, memory operands, calls/returns, unconditional jumps, and full control-flow graph modelling.
+- Long-form Jcc displacement modelling or emitting new branch targets; trailing Jcc bytes stay pinned from the original binary.
+- x86 LLM or text-input user workflows beyond the existing parser helper tests.
+- The broader #77 ISA-trait collapse and deletion of parallel x86 modules.
+- Refactoring unrelated comments, formatting unrelated files, changing merge policy, or touching any generated/build artifacts.

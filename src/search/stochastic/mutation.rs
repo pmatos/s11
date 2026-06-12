@@ -15,6 +15,8 @@ use crate::search::candidate::generate_random_instruction;
 use crate::search::config::MutationWeights;
 use rand::RngExt;
 
+const ADDRESS_OFFSET_POOL: [i64; 8] = [0, 8, 16, 24, 32, 64, -8, -256];
+
 /// Drop ROR from a shifted-register operand when bridging from a logical
 /// opcode (AND/ORR/EOR/TST — ROR allowed) to an arithmetic opcode
 /// (ADD/SUB/CMP/CMN — ROR rejected by `is_encodable_aarch64`). Other shift
@@ -961,11 +963,9 @@ impl Mutator {
     }
 
     fn random_address_offset<R: RngExt>(&self, rng: &mut R) -> i64 {
-        // Restrict to a tiny offset pool so mutations stay encodable.
-        // Values are chosen to cover the unscaled-signed (LDUR) and
-        // scaled-positive (LDR) ranges.
-        const POOL: [i64; 5] = [0, 8, 16, -8, -256];
-        POOL[rng.random_range(0..POOL.len())]
+        // Favor useful positive scaled offsets while retaining signed 9-bit
+        // negative coverage for unscaled and writeback memory forms.
+        ADDRESS_OFFSET_POOL[rng.random_range(0..ADDRESS_OFFSET_POOL.len())]
     }
 
     fn random_register<R: RngExt>(&self, rng: &mut R) -> Register {
@@ -1172,6 +1172,33 @@ mod tests {
     }
 
     #[test]
+    fn random_address_offset_pool_is_tuned_for_positive_scaled_memory_offsets() {
+        let expected = [0, 8, 16, 24, 32, 64, -8, -256];
+        assert_eq!(ADDRESS_OFFSET_POOL, expected);
+
+        let mut unique = ADDRESS_OFFSET_POOL;
+        unique.sort_unstable();
+        assert!(
+            unique.windows(2).all(|window| window[0] != window[1]),
+            "address offset mutation pool must not contain duplicates"
+        );
+
+        assert!(
+            ADDRESS_OFFSET_POOL.iter().all(|offset| {
+                (offset >= &0 && offset % 8 == 0) || (-256..=255).contains(offset)
+            })
+        );
+        assert!(
+            ADDRESS_OFFSET_POOL
+                .iter()
+                .filter(|offset| **offset >= 0 && **offset % 8 == 0)
+                .count()
+                >= 6,
+            "pool should favor useful non-negative X-form scaled offsets"
+        );
+    }
+
+    #[test]
     fn test_mutate_operand_can_produce_shifted_register() {
         // With many trials, mutate_operand on an Add must sometimes pick a
         // ShiftedRegister rm. Issue #59.
@@ -1241,6 +1268,60 @@ mod tests {
             }
         }
         assert!(changed, "mutate_operand never modified Ldr operands");
+    }
+
+    #[test]
+    fn mutate_operand_on_ldr_can_reach_expanded_positive_offsets() {
+        use crate::ir::types::{AccessWidth, AddressOperand, IndexMode};
+        let mutator = default_mutator();
+        let mut rng = StdRng::seed_from_u64(296);
+        let initial = Instruction::Ldr {
+            rt: Register::X0,
+            addr: AddressOperand::Imm {
+                base: Register::X1,
+                offset: 0,
+                mode: IndexMode::Offset,
+            },
+            width: AccessWidth::Extended,
+        };
+        let mut saw_24 = false;
+        let mut saw_32 = false;
+        let mut saw_64 = false;
+
+        for _ in 0..1000 {
+            let mut seq = vec![initial];
+            mutator.mutate_operand(&mut rng, &mut seq);
+            match seq[0] {
+                Instruction::Ldr {
+                    width: AccessWidth::Extended,
+                    addr:
+                        AddressOperand::Imm {
+                            offset,
+                            mode: IndexMode::Offset,
+                            ..
+                        },
+                    ..
+                } => match offset {
+                    24 => saw_24 = true,
+                    32 => saw_32 = true,
+                    64 => saw_64 = true,
+                    _ => {}
+                },
+                _ => panic!(
+                    "mutate_operand changed variant/width/mode on Ldr: {:?}",
+                    seq[0]
+                ),
+            }
+
+            if saw_24 && saw_32 && saw_64 {
+                return;
+            }
+        }
+
+        assert!(
+            saw_24 && saw_32 && saw_64,
+            "mutate_operand did not reach all expanded positive offsets: 24={saw_24}, 32={saw_32}, 64={saw_64}"
+        );
     }
 
     #[test]
