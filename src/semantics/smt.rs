@@ -3666,9 +3666,9 @@ mod tests {
         let zero = BV::from_u64(0, 64);
         solver.assert(x0_pre.eq(BV::from_u64(0xDEADBEEF_CAFEBABE, 64)));
         solver.assert(pre.get_register(Register::X1).eq(&zero));
-        // Expected: low 2 bytes of x2 from x0 low 2 bytes = 0xBABE
-        // Then bytes 2..3 from x0 low 2 bytes (re-stored) = 0xBABE
-        // Then bytes 4..7 from x0 high 4 bytes = 0xDEADBEEF
+        // Expected: bytes 0..=1 from the original 64-bit STR of x0 = 0xBABE
+        // Then bytes 2..=3 from the low 16 bits of x0 stored by STRH at offset 2 = 0xBABE
+        // Then bytes 4..=7 from the original 64-bit STR of x0 = 0xDEADBEEF
         let x2_post = post.get_register(Register::X2);
         let expected = BV::from_u64(0xDEAD_BEEF_BABE_BABE, 64);
         solver.assert(x2_post.eq(&expected));
