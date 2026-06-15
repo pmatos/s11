@@ -51,8 +51,8 @@ pub trait SymbolicBackend<I: ISA>: Sized {
         timeout: Duration,
     ) -> (EquivalenceResult, EquivalenceMetrics);
 
-    /// Width parameter for cost + state masking. AArch64 returns 64;
-    /// x86 reads `SearchConfig::x86_width` (32 or 64).
+    /// Width parameter for cost + state masking. Architecture markers own
+    /// this width so a mismatched config cannot silently change semantics.
     fn width(config: &SearchConfig) -> u32;
 }
 
@@ -214,7 +214,30 @@ impl SymbolicBackend<crate::isa::X86_32> for crate::isa::X86_32 {
         (result, EquivalenceMetrics::default())
     }
 
-    fn width(config: &SearchConfig) -> u32 {
-        config.x86_width
+    fn width(_config: &SearchConfig) -> u32 {
+        crate::isa::X86_32.register_width()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn x86_32_symbolic_width_is_architectural_even_with_default_config() {
+        let config = SearchConfig::default();
+        assert_eq!(config.x86_width, 64);
+
+        assert_eq!(
+            <crate::isa::X86_32 as SymbolicBackend<crate::isa::X86_32>>::width(&config),
+            32
+        );
+
+        assert_eq!(
+            <crate::isa::X86_64 as SymbolicBackend<crate::isa::X86_64>>::width(
+                &SearchConfig::default().with_x86_width(32),
+            ),
+            64
+        );
     }
 }
