@@ -617,6 +617,14 @@ mod tests {
     }
 
     #[test]
+    fn test_parse_live_out_contract_space_separated_regs_and_flags() {
+        let live_out = parse_live_out_contract("x0 x1;nzcv").unwrap();
+        assert!(live_out.contains_register(Register::X0));
+        assert!(live_out.contains_register(Register::X1));
+        assert!(live_out.flags_live());
+    }
+
+    #[test]
     fn test_parse_live_out_contract_regs_only_flags_off() {
         let live_out = parse_live_out_contract("x0,x1").unwrap();
         assert!(live_out.contains_register(Register::X0));
