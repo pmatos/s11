@@ -865,6 +865,12 @@ impl X86Mutator {
     /// its operand shape (reg-reg → reg-reg, reg-imm → reg-imm). CMP
     /// has no rd, so it only swaps between register and immediate CMP
     /// forms.
+    ///
+    /// Note the deliberate asymmetry: the reg-reg and reg-imm groups
+    /// sample from a range that includes the current variant, so they may
+    /// produce an identity mutation. CMP, by contrast, always bridges
+    /// `CmpReg` ↔ `CmpImm`, so a CMP opcode mutation is guaranteed to
+    /// change the form. This is intentional, not an oversight.
     fn mutate_opcode<R: rand::RngExt>(&self, rng: &mut R, sequence: &mut [X86Instruction]) {
         if sequence.is_empty() {
             return;
@@ -1718,7 +1724,9 @@ mod tests {
 
         let mutator = X86Mutator::new(
             vec![X86Register::RBX],
-            vec![5],
+            // Unused by CmpImm → CmpReg (which calls pick_register, not
+            // pick_immediate); a value absent from the target makes that clear.
+            vec![0],
             MutationWeights {
                 operand: 0.0,
                 opcode: 1.0,
@@ -1727,8 +1735,10 @@ mod tests {
             },
             crate::assembler::x86::X86Mode::Mode64,
         );
+        // rn is a non-RAX register so the "rn is preserved" assertion can't be
+        // satisfied coincidentally by the pick_register RAX fallback default.
         let target = vec![X86Instruction::CmpImm {
-            rn: X86Register::RAX,
+            rn: X86Register::RCX,
             imm: 5,
         }];
         let mut rng = ChaCha8Rng::seed_from_u64(7);
@@ -1738,7 +1748,7 @@ mod tests {
         assert_eq!(
             mutated,
             vec![X86Instruction::CmpReg {
-                rn: X86Register::RAX,
+                rn: X86Register::RCX,
                 rs: X86Register::RBX,
             }]
         );
