@@ -863,7 +863,8 @@ impl X86Mutator {
 
     /// Swap the variant of a randomly-chosen instruction while keeping
     /// its operand shape (reg-reg → reg-reg, reg-imm → reg-imm). CMP
-    /// has no rd so CMP variants stay within CMP.
+    /// has no rd, so it only swaps between register and immediate CMP
+    /// forms.
     fn mutate_opcode<R: rand::RngExt>(&self, rng: &mut R, sequence: &mut [X86Instruction]) {
         if sequence.is_empty() {
             return;
@@ -897,7 +898,14 @@ impl X86Mutator {
                 4 => X86Instruction::OrImm { rd, imm },
                 _ => X86Instruction::XorImm { rd, imm },
             },
-            X86Instruction::CmpReg { .. } | X86Instruction::CmpImm { .. } => current,
+            X86Instruction::CmpReg { rn, .. } => X86Instruction::CmpImm {
+                rn,
+                imm: self.pick_immediate(rng),
+            },
+            X86Instruction::CmpImm { rn, .. } => X86Instruction::CmpReg {
+                rn,
+                rs: self.pick_register(rng),
+            },
             // Cmov has a unique shape (rd, rs, cond) with no opcode-shape
             // siblings; keep it unchanged in the opcode-bridge mutator.
             X86Instruction::Cmov { .. } => current,
@@ -1663,6 +1671,76 @@ mod tests {
         assert!(
             changed,
             "200 mutations produced no change \u{2014} stub still wired?"
+        );
+    }
+
+    #[test]
+    fn x86_mutator_opcode_mutates_cmp_reg_to_cmp_imm() {
+        use crate::isa::traits::ISAMutator;
+        use crate::search::config::MutationWeights;
+        use rand::SeedableRng;
+        use rand_chacha::ChaCha8Rng;
+
+        let mutator = X86Mutator::new(
+            vec![X86Register::RBX],
+            vec![7],
+            MutationWeights {
+                operand: 0.0,
+                opcode: 1.0,
+                swap: 0.0,
+                instruction: 0.0,
+            },
+            crate::assembler::x86::X86Mode::Mode64,
+        );
+        let target = vec![X86Instruction::CmpReg {
+            rn: X86Register::RAX,
+            rs: X86Register::RBX,
+        }];
+        let mut rng = ChaCha8Rng::seed_from_u64(7);
+
+        let mutated = mutator.mutate(&mut rng, &target);
+
+        assert_eq!(
+            mutated,
+            vec![X86Instruction::CmpImm {
+                rn: X86Register::RAX,
+                imm: 7,
+            }]
+        );
+    }
+
+    #[test]
+    fn x86_mutator_opcode_mutates_cmp_imm_to_cmp_reg() {
+        use crate::isa::traits::ISAMutator;
+        use crate::search::config::MutationWeights;
+        use rand::SeedableRng;
+        use rand_chacha::ChaCha8Rng;
+
+        let mutator = X86Mutator::new(
+            vec![X86Register::RBX],
+            vec![5],
+            MutationWeights {
+                operand: 0.0,
+                opcode: 1.0,
+                swap: 0.0,
+                instruction: 0.0,
+            },
+            crate::assembler::x86::X86Mode::Mode64,
+        );
+        let target = vec![X86Instruction::CmpImm {
+            rn: X86Register::RAX,
+            imm: 5,
+        }];
+        let mut rng = ChaCha8Rng::seed_from_u64(7);
+
+        let mutated = mutator.mutate(&mut rng, &target);
+
+        assert_eq!(
+            mutated,
+            vec![X86Instruction::CmpReg {
+                rn: X86Register::RAX,
+                rs: X86Register::RBX,
+            }]
         );
     }
 
