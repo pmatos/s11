@@ -519,7 +519,7 @@ mod tests {
 
     std::thread_local! {
         static RECORDED_SMT_TIMEOUT_MS: std::cell::Cell<Option<u64>> =
-            std::cell::Cell::new(None);
+            const { std::cell::Cell::new(None) };
     }
 
     impl StochasticBackend<TimeoutProbeIsa> for TimeoutProbeIsa {
@@ -629,8 +629,10 @@ mod tests {
 
     #[test]
     fn stochastic_search_falls_back_to_five_seconds_when_solver_timeout_unset() {
-        let mut symbolic_config = SymbolicConfig::default();
-        symbolic_config.solver_timeout = None;
+        let symbolic_config = SymbolicConfig {
+            solver_timeout: None,
+            ..SymbolicConfig::default()
+        };
 
         let recorded_timeout = run_timeout_probe_search(symbolic_config);
 
