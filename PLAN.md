@@ -1,68 +1,62 @@
-# Plan - issue #175: Add `test_generate_random_reaches_madd_family`
+# Plan: Contract-Scoped Live-Out Parse Error
 
 ## 1. Problem Restated
 
-Issue #175 asks for a focused regression test proving that the AArch64 random candidate generator still reaches the multiply-accumulate instruction family after the dispatch slot that used to be the catch-all became an explicit `29 =>` arm. The existing exhaustive generator already covers `Madd`, `Msub`, `Mneg`, `Smulh`, and `Umulh`, but the stochastic path needs its own fixed-seed 5000-draw guard over `generate_random_instruction` so future refactors cannot silently make opcode IDs `42..=46` unreachable.
+`parse_live_out_contract` now parses the whole `--live-out` contract, including the optional `;nzcv` flag-liveness suffix, so a register-only error name is misleading when diagnostics can say things like `unknown flag token 'bogus'`. In this checkout the original `ParseLiveOutRegistersError` symbol is already gone and the shared wrapper is named `ParseRegisterSetError`, but the contract parser still exposes that register-set-flavored name in its signature and ADR-0006 still has one stale reference to the old name. The implementation should add a contract-facing error name for `parse_live_out_contract` without breaking existing `RegisterSet<Register>::from_str` users.
 
 ## 2. Files To Touch
 
-- `src/search/candidate.rs` - add one unit test in the existing `#[cfg(test)] mod tests`, near the current random reachability tests and reusing `random_opcode_ids(seed, draws)`.
-
-No production code should change unless the new test unexpectedly exposes a real mismatch in the current generator. There are no `crates/` or `compiler/` directories in this repository, so this is not a Rust-stage/self-hosted cross-cutting change. There is no `docs/spec/` tree; `docs/capability.md` and the ADRs do not need updates because this PR adds coverage for already-documented AArch64 support rather than changing syntax, semantics, CLI flags, contracts, or supported mnemonics.
+- `src/validation/live_out.rs`
+  - Lines 9-21: keep `ParseRegisterSetError` as the underlying shared `{ message: String }` wrapper used by `RegisterSet<Register>::from_str`, but broaden its doc comment to cover live-out contract parsing too.
+  - After line 21: add `pub type ParseLiveOutError = ParseRegisterSetError;` with a doc comment explaining it is the contract-facing error name for `parse_live_out_contract`.
+  - Line 94: change `parse_live_out_contract(s: &str) -> Result<LiveOut, ParseRegisterSetError>` to return `Result<LiveOut, ParseLiveOutError>`.
+  - Lines 266-272 and 694-702: adjust or add tests so the contract parser path names `ParseLiveOutError` while preserving display output and flag-token diagnostics.
+- `docs/adr/0006-live-out-cli-grammar.md`
+  - Line 18: update the documented signature to `Result<LiveOut, ParseLiveOutError>`.
+  - Line 48: replace the stale `ParseLiveOutRegistersError` reference with the current contract-facing `ParseLiveOutError` name and mention that it aliases the shared `ParseRegisterSetError` wrapper.
+- `src/main.rs`
+  - Lines 1520-1521 and 1585-1586 are call sites to verify; no edit is expected unless the implementation needs an import cleanup. Both should continue mapping errors through `"invalid live-out: {}"`.
+- No `crates/`, `compiler/`, or `docs/spec/*.md` files exist in this repository checkout, so there is no cross-compiler or spec-doc update for this Rust-only hygiene change.
 
 ## 3. TDD Slices
 
-1. Add the regression test skeleton in `src/search/candidate.rs`, immediately after `test_generate_random_reaches_csel_family` (currently around lines 1211-1258). Name it `test_generate_random_reaches_madd_family`. It should call `let ids = random_opcode_ids(0x66, 5_000);`, matching the nearby fixed-seed random reach tests.
+1. Add the contract-facing compile check.
+   - Test location: `src/validation/live_out.rs` test module near `display_renders_message_without_type_prefix` at lines 266-272.
+   - Red behavior: introduce or adjust a unit test that binds a parsed contract error as `ParseLiveOutError`, for example from `parse_live_out_contract("x0;bogus").unwrap_err()`, and asserts `err.to_string()` is still the bare message body.
+   - Production code: add `pub type ParseLiveOutError = ParseRegisterSetError;`, update the `parse_live_out_contract` return type, and keep `Display` implemented only on `ParseRegisterSetError` so the alias inherits the existing behavior.
 
-2. In that test, assert that `ids` contains `opcode_id` for representative instructions for each family member:
-   - `Instruction::Madd { rd: X0, rn: X1, rm: X2, ra: X0 }` -> opcode ID 42
-   - `Instruction::Msub { rd: X0, rn: X1, rm: X2, ra: X0 }` -> opcode ID 43
-   - `Instruction::Mneg { rd: X0, rn: X1, rm: X2 }` -> opcode ID 44
-   - `Instruction::Smulh { rd: X0, rn: X1, rm: X2 }` -> opcode ID 45
-   - `Instruction::Umulh { rd: X0, rn: X1, rm: X2 }` -> opcode ID 46
-   Use the same `(label, instr)` loop and failure message shape as `test_generate_random_reaches_mul_div_family`, `test_generate_random_reaches_compare_family`, and `test_generate_random_reaches_csel_family` (lines 1140-1258).
+2. Pin flag-token diagnostics through the contract-facing name.
+   - Test location: `src/validation/live_out.rs` around `test_parse_live_out_contract_unknown_flag_rejected` at lines 694-702.
+   - Red behavior: make the test explicitly type the error as `ParseLiveOutError` and assert it still contains `unknown flag token`.
+   - Production code: no new parsing behavior should be needed beyond the signature/alias from slice 1; this slice guards against accidentally narrowing the contract parser back to register-only terminology.
 
-3. Red-check the test as a regression guard without committing sabotage: temporarily alter the random dispatch locally so slot 29 no longer emits the MADD family, for example by making arm `29` emit only an existing non-MADD instruction, then run:
-   ```bash
-   cargo test search::candidate::tests::test_generate_random_reaches_madd_family -- --exact
-   ```
-   Confirm the new test fails with a "random never produced ..." assertion, then immediately revert the temporary production-code mutation.
-
-4. Green-check against the real code. The production implementation that should satisfy the test already exists at `src/search/candidate.rs:804-821`: slot `29` samples `rng.random_range(0..5)` and emits `Madd`, `Msub`, `Mneg`, `Smulh`, or `Umulh`. Run the targeted test again and expect it to pass.
-
-5. Refactor only if the test body duplicates enough local boilerplate to be worth a tiny cleanup. Prefer keeping the test parallel to the three existing random reachability tests over introducing a new abstraction. Do not change opcode numbering, random dispatch probabilities, candidate generation behavior, or documentation.
+3. Align the accepted architecture record.
+   - Test/static check location: repository-wide `rg -n "ParseLiveOutRegistersError" docs src`.
+   - Red behavior: before the doc edit, ADR-0006 still mentions `ParseLiveOutRegistersError`.
+   - Production/docs code: update `docs/adr/0006-live-out-cli-grammar.md` so the documented parser signature and resolution note use `ParseLiveOutError` for the contract parser and `ParseRegisterSetError` only for the shared underlying register-set wrapper.
 
 ## 4. Verification Surface
 
-- No ESBMC proof work is needed. This does not touch contracts, codegen, the C model, SMT lowering, concrete semantics, parser behavior, or the binary patching path.
-- No `tests/run/`, `tests/asm/`, `tests/integration/`, `examples/`, or benchmark fixtures should grow.
-- Minimum verification:
-  ```bash
-  cargo test search::candidate::tests::test_generate_random_reaches_madd_family -- --exact
-  ```
-- Broader local verification before PR/commit:
-  ```bash
-  cargo test search::candidate
-  cargo fmt -- --check
-  ```
-- Full pre-push verification remains the repository gate from `CLAUDE.md`:
-  ```bash
-  ./ci_check.sh
-  ```
+- Run targeted tests after the implementation:
+  - `cargo test validation::live_out::tests::display_renders_message_without_type_prefix`
+  - `cargo test validation::live_out::tests::test_parse_live_out_contract_unknown_flag_rejected`
+  - `cargo test validation::live_out::tests::test_parse_live_out_contract_per_flag_tokens_reserved`
+- Run `cargo check` or `just check` to catch any public signature/import fallout.
+- Before a final PR, follow repository guidance and run `./ci_check.sh`; if time is tight, at minimum run `cargo test validation::live_out`.
+- This change does not touch contracts in the Vow/ESBMC sense, codegen, the C model, or machine semantics. There are no ESBMC properties to prove, and no `tests/run/` or `examples/` fixtures exist or need to grow.
 
 ## 5. Risk Areas
 
-- Fixed-seed brittleness: `0x66` with 5000 draws is already used by nearby random reach tests and should have an extremely large margin for a 1-in-33 outer slot and 1-in-5 subslot, but if `rand_chacha` or the dispatch ordering changes later this test may fail honestly because the fixed trace changed.
-- Test runtime: 5000 draws are cheap and already match nearby tests, so keep the new test at the requested size and avoid expanding it into a statistical stress test.
-- Opcode ID coupling: the assertions intentionally use `opcode_id(&instr)` rather than hard-coded numbers in the test body. The issue's expected range is still documented in this plan and pinned by the representative instruction variants.
-- Clippy/format gate: the added test should not introduce unused imports or dead helper functions. Reuse existing imports from `super::*`, `default_registers`, `default_immediates`, and `random_opcode_ids`.
-- Parse/print/parse idempotency and binary fixed point are unaffected because no parser, printer, codegen, ordering-sensitive maps, stack-slot layout, or `vow-clif-shim`-style component exists in this repo slice.
+- Public API blast radius: removing or renaming `ParseRegisterSetError` would break users of `RegisterSet<Register>::from_str`; use a `ParseLiveOutError` alias for the contract-facing path instead.
+- Stale terminology: `ParseLiveOutRegistersError` should not remain in docs or code after the implementation.
+- Rustdoc readability: the `parse_live_out_contract` signature should show the contract-facing alias, while the shared wrapper can remain documented as the register-set/parser error carrier.
+- `cargo clippy --all -- -D warnings`: avoid unused imports or dead aliases; the public alias should be used in the parser signature and tests.
+- Parse/print/parse idempotency and binary fixed-point behavior are unaffected because no grammar, IR, search, assembler, or codegen ordering changes are planned.
 
 ## 6. Out Of Scope
 
-- Changing `generate_random_instruction` dispatch weights, slot count, or sub-multiplexer structure.
-- Adding exhaustive-generator tests for the MADD family; `generate_all_instructions` already emits these variants at `src/search/candidate.rs:249-259`.
-- Adding docs or capability-matrix entries for `madd`, `msub`, `mneg`, `smulh`, or `umulh`; `docs/capability.md` already lists multiply-accumulate support.
-- Renumbering `opcode_id`, synchronizing with `src/isa/aarch64.rs`, or broadening the opcode-ID uniqueness tests.
-- Refactoring the existing random reach tests into a table-driven helper.
-- Running or modifying benchmark, integration, x86, RISC-V, parser, assembler, semantics, or LLM search code.
+- Do not change the `--live-out` grammar, accepted flag tokens, or error message text beyond type/doc names.
+- Do not split the error into multiple structs with conversions; the existing `{ message: String }` wrapper is sufficient.
+- Do not add compatibility aliases for the removed `ParseLiveOutRegistersError` name; reintroducing the old register-only symbol would dilute the cleanup.
+- Do not refactor `RegisterSet`, `LiveOut`, x86 live-out masks, or ADR-0004 migration work.
+- Do not modify `symphony/`, `build/`, unrelated docs, formatting across untouched files, or generated artifacts.
