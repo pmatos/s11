@@ -61,6 +61,17 @@ fn docs_capability_lists_every_checked_in_aarch64_mnemonic() {
 }
 
 #[test]
+fn docs_capability_documents_w_logical_immediates() {
+    let matrix = normalized_doc("docs/capability.md");
+    assert!(
+        matrix.contains(
+            "logical-immediate forms for `and`, `ands`, `orr`, `eor`, and `tst` support both 64-bit `x` registers and 32-bit `w` registers"
+        ),
+        "docs/capability.md must document W-register logical-immediate support"
+    );
+}
+
+#[test]
 fn memory_operations_are_consistently_documented_with_known_gaps() {
     let matrix = normalized_doc("docs/capability.md");
     assert!(

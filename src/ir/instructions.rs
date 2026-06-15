@@ -1,7 +1,8 @@
 //! AArch64 instruction definitions for the IR
 
 use crate::ir::types::{
-    AccessWidth, AddressOperand, Condition, IndexMode, LabelId, Operand, Register, ShiftKind,
+    AccessWidth, AddressOperand, Condition, IndexMode, LabelId, Operand, Register, RegisterWidth,
+    ShiftKind,
 };
 use std::fmt;
 
@@ -16,6 +17,23 @@ pub const MOVW_LEGAL_SHIFTS: [u8; 4] = [0, 16, 32, 48];
 /// AND/ORR/EOR/TST/ANDS immediate forms). Delegates to dynasmrt's encoder.
 fn logical_imm64_encodable(imm: i64) -> bool {
     dynasmrt::aarch64::encode_logical_immediate_64bit(imm as u64).is_some()
+}
+
+pub(crate) fn logical_imm32_value(imm: i64) -> Option<u32> {
+    if imm >= 0 {
+        u32::try_from(imm).ok()
+    } else {
+        Some(imm as u32)
+    }
+}
+
+/// True iff `imm` is representable as an AArch64 32-bit logical bitmask
+/// immediate. Positive literals must fit in 32 bits; negative literals are
+/// interpreted as two's-complement W-width masks.
+pub(crate) fn logical_imm32_encodable(imm: i64) -> bool {
+    logical_imm32_value(imm)
+        .and_then(dynasmrt::aarch64::encode_logical_immediate_32bit)
+        .is_some()
 }
 
 /// Helper for `Instruction::destinations` on single-register memory ops: the
@@ -108,16 +126,19 @@ pub enum Instruction {
         rd: Register,
         rn: Register,
         rm: Operand,
+        width: RegisterWidth,
     },
     Orr {
         rd: Register,
         rn: Register,
         rm: Operand,
+        width: RegisterWidth,
     },
     Eor {
         rd: Register,
         rn: Register,
         rm: Operand,
+        width: RegisterWidth,
     },
 
     // Shifts
@@ -195,6 +216,7 @@ pub enum Instruction {
     Tst {
         rn: Register,
         rm: Operand,
+        width: RegisterWidth,
     },
 
     // Conditional select
@@ -313,6 +335,7 @@ pub enum Instruction {
         rd: Register,
         rn: Register,
         rm: Operand,
+        width: RegisterWidth,
     },
 
     // Conditional set: rd = (cond holds) ? 1 : 0
@@ -758,17 +781,23 @@ impl Instruction {
             // forbids SP for any operand). The immediate form encodes Rd in
             // the Xn|SP slot, which forbids XZR (would alias to SP and
             // silently miscompile).
-            Instruction::And { rd, rn, rm }
-            | Instruction::Orr { rd, rn, rm }
-            | Instruction::Eor { rd, rn, rm } => match rm {
-                Operand::Register(_) => true,
+            Instruction::And { rd, rn, rm, width }
+            | Instruction::Orr { rd, rn, rm, width }
+            | Instruction::Eor { rd, rn, rm, width } => match rm {
+                Operand::Register(_) => *width == RegisterWidth::X64,
                 // rd in the Xn|SP slot (SP allowed, XZR forbidden); rn in the
                 // plain Xn slot (XZR allowed via reg 31, SP forbidden).
-                Operand::Immediate(imm) => {
-                    *rd != Register::XZR && *rn != Register::SP && logical_imm64_encodable(*imm)
-                }
+                Operand::Immediate(imm) => match width {
+                    RegisterWidth::X64 => {
+                        *rd != Register::XZR && *rn != Register::SP && logical_imm64_encodable(*imm)
+                    }
+                    RegisterWidth::W32 => {
+                        *rd != Register::XZR && *rn != Register::SP && logical_imm32_encodable(*imm)
+                    }
+                },
                 Operand::ShiftedRegister { reg, amount, .. } => {
-                    *amount <= 63
+                    *width == RegisterWidth::X64
+                        && *amount <= 63
                         && *reg != Register::SP
                         && *rd != Register::SP
                         && *rn != Register::SP
@@ -826,11 +855,17 @@ impl Instruction {
             // shifted-register (all 4 kinds incl. ROR). No rd, so no XZR-slot
             // guard needed for the immediate form — but rn is the plain Xn slot
             // (rejects SP).
-            Instruction::Tst { rn, rm } => match rm {
-                Operand::Register(_) => true,
-                Operand::Immediate(imm) => *rn != Register::SP && logical_imm64_encodable(*imm),
+            Instruction::Tst { rn, rm, width } => match rm {
+                Operand::Register(_) => *width == RegisterWidth::X64,
+                Operand::Immediate(imm) => match width {
+                    RegisterWidth::X64 => *rn != Register::SP && logical_imm64_encodable(*imm),
+                    RegisterWidth::W32 => *rn != Register::SP && logical_imm32_encodable(*imm),
+                },
                 Operand::ShiftedRegister { reg, amount, .. } => {
-                    *amount <= 63 && *reg != Register::SP && *rn != Register::SP
+                    *width == RegisterWidth::X64
+                        && *amount <= 63
+                        && *reg != Register::SP
+                        && *rn != Register::SP
                 }
                 Operand::ExtendedRegister { .. } => false,
             },
@@ -868,11 +903,16 @@ impl Instruction {
             // ShiftedRegister out of scope (#59). The immediate form uses the
             // plain X slot for both rd and rn (rejects SP); XZR is fine for rd
             // (encodes as the TST shape).
-            Instruction::Ands { rd, rn, rm } => match rm {
-                Operand::Register(_) => true,
-                Operand::Immediate(imm) => {
-                    *rd != Register::SP && *rn != Register::SP && logical_imm64_encodable(*imm)
-                }
+            Instruction::Ands { rd, rn, rm, width } => match rm {
+                Operand::Register(_) => *width == RegisterWidth::X64,
+                Operand::Immediate(imm) => match width {
+                    RegisterWidth::X64 => {
+                        *rd != Register::SP && *rn != Register::SP && logical_imm64_encodable(*imm)
+                    }
+                    RegisterWidth::W32 => {
+                        *rd != Register::SP && *rn != Register::SP && logical_imm32_encodable(*imm)
+                    }
+                },
                 Operand::ShiftedRegister { .. } => false,
                 Operand::ExtendedRegister { .. } => false,
             },
@@ -1033,7 +1073,7 @@ impl Instruction {
             // including the shifted-register form's inner register).
             Instruction::Cmp { rn, rm }
             | Instruction::Cmn { rn, rm }
-            | Instruction::Tst { rn, rm } => {
+            | Instruction::Tst { rn, rm, .. } => {
                 let mut regs = vec![*rn];
                 match rm {
                     Operand::Register(r) => regs.push(*r),
@@ -1290,9 +1330,27 @@ impl fmt::Display for Instruction {
             Instruction::MovImm { rd, imm } => write!(f, "mov {}, #{}", rd, imm),
             Instruction::Add { rd, rn, rm } => write!(f, "add {}, {}, {}", rd, rn, rm),
             Instruction::Sub { rd, rn, rm } => write!(f, "sub {}, {}, {}", rd, rn, rm),
-            Instruction::And { rd, rn, rm } => write!(f, "and {}, {}, {}", rd, rn, rm),
-            Instruction::Orr { rd, rn, rm } => write!(f, "orr {}, {}, {}", rd, rn, rm),
-            Instruction::Eor { rd, rn, rm } => write!(f, "eor {}, {}, {}", rd, rn, rm),
+            Instruction::And { rd, rn, rm, width } => write!(
+                f,
+                "and {}, {}, {}",
+                width.register_name(*rd),
+                width.register_name(*rn),
+                rm
+            ),
+            Instruction::Orr { rd, rn, rm, width } => write!(
+                f,
+                "orr {}, {}, {}",
+                width.register_name(*rd),
+                width.register_name(*rn),
+                rm
+            ),
+            Instruction::Eor { rd, rn, rm, width } => write!(
+                f,
+                "eor {}, {}, {}",
+                width.register_name(*rd),
+                width.register_name(*rn),
+                rm
+            ),
             Instruction::Lsl { rd, rn, shift } => write!(f, "lsl {}, {}, {}", rd, rn, shift),
             Instruction::Lsr { rd, rn, shift } => write!(f, "lsr {}, {}, {}", rd, rn, shift),
             Instruction::Asr { rd, rn, shift } => write!(f, "asr {}, {}, {}", rd, rn, shift),
@@ -1311,7 +1369,9 @@ impl fmt::Display for Instruction {
             // Comparison instructions
             Instruction::Cmp { rn, rm } => write!(f, "cmp {}, {}", rn, rm),
             Instruction::Cmn { rn, rm } => write!(f, "cmn {}, {}", rn, rm),
-            Instruction::Tst { rn, rm } => write!(f, "tst {}, {}", rn, rm),
+            Instruction::Tst { rn, rm, width } => {
+                write!(f, "tst {}, {}", width.register_name(*rn), rm)
+            }
             // Conditional select instructions
             Instruction::Csel { rd, rn, rm, cond } => {
                 write!(f, "csel {}, {}, {}, {}", rd, rn, rm, cond)
@@ -1361,7 +1421,13 @@ impl fmt::Display for Instruction {
             Instruction::Eon { rd, rn, rm } => write!(f, "eon {}, {}, {}", rd, rn, rm),
             Instruction::Adds { rd, rn, rm } => write!(f, "adds {}, {}, {}", rd, rn, rm),
             Instruction::Subs { rd, rn, rm } => write!(f, "subs {}, {}, {}", rd, rn, rm),
-            Instruction::Ands { rd, rn, rm } => write!(f, "ands {}, {}, {}", rd, rn, rm),
+            Instruction::Ands { rd, rn, rm, width } => write!(
+                f,
+                "ands {}, {}, {}",
+                width.register_name(*rd),
+                width.register_name(*rn),
+                rm
+            ),
             Instruction::Cset { rd, cond } => write!(f, "cset {}, {}", rd, cond),
             Instruction::Csetm { rd, cond } => write!(f, "csetm {}, {}", rd, cond),
             Instruction::Ror { rd, rn, shift } => write!(f, "ror {}, {}, {}", rd, rn, shift),
@@ -1498,6 +1564,7 @@ mod tests {
             rd: Register::X0,
             rn: Register::X0,
             rm: Operand::Register(Register::X0),
+            width: crate::ir::RegisterWidth::X64,
         };
         assert_eq!(format!("{}", eor), "eor x0, x0, x0");
     }
@@ -2212,16 +2279,19 @@ mod tests {
                 rd: Register::X0,
                 rn: Register::X1,
                 rm: shifted,
+                width: crate::ir::RegisterWidth::X64,
             },
             Instruction::Orr {
                 rd: Register::X0,
                 rn: Register::X1,
                 rm: shifted,
+                width: crate::ir::RegisterWidth::X64,
             },
             Instruction::Eor {
                 rd: Register::X0,
                 rn: Register::X1,
                 rm: shifted,
+                width: crate::ir::RegisterWidth::X64,
             },
         ] {
             assert_eq!(
@@ -2243,6 +2313,7 @@ mod tests {
             Instruction::Tst {
                 rn: Register::X1,
                 rm: shifted,
+                width: crate::ir::RegisterWidth::X64,
             },
         ] {
             assert_eq!(instr.source_registers(), vec![Register::X1, Register::X3]);
@@ -2388,6 +2459,7 @@ mod tests {
                         kind,
                         amount: 5
                     },
+                    width: crate::ir::RegisterWidth::X64,
                 }
                 .is_encodable_aarch64(),
                 "ORR with {:?} must be encodable",
@@ -2401,6 +2473,7 @@ mod tests {
                         kind,
                         amount: 5
                     },
+                    width: crate::ir::RegisterWidth::X64,
                 }
                 .is_encodable_aarch64(),
                 "TST with {:?} must be encodable",
@@ -2538,7 +2611,8 @@ mod tests {
             Instruction::And {
                 rd: Register::X0,
                 rn: Register::X1,
-                rm: Operand::Register(Register::X2)
+                rm: Operand::Register(Register::X2),
+                width: crate::ir::RegisterWidth::X64,
             }
             .is_encodable_aarch64()
         );
@@ -2548,7 +2622,8 @@ mod tests {
             Instruction::And {
                 rd: Register::X0,
                 rn: Register::X1,
-                rm: Operand::Immediate(0xFF)
+                rm: Operand::Immediate(0xFF),
+                width: crate::ir::RegisterWidth::X64,
             }
             .is_encodable_aarch64()
         );
@@ -2556,7 +2631,8 @@ mod tests {
             Instruction::Orr {
                 rd: Register::X0,
                 rn: Register::X1,
-                rm: Operand::Immediate(1)
+                rm: Operand::Immediate(1),
+                width: crate::ir::RegisterWidth::X64,
             }
             .is_encodable_aarch64()
         );
@@ -2566,7 +2642,8 @@ mod tests {
             !Instruction::Eor {
                 rd: Register::X0,
                 rn: Register::X1,
-                rm: Operand::Immediate(0)
+                rm: Operand::Immediate(0),
+                width: crate::ir::RegisterWidth::X64,
             }
             .is_encodable_aarch64()
         );
@@ -2808,14 +2885,16 @@ mod tests {
         assert!(
             Instruction::Tst {
                 rn: Register::X0,
-                rm: Operand::Register(Register::X1)
+                rm: Operand::Register(Register::X1),
+                width: crate::ir::RegisterWidth::X64,
             }
             .is_encodable_aarch64()
         );
         assert!(
             Instruction::Tst {
                 rn: Register::X0,
-                rm: Operand::Immediate(1)
+                rm: Operand::Immediate(1),
+                width: crate::ir::RegisterWidth::X64,
             }
             .is_encodable_aarch64()
         );
@@ -2823,7 +2902,8 @@ mod tests {
         assert!(
             !Instruction::Tst {
                 rn: Register::X0,
-                rm: Operand::Immediate(5)
+                rm: Operand::Immediate(5),
+                width: crate::ir::RegisterWidth::X64,
             }
             .is_encodable_aarch64()
         );
@@ -2854,16 +2934,19 @@ mod tests {
                 rd: Register::X0,
                 rn: Register::X1,
                 rm: Operand::Register(Register::X2),
+                width: crate::ir::RegisterWidth::X64,
             },
             Instruction::Orr {
                 rd: Register::X0,
                 rn: Register::X1,
                 rm: Operand::Register(Register::X2),
+                width: crate::ir::RegisterWidth::X64,
             },
             Instruction::Eor {
                 rd: Register::X0,
                 rn: Register::X1,
                 rm: Operand::Register(Register::X2),
+                width: crate::ir::RegisterWidth::X64,
             },
             Instruction::Lsl {
                 rd: Register::X0,
@@ -2933,6 +3016,7 @@ mod tests {
             Instruction::Tst {
                 rn: Register::X1,
                 rm: Operand::Register(Register::X2),
+                width: crate::ir::RegisterWidth::X64,
             },
             Instruction::Csel {
                 rd: Register::X0,
@@ -3019,6 +3103,7 @@ mod tests {
                 rd: Register::X0,
                 rn: Register::X1,
                 rm: Operand::Register(Register::X2),
+                width: crate::ir::RegisterWidth::X64,
             },
             Instruction::Cset {
                 rd: Register::X0,
@@ -3277,6 +3362,7 @@ mod tests {
                 rd: Register::X0,
                 rn: Register::X1,
                 rm: er,
+                width: crate::ir::RegisterWidth::X64,
             }
             .is_encodable_aarch64()
         );
@@ -3285,6 +3371,7 @@ mod tests {
                 rd: Register::X0,
                 rn: Register::X1,
                 rm: er,
+                width: crate::ir::RegisterWidth::X64,
             }
             .is_encodable_aarch64()
         );
@@ -3293,6 +3380,7 @@ mod tests {
                 rd: Register::X0,
                 rn: Register::X1,
                 rm: er,
+                width: crate::ir::RegisterWidth::X64,
             }
             .is_encodable_aarch64()
         );
@@ -3300,6 +3388,7 @@ mod tests {
             !Instruction::Tst {
                 rn: Register::X1,
                 rm: er,
+                width: crate::ir::RegisterWidth::X64,
             }
             .is_encodable_aarch64()
         );
@@ -3559,6 +3648,7 @@ mod tests {
                     rd: Register::X0,
                     rn: Register::X1,
                     rm: Operand::Immediate(imm),
+                    width: crate::ir::RegisterWidth::X64,
                 }
                 .is_encodable_aarch64(),
                 "AND with valid imm 0x{:x} should be encodable",
@@ -3569,6 +3659,7 @@ mod tests {
                     rd: Register::X0,
                     rn: Register::X1,
                     rm: Operand::Immediate(imm),
+                    width: crate::ir::RegisterWidth::X64,
                 }
                 .is_encodable_aarch64(),
                 "ORR with valid imm 0x{:x} should be encodable",
@@ -3579,6 +3670,7 @@ mod tests {
                     rd: Register::X0,
                     rn: Register::X1,
                     rm: Operand::Immediate(imm),
+                    width: crate::ir::RegisterWidth::X64,
                 }
                 .is_encodable_aarch64(),
                 "EOR with valid imm 0x{:x} should be encodable",
@@ -3588,6 +3680,7 @@ mod tests {
                 Instruction::Tst {
                     rn: Register::X1,
                     rm: Operand::Immediate(imm),
+                    width: crate::ir::RegisterWidth::X64,
                 }
                 .is_encodable_aarch64(),
                 "TST with valid imm 0x{:x} should be encodable",
@@ -3598,6 +3691,7 @@ mod tests {
                     rd: Register::X0,
                     rn: Register::X1,
                     rm: Operand::Immediate(imm),
+                    width: crate::ir::RegisterWidth::X64,
                 }
                 .is_encodable_aarch64(),
                 "ANDS with valid imm 0x{:x} should be encodable",
@@ -3615,25 +3709,30 @@ mod tests {
                     rd: Register::X0,
                     rn: Register::X1,
                     rm: Operand::Immediate(r),
+                    width: crate::ir::RegisterWidth::X64,
                 },
                 |r| Instruction::Orr {
                     rd: Register::X0,
                     rn: Register::X1,
                     rm: Operand::Immediate(r),
+                    width: crate::ir::RegisterWidth::X64,
                 },
                 |r| Instruction::Eor {
                     rd: Register::X0,
                     rn: Register::X1,
                     rm: Operand::Immediate(r),
+                    width: crate::ir::RegisterWidth::X64,
                 },
                 |r| Instruction::Tst {
                     rn: Register::X1,
                     rm: Operand::Immediate(r),
+                    width: crate::ir::RegisterWidth::X64,
                 },
                 |r| Instruction::Ands {
                     rd: Register::X0,
                     rn: Register::X1,
                     rm: Operand::Immediate(r),
+                    width: crate::ir::RegisterWidth::X64,
                 },
             ] {
                 let instr = ctor(imm);
@@ -3647,6 +3746,121 @@ mod tests {
         }
     }
 
+    fn w32_logical_immediate_instrs(imm: i64) -> [Instruction; 5] {
+        [
+            Instruction::And {
+                rd: Register::X0,
+                rn: Register::X1,
+                rm: Operand::Immediate(imm),
+                width: RegisterWidth::W32,
+            },
+            Instruction::Orr {
+                rd: Register::X0,
+                rn: Register::X1,
+                rm: Operand::Immediate(imm),
+                width: RegisterWidth::W32,
+            },
+            Instruction::Eor {
+                rd: Register::X0,
+                rn: Register::X1,
+                rm: Operand::Immediate(imm),
+                width: RegisterWidth::W32,
+            },
+            Instruction::Tst {
+                rn: Register::X1,
+                rm: Operand::Immediate(imm),
+                width: RegisterWidth::W32,
+            },
+            Instruction::Ands {
+                rd: Register::X0,
+                rn: Register::X1,
+                rm: Operand::Immediate(imm),
+                width: RegisterWidth::W32,
+            },
+        ]
+    }
+
+    #[test]
+    fn test_is_encodable_aarch64_logical_imm32_accepts_valid_masks() {
+        for imm in [0xFF_i64, 0x8000_0000, 0x5555_5555, -256] {
+            for instr in w32_logical_immediate_instrs(imm) {
+                assert!(
+                    instr.is_encodable_aarch64(),
+                    "{} with W32 imm 0x{:x} should be encodable",
+                    instr,
+                    imm as u64
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_is_encodable_aarch64_logical_imm32_rejects_invalid_masks() {
+        for imm in [0_i64, -1, 0xFFFF_FFFF, 5, 0x1_0000_00FF] {
+            for instr in w32_logical_immediate_instrs(imm) {
+                assert!(
+                    !instr.is_encodable_aarch64(),
+                    "{} with W32 imm 0x{:x} must NOT be encodable",
+                    instr,
+                    imm as u64
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_is_encodable_aarch64_logical_imm32_enforces_wsp_wzr_slots() {
+        assert!(
+            Instruction::And {
+                rd: Register::SP,
+                rn: Register::X1,
+                rm: Operand::Immediate(0xFF),
+                width: RegisterWidth::W32,
+            }
+            .is_encodable_aarch64(),
+            "AND WSP, Wn, #imm uses the Wn|WSP destination slot"
+        );
+        assert!(
+            !Instruction::And {
+                rd: Register::XZR,
+                rn: Register::X1,
+                rm: Operand::Immediate(0xFF),
+                width: RegisterWidth::W32,
+            }
+            .is_encodable_aarch64(),
+            "AND WZR, Wn, #imm would alias to WSP in the destination slot"
+        );
+        assert!(
+            Instruction::Ands {
+                rd: Register::XZR,
+                rn: Register::X1,
+                rm: Operand::Immediate(0xFF),
+                width: RegisterWidth::W32,
+            }
+            .is_encodable_aarch64(),
+            "ANDS WZR, Wn, #imm uses a plain W destination slot"
+        );
+        assert!(
+            !Instruction::Ands {
+                rd: Register::SP,
+                rn: Register::X1,
+                rm: Operand::Immediate(0xFF),
+                width: RegisterWidth::W32,
+            }
+            .is_encodable_aarch64(),
+            "ANDS WSP, Wn, #imm is not a plain W-register destination"
+        );
+        assert!(
+            !Instruction::Tst {
+                rn: Register::SP,
+                rm: Operand::Immediate(0xFF),
+                width: RegisterWidth::W32,
+            }
+            .is_encodable_aarch64(),
+            "TST WSP, #imm is not a plain W-register source"
+        );
+    }
+
     #[test]
     fn test_is_encodable_aarch64_rejects_xzr_dest_for_and_orr_eor_imm() {
         // AND/ORR/EOR (immediate) put Rd in the Xn|SP slot — XZR aliases to SP
@@ -3656,16 +3870,19 @@ mod tests {
                 rd,
                 rn: Register::X1,
                 rm: Operand::Immediate(imm),
+                width: crate::ir::RegisterWidth::X64,
             },
             |rd, imm| Instruction::Orr {
                 rd,
                 rn: Register::X1,
                 rm: Operand::Immediate(imm),
+                width: crate::ir::RegisterWidth::X64,
             },
             |rd, imm| Instruction::Eor {
                 rd,
                 rn: Register::X1,
                 rm: Operand::Immediate(imm),
+                width: crate::ir::RegisterWidth::X64,
             },
         ] {
             // Same encoder accepts 0xFF for X0…
@@ -3680,6 +3897,7 @@ mod tests {
                 rd: Register::XZR,
                 rn: Register::X1,
                 rm: Operand::Immediate(0xFF),
+                width: crate::ir::RegisterWidth::X64,
             }
             .is_encodable_aarch64()
         );
@@ -3694,16 +3912,19 @@ mod tests {
                 rd: Register::X0,
                 rn,
                 rm: Operand::Immediate(0xFF),
+                width: crate::ir::RegisterWidth::X64,
             },
             |rn| Instruction::Orr {
                 rd: Register::X0,
                 rn,
                 rm: Operand::Immediate(0xFF),
+                width: crate::ir::RegisterWidth::X64,
             },
             |rn| Instruction::Eor {
                 rd: Register::X0,
                 rn,
                 rm: Operand::Immediate(0xFF),
+                width: crate::ir::RegisterWidth::X64,
             },
         ] {
             assert!(
@@ -3722,6 +3943,7 @@ mod tests {
                 rd: Register::SP,
                 rn: Register::X1,
                 rm: Operand::Immediate(0xFF),
+                width: crate::ir::RegisterWidth::X64,
             }
             .is_encodable_aarch64()
         );
@@ -3731,6 +3953,7 @@ mod tests {
             !Instruction::Tst {
                 rn: Register::SP,
                 rm: Operand::Immediate(0xFF),
+                width: crate::ir::RegisterWidth::X64,
             }
             .is_encodable_aarch64()
         );
@@ -3741,6 +3964,7 @@ mod tests {
                 rd: Register::SP,
                 rn: Register::X1,
                 rm: Operand::Immediate(0xFF),
+                width: crate::ir::RegisterWidth::X64,
             }
             .is_encodable_aarch64()
         );
@@ -3749,6 +3973,7 @@ mod tests {
                 rd: Register::X0,
                 rn: Register::SP,
                 rm: Operand::Immediate(0xFF),
+                width: crate::ir::RegisterWidth::X64,
             }
             .is_encodable_aarch64()
         );

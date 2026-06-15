@@ -17,7 +17,7 @@ use std::path::Path;
 
 use crate::ir::instructions::MOVW_LEGAL_SHIFTS;
 use crate::ir::types::NORMAL_CONDITIONS;
-use crate::ir::{Condition, Instruction, LabelId, Operand, Register, ShiftKind};
+use crate::ir::{Condition, Instruction, LabelId, Operand, Register, RegisterWidth, ShiftKind};
 
 pub mod x86;
 
@@ -196,6 +196,42 @@ pub fn parse_w_or_x_register(s: &str) -> Result<Register, String> {
         "wsp" => Ok(Register::SP),
         _ => Err(format!("unknown register: {}", s)),
     }
+}
+
+fn parse_sized_register(s: &str) -> Result<(Register, RegisterWidth), String> {
+    let lower = s.to_lowercase();
+    match lower.as_str() {
+        "wzr" => return Ok((Register::XZR, RegisterWidth::W32)),
+        "wsp" => return Ok((Register::SP, RegisterWidth::W32)),
+        _ => {}
+    }
+
+    if let Some(raw_index) = lower.strip_prefix('w')
+        && let Ok(index) = raw_index.parse::<u8>()
+        && index <= 30
+    {
+        return Ok((
+            Register::from_index(index).expect("valid W register index"),
+            RegisterWidth::W32,
+        ));
+    }
+
+    parse_register(s).map(|register| (register, RegisterWidth::X64))
+}
+
+fn parse_same_width_registers(
+    mnem: &str,
+    operands: &[&str],
+) -> Result<(Register, Register, RegisterWidth), String> {
+    let (rd, rd_width) = parse_sized_register(operands[0])?;
+    let (rn, rn_width) = parse_sized_register(operands[1])?;
+    if rd_width != rn_width {
+        return Err(format!(
+            "{} operands must use matching register widths",
+            mnem
+        ));
+    }
+    Ok((rd, rn, rd_width))
 }
 
 /// Parse an immediate value (with or without # prefix, hex or decimal)
@@ -515,10 +551,24 @@ fn parse_subs(operands: &[&str]) -> Result<Instruction, String> {
 
 /// Parse ANDS instruction (register-only rm)
 fn parse_ands(operands: &[&str]) -> Result<Instruction, String> {
+    if operands.len() == 3 {
+        let (rd, rn, width) = parse_same_width_registers("ands", operands)?;
+        let rm = match width {
+            RegisterWidth::W32 => Operand::Immediate(parse_immediate(operands[2])?),
+            RegisterWidth::X64 => parse_operand(operands[2])?,
+        };
+        return Ok(Instruction::Ands { rd, rn, rm, width });
+    }
+
     let rm = parse_rm_3op("ands", operands)?;
     let rd = parse_register(operands[0])?;
     let rn = parse_register(operands[1])?;
-    Ok(Instruction::Ands { rd, rn, rm })
+    Ok(Instruction::Ands {
+        rd,
+        rn,
+        rm,
+        width: RegisterWidth::X64,
+    })
 }
 
 /// Parse CSET instruction: `cset rd, cond`
@@ -1090,26 +1140,68 @@ fn parse_sub(operands: &[&str]) -> Result<Instruction, String> {
 
 /// Parse AND instruction
 fn parse_and(operands: &[&str]) -> Result<Instruction, String> {
+    if operands.len() == 3 {
+        let (rd, rn, width) = parse_same_width_registers("and", operands)?;
+        let rm = match width {
+            RegisterWidth::W32 => Operand::Immediate(parse_immediate(operands[2])?),
+            RegisterWidth::X64 => parse_operand(operands[2])?,
+        };
+        return Ok(Instruction::And { rd, rn, rm, width });
+    }
+
     let rm = parse_rm_3op("and", operands)?;
     let rd = parse_register(operands[0])?;
     let rn = parse_register(operands[1])?;
-    Ok(Instruction::And { rd, rn, rm })
+    Ok(Instruction::And {
+        rd,
+        rn,
+        rm,
+        width: RegisterWidth::X64,
+    })
 }
 
 /// Parse ORR instruction
 fn parse_orr(operands: &[&str]) -> Result<Instruction, String> {
+    if operands.len() == 3 {
+        let (rd, rn, width) = parse_same_width_registers("orr", operands)?;
+        let rm = match width {
+            RegisterWidth::W32 => Operand::Immediate(parse_immediate(operands[2])?),
+            RegisterWidth::X64 => parse_operand(operands[2])?,
+        };
+        return Ok(Instruction::Orr { rd, rn, rm, width });
+    }
+
     let rm = parse_rm_3op("orr", operands)?;
     let rd = parse_register(operands[0])?;
     let rn = parse_register(operands[1])?;
-    Ok(Instruction::Orr { rd, rn, rm })
+    Ok(Instruction::Orr {
+        rd,
+        rn,
+        rm,
+        width: RegisterWidth::X64,
+    })
 }
 
 /// Parse EOR instruction
 fn parse_eor(operands: &[&str]) -> Result<Instruction, String> {
+    if operands.len() == 3 {
+        let (rd, rn, width) = parse_same_width_registers("eor", operands)?;
+        let rm = match width {
+            RegisterWidth::W32 => Operand::Immediate(parse_immediate(operands[2])?),
+            RegisterWidth::X64 => parse_operand(operands[2])?,
+        };
+        return Ok(Instruction::Eor { rd, rn, rm, width });
+    }
+
     let rm = parse_rm_3op("eor", operands)?;
     let rd = parse_register(operands[0])?;
     let rn = parse_register(operands[1])?;
-    Ok(Instruction::Eor { rd, rn, rm })
+    Ok(Instruction::Eor {
+        rd,
+        rn,
+        rm,
+        width: RegisterWidth::X64,
+    })
 }
 
 /// Parse LSL instruction
@@ -1300,9 +1392,22 @@ fn parse_cmn(operands: &[&str]) -> Result<Instruction, String> {
 
 /// Parse TST instruction
 fn parse_tst(operands: &[&str]) -> Result<Instruction, String> {
+    if operands.len() == 2 {
+        let (rn, width) = parse_sized_register(operands[0])?;
+        let rm = match width {
+            RegisterWidth::W32 => Operand::Immediate(parse_immediate(operands[1])?),
+            RegisterWidth::X64 => parse_operand(operands[1])?,
+        };
+        return Ok(Instruction::Tst { rn, rm, width });
+    }
+
     let rm = parse_rm_2op("tst", operands)?;
     let rn = parse_register(operands[0])?;
-    Ok(Instruction::Tst { rn, rm })
+    Ok(Instruction::Tst {
+        rn,
+        rm,
+        width: RegisterWidth::X64,
+    })
 }
 
 /// Parse CCMP instruction: `ccmp Xn, <Xm | #imm5>, #nzcv, cond`.
@@ -1973,6 +2078,7 @@ mod tests {
                     kind: ShiftKind::Ror,
                     amount: 8,
                 },
+                width: RegisterWidth::X64,
             }
         );
     }
@@ -2162,6 +2268,35 @@ mod tests {
         assert!(parse_line("tst x1, #0x8000000000000000").is_ok());
     }
 
+    #[test]
+    fn test_parse_w_logical_immediates_roundtrip() {
+        for text in [
+            "and w0, w1, #255",
+            "orr w0, w1, #255",
+            "eor w0, w1, #255",
+            "tst w1, #255",
+            "ands w0, w1, #255",
+            "and wsp, w1, #255",
+            "ands wzr, w1, #255",
+        ] {
+            let instr = parse_one(text);
+            assert_eq!(format!("{}", instr), text);
+        }
+    }
+
+    #[test]
+    fn test_parse_w_logical_immediates_reject_invalid_slots_and_forms() {
+        for text in [
+            "and wzr, w1, #255",
+            "ands wsp, w1, #255",
+            "tst wsp, #255",
+            "and w0, x1, #255",
+            "and w0, w1, w2",
+        ] {
+            assert!(parse_line(text).is_err(), "{text} should be rejected");
+        }
+    }
+
     // Full assembly parsing tests
     #[test]
     fn test_parse_assembly_string() {
@@ -2247,6 +2382,7 @@ mod tests {
                 rd: Register::X0,
                 rn: Register::X1,
                 rm: Operand::Register(Register::X2),
+                width: RegisterWidth::X64,
             },
             Instruction::Cset {
                 rd: Register::X0,

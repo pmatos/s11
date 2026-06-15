@@ -894,6 +894,7 @@ mod tests {
             rd: Register::X0,
             rn: Register::X0,
             rm: Operand::Register(Register::X0),
+            width: crate::ir::RegisterWidth::X64,
         }];
 
         assert!(search.verify_equivalence(&target, &candidate, &live_out, &config));

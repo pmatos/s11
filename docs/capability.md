@@ -22,6 +22,8 @@ Rewritable straight-line mnemonics accepted by the parser and Capstone bridge:
 - Arithmetic and flag-setting arithmetic: `add`, `sub`, `adds`, `subs`
 - Logical and inverted-logical forms: `and`, `ands`, `orr`, `eor`, `bic`,
   `bics`, `orn`, `eon`
+  - Logical-immediate forms for `and`, `ands`, `orr`, `eor`, and `tst`
+    support both 64-bit `X` registers and 32-bit `W` registers.
 - Shifts and rotate: `lsl`, `lsr`, `asr`, `ror`
 - Multiply/divide and multiply-accumulate: `mul`, `madd`, `msub`, `mneg`,
   `smulh`, `umulh`, `sdiv`, `udiv`

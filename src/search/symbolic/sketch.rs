@@ -95,9 +95,24 @@ impl SymbolicInstruction {
             }
             2 => Some(Instruction::Add { rd, rn, rm }),
             3 => Some(Instruction::Sub { rd, rn, rm }),
-            4 => Some(Instruction::And { rd, rn, rm }),
-            5 => Some(Instruction::Orr { rd, rn, rm }),
-            6 => Some(Instruction::Eor { rd, rn, rm }),
+            4 => Some(Instruction::And {
+                rd,
+                rn,
+                rm,
+                width: crate::ir::RegisterWidth::X64,
+            }),
+            5 => Some(Instruction::Orr {
+                rd,
+                rn,
+                rm,
+                width: crate::ir::RegisterWidth::X64,
+            }),
+            6 => Some(Instruction::Eor {
+                rd,
+                rn,
+                rm,
+                width: crate::ir::RegisterWidth::X64,
+            }),
             7 => Some(Instruction::Lsl { rd, rn, shift: rm }),
             8 => Some(Instruction::Lsr { rd, rn, shift: rm }),
             9 => Some(Instruction::Asr { rd, rn, shift: rm }),

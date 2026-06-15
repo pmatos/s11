@@ -1,9 +1,10 @@
 pub mod x86;
 
+use crate::ir::instructions::logical_imm32_value;
 use crate::ir::types::{
     AccessWidth, AddressOperand, Condition, ExtendKind, IndexMode, LabelId, ShiftKind,
 };
-use crate::ir::{Instruction, Operand, Register};
+use crate::ir::{Instruction, Operand, Register, RegisterWidth};
 use dynasmrt::{DynasmApi, dynasm};
 
 /// Emits one of the four CSEL-family mnemonics with the given register
@@ -783,11 +784,14 @@ impl AArch64Assembler {
             // rejects XZR), while the register and shifted-register forms use
             // the plain Xn slot (rejects SP). Resolving rd inside each arm
             // avoids prematurely rejecting `<op> sp, xn, #imm`.
-            Instruction::And { rd, rn, rm } => {
+            Instruction::And { rd, rn, rm, width } => {
                 let rn_reg = register_to_dynasm(*rn)?;
 
                 match rm {
                     Operand::Register(rm_reg) => {
+                        if *width != RegisterWidth::X64 {
+                            return Err("AND W-register form supports immediates only".to_string());
+                        }
                         let rd_reg = register_to_dynasm(*rd)?;
                         let rm_reg_num = register_to_dynasm(*rm_reg)?;
                         dynasm!(ops
@@ -797,22 +801,38 @@ impl AArch64Assembler {
                         Ok(())
                     }
                     Operand::Immediate(imm) => {
-                        let val = *imm as u64;
-                        if dynasmrt::aarch64::encode_logical_immediate_64bit(val).is_none() {
-                            return Err(format!(
-                                "AND immediate 0x{:x} is not a valid AArch64 logical immediate",
-                                val
-                            ));
+                        match width {
+                            RegisterWidth::X64 => {
+                                let val = *imm as u64;
+                                if dynasmrt::aarch64::encode_logical_immediate_64bit(val).is_none()
+                                {
+                                    return Err(format!(
+                                        "AND immediate 0x{:x} is not a valid AArch64 logical immediate",
+                                        val
+                                    ));
+                                }
+                                // AND (immediate) encodes Rd in the Xn|SP slot.
+                                let rd_reg_xsp = register_to_dynasm_xsp(*rd)?;
+                                dynasm!(ops
+                                    ; .arch aarch64
+                                    ; and XSP(rd_reg_xsp), X(rn_reg), #val
+                                );
+                            }
+                            RegisterWidth::W32 => {
+                                let val = logical_imm32_for_assembler("AND", *imm)?;
+                                let rd_reg_wsp = register_to_dynasm_wsp(*rd)?;
+                                dynasm!(ops
+                                    ; .arch aarch64
+                                    ; and WSP(rd_reg_wsp), W(rn_reg), #val
+                                );
+                            }
                         }
-                        // AND (immediate) encodes Rd in the Xn|SP slot.
-                        let rd_reg_xsp = register_to_dynasm_xsp(*rd)?;
-                        dynasm!(ops
-                            ; .arch aarch64
-                            ; and XSP(rd_reg_xsp), X(rn_reg), #val
-                        );
                         Ok(())
                     }
                     Operand::ShiftedRegister { reg, kind, amount } => {
+                        if *width != RegisterWidth::X64 {
+                            return Err("AND W-register form supports immediates only".to_string());
+                        }
                         let rd_reg = register_to_dynasm(*rd)?;
                         let rm_reg_num = register_to_dynasm(*reg)?;
                         emit_shifted_reg_3op_logical!(
@@ -824,11 +844,14 @@ impl AArch64Assembler {
                     }
                 }
             }
-            Instruction::Orr { rd, rn, rm } => {
+            Instruction::Orr { rd, rn, rm, width } => {
                 let rn_reg = register_to_dynasm(*rn)?;
 
                 match rm {
                     Operand::Register(rm_reg) => {
+                        if *width != RegisterWidth::X64 {
+                            return Err("ORR W-register form supports immediates only".to_string());
+                        }
                         let rd_reg = register_to_dynasm(*rd)?;
                         let rm_reg_num = register_to_dynasm(*rm_reg)?;
                         dynasm!(ops
@@ -838,21 +861,37 @@ impl AArch64Assembler {
                         Ok(())
                     }
                     Operand::Immediate(imm) => {
-                        let val = *imm as u64;
-                        if dynasmrt::aarch64::encode_logical_immediate_64bit(val).is_none() {
-                            return Err(format!(
-                                "ORR immediate 0x{:x} is not a valid AArch64 logical immediate",
-                                val
-                            ));
+                        match width {
+                            RegisterWidth::X64 => {
+                                let val = *imm as u64;
+                                if dynasmrt::aarch64::encode_logical_immediate_64bit(val).is_none()
+                                {
+                                    return Err(format!(
+                                        "ORR immediate 0x{:x} is not a valid AArch64 logical immediate",
+                                        val
+                                    ));
+                                }
+                                let rd_reg_xsp = register_to_dynasm_xsp(*rd)?;
+                                dynasm!(ops
+                                    ; .arch aarch64
+                                    ; orr XSP(rd_reg_xsp), X(rn_reg), #val
+                                );
+                            }
+                            RegisterWidth::W32 => {
+                                let val = logical_imm32_for_assembler("ORR", *imm)?;
+                                let rd_reg_wsp = register_to_dynasm_wsp(*rd)?;
+                                dynasm!(ops
+                                    ; .arch aarch64
+                                    ; orr WSP(rd_reg_wsp), W(rn_reg), #val
+                                );
+                            }
                         }
-                        let rd_reg_xsp = register_to_dynasm_xsp(*rd)?;
-                        dynasm!(ops
-                            ; .arch aarch64
-                            ; orr XSP(rd_reg_xsp), X(rn_reg), #val
-                        );
                         Ok(())
                     }
                     Operand::ShiftedRegister { reg, kind, amount } => {
+                        if *width != RegisterWidth::X64 {
+                            return Err("ORR W-register form supports immediates only".to_string());
+                        }
                         let rd_reg = register_to_dynasm(*rd)?;
                         let rm_reg_num = register_to_dynasm(*reg)?;
                         emit_shifted_reg_3op_logical!(
@@ -864,11 +903,14 @@ impl AArch64Assembler {
                     }
                 }
             }
-            Instruction::Eor { rd, rn, rm } => {
+            Instruction::Eor { rd, rn, rm, width } => {
                 let rn_reg = register_to_dynasm(*rn)?;
 
                 match rm {
                     Operand::Register(rm_reg) => {
+                        if *width != RegisterWidth::X64 {
+                            return Err("EOR W-register form supports immediates only".to_string());
+                        }
                         let rd_reg = register_to_dynasm(*rd)?;
                         let rm_reg_num = register_to_dynasm(*rm_reg)?;
                         dynasm!(ops
@@ -878,21 +920,37 @@ impl AArch64Assembler {
                         Ok(())
                     }
                     Operand::Immediate(imm) => {
-                        let val = *imm as u64;
-                        if dynasmrt::aarch64::encode_logical_immediate_64bit(val).is_none() {
-                            return Err(format!(
-                                "EOR immediate 0x{:x} is not a valid AArch64 logical immediate",
-                                val
-                            ));
+                        match width {
+                            RegisterWidth::X64 => {
+                                let val = *imm as u64;
+                                if dynasmrt::aarch64::encode_logical_immediate_64bit(val).is_none()
+                                {
+                                    return Err(format!(
+                                        "EOR immediate 0x{:x} is not a valid AArch64 logical immediate",
+                                        val
+                                    ));
+                                }
+                                let rd_reg_xsp = register_to_dynasm_xsp(*rd)?;
+                                dynasm!(ops
+                                    ; .arch aarch64
+                                    ; eor XSP(rd_reg_xsp), X(rn_reg), #val
+                                );
+                            }
+                            RegisterWidth::W32 => {
+                                let val = logical_imm32_for_assembler("EOR", *imm)?;
+                                let rd_reg_wsp = register_to_dynasm_wsp(*rd)?;
+                                dynasm!(ops
+                                    ; .arch aarch64
+                                    ; eor WSP(rd_reg_wsp), W(rn_reg), #val
+                                );
+                            }
                         }
-                        let rd_reg_xsp = register_to_dynasm_xsp(*rd)?;
-                        dynasm!(ops
-                            ; .arch aarch64
-                            ; eor XSP(rd_reg_xsp), X(rn_reg), #val
-                        );
                         Ok(())
                     }
                     Operand::ShiftedRegister { reg, kind, amount } => {
+                        if *width != RegisterWidth::X64 {
+                            return Err("EOR W-register form supports immediates only".to_string());
+                        }
                         let rd_reg = register_to_dynasm(*rd)?;
                         let rm_reg_num = register_to_dynasm(*reg)?;
                         emit_shifted_reg_3op_logical!(
@@ -1169,11 +1227,14 @@ impl AArch64Assembler {
                     }
                 }
             }
-            Instruction::Tst { rn, rm } => {
+            Instruction::Tst { rn, rm, width } => {
                 let rn_reg = register_to_dynasm(*rn)?;
 
                 match rm {
                     Operand::Register(rm_reg) => {
+                        if *width != RegisterWidth::X64 {
+                            return Err("TST W-register form supports immediates only".to_string());
+                        }
                         let rm_reg_num = register_to_dynasm(*rm_reg)?;
                         dynasm!(ops
                             ; .arch aarch64
@@ -1182,20 +1243,35 @@ impl AArch64Assembler {
                         Ok(())
                     }
                     Operand::Immediate(imm) => {
-                        let val = *imm as u64;
-                        if dynasmrt::aarch64::encode_logical_immediate_64bit(val).is_none() {
-                            return Err(format!(
-                                "TST immediate 0x{:x} is not a valid AArch64 logical immediate",
-                                val
-                            ));
+                        match width {
+                            RegisterWidth::X64 => {
+                                let val = *imm as u64;
+                                if dynasmrt::aarch64::encode_logical_immediate_64bit(val).is_none()
+                                {
+                                    return Err(format!(
+                                        "TST immediate 0x{:x} is not a valid AArch64 logical immediate",
+                                        val
+                                    ));
+                                }
+                                dynasm!(ops
+                                    ; .arch aarch64
+                                    ; tst X(rn_reg), #val
+                                );
+                            }
+                            RegisterWidth::W32 => {
+                                let val = logical_imm32_for_assembler("TST", *imm)?;
+                                dynasm!(ops
+                                    ; .arch aarch64
+                                    ; tst W(rn_reg), #val
+                                );
+                            }
                         }
-                        dynasm!(ops
-                            ; .arch aarch64
-                            ; tst X(rn_reg), #val
-                        );
                         Ok(())
                     }
                     Operand::ShiftedRegister { reg, kind, amount } => {
+                        if *width != RegisterWidth::X64 {
+                            return Err("TST W-register form supports immediates only".to_string());
+                        }
                         let rm_reg_num = register_to_dynasm(*reg)?;
                         emit_shifted_reg_2op_logical!(ops, tst, rn_reg, rm_reg_num, kind, *amount)
                     }
@@ -1548,27 +1624,42 @@ impl AArch64Assembler {
                     }
                 }
             }
-            Instruction::Ands { rd, rn, rm } => {
+            Instruction::Ands { rd, rn, rm, width } => {
                 let rd_reg = register_to_dynasm(*rd)?;
                 let rn_reg = register_to_dynasm(*rn)?;
                 match rm {
                     Operand::Register(r) => {
+                        if *width != RegisterWidth::X64 {
+                            return Err("ANDS W-register form supports immediates only".to_string());
+                        }
                         let rm_reg = register_to_dynasm(*r)?;
                         dynasm!(ops ; .arch aarch64 ; ands X(rd_reg), X(rn_reg), X(rm_reg));
                         Ok(())
                     }
                     Operand::Immediate(imm) => {
-                        let val = *imm as u64;
-                        if dynasmrt::aarch64::encode_logical_immediate_64bit(val).is_none() {
-                            return Err(format!(
-                                "ANDS immediate 0x{:x} is not a valid AArch64 logical immediate",
-                                val
-                            ));
+                        match width {
+                            RegisterWidth::X64 => {
+                                let val = *imm as u64;
+                                if dynasmrt::aarch64::encode_logical_immediate_64bit(val).is_none()
+                                {
+                                    return Err(format!(
+                                        "ANDS immediate 0x{:x} is not a valid AArch64 logical immediate",
+                                        val
+                                    ));
+                                }
+                                dynasm!(ops
+                                    ; .arch aarch64
+                                    ; ands X(rd_reg), X(rn_reg), #val
+                                );
+                            }
+                            RegisterWidth::W32 => {
+                                let val = logical_imm32_for_assembler("ANDS", *imm)?;
+                                dynasm!(ops
+                                    ; .arch aarch64
+                                    ; ands W(rd_reg), W(rn_reg), #val
+                                );
+                            }
                         }
-                        dynasm!(ops
-                            ; .arch aarch64
-                            ; ands X(rd_reg), X(rn_reg), #val
-                        );
                         Ok(())
                     }
                     Operand::ShiftedRegister { .. } => {
@@ -1975,6 +2066,40 @@ fn register_to_dynasm_xsp(reg: Register) -> Result<u8, String> {
     }
 }
 
+/// Map a register to the `Wn|WSP` encoding slot. Returns Err for WZR — this
+/// IR represents WZR as `Register::XZR`, whose register number 31 would decode
+/// as WSP in this slot.
+fn register_to_dynasm_wsp(reg: Register) -> Result<u8, String> {
+    match reg {
+        Register::XZR => Err(
+            "WZR is not encodable in the Wn|WSP register slot (would decode as WSP)".to_string(),
+        ),
+        Register::SP => Ok(31),
+        other => other.index().ok_or_else(|| {
+            format!(
+                "Register {:?} not supported in dynasm Wn|WSP encoding",
+                other
+            )
+        }),
+    }
+}
+
+fn logical_imm32_for_assembler(mnemonic: &str, imm: i64) -> Result<u32, String> {
+    let val = logical_imm32_value(imm).ok_or_else(|| {
+        format!(
+            "{} immediate {} is out of range for a 32-bit logical immediate",
+            mnemonic, imm
+        )
+    })?;
+    if dynasmrt::aarch64::encode_logical_immediate_32bit(val).is_none() {
+        return Err(format!(
+            "{} immediate 0x{:x} is not a valid AArch64 32-bit logical immediate",
+            mnemonic, val
+        ));
+    }
+    Ok(val)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2209,6 +2334,7 @@ mod tests {
             rd: Register::X0,
             rn: Register::X1,
             rm: Operand::Register(Register::X2),
+            width: crate::ir::RegisterWidth::X64,
         }];
 
         let bytes = assembler
@@ -2224,6 +2350,7 @@ mod tests {
             rd: Register::X0,
             rn: Register::X1,
             rm: Operand::Register(Register::X2),
+            width: crate::ir::RegisterWidth::X64,
         }];
 
         let bytes = assembler
@@ -2239,6 +2366,7 @@ mod tests {
             rd: Register::X0,
             rn: Register::X0,
             rm: Operand::Register(Register::X0),
+            width: crate::ir::RegisterWidth::X64,
         }];
 
         let bytes = assembler
@@ -2254,6 +2382,7 @@ mod tests {
             rd: Register::X0,
             rn: Register::X1,
             rm: Operand::Immediate(0xFF),
+            width: crate::ir::RegisterWidth::X64,
         }];
 
         let bytes = assembler
@@ -2269,6 +2398,7 @@ mod tests {
             rd: Register::X0,
             rn: Register::X1,
             rm: Operand::Immediate(0xFFFF),
+            width: crate::ir::RegisterWidth::X64,
         }];
 
         let bytes = assembler
@@ -2284,6 +2414,7 @@ mod tests {
             rd: Register::X0,
             rn: Register::X1,
             rm: Operand::Immediate(0xF0F0F0F0F0F0F0F0_u64 as i64),
+            width: crate::ir::RegisterWidth::X64,
         }];
 
         let bytes = assembler
@@ -2298,6 +2429,7 @@ mod tests {
         let instructions = vec![Instruction::Tst {
             rn: Register::X1,
             rm: Operand::Immediate(0xFF),
+            width: crate::ir::RegisterWidth::X64,
         }];
 
         let bytes = assembler
@@ -2313,6 +2445,7 @@ mod tests {
             rd: Register::X0,
             rn: Register::X1,
             rm: Operand::Immediate(0xFF),
+            width: crate::ir::RegisterWidth::X64,
         }];
 
         let bytes = assembler
@@ -2331,6 +2464,7 @@ mod tests {
                 rd: Register::X0,
                 rn: Register::X1,
                 rm: Operand::Immediate(0),
+                width: crate::ir::RegisterWidth::X64,
             }],
             0,
         );
@@ -2346,6 +2480,7 @@ mod tests {
                 rd: Register::X0,
                 rn: Register::X1,
                 rm: Operand::Immediate(-1),
+                width: crate::ir::RegisterWidth::X64,
             }],
             0,
         );
@@ -2360,6 +2495,7 @@ mod tests {
                 rd: Register::X0,
                 rn: Register::X1,
                 rm: Operand::Immediate(5),
+                width: crate::ir::RegisterWidth::X64,
             }],
             0,
         );
@@ -2373,6 +2509,7 @@ mod tests {
             &[Instruction::Tst {
                 rn: Register::X1,
                 rm: Operand::Immediate(0),
+                width: crate::ir::RegisterWidth::X64,
             }],
             0,
         );
@@ -2391,6 +2528,7 @@ mod tests {
             rd: Register::X0,
             rn: Register::X1,
             rm: Operand::Immediate(0x8000_0000_0000_0000_u64 as i64),
+            width: crate::ir::RegisterWidth::X64,
         }];
 
         let bytes = assembler
@@ -2410,6 +2548,7 @@ mod tests {
             rd: Register::SP,
             rn: Register::X1,
             rm: Operand::Immediate(0xFF),
+            width: crate::ir::RegisterWidth::X64,
         }];
 
         let bytes = assembler
@@ -2429,6 +2568,7 @@ mod tests {
             rd: Register::XZR,
             rn: Register::X1,
             rm: Operand::Immediate(0xFF),
+            width: crate::ir::RegisterWidth::X64,
         }];
 
         let bytes = assembler
@@ -2436,6 +2576,144 @@ mod tests {
             .expect("ANDS with XZR destination (immediate form) should encode");
         // Capstone canonicalises ANDS XZR ..., #imm → TST X..., #imm.
         disassemble_and_verify(&bytes, "tst", &["x1", "0xff"]);
+    }
+
+    #[test]
+    fn test_w32_logical_immediates_roundtrip() {
+        let cases: Vec<(Instruction, &str, Vec<&str>)> = vec![
+            (
+                Instruction::And {
+                    rd: Register::X0,
+                    rn: Register::X1,
+                    rm: Operand::Immediate(0xFF),
+                    width: RegisterWidth::W32,
+                },
+                "and",
+                vec!["w0", "w1", "0xff"],
+            ),
+            (
+                Instruction::Orr {
+                    rd: Register::X0,
+                    rn: Register::X1,
+                    rm: Operand::Immediate(0xFF),
+                    width: RegisterWidth::W32,
+                },
+                "orr",
+                vec!["w0", "w1", "0xff"],
+            ),
+            (
+                Instruction::Eor {
+                    rd: Register::X0,
+                    rn: Register::X1,
+                    rm: Operand::Immediate(0xFF),
+                    width: RegisterWidth::W32,
+                },
+                "eor",
+                vec!["w0", "w1", "0xff"],
+            ),
+            (
+                Instruction::Tst {
+                    rn: Register::X1,
+                    rm: Operand::Immediate(0xFF),
+                    width: RegisterWidth::W32,
+                },
+                "tst",
+                vec!["w1", "0xff"],
+            ),
+            (
+                Instruction::Ands {
+                    rd: Register::X0,
+                    rn: Register::X1,
+                    rm: Operand::Immediate(0xFF),
+                    width: RegisterWidth::W32,
+                },
+                "ands",
+                vec!["w0", "w1", "0xff"],
+            ),
+            (
+                Instruction::And {
+                    rd: Register::SP,
+                    rn: Register::X1,
+                    rm: Operand::Immediate(0xFF),
+                    width: RegisterWidth::W32,
+                },
+                "and",
+                vec!["wsp", "w1", "0xff"],
+            ),
+        ];
+
+        for (instr, mnemonic, operands) in cases {
+            let mut assembler = AArch64Assembler::new();
+            let bytes = assembler
+                .assemble_instructions(&[instr], 0)
+                .expect("W32 logical immediate should encode");
+            disassemble_and_verify(&bytes, mnemonic, &operands);
+        }
+    }
+
+    #[test]
+    fn test_w32_logical_immediates_reject_invalid_masks_and_slots() {
+        let mut assembler = AArch64Assembler::new();
+
+        for imm in [0, -1, 5, 0x1_0000_00FF] {
+            let err = assembler
+                .assemble_instructions(
+                    &[Instruction::And {
+                        rd: Register::X0,
+                        rn: Register::X1,
+                        rm: Operand::Immediate(imm),
+                        width: RegisterWidth::W32,
+                    }],
+                    0,
+                )
+                .expect_err("invalid W32 logical immediate must be rejected");
+            assert!(
+                err.contains("32-bit logical immediate"),
+                "unexpected error for imm {imm}: {err}"
+            );
+        }
+
+        assert!(
+            assembler
+                .assemble_instructions(
+                    &[Instruction::And {
+                        rd: Register::XZR,
+                        rn: Register::X1,
+                        rm: Operand::Immediate(0xFF),
+                        width: RegisterWidth::W32,
+                    }],
+                    0,
+                )
+                .is_err(),
+            "AND WZR, Wn, #imm would alias to WSP and must be rejected"
+        );
+        assert!(
+            assembler
+                .assemble_instructions(
+                    &[Instruction::Ands {
+                        rd: Register::SP,
+                        rn: Register::X1,
+                        rm: Operand::Immediate(0xFF),
+                        width: RegisterWidth::W32,
+                    }],
+                    0,
+                )
+                .is_err(),
+            "ANDS WSP, Wn, #imm is not encodable"
+        );
+        assert!(
+            assembler
+                .assemble_instructions(
+                    &[Instruction::Tst {
+                        rn: Register::SP,
+                        rm: Operand::Immediate(0xFF),
+                        width: RegisterWidth::W32,
+                    }],
+                    0,
+                )
+                .is_err(),
+            "TST WSP, #imm is not encodable"
+        );
     }
 
     #[test]
@@ -3422,16 +3700,19 @@ mod tests {
                 rd: Register::X0,
                 rn: Register::X1,
                 rm: Operand::Register(Register::X2),
+                width: crate::ir::RegisterWidth::X64,
             },
             Instruction::Orr {
                 rd: Register::X0,
                 rn: Register::X1,
                 rm: Operand::Register(Register::X2),
+                width: crate::ir::RegisterWidth::X64,
             },
             Instruction::Eor {
                 rd: Register::X0,
                 rn: Register::X1,
                 rm: Operand::Register(Register::X2),
+                width: crate::ir::RegisterWidth::X64,
             },
             Instruction::Lsl {
                 rd: Register::X0,
@@ -3482,6 +3763,7 @@ mod tests {
             Instruction::Tst {
                 rn: Register::X1,
                 rm: Operand::Register(Register::X2),
+                width: crate::ir::RegisterWidth::X64,
             },
             Instruction::Mvn {
                 rd: Register::X0,
@@ -3589,6 +3871,7 @@ mod tests {
                 rd: Register::X0,
                 rn: Register::X1,
                 rm: Operand::Register(Register::X2),
+                width: crate::ir::RegisterWidth::X64,
             },
             Instruction::Ror {
                 rd: Register::X0,
@@ -3629,16 +3912,19 @@ mod tests {
                 rd: Register::X0,
                 rn: Register::X1,
                 rm: Operand::Immediate(5),
+                width: crate::ir::RegisterWidth::X64,
             },
             Instruction::Orr {
                 rd: Register::X0,
                 rn: Register::X1,
                 rm: Operand::Immediate(5),
+                width: crate::ir::RegisterWidth::X64,
             },
             Instruction::Eor {
                 rd: Register::X0,
                 rn: Register::X1,
                 rm: Operand::Immediate(5),
+                width: crate::ir::RegisterWidth::X64,
             },
             Instruction::Lsl {
                 rd: Register::X0,
@@ -3666,6 +3952,7 @@ mod tests {
             Instruction::Tst {
                 rn: Register::X1,
                 rm: Operand::Immediate(5),
+                width: crate::ir::RegisterWidth::X64,
             },
             Instruction::MovN {
                 rd: Register::X0,
@@ -3726,6 +4013,7 @@ mod tests {
                 rd: Register::X0,
                 rn: Register::X1,
                 rm: Operand::Immediate(5),
+                width: crate::ir::RegisterWidth::X64,
             },
             Instruction::Ror {
                 rd: Register::X0,
@@ -3997,6 +4285,7 @@ mod tests {
                         kind: ShiftKind::Asr,
                         amount: 7,
                     },
+                    width: crate::ir::RegisterWidth::X64,
                 },
                 "and",
                 vec!["x6".into(), "x7".into(), "x8".into(), "asr #7".into()],
@@ -4010,6 +4299,7 @@ mod tests {
                         kind: ShiftKind::Ror,
                         amount: 1,
                     },
+                    width: crate::ir::RegisterWidth::X64,
                 },
                 "orr",
                 vec!["x9".into(), "x10".into(), "x11".into(), "ror #1".into()],
@@ -4023,6 +4313,7 @@ mod tests {
                         kind: ShiftKind::Lsl,
                         amount: 2,
                     },
+                    width: crate::ir::RegisterWidth::X64,
                 },
                 "eor",
                 vec!["x12".into(), "x13".into(), "x14".into(), "lsl #2".into()],
@@ -4059,6 +4350,7 @@ mod tests {
                         kind: ShiftKind::Ror,
                         amount: 16,
                     },
+                    width: crate::ir::RegisterWidth::X64,
                 },
                 "tst",
                 vec!["x19".into(), "x20".into(), "ror #16".into()],
