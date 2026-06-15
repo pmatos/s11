@@ -1,48 +1,46 @@
-# Plan - issue #175: Add `test_generate_random_reaches_madd_family`
+# Plan - issue #181: Pin reversed-order `--live-out` error
 
 ## 1. Problem Restated
 
-Issue #175 asks for a focused regression test proving that the AArch64 random candidate generator still reaches the multiply-accumulate instruction family after the dispatch slot that used to be the catch-all became an explicit `29 =>` arm. The existing exhaustive generator already covers `Madd`, `Msub`, `Mneg`, `Smulh`, and `Umulh`, but the stochastic path needs its own fixed-seed 5000-draw guard over `generate_random_instruction` so future refactors cannot silently make opcode IDs `42..=46` unreachable.
+Issue #181 asks for a narrow regression test documenting the current malformed-order behavior for `--live-out "nzcv;x0"`. The accepted grammar is `<regs>` or `<regs>;<flags>` with `nzcv` valid only in the flags half, so the reversed input currently splits into register half `nzcv` and flag half `x0`, then fails through the register parser with `invalid register name: 'nzcv'`. The PR should pin that exact diagnostic so future parser-message changes fail with an actionable test failure, without changing parser behavior.
 
 ## 2. Files To Touch
 
-- `src/search/candidate.rs` - add one unit test in the existing `#[cfg(test)] mod tests`, near the current random reachability tests and reusing `random_opcode_ids(seed, draws)`.
+- `src/validation/live_out.rs` - add one unit test in the existing `#[cfg(test)] mod tests`, near the `parse_live_out_contract` malformed-input tests around lines 677-727.
 
-No production code should change unless the new test unexpectedly exposes a real mismatch in the current generator. There are no `crates/` or `compiler/` directories in this repository, so this is not a Rust-stage/self-hosted cross-cutting change. There is no `docs/spec/` tree; `docs/capability.md` and the ADRs do not need updates because this PR adds coverage for already-documented AArch64 support rather than changing syntax, semantics, CLI flags, contracts, or supported mnemonics.
+No production files should change. There are no `crates/` or `compiler/` directories in this repository, so this is not a Rust-stage/self-hosted compiler cross-cutting change. There is no `docs/spec/` tree in this checkout; the relevant accepted design source is `docs/adr/0006-live-out-cli-grammar.md`, and no ADR/spec update is needed because the grammar and behavior stay unchanged.
 
 ## 3. TDD Slices
 
-1. Add the regression test skeleton in `src/search/candidate.rs`, immediately after `test_generate_random_reaches_csel_family` (currently around lines 1211-1258). Name it `test_generate_random_reaches_madd_family`. It should call `let ids = random_opcode_ids(0x66, 5_000);`, matching the nearby fixed-seed random reach tests.
+1. Add a focused regression test in `src/validation/live_out.rs`, immediately after `test_parse_live_out_contract_bareword_nzcv_rejected` or before `test_parse_live_out_contract_unknown_flag_rejected`. Name it `test_parse_live_out_contract_reversed_order_nzcv_x0_error`.
 
-2. In that test, assert that `ids` contains `opcode_id` for representative instructions for each family member:
-   - `Instruction::Madd { rd: X0, rn: X1, rm: X2, ra: X0 }` -> opcode ID 42
-   - `Instruction::Msub { rd: X0, rn: X1, rm: X2, ra: X0 }` -> opcode ID 43
-   - `Instruction::Mneg { rd: X0, rn: X1, rm: X2 }` -> opcode ID 44
-   - `Instruction::Smulh { rd: X0, rn: X1, rm: X2 }` -> opcode ID 45
-   - `Instruction::Umulh { rd: X0, rn: X1, rm: X2 }` -> opcode ID 46
-   Use the same `(label, instr)` loop and failure message shape as `test_generate_random_reaches_mul_div_family`, `test_generate_random_reaches_compare_family`, and `test_generate_random_reaches_csel_family` (lines 1140-1258).
-
-3. Red-check the test as a regression guard without committing sabotage: temporarily alter the random dispatch locally so slot 29 no longer emits the MADD family, for example by making arm `29` emit only an existing non-MADD instruction, then run:
-   ```bash
-   cargo test search::candidate::tests::test_generate_random_reaches_madd_family -- --exact
+2. In that test, call `let err = parse_live_out_contract("nzcv;x0").unwrap_err();` and assert the exact rendered message:
+   ```rust
+   assert_eq!(err.to_string(), "invalid register name: 'nzcv'");
    ```
-   Confirm the new test fails with a "random never produced ..." assertion, then immediately revert the temporary production-code mutation.
+   Prefer `err.to_string()` over substring matching so the test pins the user-visible `Display` body already covered by `display_renders_message_without_type_prefix` at `src/validation/live_out.rs:267-271`.
 
-4. Green-check against the real code. The production implementation that should satisfy the test already exists at `src/search/candidate.rs:804-821`: slot `29` samples `rng.random_range(0..5)` and emits `Madd`, `Msub`, `Mneg`, `Smulh`, or `Umulh`. Run the targeted test again and expect it to pass.
+3. Red-check the guard without committing sabotage: temporarily change the expected string in the new test, or temporarily mutate the local parser diagnostic at `src/validation/live_out.rs:49-50`, then run:
+   ```bash
+   cargo test validation::live_out::tests::test_parse_live_out_contract_reversed_order_nzcv_x0_error -- --exact
+   ```
+   Confirm the test fails on the message mismatch, then immediately revert the temporary mutation.
 
-5. Refactor only if the test body duplicates enough local boilerplate to be worth a tiny cleanup. Prefer keeping the test parallel to the three existing random reachability tests over introducing a new abstraction. Do not change opcode numbering, random dispatch probabilities, candidate generation behavior, or documentation.
+4. Green-check against the real code. The production path that should satisfy the test already exists: `parse_live_out_contract` counts one semicolon at `src/validation/live_out.rs:94-115`, parses `regs_part` via `RegisterSet::<Register>::from_str`, and `parse_register` emits `invalid register name: 'nzcv'` at `src/validation/live_out.rs:49-50`. No production code should be edited.
+
+5. Refactor only if formatting requires it. Keep the test local and explicit; do not introduce helper functions or convert the surrounding parse-live-out tests to table-driven form for this small coverage addition.
 
 ## 4. Verification Surface
 
-- No ESBMC proof work is needed. This does not touch contracts, codegen, the C model, SMT lowering, concrete semantics, parser behavior, or the binary patching path.
-- No `tests/run/`, `tests/asm/`, `tests/integration/`, `examples/`, or benchmark fixtures should grow.
+- No ESBMC proof work is needed. This change does not touch contracts, codegen, the C model, SMT lowering, concrete semantics, assembler output, or binary patching.
+- No fixtures under `tests/run/`, `tests/asm/`, `tests/integration/`, `examples/`, or benchmark directories should grow.
 - Minimum verification:
   ```bash
-  cargo test search::candidate::tests::test_generate_random_reaches_madd_family -- --exact
+  cargo test validation::live_out::tests::test_parse_live_out_contract_reversed_order_nzcv_x0_error -- --exact
   ```
 - Broader local verification before PR/commit:
   ```bash
-  cargo test search::candidate
+  cargo test validation::live_out
   cargo fmt -- --check
   ```
 - Full pre-push verification remains the repository gate from `CLAUDE.md`:
@@ -52,17 +50,17 @@ No production code should change unless the new test unexpectedly exposes a real
 
 ## 5. Risk Areas
 
-- Fixed-seed brittleness: `0x66` with 5000 draws is already used by nearby random reach tests and should have an extremely large margin for a 1-in-33 outer slot and 1-in-5 subslot, but if `rand_chacha` or the dispatch ordering changes later this test may fail honestly because the fixed trace changed.
-- Test runtime: 5000 draws are cheap and already match nearby tests, so keep the new test at the requested size and avoid expanding it into a statistical stress test.
-- Opcode ID coupling: the assertions intentionally use `opcode_id(&instr)` rather than hard-coded numbers in the test body. The issue's expected range is still documented in this plan and pinned by the representative instruction variants.
-- Clippy/format gate: the added test should not introduce unused imports or dead helper functions. Reuse existing imports from `super::*`, `default_registers`, `default_immediates`, and `random_opcode_ids`.
-- Parse/print/parse idempotency and binary fixed point are unaffected because no parser, printer, codegen, ordering-sensitive maps, stack-slot layout, or `vow-clif-shim`-style component exists in this repo slice.
+- Error-message coupling is intentional here: use an exact assertion because the issue specifically asks to pin the diagnostic text for `nzcv;x0`.
+- Test placement should stay in the parser/error-test cluster so future maintainers understand this as CLI grammar coverage, not live-in/live-out dataflow coverage.
+- Do not change `parse_live_out_contract` to special-case reversed order unless a separate issue asks for a friendlier diagnostic; that would widen the behavioral scope and may require ADR/help-text updates.
+- `parse -> print -> parse` idempotency is unaffected because this is a CLI live-out contract parser test, not assembly IR parsing or formatting.
+- Binary fixed-point risks are absent: no `compiler/` tree exists here, and the plan does not touch codegen ordering, map iteration, stack-slot layout, assembler encoding, or `vow-clif-shim`-style components.
+- The `cargo clippy --all -- -D warnings` gate should be unaffected; the added test must avoid unused imports or dead helper functions.
 
 ## 6. Out Of Scope
 
-- Changing `generate_random_instruction` dispatch weights, slot count, or sub-multiplexer structure.
-- Adding exhaustive-generator tests for the MADD family; `generate_all_instructions` already emits these variants at `src/search/candidate.rs:249-259`.
-- Adding docs or capability-matrix entries for `madd`, `msub`, `mneg`, `smulh`, or `umulh`; `docs/capability.md` already lists multiply-accumulate support.
-- Renumbering `opcode_id`, synchronizing with `src/isa/aarch64.rs`, or broadening the opcode-ID uniqueness tests.
-- Refactoring the existing random reach tests into a table-driven helper.
-- Running or modifying benchmark, integration, x86, RISC-V, parser, assembler, semantics, or LLM search code.
+- Changing the grammar for reversed-order input or adding a bespoke "wrong order" diagnostic.
+- Changing any `run_equiv` or `run_llm_opt` error-prefix behavior in `src/main.rs`.
+- Adding docs/spec/ADR updates; this PR documents existing behavior through a regression test only.
+- Refactoring `ParseRegisterSetError`, `parse_register`, or the surrounding `parse_live_out_contract` tests.
+- Running benchmarks, mutation tests, x86/RISC-V flows, LLM search, assembler tests, or integration fixtures for this unit-test-only issue.
