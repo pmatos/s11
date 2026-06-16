@@ -2539,6 +2539,96 @@ mod tests {
     }
 
     #[test]
+    fn parse_sbfx_roundtrip() {
+        let parsed = match parse_line("sbfx x0, x1, #5, #10").unwrap() {
+            LineResult::Instruction(instr) => instr,
+            LineResult::Skip => panic!("unexpected skip"),
+        };
+        assert_eq!(
+            parsed,
+            Instruction::Sbfx {
+                rd: Register::X0,
+                rn: Register::X1,
+                lsb: 5,
+                width: 10,
+            }
+        );
+        assert_eq!(format!("{}", parsed), "sbfx x0, x1, #5, #10");
+    }
+
+    #[test]
+    fn parse_bfi_roundtrip() {
+        let parsed = match parse_line("bfi x0, x1, #5, #10").unwrap() {
+            LineResult::Instruction(instr) => instr,
+            LineResult::Skip => panic!("unexpected skip"),
+        };
+        assert_eq!(
+            parsed,
+            Instruction::Bfi {
+                rd: Register::X0,
+                rn: Register::X1,
+                lsb: 5,
+                width: 10,
+            }
+        );
+        assert_eq!(format!("{}", parsed), "bfi x0, x1, #5, #10");
+    }
+
+    #[test]
+    fn parse_bfxil_roundtrip() {
+        let parsed = match parse_line("bfxil x0, x1, #5, #10").unwrap() {
+            LineResult::Instruction(instr) => instr,
+            LineResult::Skip => panic!("unexpected skip"),
+        };
+        assert_eq!(
+            parsed,
+            Instruction::Bfxil {
+                rd: Register::X0,
+                rn: Register::X1,
+                lsb: 5,
+                width: 10,
+            }
+        );
+        assert_eq!(format!("{}", parsed), "bfxil x0, x1, #5, #10");
+    }
+
+    #[test]
+    fn parse_ubfiz_roundtrip() {
+        let parsed = match parse_line("ubfiz x0, x1, #5, #10").unwrap() {
+            LineResult::Instruction(instr) => instr,
+            LineResult::Skip => panic!("unexpected skip"),
+        };
+        assert_eq!(
+            parsed,
+            Instruction::Ubfiz {
+                rd: Register::X0,
+                rn: Register::X1,
+                lsb: 5,
+                width: 10,
+            }
+        );
+        assert_eq!(format!("{}", parsed), "ubfiz x0, x1, #5, #10");
+    }
+
+    #[test]
+    fn parse_sbfiz_roundtrip() {
+        let parsed = match parse_line("sbfiz x0, x1, #5, #10").unwrap() {
+            LineResult::Instruction(instr) => instr,
+            LineResult::Skip => panic!("unexpected skip"),
+        };
+        assert_eq!(
+            parsed,
+            Instruction::Sbfiz {
+                rd: Register::X0,
+                rn: Register::X1,
+                lsb: 5,
+                width: 10,
+            }
+        );
+        assert_eq!(format!("{}", parsed), "sbfiz x0, x1, #5, #10");
+    }
+
+    #[test]
     fn parse_ubfx_rejects_out_of_range_lsb() {
         let result = parse_line("ubfx x0, x1, #64, #1");
         assert!(result.is_err(), "lsb >= 64 must be rejected");
@@ -2581,6 +2671,12 @@ mod tests {
             ("ccmp x1, x2, #5, eq", "ccmp x1, x2, #5, eq"),
             ("ccmp x1, #15, #3, ne", "ccmp x1, #15, #3, ne"),
             ("ccmn x1, x2, #0, lt", "ccmn x1, x2, #0, lt"),
+            ("ubfx x0, x1, #5, #10", "ubfx x0, x1, #5, #10"),
+            ("sbfx x0, x1, #5, #10", "sbfx x0, x1, #5, #10"),
+            ("bfi x0, x1, #5, #10", "bfi x0, x1, #5, #10"),
+            ("bfxil x0, x1, #5, #10", "bfxil x0, x1, #5, #10"),
+            ("ubfiz x0, x1, #5, #10", "ubfiz x0, x1, #5, #10"),
+            ("sbfiz x0, x1, #5, #10", "sbfiz x0, x1, #5, #10"),
             ("csinc x0, x1, x2, ne", "csinc x0, x1, x2, ne"),
             ("csinv x0, x1, x2, lt", "csinv x0, x1, x2, lt"),
             ("csneg x0, x1, x2, ge", "csneg x0, x1, x2, ge"),
