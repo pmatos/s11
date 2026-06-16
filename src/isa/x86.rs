@@ -1040,9 +1040,13 @@ impl InstructionGenerator<X86Instruction> for X86InstructionGenerator {
             }
         }
         // CMOVcc is rewritable and reads flags, so enumerate every
-        // condition for each register pair. Jcc remains excluded.
+        // condition for each non-identical register pair. Jcc remains
+        // excluded.
         for &rd in registers {
             for &rs in registers {
+                if rd == rs {
+                    continue;
+                }
                 for &cond in &X86Condition::ALL {
                     out.push(X86Instruction::Cmov { rd, rs, cond });
                 }
@@ -1203,6 +1207,15 @@ mod tests {
         let imms = [0i64, 1, -1];
         let all = X86InstructionGenerator.generate_all(&regs, &imms);
 
+        let n = regs.len();
+        let m = imms.len();
+        let expected_len = 7 * n * n + 7 * n * m + n * (n - 1) * X86Condition::ALL.len();
+        assert_eq!(
+            all.len(),
+            expected_len,
+            "generate_all should only prune CMOV self-pairs from the full pool"
+        );
+
         // For each opcode_id, at least one variant must appear.
         let opcode_count = X86InstructionGenerator.opcode_count();
         let mut seen = vec![false; opcode_count as usize];
@@ -1244,6 +1257,41 @@ mod tests {
             all.iter()
                 .all(|instr| !matches!(instr, X86Instruction::Jcc { .. })),
             "trait generator must not enumerate fixed Jcc terminators"
+        );
+    }
+
+    #[test]
+    fn x86_generator_filters_self_cmov_candidates() {
+        use crate::isa::traits::InstructionGenerator;
+        let regs = [X86Register::RAX, X86Register::RBX];
+        let imms = [0i64];
+        let all = X86InstructionGenerator.generate_all(&regs, &imms);
+
+        for &cond in &X86Condition::ALL {
+            assert!(
+                all.contains(&X86Instruction::Cmov {
+                    rd: X86Register::RAX,
+                    rs: X86Register::RBX,
+                    cond,
+                }),
+                "generator must keep cross-register cmov{} rax, rbx",
+                cond
+            );
+            assert!(
+                all.contains(&X86Instruction::Cmov {
+                    rd: X86Register::RBX,
+                    rs: X86Register::RAX,
+                    cond,
+                }),
+                "generator must keep cross-register cmov{} rbx, rax",
+                cond
+            );
+        }
+
+        assert!(
+            !all.iter()
+                .any(|instr| matches!(instr, X86Instruction::Cmov { rd, rs, .. } if rd == rs)),
+            "generate_all must skip no-op CMOV candidates where rd == rs"
         );
     }
 
