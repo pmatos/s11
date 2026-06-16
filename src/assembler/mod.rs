@@ -790,7 +790,7 @@ impl AArch64Assembler {
                 match rm {
                     Operand::Register(rm_reg) => {
                         if *width != RegisterWidth::X64 {
-                            return Err("AND W-register form supports immediates only".to_string());
+                            return Err("AND with W registers supports immediate operands only; register and shifted-register forms require X registers".to_string());
                         }
                         let rd_reg = register_to_dynasm(*rd)?;
                         let rm_reg_num = register_to_dynasm(*rm_reg)?;
@@ -831,7 +831,7 @@ impl AArch64Assembler {
                     }
                     Operand::ShiftedRegister { reg, kind, amount } => {
                         if *width != RegisterWidth::X64 {
-                            return Err("AND W-register form supports immediates only".to_string());
+                            return Err("AND with W registers supports immediate operands only; register and shifted-register forms require X registers".to_string());
                         }
                         let rd_reg = register_to_dynasm(*rd)?;
                         let rm_reg_num = register_to_dynasm(*reg)?;
@@ -850,7 +850,7 @@ impl AArch64Assembler {
                 match rm {
                     Operand::Register(rm_reg) => {
                         if *width != RegisterWidth::X64 {
-                            return Err("ORR W-register form supports immediates only".to_string());
+                            return Err("ORR with W registers supports immediate operands only; register and shifted-register forms require X registers".to_string());
                         }
                         let rd_reg = register_to_dynasm(*rd)?;
                         let rm_reg_num = register_to_dynasm(*rm_reg)?;
@@ -890,7 +890,7 @@ impl AArch64Assembler {
                     }
                     Operand::ShiftedRegister { reg, kind, amount } => {
                         if *width != RegisterWidth::X64 {
-                            return Err("ORR W-register form supports immediates only".to_string());
+                            return Err("ORR with W registers supports immediate operands only; register and shifted-register forms require X registers".to_string());
                         }
                         let rd_reg = register_to_dynasm(*rd)?;
                         let rm_reg_num = register_to_dynasm(*reg)?;
@@ -909,7 +909,7 @@ impl AArch64Assembler {
                 match rm {
                     Operand::Register(rm_reg) => {
                         if *width != RegisterWidth::X64 {
-                            return Err("EOR W-register form supports immediates only".to_string());
+                            return Err("EOR with W registers supports immediate operands only; register and shifted-register forms require X registers".to_string());
                         }
                         let rd_reg = register_to_dynasm(*rd)?;
                         let rm_reg_num = register_to_dynasm(*rm_reg)?;
@@ -949,7 +949,7 @@ impl AArch64Assembler {
                     }
                     Operand::ShiftedRegister { reg, kind, amount } => {
                         if *width != RegisterWidth::X64 {
-                            return Err("EOR W-register form supports immediates only".to_string());
+                            return Err("EOR with W registers supports immediate operands only; register and shifted-register forms require X registers".to_string());
                         }
                         let rd_reg = register_to_dynasm(*rd)?;
                         let rm_reg_num = register_to_dynasm(*reg)?;
@@ -1233,7 +1233,7 @@ impl AArch64Assembler {
                 match rm {
                     Operand::Register(rm_reg) => {
                         if *width != RegisterWidth::X64 {
-                            return Err("TST W-register form supports immediates only".to_string());
+                            return Err("TST with W registers supports immediate operands only; register and shifted-register forms require X registers".to_string());
                         }
                         let rm_reg_num = register_to_dynasm(*rm_reg)?;
                         dynasm!(ops
@@ -1270,7 +1270,7 @@ impl AArch64Assembler {
                     }
                     Operand::ShiftedRegister { reg, kind, amount } => {
                         if *width != RegisterWidth::X64 {
-                            return Err("TST W-register form supports immediates only".to_string());
+                            return Err("TST with W registers supports immediate operands only; register and shifted-register forms require X registers".to_string());
                         }
                         let rm_reg_num = register_to_dynasm(*reg)?;
                         emit_shifted_reg_2op_logical!(ops, tst, rn_reg, rm_reg_num, kind, *amount)
@@ -1630,7 +1630,7 @@ impl AArch64Assembler {
                 match rm {
                     Operand::Register(r) => {
                         if *width != RegisterWidth::X64 {
-                            return Err("ANDS W-register form supports immediates only".to_string());
+                            return Err("ANDS with W registers supports immediate operands only; register and shifted-register forms require X registers".to_string());
                         }
                         let rm_reg = register_to_dynasm(*r)?;
                         dynasm!(ops ; .arch aarch64 ; ands X(rd_reg), X(rn_reg), X(rm_reg));
