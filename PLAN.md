@@ -1,62 +1,66 @@
-# Plan: Contract-Scoped Live-Out Parse Error
+# Plan - issue #181: Pin reversed-order `--live-out` error
 
 ## 1. Problem Restated
 
-`parse_live_out_contract` now parses the whole `--live-out` contract, including the optional `;nzcv` flag-liveness suffix, so a register-only error name is misleading when diagnostics can say things like `unknown flag token 'bogus'`. In this checkout the original `ParseLiveOutRegistersError` symbol is already gone and the shared wrapper is named `ParseRegisterSetError`, but the contract parser still exposes that register-set-flavored name in its signature and ADR-0006 still has one stale reference to the old name. The implementation should add a contract-facing error name for `parse_live_out_contract` without breaking existing `RegisterSet<Register>::from_str` users.
+Issue #181 asks for a narrow regression test documenting the current malformed-order behavior for `--live-out "nzcv;x0"`. The accepted grammar is `<regs>` or `<regs>;<flags>` with `nzcv` valid only in the flags half, so the reversed input currently splits into register half `nzcv` and flag half `x0`, then fails through the register parser with `invalid register name: 'nzcv'`. The PR should pin that exact diagnostic so future parser-message changes fail with an actionable test failure, without changing parser behavior.
 
 ## 2. Files To Touch
 
-- `src/validation/live_out.rs`
-  - Lines 9-21: keep `ParseRegisterSetError` as the underlying shared `{ message: String }` wrapper used by `RegisterSet<Register>::from_str`, but broaden its doc comment to cover live-out contract parsing too.
-  - After line 21: add `pub type ParseLiveOutError = ParseRegisterSetError;` with a doc comment explaining it is the contract-facing error name for `parse_live_out_contract`.
-  - Line 94: change `parse_live_out_contract(s: &str) -> Result<LiveOut, ParseRegisterSetError>` to return `Result<LiveOut, ParseLiveOutError>`.
-  - Lines 266-272 and 694-702: adjust or add tests so the contract parser path names `ParseLiveOutError` while preserving display output and flag-token diagnostics.
-- `docs/adr/0006-live-out-cli-grammar.md`
-  - Line 18: update the documented signature to `Result<LiveOut, ParseLiveOutError>`.
-  - Line 48: replace the stale `ParseLiveOutRegistersError` reference with the current contract-facing `ParseLiveOutError` name and mention that it aliases the shared `ParseRegisterSetError` wrapper.
-- `src/main.rs`
-  - Lines 1520-1521 and 1585-1586 are call sites to verify; no edit is expected unless the implementation needs an import cleanup. Both should continue mapping errors through `"invalid live-out: {}"`.
-- No `crates/`, `compiler/`, or `docs/spec/*.md` files exist in this repository checkout, so there is no cross-compiler or spec-doc update for this Rust-only hygiene change.
+- `src/validation/live_out.rs` - add one unit test in the existing `#[cfg(test)] mod tests`, near the `parse_live_out_contract` malformed-input tests around lines 677-727.
+
+No production files should change. There are no `crates/` or `compiler/` directories in this repository, so this is not a Rust-stage/self-hosted compiler cross-cutting change. There is no `docs/spec/` tree in this checkout; the relevant accepted design source is `docs/adr/0006-live-out-cli-grammar.md`, and no ADR/spec update is needed because the grammar and behavior stay unchanged.
 
 ## 3. TDD Slices
 
-1. Add the contract-facing compile check.
-   - Test location: `src/validation/live_out.rs` test module near `display_renders_message_without_type_prefix` at lines 266-272.
-   - Red behavior: introduce or adjust a unit test that binds a parsed contract error as `ParseLiveOutError`, for example from `parse_live_out_contract("x0;bogus").unwrap_err()`, and asserts `err.to_string()` is still the bare message body.
-   - Production code: add `pub type ParseLiveOutError = ParseRegisterSetError;`, update the `parse_live_out_contract` return type, and keep `Display` implemented only on `ParseRegisterSetError` so the alias inherits the existing behavior.
+1. Add a focused regression test in `src/validation/live_out.rs`, immediately after `test_parse_live_out_contract_bareword_nzcv_rejected` or before `test_parse_live_out_contract_unknown_flag_rejected`. Name it `test_parse_live_out_contract_reversed_order_nzcv_x0_error`.
 
-2. Pin flag-token diagnostics through the contract-facing name.
-   - Test location: `src/validation/live_out.rs` around `test_parse_live_out_contract_unknown_flag_rejected` at lines 694-702.
-   - Red behavior: make the test explicitly type the error as `ParseLiveOutError` and assert it still contains `unknown flag token`.
-   - Production code: no new parsing behavior should be needed beyond the signature/alias from slice 1; this slice guards against accidentally narrowing the contract parser back to register-only terminology.
+2. In that test, call `let err = parse_live_out_contract("nzcv;x0").unwrap_err();` and assert the exact rendered message:
+   ```rust
+   assert_eq!(err.to_string(), "invalid register name: 'nzcv'");
+   ```
+   Prefer `err.to_string()` over substring matching so the test pins the user-visible `Display` body already covered by `display_renders_message_without_type_prefix` at `src/validation/live_out.rs:267-271`.
 
-3. Align the accepted architecture record.
-   - Test/static check location: repository-wide `rg -n "ParseLiveOutRegistersError" docs src`.
-   - Red behavior: before the doc edit, ADR-0006 still mentions `ParseLiveOutRegistersError`.
-   - Production/docs code: update `docs/adr/0006-live-out-cli-grammar.md` so the documented parser signature and resolution note use `ParseLiveOutError` for the contract parser and `ParseRegisterSetError` only for the shared underlying register-set wrapper.
+3. Red-check the guard without committing sabotage: temporarily change the expected string in the new test, or temporarily mutate the local parser diagnostic at `src/validation/live_out.rs:49-50`, then run:
+   ```bash
+   cargo test validation::live_out::tests::test_parse_live_out_contract_reversed_order_nzcv_x0_error -- --exact
+   ```
+   Confirm the test fails on the message mismatch, then immediately revert the temporary mutation.
+
+4. Green-check against the real code. The production path that should satisfy the test already exists: `parse_live_out_contract` counts one semicolon at `src/validation/live_out.rs:94-115`, parses `regs_part` via `RegisterSet::<Register>::from_str`, and `parse_register` emits `invalid register name: 'nzcv'` at `src/validation/live_out.rs:49-50`. No production code should be edited.
+
+5. Refactor only if formatting requires it. Keep the test local and explicit; do not introduce helper functions or convert the surrounding parse-live-out tests to table-driven form for this small coverage addition.
 
 ## 4. Verification Surface
 
-- Run targeted tests after the implementation:
-  - `cargo test validation::live_out::tests::display_renders_message_without_type_prefix`
-  - `cargo test validation::live_out::tests::test_parse_live_out_contract_unknown_flag_rejected`
-  - `cargo test validation::live_out::tests::test_parse_live_out_contract_per_flag_tokens_reserved`
-- Run `cargo check` or `just check` to catch any public signature/import fallout.
-- Before a final PR, follow repository guidance and run `./ci_check.sh`; if time is tight, at minimum run `cargo test validation::live_out`.
-- This change does not touch contracts in the Vow/ESBMC sense, codegen, the C model, or machine semantics. There are no ESBMC properties to prove, and no `tests/run/` or `examples/` fixtures exist or need to grow.
+- No ESBMC proof work is needed. This change does not touch contracts, codegen, the C model, SMT lowering, concrete semantics, assembler output, or binary patching.
+- No fixtures under `tests/run/`, `tests/asm/`, `tests/integration/`, `examples/`, or benchmark directories should grow.
+- Minimum verification:
+  ```bash
+  cargo test validation::live_out::tests::test_parse_live_out_contract_reversed_order_nzcv_x0_error -- --exact
+  ```
+- Broader local verification before PR/commit:
+  ```bash
+  cargo test validation::live_out
+  cargo fmt -- --check
+  ```
+- Full pre-push verification remains the repository gate from `CLAUDE.md`:
+  ```bash
+  ./ci_check.sh
+  ```
 
 ## 5. Risk Areas
 
-- Public API blast radius: removing or renaming `ParseRegisterSetError` would break users of `RegisterSet<Register>::from_str`; use a `ParseLiveOutError` alias for the contract-facing path instead.
-- Stale terminology: `ParseLiveOutRegistersError` should not remain in docs or code after the implementation.
-- Rustdoc readability: the `parse_live_out_contract` signature should show the contract-facing alias, while the shared wrapper can remain documented as the register-set/parser error carrier.
-- `cargo clippy --all -- -D warnings`: avoid unused imports or dead aliases; the public alias should be used in the parser signature and tests.
-- Parse/print/parse idempotency and binary fixed-point behavior are unaffected because no grammar, IR, search, assembler, or codegen ordering changes are planned.
+- Error-message coupling is intentional here: use an exact assertion because the issue specifically asks to pin the diagnostic text for `nzcv;x0`.
+- Test placement should stay in the parser/error-test cluster so future maintainers understand this as CLI grammar coverage, not live-in/live-out dataflow coverage.
+- Do not change `parse_live_out_contract` to special-case reversed order unless a separate issue asks for a friendlier diagnostic; that would widen the behavioral scope and may require ADR/help-text updates.
+- `parse -> print -> parse` idempotency is unaffected because this is a CLI live-out contract parser test, not assembly IR parsing or formatting.
+- Binary fixed-point risks are absent: no `compiler/` tree exists here, and the plan does not touch codegen ordering, map iteration, stack-slot layout, assembler encoding, or `vow-clif-shim`-style components.
+- The `cargo clippy --all -- -D warnings` gate should be unaffected; the added test must avoid unused imports or dead helper functions.
 
 ## 6. Out Of Scope
 
-- Do not change the `--live-out` grammar, accepted flag tokens, or error message text beyond type/doc names.
-- Do not split the error into multiple structs with conversions; the existing `{ message: String }` wrapper is sufficient.
-- Do not add compatibility aliases for the removed `ParseLiveOutRegistersError` name; reintroducing the old register-only symbol would dilute the cleanup.
-- Do not refactor `RegisterSet`, `LiveOut`, x86 live-out masks, or ADR-0004 migration work.
-- Do not modify `symphony/`, `build/`, unrelated docs, formatting across untouched files, or generated artifacts.
+- Changing the grammar for reversed-order input or adding a bespoke "wrong order" diagnostic.
+- Changing any `run_equiv` or `run_llm_opt` error-prefix behavior in `src/main.rs`.
+- Adding docs/spec/ADR updates; this PR documents existing behavior through a regression test only.
+- Refactoring `ParseRegisterSetError`, `parse_register`, or the surrounding `parse_live_out_contract` tests.
+- Running benchmarks, mutation tests, x86/RISC-V flows, LLM search, assembler tests, or integration fixtures for this unit-test-only issue.

@@ -690,6 +690,12 @@ mod tests {
     }
 
     #[test]
+    fn test_parse_live_out_contract_reversed_order_nzcv_x0_error() {
+        let err = parse_live_out_contract("nzcv;x0").unwrap_err();
+        assert_eq!(err.to_string(), "invalid register name: 'nzcv'");
+    }
+
+    #[test]
     fn test_parse_live_out_contract_multi_section_rejected() {
         assert!(parse_live_out_contract("x0;nzcv;extra").is_err());
         assert!(parse_live_out_contract(";nzcv;").is_err());
