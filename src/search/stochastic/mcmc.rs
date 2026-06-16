@@ -3,6 +3,7 @@
 //! Implements stochastic superoptimization using MCMC-style mutation plus
 //! Metropolis cost acceptance. Proposal probabilities are heuristic and no
 //! Hastings ratio is computed.
+//!
 //! The algorithm:
 //! 1. Generate test cases for fast validation
 //! 2. Start with a random initial program (or copy of target)
