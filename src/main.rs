@@ -2549,6 +2549,28 @@ mod cli_helper_tests {
     }
 
     #[test]
+    fn convert_capstone_op_rejects_cond_select_al_nv_aliases() {
+        // AL/NV have no meaningful inverse, so the conditional-select
+        // normalizer rejects them rather than emitting a csinc/csinv/csneg
+        // with AL/NV. Pin that error path through to the Unsupported outcome.
+        for (mnemonic, ops) in [("cinc", "x0, x1, al"), ("cinv", "x2, x3, nv")] {
+            match convert_capstone_op(mnemonic, ops) {
+                ConvertOutcome::Unsupported(msg) => {
+                    assert!(
+                        msg.contains(mnemonic),
+                        "diagnostic should name `{mnemonic}`: {msg}"
+                    );
+                    assert!(
+                        msg.contains("does not support"),
+                        "diagnostic should explain the rejected condition: {msg}"
+                    );
+                }
+                other => panic!("expected Unsupported for `{mnemonic} {ops}`, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
     fn convert_capstone_op_skips_nop_silently() {
         assert!(matches!(
             convert_capstone_op("nop", ""),
