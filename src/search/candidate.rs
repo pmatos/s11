@@ -313,6 +313,10 @@ pub fn generate_all_instructions(registers: &[Register], immediates: &[i64]) -> 
 
         // Multiply-accumulate family. MADD/MSUB take a 4th register slot
         // (`ra`); MNEG/SMULH/UMULH are 3-operand register-only.
+        // At the default 8-register scope this block emits
+        // `2 * 8^4 + 3 * 8^3` = 9,728 candidates per length bucket; keep
+        // docs/capability.md (and the README/TUTORIAL notes) in sync if the
+        // instruction mix here changes.
         for &rn in registers {
             for &rm in registers {
                 instrs.push(Instruction::Mneg { rd, rn, rm });
