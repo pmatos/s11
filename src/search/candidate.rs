@@ -1207,6 +1207,10 @@ mod tests {
         // isn't in scope here.
         let instrs = generate_all_instructions(&default_registers(), &default_immediates());
         let ids: std::collections::BTreeSet<u8> = instrs.iter().map(opcode_id).collect();
+        // Keep this literal range: 10..=19 is the stable issue-66 opcode_id
+        // contract for Mul through Csneg. Deriving it from representative
+        // Instruction values would hide accidental renumbering, unlike the
+        // random-reach tests where that indirection is deliberate.
         for id in 10u8..=19 {
             assert!(
                 ids.contains(&id),

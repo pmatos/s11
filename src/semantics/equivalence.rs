@@ -311,6 +311,8 @@ fn fast_path_initial_nzcv_variants(
 ) -> Vec<ConcreteMachineState> {
     use crate::semantics::state::ConditionFlags;
     let variant_regs_config = RandomInputConfig {
+        // 16 == 2^4 NZCV bit patterns; this pass is exhaustive over initial
+        // flags rather than governed by config.random_test_count.
         count: 16,
         registers: input_regs.to_vec(),
         memory_seed_size: 0,

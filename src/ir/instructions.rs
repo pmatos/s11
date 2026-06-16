@@ -1,5 +1,6 @@
 //! AArch64 instruction definitions for the IR
 
+use crate::ir::aarch64_encoding::logical_imm64_encodable;
 use crate::ir::types::{
     AccessWidth, AddressOperand, Condition, IndexMode, LabelId, Operand, Register, RegisterWidth,
     ShiftKind,
@@ -11,13 +12,6 @@ use std::fmt;
 /// every random-generation / mutation site so the four positions cannot drift
 /// out of sync across the codebase.
 pub const MOVW_LEGAL_SHIFTS: [u8; 4] = [0, 16, 32, 48];
-
-/// True iff `imm` (reinterpreted as `u64`) is representable as an AArch64
-/// 64-bit logical bitmask immediate (the `N:immr:imms` encoding used by
-/// AND/ORR/EOR/TST/ANDS immediate forms). Delegates to dynasmrt's encoder.
-fn logical_imm64_encodable(imm: i64) -> bool {
-    dynasmrt::aarch64::encode_logical_immediate_64bit(imm as u64).is_some()
-}
 
 pub(crate) fn logical_imm32_value(imm: i64) -> Option<u32> {
     if imm >= 0 {

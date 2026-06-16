@@ -1,5 +1,6 @@
 pub mod x86;
 
+use crate::ir::aarch64_encoding::logical_imm64_encodable;
 use crate::ir::instructions::logical_imm32_value;
 use crate::ir::types::{
     AccessWidth, AddressOperand, Condition, ExtendKind, IndexMode, LabelId, ShiftKind,
@@ -804,8 +805,7 @@ impl AArch64Assembler {
                         match width {
                             RegisterWidth::X64 => {
                                 let val = *imm as u64;
-                                if dynasmrt::aarch64::encode_logical_immediate_64bit(val).is_none()
-                                {
+                                if !logical_imm64_encodable(*imm) {
                                     return Err(format!(
                                         "AND immediate 0x{:x} is not a valid AArch64 logical immediate",
                                         val
@@ -864,8 +864,7 @@ impl AArch64Assembler {
                         match width {
                             RegisterWidth::X64 => {
                                 let val = *imm as u64;
-                                if dynasmrt::aarch64::encode_logical_immediate_64bit(val).is_none()
-                                {
+                                if !logical_imm64_encodable(*imm) {
                                     return Err(format!(
                                         "ORR immediate 0x{:x} is not a valid AArch64 logical immediate",
                                         val
@@ -923,8 +922,7 @@ impl AArch64Assembler {
                         match width {
                             RegisterWidth::X64 => {
                                 let val = *imm as u64;
-                                if dynasmrt::aarch64::encode_logical_immediate_64bit(val).is_none()
-                                {
+                                if !logical_imm64_encodable(*imm) {
                                     return Err(format!(
                                         "EOR immediate 0x{:x} is not a valid AArch64 logical immediate",
                                         val
@@ -1246,8 +1244,7 @@ impl AArch64Assembler {
                         match width {
                             RegisterWidth::X64 => {
                                 let val = *imm as u64;
-                                if dynasmrt::aarch64::encode_logical_immediate_64bit(val).is_none()
-                                {
+                                if !logical_imm64_encodable(*imm) {
                                     return Err(format!(
                                         "TST immediate 0x{:x} is not a valid AArch64 logical immediate",
                                         val
@@ -1640,8 +1637,7 @@ impl AArch64Assembler {
                         match width {
                             RegisterWidth::X64 => {
                                 let val = *imm as u64;
-                                if dynasmrt::aarch64::encode_logical_immediate_64bit(val).is_none()
-                                {
+                                if !logical_imm64_encodable(*imm) {
                                     return Err(format!(
                                         "ANDS immediate 0x{:x} is not a valid AArch64 logical immediate",
                                         val

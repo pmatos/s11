@@ -540,6 +540,28 @@ fn live_out_for_optimization_prefix(
     LiveOut::from_registers(live_registers)
 }
 
+fn build_stochastic_search_config(
+    options: &OptimizationOptions,
+    available_registers: Vec<Register>,
+    available_immediates: Vec<i64>,
+) -> SearchConfig {
+    let stochastic_config = StochasticConfig::default()
+        .with_beta(options.beta)
+        .with_iterations(options.iterations)
+        .with_seed_option(options.seed);
+
+    let symbolic_config = SymbolicConfig::default().with_timeout(options.solver_timeout);
+
+    SearchConfig::default()
+        .with_stochastic(stochastic_config)
+        .with_symbolic(symbolic_config)
+        .with_cost_metric(options.cost_metric)
+        .with_timeout_option(options.timeout)
+        .with_verbose(options.verbose)
+        .with_registers(available_registers)
+        .with_immediates(available_immediates)
+}
+
 /// Build the per-worker `SearchConfig` consumed by the hybrid parallel
 /// coordinator.
 ///
@@ -570,6 +592,25 @@ fn build_hybrid_search_config(
         .with_registers(available_registers)
         .with_immediates(available_immediates)
         .with_timeout_option(options.timeout)
+}
+
+fn build_x86_stochastic_search_config(width: u32, options: &OptimizationOptions) -> SearchConfig {
+    let stochastic_config = StochasticConfig::default()
+        .with_beta(options.beta)
+        .with_iterations(options.iterations)
+        .with_seed_option(options.seed);
+
+    let symbolic_config = SymbolicConfig::default().with_timeout(options.solver_timeout);
+
+    SearchConfig::default()
+        .with_stochastic(stochastic_config)
+        .with_symbolic(symbolic_config)
+        .with_cost_metric(options.cost_metric)
+        .with_timeout_option(options.timeout)
+        .with_verbose(options.verbose)
+        .with_x86_registers(search::candidate_x86::default_x86_registers())
+        .with_immediates(search::candidate_x86::default_x86_immediates())
+        .with_x86_width(width)
 }
 
 /// Run optimization using the selected algorithm.
@@ -658,18 +699,8 @@ fn run_optimization(
                 println!("  Seed: {}", seed);
             }
 
-            let stochastic_config = StochasticConfig::default()
-                .with_beta(options.beta)
-                .with_iterations(options.iterations)
-                .with_seed_option(options.seed);
-
-            let config = SearchConfig::default()
-                .with_stochastic(stochastic_config)
-                .with_cost_metric(options.cost_metric)
-                .with_timeout_option(options.timeout)
-                .with_verbose(options.verbose)
-                .with_registers(available_registers)
-                .with_immediates(available_immediates);
+            let config =
+                build_stochastic_search_config(options, available_registers, available_immediates);
 
             let mut search: StochasticSearch<isa::AArch64> = StochasticSearch::new();
             let result: search::result::SearchResult =
@@ -1168,18 +1199,7 @@ fn run_x86_stochastic(
     use search::stochastic::StochasticSearch;
     use validation::live_out::x86_live_out_from_target;
 
-    let stochastic_config = search::config::StochasticConfig::default()
-        .with_beta(options.beta)
-        .with_iterations(options.iterations)
-        .with_seed_option(options.seed);
-    let config = search::config::SearchConfig::default()
-        .with_stochastic(stochastic_config)
-        .with_cost_metric(options.cost_metric)
-        .with_timeout_option(options.timeout)
-        .with_verbose(options.verbose)
-        .with_x86_registers(search::candidate_x86::default_x86_registers())
-        .with_immediates(search::candidate_x86::default_x86_immediates())
-        .with_x86_width(width);
+    let config = build_x86_stochastic_search_config(width, options);
     let live_out = x86_live_out_from_target(target);
 
     // Extract (optimized, statistics) in each width branch separately:
@@ -2471,6 +2491,70 @@ mod cli_helper_tests {
         opts.timeout = None;
         let config = build_hybrid_search_config(&opts, vec![Register::X0], vec![0]);
         assert_eq!(config.timeout, None);
+    }
+
+    #[test]
+    fn build_stochastic_search_config_propagates_solver_timeout() {
+        let mut opts = options_for(Algorithm::Stochastic);
+        opts.timeout = Some(Duration::from_millis(11));
+        opts.solver_timeout = Duration::from_millis(17);
+        opts.beta = 2.5;
+        opts.iterations = 123;
+        opts.seed = Some(99);
+        opts.cost_metric = CostMetric::Latency;
+        opts.verbose = true;
+
+        let regs = vec![Register::X0, Register::X1];
+        let imms = vec![0, 7];
+        let config = build_stochastic_search_config(&opts, regs.clone(), imms.clone());
+
+        assert_eq!(
+            config.symbolic.solver_timeout,
+            Some(Duration::from_millis(17))
+        );
+        assert_eq!(config.stochastic.beta, 2.5);
+        assert_eq!(config.stochastic.iterations, 123);
+        assert_eq!(config.stochastic.seed, Some(99));
+        assert_eq!(config.cost_metric, CostMetric::Latency);
+        assert_eq!(config.timeout, Some(Duration::from_millis(11)));
+        assert!(config.verbose);
+        assert_eq!(config.available_registers, regs);
+        assert_eq!(config.available_immediates, imms);
+    }
+
+    #[test]
+    fn build_x86_stochastic_search_config_propagates_solver_timeout() {
+        let mut opts = options_for(Algorithm::Stochastic);
+        opts.timeout = Some(Duration::from_millis(13));
+        opts.solver_timeout = Duration::from_millis(19);
+        opts.beta = 3.5;
+        opts.iterations = 456;
+        opts.seed = Some(101);
+        opts.cost_metric = CostMetric::CodeSize;
+        opts.verbose = true;
+
+        let config = build_x86_stochastic_search_config(32, &opts);
+
+        assert_eq!(
+            config.symbolic.solver_timeout,
+            Some(Duration::from_millis(19))
+        );
+        assert_eq!(config.stochastic.beta, 3.5);
+        assert_eq!(config.stochastic.iterations, 456);
+        assert_eq!(config.stochastic.seed, Some(101));
+        assert_eq!(config.cost_metric, CostMetric::CodeSize);
+        assert_eq!(config.timeout, Some(Duration::from_millis(13)));
+        assert!(config.verbose);
+        assert_eq!(
+            config.x86_available_registers,
+            search::candidate_x86::default_x86_registers()
+        );
+        assert_eq!(
+            config.available_immediates,
+            search::candidate_x86::default_x86_immediates()
+        );
+        assert_eq!(config.x86_width, 32);
+        assert_eq!(config.x86_mode, assembler::x86::X86Mode::Mode32);
     }
 
     #[test]
