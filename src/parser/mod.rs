@@ -366,6 +366,23 @@ fn parse_mov(operands: &[&str]) -> Result<Instruction, String> {
         return Err(format!("mov requires 2 operands, got {}", operands.len()));
     }
 
+    if let Ok((rd, RegisterWidth::W32)) = parse_sized_register(operands[0]) {
+        let src = parse_operand(operands[1])?;
+        return match src {
+            Operand::Immediate(imm) => Ok(Instruction::Orr {
+                rd,
+                rn: Register::XZR,
+                rm: Operand::Immediate(imm),
+                width: RegisterWidth::W32,
+            }),
+            Operand::Register(_)
+            | Operand::ShiftedRegister { .. }
+            | Operand::ExtendedRegister { .. } => {
+                Err("mov W-register form only supports logical-immediate aliases".to_string())
+            }
+        };
+    }
+
     let rd = parse_register(operands[0])?;
     let src = parse_operand(operands[1])?;
 
@@ -2285,6 +2302,33 @@ mod tests {
     }
 
     #[test]
+    fn test_parse_mov_w_logical_immediate_aliases() {
+        let instr = parse_one("mov w0, #0xff");
+        assert_eq!(
+            instr,
+            Instruction::Orr {
+                rd: Register::X0,
+                rn: Register::XZR,
+                rm: Operand::Immediate(255),
+                width: RegisterWidth::W32,
+            }
+        );
+        assert_eq!(format!("{}", instr), "orr w0, wzr, #255");
+
+        let instr = parse_one("mov wsp, #0xff");
+        assert_eq!(
+            instr,
+            Instruction::Orr {
+                rd: Register::SP,
+                rn: Register::XZR,
+                rm: Operand::Immediate(255),
+                width: RegisterWidth::W32,
+            }
+        );
+        assert_eq!(format!("{}", instr), "orr wsp, wzr, #255");
+    }
+
+    #[test]
     fn test_parse_w_logical_immediates_reject_invalid_slots_and_forms() {
         for text in [
             "and wzr, w1, #255",
@@ -2292,6 +2336,9 @@ mod tests {
             "tst wsp, #255",
             "and w0, x1, #255",
             "and w0, w1, w2",
+            "mov wzr, #0xff",
+            "mov w0, #5",
+            "mov w0, w1",
         ] {
             assert!(parse_line(text).is_err(), "{text} should be rejected");
         }

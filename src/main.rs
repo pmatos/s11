@@ -1940,6 +1940,8 @@ mod cli_helper_tests {
         let cases = [
             ("mov", "x0, x1"),
             ("mov", "x0, #5"),
+            ("mov", "w0, #0xff"),
+            ("mov", "wsp, #0xff"),
             ("mvn", "x0, x1"),
             ("neg", "x0, x1"),
             ("negs", "x0, x1"),
@@ -2104,7 +2106,7 @@ mod cli_helper_tests {
         // Tripwire: bump in lockstep when adding/removing rows. Catches
         // accidental row deletion and forces a re-read when adding a parser
         // mnemonic without a matching test row.
-        assert_eq!(cases.len(), 137);
+        assert_eq!(cases.len(), 139);
 
         fn docs_mnemonic(mnemonic: &'static str) -> &'static str {
             if mnemonic.starts_with("b.") {
