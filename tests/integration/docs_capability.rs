@@ -165,6 +165,14 @@ fn stale_aarch64_count_and_branch_unsupported_claims_are_removed() {
 #[test]
 fn x86_support_is_visible_in_public_docs() {
     let matrix = read_doc("docs/capability.md").to_ascii_lowercase();
+    assert!(
+        matrix.contains("trait-backed"),
+        "docs/capability.md must describe x86 as using the shared trait-backed path"
+    );
+    assert!(
+        !matrix.contains("parallel x86 pipeline"),
+        "docs/capability.md must not describe x86 as a parallel pipeline"
+    );
     for mnemonic in X86_SUPPORTED_MNEMONICS {
         assert!(
             matrix.contains(&format!("`{mnemonic}`")),

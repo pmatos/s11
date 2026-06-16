@@ -5,9 +5,11 @@ Date: 2026-05-16
 
 ## Context
 
-Issue #77 calls for collapsing the parallel AArch64, x86 and RISC-V pipelines onto the existing trait surface in `src/isa/traits.rs`. As of today the `ISA` / `InstructionType` / `OperandType` / `RegisterType` / `InstructionGenerator` traits have impls on every backend, but four others — `ConcreteExecutor`, `SymbolicExecutor`, `CostModel`, `Assembler` — have **no implementations** and are bypassed by free functions in `src/semantics/{concrete,smt,cost,equivalence}.rs` and their `_x86` siblings, plus `src/assembler/{mod,x86}.rs`. The search layer (`src/search/`), the validation layer (`src/validation/`), and the CLI in `src/main.rs` all reference `crate::ir::Instruction` directly, with a duplicated x86 pipeline (`optimize_elf_binary_x86`, `convert_to_x86_ir`, etc.) sitting beside the AArch64 path. RISC-V is rejected at `src/main.rs:1558-1563` even though `src/isa/riscv.rs` (1185 lines) implements the existing trait surface.
+Issue #77 called for collapsing the parallel AArch64, x86 and RISC-V pipelines onto the existing trait surface in `src/isa/traits.rs`. At planning time the `ISA` / `InstructionType` / `OperandType` / `RegisterType` / `InstructionGenerator` traits had impls on every backend, but four others — `ConcreteExecutor`, `SymbolicExecutor`, `CostModel`, `Assembler` — had **no implementations** and were bypassed by free functions in `src/semantics/{concrete,smt,cost,equivalence}.rs` and their `_x86` siblings, plus `src/assembler/{mod,x86}.rs`. The search layer (`src/search/`), the validation layer (`src/validation/`), and the CLI in `src/main.rs` referenced `crate::ir::Instruction` directly, with a duplicated x86 pipeline (`optimize_elf_binary_x86`, `convert_to_x86_ir`, etc.) sitting beside the AArch64 path. RISC-V was rejected even though `src/isa/riscv.rs` implemented the existing trait surface.
 
-The refactor lands in three stages — (1) lift AArch64 onto the four trait gaps as a no-functional-change refactor, (2) port x86 onto the same surface and delete the `*_x86.rs` parallel files, (3) wire RISC-V through end-to-end. Several cross-cutting design choices are needed before stage 1 code begins, and once chosen they thread through every consumer. This ADR records those choices.
+The refactor was planned in three stages — (1) lift AArch64 onto the four trait gaps as a no-functional-change refactor, (2) port x86 onto the same surface and remove consumer-facing x86 bypasses, (3) wire RISC-V through end-to-end. Several cross-cutting design choices were needed before stage 1 code began, and once chosen they thread through every consumer. This ADR records those choices.
+
+Implementation status as of 2026-06-16: stages 1 and 2 have landed for AArch64 and x86. Generic equivalence/search live on the trait surface, x86 live-out uses `RegisterSet<X86Register>`, x86 candidates/costs flow through ISA trait impls, and `s11 opt` uses one shared ELF optimization driver with per-architecture hooks. The x86 concrete/SMT/cost modules remain as backend implementation details behind the trait impls. RISC-V remains scaffold-only with no supported opt path because machine-code emission is not yet implemented.
 
 The decisions below are not a menu of alternatives. They are commitments made in the plan at `.ultraplan/unify-isa-traits.md` after parallel codebase exploration and adversarial review.
 
@@ -39,7 +41,7 @@ Rationale: the only consumer that round-trips full operand structure is the stoc
 
 ### 5. `RegisterSet<R>` replaces `LiveOut` and `X86LiveOutMask`; `flags_live` lives on the mask
 
-A generic `pub struct RegisterSet<R: RegisterType> { regs: HashSet<R>, flags_live: bool }` lives in `src/semantics/live_out.rs`. AArch64's `LiveOut` is the type alias `pub type LiveOut = RegisterSet<crate::ir::Register>;`. In stage 2 step 16, `X86LiveOutMask` (`src/semantics/state.rs:397-441`) is deleted and x86 callers move to `RegisterSet<X86Register>`. RISC-V uses `RegisterSet<RiscVRegister>` with `flags_live` always `false`.
+A generic `pub struct RegisterSet<R: RegisterType> { regs: HashSet<R>, flags_live: bool }` lives in `src/semantics/live_out.rs`. AArch64's `LiveOut` is the type alias `pub type LiveOut = RegisterSet<crate::ir::Register>;`. Stage 2 deleted `X86LiveOutMask` and moved x86 callers to `RegisterSet<X86Register>`. RISC-V uses `RegisterSet<RiscVRegister>` with `flags_live` always `false`.
 
 The neutral name `RegisterSet` (closes #85) acknowledges that the same shape carries both live-in (`compute_live_in_registers`) and live-out sets — previously the AArch64 path used `LiveOutRegisters` for both, which surprised readers. The earlier working name `LiveOutMask<R>` from the original ADR draft was renamed during stage 1 step 9 to land both renames in a single PR.
 
@@ -78,7 +80,7 @@ Rationale: stage 1 and stage 2 are unaffected by this decision; deferring it doe
 
 **Positive:**
 - The four trait gaps (`ConcreteExecutor`, `SymbolicExecutor`, `CostModel`, `Assembler`) get their first implementations and start carrying real weight. The trait surface stops being aspirational.
-- The four `*_x86.rs` parallel files (`src/semantics/{concrete,smt,cost}_x86.rs`, `src/search/candidate_x86.rs`) plus `X86EquivalenceConfig` and `optimize_elf_binary_x86` disappear in stage 2 — the diff is a net deletion.
+- Consumer-facing x86 bypasses have disappeared by stage 2: `src/search/candidate_x86.rs`, `X86LiveOutMask`, `X86EquivalenceConfig`, `check_equivalence_x86`, and `optimize_elf_binary_x86` are removed. The remaining x86 concrete/SMT/cost files stay as backend implementation details behind trait impls.
 - A single principled width abstraction (`type Width: BVWidth`) replaces today's scattered hardcoded `64` literals in `src/semantics/smt.rs` and `src/semantics/concrete.rs` (~91 sites per the exploration audit).
 - The `flag_writers_diverge` substitution moves from "AArch64 inherent method" to "trait dispatch", which means x86 stops being silently mishandled by any future consumer that reaches for `has_side_effects`.
 - RISC-V's existing 1185 lines of trait scaffolding in `src/isa/riscv.rs` actually get exercised once the consumer layer is generic.
