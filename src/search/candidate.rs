@@ -1010,90 +1010,6 @@ pub fn generate_random_sequence<R: rand::RngExt>(
         .collect()
 }
 
-/// Get the opcode type as a numeric identifier (for mutation)
-#[allow(dead_code)]
-pub fn opcode_id(instr: &Instruction) -> u8 {
-    match instr {
-        Instruction::MovReg { .. } => 0,
-        Instruction::MovImm { .. } => 1,
-        Instruction::Add { .. } => 2,
-        Instruction::Sub { .. } => 3,
-        Instruction::And { .. } => 4,
-        Instruction::Orr { .. } => 5,
-        Instruction::Eor { .. } => 6,
-        Instruction::Lsl { .. } => 7,
-        Instruction::Lsr { .. } => 8,
-        Instruction::Asr { .. } => 9,
-        Instruction::Mul { .. } => 10,
-        Instruction::Sdiv { .. } => 11,
-        Instruction::Udiv { .. } => 12,
-        Instruction::Cmp { .. } => 13,
-        Instruction::Cmn { .. } => 14,
-        Instruction::Tst { .. } => 15,
-        Instruction::Csel { .. } => 16,
-        Instruction::Csinc { .. } => 17,
-        Instruction::Csinv { .. } => 18,
-        Instruction::Csneg { .. } => 19,
-        Instruction::Mvn { .. } => 20,
-        Instruction::Neg { .. } => 21,
-        Instruction::Negs { .. } => 22,
-        Instruction::MovN { .. } => 23,
-        Instruction::Bic { .. } => 24,
-        Instruction::Bics { .. } => 25,
-        Instruction::Orn { .. } => 26,
-        Instruction::Eon { .. } => 27,
-        Instruction::Adds { .. } => 28,
-        Instruction::Subs { .. } => 29,
-        Instruction::Ands { .. } => 30,
-        Instruction::Cset { .. } => 31,
-        Instruction::Csetm { .. } => 32,
-        Instruction::Ror { .. } => 33,
-        Instruction::MovZ { .. } => 34,
-        Instruction::MovK { .. } => 35,
-        Instruction::Clz { .. } => 36,
-        Instruction::Cls { .. } => 37,
-        Instruction::Rbit { .. } => 38,
-        Instruction::Rev { .. } => 39,
-        Instruction::Rev32 { .. } => 40,
-        Instruction::Rev16 { .. } => 41,
-        Instruction::Madd { .. } => 42,
-        Instruction::Msub { .. } => 43,
-        Instruction::Mneg { .. } => 44,
-        Instruction::Smulh { .. } => 45,
-        Instruction::Umulh { .. } => 46,
-        Instruction::Ccmp { .. } => 47,
-        Instruction::Ccmn { .. } => 48,
-        Instruction::Sxtb { .. } => 49,
-        Instruction::Sxth { .. } => 50,
-        Instruction::Sxtw { .. } => 51,
-        Instruction::Uxtb { .. } => 52,
-        Instruction::Uxth { .. } => 53,
-        Instruction::Ubfx { .. } => 49,
-        Instruction::Sbfx { .. } => 50,
-        Instruction::Bfi { .. } => 51,
-        Instruction::Bfxil { .. } => 52,
-        Instruction::Ubfiz { .. } => 53,
-        Instruction::Sbfiz { .. } => 54,
-        // Branches / terminators (issue #69)
-        Instruction::B { .. } => 55,
-        Instruction::BCond { .. } => 56,
-        Instruction::Ret { .. } => 57,
-        Instruction::Cbz { .. } => 58,
-        Instruction::Cbnz { .. } => 59,
-        Instruction::Tbz { .. } => 60,
-        Instruction::Tbnz { .. } => 61,
-        Instruction::Bl { .. } => 62,
-        Instruction::Br { .. } => 63,
-        // Memory ops (issue #68). Mirrors `src/isa/aarch64.rs` so the two
-        // tables stay aligned. See ADR-0007.
-        Instruction::Ldr { .. } => 64,
-        Instruction::Ldrs { .. } => 65,
-        Instruction::Str { .. } => 66,
-        Instruction::Ldp { .. } => 67,
-        Instruction::Stp { .. } => 68,
-    }
-}
-
 /// Check if an instruction has immediate operand support
 #[allow(dead_code)]
 pub fn supports_immediate(instr: &Instruction) -> bool {
@@ -1220,7 +1136,8 @@ mod tests {
         // opcode_id collision between Sxt* and Ubfx/Sbfx/Bfi/Bfxil/Ubfiz that
         // isn't in scope here.
         let instrs = generate_all_instructions(&default_registers(), &default_immediates());
-        let ids: std::collections::BTreeSet<u8> = instrs.iter().map(opcode_id).collect();
+        let ids: std::collections::BTreeSet<u8> =
+            instrs.iter().map(InstructionType::opcode_id).collect();
         // Keep this literal range: 10..=19 is the stable issue-66 opcode_id
         // contract for Mul through Csneg. Deriving it from representative
         // Instruction values would hide accidental renumbering, unlike the
@@ -1241,7 +1158,7 @@ mod tests {
         let imms = default_immediates();
         let mut rng = ChaCha8Rng::seed_from_u64(seed);
         (0..draws)
-            .map(|_| opcode_id(&generate_random_instruction(&mut rng, &regs, &imms)))
+            .map(|_| generate_random_instruction(&mut rng, &regs, &imms).opcode_id())
             .collect()
     }
 
@@ -1258,7 +1175,7 @@ mod tests {
         const N: u32 = 30_000;
 
         for _ in 0..N {
-            let id = opcode_id(&generate_random_instruction(&mut rng, &regs, &imms));
+            let id = generate_random_instruction(&mut rng, &regs, &imms).opcode_id();
             *counts.entry(id).or_default() += 1;
         }
 
@@ -1306,7 +1223,7 @@ mod tests {
                 },
             ),
         ] {
-            let id = opcode_id(&instr);
+            let id = instr.opcode_id();
             let count = counts.get(&id).copied().unwrap_or(0);
             assert!(
                 count >= 500,
@@ -1349,7 +1266,7 @@ mod tests {
             ),
         ] {
             assert!(
-                ids.contains(&opcode_id(&instr)),
+                ids.contains(&instr.opcode_id()),
                 "random never produced {}",
                 label
             );
@@ -1384,7 +1301,7 @@ mod tests {
             ),
         ] {
             assert!(
-                ids.contains(&opcode_id(&instr)),
+                ids.contains(&instr.opcode_id()),
                 "random never produced {}",
                 label
             );
@@ -1433,7 +1350,7 @@ mod tests {
             ),
         ] {
             assert!(
-                ids.contains(&opcode_id(&instr)),
+                ids.contains(&instr.opcode_id()),
                 "random never produced {}",
                 label
             );
@@ -1488,7 +1405,7 @@ mod tests {
             ),
         ] {
             assert!(
-                ids.contains(&opcode_id(&instr)),
+                ids.contains(&instr.opcode_id()),
                 "random never produced {}",
                 label
             );
@@ -1770,63 +1687,9 @@ mod tests {
             },
         ];
 
-        let ids: Vec<_> = instrs.iter().map(opcode_id).collect();
+        let ids: Vec<_> = instrs.iter().map(InstructionType::opcode_id).collect();
         let unique: std::collections::HashSet<_> = ids.iter().collect();
         assert_eq!(ids.len(), unique.len());
-    }
-
-    /// Sync test: opcode_id in candidate.rs must agree with
-    /// AArch64InstructionInfo::opcode_id in isa/aarch64.rs for every bitfield
-    /// variant. Catches drift between the two definitions.
-    #[test]
-    fn test_bitfield_opcode_id_matches_isa_backend() {
-        use crate::isa::InstructionType;
-        let instrs = vec![
-            Instruction::Ubfx {
-                rd: Register::X0,
-                rn: Register::X1,
-                lsb: 0,
-                width: 1,
-            },
-            Instruction::Sbfx {
-                rd: Register::X0,
-                rn: Register::X1,
-                lsb: 0,
-                width: 1,
-            },
-            Instruction::Bfi {
-                rd: Register::X0,
-                rn: Register::X1,
-                lsb: 0,
-                width: 1,
-            },
-            Instruction::Bfxil {
-                rd: Register::X0,
-                rn: Register::X1,
-                lsb: 0,
-                width: 1,
-            },
-            Instruction::Ubfiz {
-                rd: Register::X0,
-                rn: Register::X1,
-                lsb: 0,
-                width: 1,
-            },
-            Instruction::Sbfiz {
-                rd: Register::X0,
-                rn: Register::X1,
-                lsb: 0,
-                width: 1,
-            },
-        ];
-        for instr in &instrs {
-            assert_eq!(
-                opcode_id(instr),
-                instr.opcode_id(),
-                "opcode_id drift for {}",
-                instr
-            );
-        }
     }
 
     #[test]

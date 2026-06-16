@@ -5,6 +5,12 @@
 //! 2. Opcode mutation (16%): Change the opcode while keeping operand structure
 //! 3. Swap mutation (16%): Swap two instructions
 //! 4. Instruction mutation (18%): Replace an entire instruction
+//!
+//! These operators are heuristic proposal generators. In particular,
+//! opcode peer clusters are not required to have equal forward/reverse
+//! transition probabilities, and the stochastic search does not apply a
+//! Hastings ratio to correct that asymmetry. The search is intended as an
+//! optimization heuristic, not as a detailed-balance sampler.
 
 #![allow(dead_code)]
 
@@ -446,7 +452,12 @@ impl Mutator {
         }
     }
 
-    /// Opcode mutation: change the opcode while keeping operand structure
+    /// Opcode mutation: change the opcode while keeping operand structure.
+    ///
+    /// The match arms below are intentionally heuristic. Some clusters are
+    /// asymmetric because certain instructions have extra bridges or
+    /// encodability clamps; acceptance uses only the Metropolis cost rule, not
+    /// a Hastings correction for the proposal probabilities.
     fn mutate_opcode<R: RngExt>(&self, rng: &mut R, sequence: &mut [Instruction]) {
         if sequence.is_empty() {
             return;
@@ -738,6 +749,10 @@ impl Mutator {
             // Move-wide cluster: MOVN ↔ MOVZ ↔ MOVK (all share rd/imm/shift),
             // plus a single MovImm bridge anchored at MOVZ.
             //
+            // This is not a symmetric proposal table: MOVZ has one more
+            // outgoing arm than MOVN/MOVK. The top-level search accepts it as
+            // a heuristic proposal without a Hastings correction.
+            //
             // Topology note: before this PR, MOVN had a direct MOVN ↔ MovImm
             // edge. We removed it so MOVN now reaches MovImm via two hops
             // (MOVN → MOVZ → MovImm). Ergodicity is preserved — every move
@@ -773,7 +788,9 @@ impl Mutator {
                 1 => Instruction::MovZ { rd, imm, shift },
                 _ => Instruction::MovK { rd, imm, shift },
             },
-            // Inverted-logical join the AND/ORR/EOR cluster.
+            // Inverted-logical instructions join the AND/ORR/EOR cluster.
+            // The peer counts differ across BIC/BICS/ORN/EON, so these arms
+            // are also heuristic rather than detailed-balance transitions.
             Instruction::Bic { rd, rn, rm } => match rng.random_range(0..7) {
                 0 => Instruction::And {
                     rd,
@@ -861,6 +878,8 @@ impl Mutator {
                 _ => Instruction::Eon { rd, rn, rm },
             },
             // Flag-setting cluster: ADDS↔SUBS↔ANDS, and into/out of ADD/SUB/AND.
+            // The ADD/SUB/AND bridges make this another intentionally
+            // asymmetric proposal family.
             //
             // Note: ADDS/SUBS accept `Operand::Immediate` (12-bit). ANDS and
             // AND now accept *bitmask* immediates (issue #65), but the table
