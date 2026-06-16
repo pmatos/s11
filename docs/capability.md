@@ -19,7 +19,11 @@ Rewritable straight-line mnemonics accepted by the parser and Capstone bridge:
 
 - Data movement and aliases: `mov`, `mvn`, `neg`, `negs`, `movn`, `movz`,
   `movk`
+  - Register `mov` supports both 64-bit `X` and 32-bit `W` forms.
 - Arithmetic and flag-setting arithmetic: `add`, `sub`, `adds`, `subs`
+  - Non-flag-setting `add` and `sub` support both 64-bit `X` and 32-bit `W`
+    register/immediate/shifted-register forms. W extended-register arithmetic
+    remains out of scope for now.
 - Logical and inverted-logical forms: `and`, `ands`, `orr`, `eor`, `bic`,
   `bics`, `orn`, `eon`
   - Logical-immediate forms for `and`, `ands`, `orr`, `eor`, and `tst`

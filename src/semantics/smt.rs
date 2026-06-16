@@ -81,6 +81,24 @@ fn eval_logical_operand(state: &MachineState, operand: &Operand, width: Register
     }
 }
 
+fn eval_w_operand(state: &MachineState, operand: &Operand) -> BV {
+    match operand {
+        Operand::Register(reg) => state.get_register(*reg).extract(31, 0),
+        Operand::Immediate(imm) => BV::from_i64(*imm, 32),
+        Operand::ShiftedRegister { reg, kind, amount } => {
+            let value = state.get_register(*reg).extract(31, 0);
+            let amt = BV::from_u64(u64::from(*amount), 32);
+            match kind {
+                crate::ir::ShiftKind::Lsl => value.bvshl(&amt),
+                crate::ir::ShiftKind::Lsr => value.bvlshr(&amt),
+                crate::ir::ShiftKind::Asr => value.bvashr(&amt),
+                crate::ir::ShiftKind::Ror => bv_ror(&value, &amt, 32),
+            }
+        }
+        Operand::ExtendedRegister { .. } => state.eval_operand(operand).extract(31, 0),
+    }
+}
+
 fn zero_extend_to_state_width(value: BV, value_width: u32, state_width: u32) -> BV {
     if value_width == state_width {
         value
@@ -510,6 +528,10 @@ pub fn apply_instruction(mut state: MachineState, instruction: &Instruction) -> 
             let value = state.get_register(*rn).clone();
             state.set_register(*rd, value);
         }
+        Instruction::MovRegW { rd, rn } => {
+            let value = state.get_register(*rn).extract(31, 0);
+            state.set_register(*rd, zero_extend_to_state_width(value, 32, width));
+        }
         Instruction::MovImm { rd, imm } => {
             let value = BV::from_i64(*imm, width);
             state.set_register(*rd, value);
@@ -520,11 +542,23 @@ pub fn apply_instruction(mut state: MachineState, instruction: &Instruction) -> 
             let result = lhs.bvadd(&rhs);
             state.set_register(*rd, result);
         }
+        Instruction::AddW { rd, rn, rm } => {
+            let lhs = state.get_register(*rn).extract(31, 0);
+            let rhs = eval_w_operand(&state, rm);
+            let result = lhs.bvadd(&rhs);
+            state.set_register(*rd, zero_extend_to_state_width(result, 32, width));
+        }
         Instruction::Sub { rd, rn, rm } => {
             let lhs = state.get_register(*rn).clone();
             let rhs = state.eval_operand(rm);
             let result = lhs.bvsub(&rhs);
             state.set_register(*rd, result);
+        }
+        Instruction::SubW { rd, rn, rm } => {
+            let lhs = state.get_register(*rn).extract(31, 0);
+            let rhs = eval_w_operand(&state, rm);
+            let result = lhs.bvsub(&rhs);
+            state.set_register(*rd, zero_extend_to_state_width(result, 32, width));
         }
         Instruction::And {
             rd,

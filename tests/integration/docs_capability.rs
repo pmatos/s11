@@ -78,6 +78,21 @@ fn docs_capability_documents_w_logical_immediates() {
 }
 
 #[test]
+fn docs_capability_documents_w_mov_add_sub_forms() {
+    let matrix = normalized_doc("docs/capability.md");
+    assert!(
+        matrix.contains("register `mov` supports both 64-bit `x` and 32-bit `w` forms"),
+        "docs/capability.md must document W-register MOV register support"
+    );
+    assert!(
+        matrix.contains(
+            "non-flag-setting `add` and `sub` support both 64-bit `x` and 32-bit `w` register/immediate/shifted-register forms"
+        ),
+        "docs/capability.md must document W-register ADD/SUB support"
+    );
+}
+
+#[test]
 fn memory_operations_are_consistently_documented_with_known_gaps() {
     let matrix = normalized_doc("docs/capability.md");
     assert!(
