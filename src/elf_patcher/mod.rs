@@ -410,11 +410,11 @@ mod tests {
         assert!(invalid_window.start >= invalid_window.end);
     }
 
-    /// Hand-rolled minimal x86_64 ELF used only by integration tests in this
+    /// Hand-rolled minimal ELF64 used only by integration tests in this
     /// module. Layout: header, .text data, .shstrtab data, then a section
     /// header table with NULL / .text / .shstrtab. Only the fields
     /// `ElfPatcher` actually reads are populated.
-    fn build_minimal_x86_64_elf(text_bytes: &[u8], text_vaddr: u64) -> Vec<u8> {
+    fn build_minimal_elf64(text_bytes: &[u8], text_vaddr: u64, machine: u16) -> Vec<u8> {
         let elf_header_size = 64usize;
         let shentsize = 64usize;
         let shnum = 3usize;
@@ -431,7 +431,7 @@ mod tests {
         buf[5] = elf::abi::ELFDATA2LSB;
         buf[6] = elf::abi::EV_CURRENT;
         buf[16..18].copy_from_slice(&elf::abi::ET_EXEC.to_le_bytes());
-        buf[18..20].copy_from_slice(&elf::abi::EM_X86_64.to_le_bytes());
+        buf[18..20].copy_from_slice(&machine.to_le_bytes());
         buf[20..24].copy_from_slice(&(elf::abi::EV_CURRENT as u32).to_le_bytes());
         buf[40..48].copy_from_slice(&(shoff as u64).to_le_bytes());
         buf[52..54].copy_from_slice(&(elf_header_size as u16).to_le_bytes());
@@ -490,6 +490,14 @@ mod tests {
         buf
     }
 
+    fn build_minimal_x86_64_elf(text_bytes: &[u8], text_vaddr: u64) -> Vec<u8> {
+        build_minimal_elf64(text_bytes, text_vaddr, elf::abi::EM_X86_64)
+    }
+
+    fn build_minimal_aarch64_elf(text_bytes: &[u8], text_vaddr: u64) -> Vec<u8> {
+        build_minimal_elf64(text_bytes, text_vaddr, elf::abi::EM_AARCH64)
+    }
+
     #[test]
     fn create_patched_copy_emits_canonical_x86_nop_padding() {
         use crate::test_utils::TempFile;
@@ -521,6 +529,40 @@ mod tests {
             &patched_window[3..],
             &[0x0f, 0x1f, 0x44, 0x00, 0x00][..],
             "padding should be the canonical 5-byte Intel NOP",
+        );
+    }
+
+    #[test]
+    fn create_patched_copy_emits_canonical_aarch64_nop_padding() {
+        use crate::test_utils::TempFile;
+
+        let text_vaddr: u64 = 0x100000;
+        let text_bytes = [0xd5u8; 16];
+        let elf_bytes = build_minimal_aarch64_elf(&text_bytes, text_vaddr);
+
+        let input = TempFile::new_bytes("s11-elf-aarch64-padding-in", "elf", &elf_bytes);
+        let output = TempFile::new_bytes("s11-elf-aarch64-padding-out", "elf", &[]);
+
+        let patcher = ElfPatcher::new(input.path()).expect("patcher should accept minimal ELF");
+        assert_eq!(patcher.arch(), DetectedArch::Aarch64);
+
+        let window = AddressWindow {
+            start: text_vaddr,
+            end: text_vaddr + 16,
+        };
+        let payload = [0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff, 0x11, 0x22];
+        patcher
+            .create_patched_copy(output.path(), &window, &payload)
+            .expect("patch should succeed");
+
+        let patched = std::fs::read(output.path()).expect("output should be readable");
+        let text_file_offset = 64usize;
+        let patched_window = &patched[text_file_offset..text_file_offset + 16];
+        assert_eq!(&patched_window[..8], &payload[..], "payload bytes mismatch");
+        assert_eq!(
+            &patched_window[8..],
+            &[0x1f, 0x20, 0x03, 0xd5, 0x1f, 0x20, 0x03, 0xd5][..],
+            "padding should be repeated canonical AArch64 NOPs",
         );
     }
 
