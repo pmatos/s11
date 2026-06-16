@@ -164,6 +164,45 @@ impl fmt::Display for Register {
     }
 }
 
+/// Register width for the narrow set of AArch64 instructions that this IR
+/// models in both architectural X and W forms.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum RegisterWidth {
+    W32,
+    X64,
+}
+
+impl RegisterWidth {
+    pub fn bit_width(self) -> u8 {
+        match self {
+            RegisterWidth::W32 => 32,
+            RegisterWidth::X64 => 64,
+        }
+    }
+
+    pub fn register_name(self, register: Register) -> &'static str {
+        const X_NAMES: [&str; 31] = [
+            "x0", "x1", "x2", "x3", "x4", "x5", "x6", "x7", "x8", "x9", "x10", "x11", "x12", "x13",
+            "x14", "x15", "x16", "x17", "x18", "x19", "x20", "x21", "x22", "x23", "x24", "x25",
+            "x26", "x27", "x28", "x29", "x30",
+        ];
+        const W_NAMES: [&str; 31] = [
+            "w0", "w1", "w2", "w3", "w4", "w5", "w6", "w7", "w8", "w9", "w10", "w11", "w12", "w13",
+            "w14", "w15", "w16", "w17", "w18", "w19", "w20", "w21", "w22", "w23", "w24", "w25",
+            "w26", "w27", "w28", "w29", "w30",
+        ];
+
+        match (self, register) {
+            (RegisterWidth::X64, Register::XZR) => "xzr",
+            (RegisterWidth::X64, Register::SP) => "sp",
+            (RegisterWidth::X64, reg) => X_NAMES[reg.index().expect("x register index") as usize],
+            (RegisterWidth::W32, Register::XZR) => "wzr",
+            (RegisterWidth::W32, Register::SP) => "wsp",
+            (RegisterWidth::W32, reg) => W_NAMES[reg.index().expect("w register index") as usize],
+        }
+    }
+}
+
 /// AArch64 shift kind for the shifted-register operand form
 /// (`add x0, x1, x2, lsl #3` etc.). Issue #59.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]

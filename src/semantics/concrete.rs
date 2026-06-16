@@ -1,7 +1,7 @@
 //! Concrete interpreter for fast validation of instruction sequences
 
 use crate::ir::types::{AccessWidth, AddressOperand, IndexMode};
-use crate::ir::{Condition, Instruction, Operand, Register, ShiftKind};
+use crate::ir::{Condition, Instruction, Operand, Register, RegisterWidth, ShiftKind};
 use crate::semantics::live_out::RegisterSet;
 use crate::semantics::state::{ConcreteMachineState, ConcreteValue, ConditionFlags};
 
@@ -38,6 +38,34 @@ fn eval_operand(state: &ConcreteMachineState, operand: &Operand) -> ConcreteValu
     }
 }
 
+fn mask_for_register_width(width: RegisterWidth) -> u64 {
+    match width {
+        RegisterWidth::W32 => u32::MAX as u64,
+        RegisterWidth::X64 => u64::MAX,
+    }
+}
+
+fn eval_logical_operand(
+    state: &ConcreteMachineState,
+    operand: &Operand,
+    width: RegisterWidth,
+) -> u64 {
+    eval_operand(state, operand).as_u64() & mask_for_register_width(width)
+}
+
+fn logical_flags(result: u64, width: RegisterWidth) -> ConditionFlags {
+    let sign_bit = match width {
+        RegisterWidth::W32 => 1u64 << 31,
+        RegisterWidth::X64 => 1u64 << 63,
+    };
+    ConditionFlags {
+        n: (result & sign_bit) != 0,
+        z: (result & mask_for_register_width(width)) == 0,
+        c: false,
+        v: false,
+    }
+}
+
 /// Apply a single instruction to a concrete machine state
 pub fn apply_instruction_concrete(
     mut state: ConcreteMachineState,
@@ -64,22 +92,22 @@ pub fn apply_instruction_concrete(
             let result = lhs.wrapping_sub(rhs);
             state.set_register(*rd, ConcreteValue::new(result));
         }
-        Instruction::And { rd, rn, rm } => {
-            let lhs = state.get_register(*rn).as_u64();
-            let rhs = eval_operand(&state, rm).as_u64();
-            let result = lhs & rhs;
+        Instruction::And { rd, rn, rm, width } => {
+            let lhs = state.get_register(*rn).as_u64() & mask_for_register_width(*width);
+            let rhs = eval_logical_operand(&state, rm, *width);
+            let result = (lhs & rhs) & mask_for_register_width(*width);
             state.set_register(*rd, ConcreteValue::new(result));
         }
-        Instruction::Orr { rd, rn, rm } => {
-            let lhs = state.get_register(*rn).as_u64();
-            let rhs = eval_operand(&state, rm).as_u64();
-            let result = lhs | rhs;
+        Instruction::Orr { rd, rn, rm, width } => {
+            let lhs = state.get_register(*rn).as_u64() & mask_for_register_width(*width);
+            let rhs = eval_logical_operand(&state, rm, *width);
+            let result = (lhs | rhs) & mask_for_register_width(*width);
             state.set_register(*rd, ConcreteValue::new(result));
         }
-        Instruction::Eor { rd, rn, rm } => {
-            let lhs = state.get_register(*rn).as_u64();
-            let rhs = eval_operand(&state, rm).as_u64();
-            let result = lhs ^ rhs;
+        Instruction::Eor { rd, rn, rm, width } => {
+            let lhs = state.get_register(*rn).as_u64() & mask_for_register_width(*width);
+            let rhs = eval_logical_operand(&state, rm, *width);
+            let result = (lhs ^ rhs) & mask_for_register_width(*width);
             state.set_register(*rd, ConcreteValue::new(result));
         }
         Instruction::Lsl { rd, rn, shift } => {
@@ -172,18 +200,11 @@ pub fn apply_instruction_concrete(
             state.set_flags(flags);
         }
         // TST: Test (AND and set flags, discard result)
-        Instruction::Tst { rn, rm } => {
-            let lhs = state.get_register(*rn).as_u64();
-            let rhs = eval_operand(&state, rm).as_u64();
-            let result = lhs & rhs;
-            // TST sets N and Z based on result, clears C and V
-            let flags = ConditionFlags {
-                n: (result as i64) < 0,
-                z: result == 0,
-                c: false,
-                v: false,
-            };
-            state.set_flags(flags);
+        Instruction::Tst { rn, rm, width } => {
+            let lhs = state.get_register(*rn).as_u64() & mask_for_register_width(*width);
+            let rhs = eval_logical_operand(&state, rm, *width);
+            let result = (lhs & rhs) & mask_for_register_width(*width);
+            state.set_flags(logical_flags(result, *width));
         }
         // CCMP: conditional compare (subtract). If `cond` holds at runtime,
         // set NZCV from `rn - operand(rm)` exactly like CMP; otherwise force
@@ -329,12 +350,12 @@ pub fn apply_instruction_concrete(
             state.set_register(*rd, ConcreteValue::new(result));
             state.set_flags(ConditionFlags::from_sub(lhs, rhs, result));
         }
-        Instruction::Ands { rd, rn, rm } => {
-            let lhs = state.get_register(*rn).as_u64();
-            let rhs = eval_operand(&state, rm).as_u64();
-            let result = lhs & rhs;
+        Instruction::Ands { rd, rn, rm, width } => {
+            let lhs = state.get_register(*rn).as_u64() & mask_for_register_width(*width);
+            let rhs = eval_logical_operand(&state, rm, *width);
+            let result = (lhs & rhs) & mask_for_register_width(*width);
             state.set_register(*rd, ConcreteValue::new(result));
-            state.set_flags(ConditionFlags::from_logical(result));
+            state.set_flags(logical_flags(result, *width));
         }
         // CSET / CSETM: AArch64-spec defines them as aliases of CSINC/CSINV
         // with XZR sources and inverted condition. The observable result is
@@ -886,6 +907,7 @@ mod tests {
                 kind: ShiftKind::Asr,
                 amount: 1,
             },
+            width: RegisterWidth::X64,
         };
         let new_state = apply_instruction_concrete(state, &instr);
         assert_eq!(
@@ -906,6 +928,7 @@ mod tests {
                 kind: ShiftKind::Ror,
                 amount: 4,
             },
+            width: RegisterWidth::X64,
         };
         let new_state = apply_instruction_concrete(state, &instr);
         // 0xF rotated right by 4 in 64 bits == 0xF000_0000_0000_0000
@@ -975,6 +998,7 @@ mod tests {
             rd: Register::X0,
             rn: Register::X1,
             rm: Operand::Register(Register::X2),
+            width: RegisterWidth::X64,
         };
         let new_state = apply_instruction_concrete(state, &instr);
         assert_eq!(new_state.get_register(Register::X0).as_u64(), 0x0F00);
@@ -987,6 +1011,7 @@ mod tests {
             rd: Register::X0,
             rn: Register::X1,
             rm: Operand::Register(Register::X2),
+            width: RegisterWidth::X64,
         };
         let new_state = apply_instruction_concrete(state, &instr);
         assert_eq!(new_state.get_register(Register::X0).as_u64(), 0xFF);
@@ -999,6 +1024,7 @@ mod tests {
             rd: Register::X0,
             rn: Register::X1,
             rm: Operand::Register(Register::X2),
+            width: RegisterWidth::X64,
         };
         let new_state = apply_instruction_concrete(state, &instr);
         assert_eq!(new_state.get_register(Register::X0).as_u64(), 0xF0);
@@ -1011,9 +1037,90 @@ mod tests {
             rd: Register::X0,
             rn: Register::X0,
             rm: Operand::Register(Register::X0),
+            width: RegisterWidth::X64,
         };
         let new_state = apply_instruction_concrete(state, &instr);
         assert_eq!(new_state.get_register(Register::X0).as_u64(), 0);
+    }
+
+    #[test]
+    fn test_w32_logical_immediates_zero_extend_results() {
+        let state = state_with(vec![(Register::X1, 0xFFFF_FFFF_1234_00FF)]);
+        let instr = Instruction::And {
+            rd: Register::X0,
+            rn: Register::X1,
+            rm: Operand::Immediate(0xFF),
+            width: RegisterWidth::W32,
+        };
+        let new_state = apply_instruction_concrete(state, &instr);
+        assert_eq!(new_state.get_register(Register::X0).as_u64(), 0xFF);
+
+        let state = state_with(vec![(Register::X1, 0xFFFF_FFFF_0000_00F0)]);
+        let instr = Instruction::Orr {
+            rd: Register::X0,
+            rn: Register::X1,
+            rm: Operand::Immediate(0x0F),
+            width: RegisterWidth::W32,
+        };
+        let new_state = apply_instruction_concrete(state, &instr);
+        assert_eq!(new_state.get_register(Register::X0).as_u64(), 0xFF);
+
+        let state = state_with(vec![(Register::X1, 0xFFFF_FFFF_FFFF_00FF)]);
+        let instr = Instruction::Eor {
+            rd: Register::X0,
+            rn: Register::X1,
+            rm: Operand::Immediate(0xFF),
+            width: RegisterWidth::W32,
+        };
+        let new_state = apply_instruction_concrete(state, &instr);
+        assert_eq!(new_state.get_register(Register::X0).as_u64(), 0xFFFF_0000);
+    }
+
+    #[test]
+    fn test_w32_tst_uses_32_bit_flags() {
+        let instr = Instruction::Tst {
+            rn: Register::X1,
+            rm: Operand::Immediate(0x8000_0000),
+            width: RegisterWidth::W32,
+        };
+        let state = state_with(vec![(Register::X1, 0x8000_0000)]);
+        let new_state = apply_instruction_concrete(state, &instr);
+        let flags = new_state.get_flags();
+        assert_eq!(
+            (flags.n, flags.z, flags.c, flags.v),
+            (true, false, false, false)
+        );
+
+        let instr = Instruction::Tst {
+            rn: Register::X1,
+            rm: Operand::Immediate(0xFF),
+            width: RegisterWidth::W32,
+        };
+        let state = state_with(vec![(Register::X1, 0xFFFF_FFFF_0000_0000)]);
+        let new_state = apply_instruction_concrete(state, &instr);
+        let flags = new_state.get_flags();
+        assert_eq!(
+            (flags.n, flags.z, flags.c, flags.v),
+            (false, true, false, false)
+        );
+    }
+
+    #[test]
+    fn test_w32_ands_zero_extends_and_uses_32_bit_flags() {
+        let state = state_with(vec![(Register::X1, 0xFFFF_FFFF_8000_0000)]);
+        let instr = Instruction::Ands {
+            rd: Register::X0,
+            rn: Register::X1,
+            rm: Operand::Immediate(0x8000_0000),
+            width: RegisterWidth::W32,
+        };
+        let new_state = apply_instruction_concrete(state, &instr);
+        assert_eq!(new_state.get_register(Register::X0).as_u64(), 0x8000_0000);
+        let flags = new_state.get_flags();
+        assert_eq!(
+            (flags.n, flags.z, flags.c, flags.v),
+            (true, false, false, false)
+        );
     }
 
     #[test]
@@ -1181,6 +1288,7 @@ mod tests {
             rd: Register::X0,
             rn: Register::X0,
             rm: Operand::Register(Register::X0),
+            width: RegisterWidth::X64,
         }];
         let state2 = apply_sequence_concrete(state, &seq2);
 
@@ -1564,6 +1672,7 @@ mod tests {
             rd: Register::X0,
             rn: Register::X1,
             rm: Operand::Register(Register::X2),
+            width: RegisterWidth::X64,
         };
         let new_state = apply_instruction_concrete(state, &instr);
         assert_eq!(new_state.get_register(Register::X0).as_u64(), 0);

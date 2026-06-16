@@ -1,7 +1,7 @@
 //! Instruction generation utilities for search algorithms
 
 use crate::ir::instructions::MOVW_LEGAL_SHIFTS;
-use crate::ir::{Instruction, Operand, Register};
+use crate::ir::{Instruction, Operand, Register, RegisterWidth};
 use crate::isa::{AArch64, Assembler, InstructionType};
 
 /// Generic encodability check: for any `<I: InstructionType, A: Assembler<I>>`,
@@ -66,9 +66,24 @@ pub fn generate_all_instructions(registers: &[Register], immediates: &[i64]) -> 
 
                 instrs.push(Instruction::Add { rd, rn, rm: rm_op });
                 instrs.push(Instruction::Sub { rd, rn, rm: rm_op });
-                instrs.push(Instruction::And { rd, rn, rm: rm_op });
-                instrs.push(Instruction::Orr { rd, rn, rm: rm_op });
-                instrs.push(Instruction::Eor { rd, rn, rm: rm_op });
+                instrs.push(Instruction::And {
+                    rd,
+                    rn,
+                    rm: rm_op,
+                    width: RegisterWidth::X64,
+                });
+                instrs.push(Instruction::Orr {
+                    rd,
+                    rn,
+                    rm: rm_op,
+                    width: RegisterWidth::X64,
+                });
+                instrs.push(Instruction::Eor {
+                    rd,
+                    rn,
+                    rm: rm_op,
+                    width: RegisterWidth::X64,
+                });
                 instrs.push(Instruction::Lsl {
                     rd,
                     rn,
@@ -92,9 +107,24 @@ pub fn generate_all_instructions(registers: &[Register], immediates: &[i64]) -> 
 
                 instrs.push(Instruction::Add { rd, rn, rm: imm_op });
                 instrs.push(Instruction::Sub { rd, rn, rm: imm_op });
-                instrs.push(Instruction::And { rd, rn, rm: imm_op });
-                instrs.push(Instruction::Orr { rd, rn, rm: imm_op });
-                instrs.push(Instruction::Eor { rd, rn, rm: imm_op });
+                instrs.push(Instruction::And {
+                    rd,
+                    rn,
+                    rm: imm_op,
+                    width: RegisterWidth::X64,
+                });
+                instrs.push(Instruction::Orr {
+                    rd,
+                    rn,
+                    rm: imm_op,
+                    width: RegisterWidth::X64,
+                });
+                instrs.push(Instruction::Eor {
+                    rd,
+                    rn,
+                    rm: imm_op,
+                    width: RegisterWidth::X64,
+                });
             }
 
             // Shifted-register form (issue #59):
@@ -113,9 +143,24 @@ pub fn generate_all_instructions(registers: &[Register], immediates: &[i64]) -> 
                         };
                         instrs.push(Instruction::Add { rd, rn, rm: sr });
                         instrs.push(Instruction::Sub { rd, rn, rm: sr });
-                        instrs.push(Instruction::And { rd, rn, rm: sr });
-                        instrs.push(Instruction::Orr { rd, rn, rm: sr });
-                        instrs.push(Instruction::Eor { rd, rn, rm: sr });
+                        instrs.push(Instruction::And {
+                            rd,
+                            rn,
+                            rm: sr,
+                            width: RegisterWidth::X64,
+                        });
+                        instrs.push(Instruction::Orr {
+                            rd,
+                            rn,
+                            rm: sr,
+                            width: RegisterWidth::X64,
+                        });
+                        instrs.push(Instruction::Eor {
+                            rd,
+                            rn,
+                            rm: sr,
+                            width: RegisterWidth::X64,
+                        });
                     }
                     // ROR — logical only.
                     let sr_ror = Operand::ShiftedRegister {
@@ -123,9 +168,24 @@ pub fn generate_all_instructions(registers: &[Register], immediates: &[i64]) -> 
                         kind: ShiftKind::Ror,
                         amount,
                     };
-                    instrs.push(Instruction::And { rd, rn, rm: sr_ror });
-                    instrs.push(Instruction::Orr { rd, rn, rm: sr_ror });
-                    instrs.push(Instruction::Eor { rd, rn, rm: sr_ror });
+                    instrs.push(Instruction::And {
+                        rd,
+                        rn,
+                        rm: sr_ror,
+                        width: RegisterWidth::X64,
+                    });
+                    instrs.push(Instruction::Orr {
+                        rd,
+                        rn,
+                        rm: sr_ror,
+                        width: RegisterWidth::X64,
+                    });
+                    instrs.push(Instruction::Eor {
+                        rd,
+                        rn,
+                        rm: sr_ror,
+                        width: RegisterWidth::X64,
+                    });
                 }
                 // Issue #60: extended-register form for ADD/SUB. Cmp/Cmn
                 // are produced once-per-(rn,rm,kind,shift) further below
@@ -200,7 +260,12 @@ pub fn generate_all_instructions(registers: &[Register], immediates: &[i64]) -> 
                 instrs.push(Instruction::Eon { rd, rn, rm: rm_op });
                 instrs.push(Instruction::Adds { rd, rn, rm: rm_op });
                 instrs.push(Instruction::Subs { rd, rn, rm: rm_op });
-                instrs.push(Instruction::Ands { rd, rn, rm: rm_op });
+                instrs.push(Instruction::Ands {
+                    rd,
+                    rn,
+                    rm: rm_op,
+                    width: RegisterWidth::X64,
+                });
             }
             // ADDS / SUBS also accept the same 12-bit-class immediate table
             // ADD / SUB does — keep them in sync. ANDS accepts bitmask
@@ -359,7 +424,11 @@ pub fn generate_all_instructions(registers: &[Register], immediates: &[i64]) -> 
             let rm_op = Operand::Register(rm);
             instrs.push(Instruction::Cmp { rn, rm: rm_op });
             instrs.push(Instruction::Cmn { rn, rm: rm_op });
-            instrs.push(Instruction::Tst { rn, rm: rm_op });
+            instrs.push(Instruction::Tst {
+                rn,
+                rm: rm_op,
+                width: RegisterWidth::X64,
+            });
         }
         for &imm in immediates {
             let imm_op = Operand::Immediate(imm);
@@ -582,17 +651,32 @@ pub fn generate_random_instruction<R: rand::RngExt>(
         4 => {
             let rn = pick_reg(rng);
             let rm = Operand::Register(pick_reg(rng));
-            Instruction::And { rd, rn, rm }
+            Instruction::And {
+                rd,
+                rn,
+                rm,
+                width: RegisterWidth::X64,
+            }
         }
         5 => {
             let rn = pick_reg(rng);
             let rm = Operand::Register(pick_reg(rng));
-            Instruction::Orr { rd, rn, rm }
+            Instruction::Orr {
+                rd,
+                rn,
+                rm,
+                width: RegisterWidth::X64,
+            }
         }
         6 => {
             let rn = pick_reg(rng);
             let rm = Operand::Register(pick_reg(rng));
-            Instruction::Eor { rd, rn, rm }
+            Instruction::Eor {
+                rd,
+                rn,
+                rm,
+                width: RegisterWidth::X64,
+            }
         }
         7 => {
             let rn = pick_reg(rng);
@@ -661,7 +745,12 @@ pub fn generate_random_instruction<R: rand::RngExt>(
         20 => {
             let rn = pick_reg(rng);
             let rm = Operand::Register(pick_reg(rng));
-            Instruction::Ands { rd, rn, rm }
+            Instruction::Ands {
+                rd,
+                rn,
+                rm,
+                width: RegisterWidth::X64,
+            }
         }
         21 => Instruction::Cset {
             rd,
@@ -845,6 +934,7 @@ pub fn generate_random_instruction<R: rand::RngExt>(
                 _ => Instruction::Tst {
                     rn,
                     rm: Operand::Register(pick_reg(rng)),
+                    width: RegisterWidth::X64,
                 },
             }
         }
@@ -1201,6 +1291,7 @@ mod tests {
                 Instruction::Tst {
                     rn: Register::X0,
                     rm: Operand::Register(Register::X1),
+                    width: RegisterWidth::X64,
                 },
             ),
         ] {
@@ -1560,16 +1651,19 @@ mod tests {
                 rd: Register::X0,
                 rn: Register::X1,
                 rm: Operand::Immediate(0),
+                width: RegisterWidth::X64,
             },
             Instruction::Orr {
                 rd: Register::X0,
                 rn: Register::X1,
                 rm: Operand::Immediate(0),
+                width: RegisterWidth::X64,
             },
             Instruction::Eor {
                 rd: Register::X0,
                 rn: Register::X1,
                 rm: Operand::Immediate(0),
+                width: RegisterWidth::X64,
             },
             Instruction::Lsl {
                 rd: Register::X0,
