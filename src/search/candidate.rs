@@ -1156,6 +1156,9 @@ mod tests {
         }
     }
 
+    // Inverts `random_range`'s Lemire mapping: returns the smallest 32-bit
+    // word `w` such that `(w * range) >> 32 == value`, so a `BudgetedRng` can
+    // be primed to force a specific `random_range(0..range)` outcome.
     fn word_for_range(range: u32, value: u32) -> u32 {
         assert!(range > 0);
         assert!(value < range);
@@ -1165,6 +1168,11 @@ mod tests {
         word
     }
 
+    // Primes a `BudgetedRng` to steer `generate_random_instruction` down a
+    // chosen opcode arm: the first draw is the `rd` index (`random_range(0..2)`
+    // for these 2-register pools), the second is the opcode slot
+    // (`random_range(0..38)`). Slot 32 = CCMP/CCMN arm, slot 33 = bit-field arm
+    // — keep these in sync with the match in `generate_random_instruction`.
     fn rng_for_opcode_slot(slot: u32, rd_index: u32) -> BudgetedRng {
         BudgetedRng::new(vec![word_for_range(2, rd_index), word_for_range(38, slot)])
     }
