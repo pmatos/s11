@@ -617,7 +617,7 @@ pub fn generate_random_instruction<R: rand::RngExt>(
     let rd = registers[rng.random_range(0..registers.len())];
     let pick_reg = |rng: &mut R| registers[rng.random_range(0..registers.len())];
 
-    match rng.random_range(0..33) {
+    match rng.random_range(0..38) {
         0 => {
             let imm = if immediates.is_empty() {
                 0
@@ -777,23 +777,37 @@ pub fn generate_random_instruction<R: rand::RngExt>(
             let shift = shifts[rng.random_range(0..shifts.len())];
             Instruction::MovK { rd, imm, shift }
         }
-        // Single-source bit-manipulation: CLZ / CLS / RBIT / REV / REV32 / REV16.
-        26 => {
-            let rn = pick_reg(rng);
-            match rng.random_range(0..6) {
-                0 => Instruction::Clz { rd, rn },
-                1 => Instruction::Cls { rd, rn },
-                2 => Instruction::Rbit { rd, rn },
-                3 => Instruction::Rev { rd, rn },
-                4 => Instruction::Rev32 { rd, rn },
-                _ => Instruction::Rev16 { rd, rn },
-            }
-        }
+        // Single-source bit-manipulation opcodes each keep a top-level slot
+        // so stochastic search does not starve CLZ/RBIT/REV-shaped targets.
+        26 => Instruction::Clz {
+            rd,
+            rn: pick_reg(rng),
+        },
+        27 => Instruction::Cls {
+            rd,
+            rn: pick_reg(rng),
+        },
+        28 => Instruction::Rbit {
+            rd,
+            rn: pick_reg(rng),
+        },
+        29 => Instruction::Rev {
+            rd,
+            rn: pick_reg(rng),
+        },
+        30 => Instruction::Rev32 {
+            rd,
+            rn: pick_reg(rng),
+        },
+        31 => Instruction::Rev16 {
+            rd,
+            rn: pick_reg(rng),
+        },
         // CCMP / CCMN: conditional compare. The dispatch picks Ccmp or Ccmn
         // uniformly; the rm operand is sampled via random_operand and then
         // clamped/coerced to a valid 5-bit immediate if it lands on the
         // immediate side. nzcv is a 4-bit literal; cond from NORMAL_CONDITIONS.
-        27 => {
+        32 => {
             // CCMP/CCMN forbid SP in `rn` and in the register form of `rm`
             // (encoded in the Xn slot, not XSP). `generate_all_instructions`
             // filters SP at enumeration time; mirror that here so the
@@ -835,7 +849,7 @@ pub fn generate_random_instruction<R: rand::RngExt>(
         // SP rejected in rd and rn (matches `generate_all_instructions` and
         // `is_encodable_aarch64`); 2D constraint on (lsb, width) enforced by
         // sampling width AFTER lsb so width is bounded by `64-lsb`.
-        28 => {
+        33 => {
             debug_assert!(
                 registers.iter().any(|r| *r != Register::SP),
                 "bit-field random generator requires at least one non-SP register",
@@ -891,7 +905,7 @@ pub fn generate_random_instruction<R: rand::RngExt>(
             }
         }
         // Multiply-accumulate family: MADD/MSUB (4-operand) and MNEG/SMULH/UMULH (3-operand).
-        29 => {
+        34 => {
             let rn = pick_reg(rng);
             let rm = pick_reg(rng);
             match rng.random_range(0..5) {
@@ -909,7 +923,7 @@ pub fn generate_random_instruction<R: rand::RngExt>(
             }
         }
         // Issue #66 multiply / divide: MUL/SDIV/UDIV. All register-only.
-        30 => {
+        35 => {
             let rn = pick_reg(rng);
             let rm = pick_reg(rng);
             match rng.random_range(0..3) {
@@ -920,7 +934,7 @@ pub fn generate_random_instruction<R: rand::RngExt>(
         }
         // Issue #66 compares: CMP/CMN accept reg or imm; TST is register-only
         // at the encoder, so its `rm` is clamped to a register draw.
-        31 => {
+        36 => {
             let rn = pick_reg(rng);
             match rng.random_range(0..3) {
                 0 => Instruction::Cmp {
@@ -941,7 +955,7 @@ pub fn generate_random_instruction<R: rand::RngExt>(
         // Issue #66 conditional selects: CSEL/CSINC/CSINV/CSNEG. Register-only,
         // condition sampled from NORMAL_CONDITIONS (AL/NV excluded — AL
         // collapses to MOV rd,rn and NV is reserved).
-        32 => {
+        37 => {
             let rn = pick_reg(rng);
             let rm = pick_reg(rng);
             let cond = crate::ir::types::Condition::random_normal(rng);
@@ -1229,6 +1243,80 @@ mod tests {
         (0..draws)
             .map(|_| opcode_id(&generate_random_instruction(&mut rng, &regs, &imms)))
             .collect()
+    }
+
+    #[test]
+    fn generate_random_instruction_promotes_single_source_bit_ops_to_top_level_slots() {
+        use rand::SeedableRng;
+        use rand_chacha::ChaCha8Rng;
+        use std::collections::HashMap;
+
+        let regs = default_registers();
+        let imms = default_immediates();
+        let mut rng = ChaCha8Rng::seed_from_u64(0x115);
+        let mut counts: HashMap<u8, u32> = HashMap::new();
+        const N: u32 = 30_000;
+
+        for _ in 0..N {
+            let id = opcode_id(&generate_random_instruction(&mut rng, &regs, &imms));
+            *counts.entry(id).or_default() += 1;
+        }
+
+        for (label, instr) in [
+            (
+                "Clz",
+                Instruction::Clz {
+                    rd: Register::X0,
+                    rn: Register::X1,
+                },
+            ),
+            (
+                "Cls",
+                Instruction::Cls {
+                    rd: Register::X0,
+                    rn: Register::X1,
+                },
+            ),
+            (
+                "Rbit",
+                Instruction::Rbit {
+                    rd: Register::X0,
+                    rn: Register::X1,
+                },
+            ),
+            (
+                "Rev",
+                Instruction::Rev {
+                    rd: Register::X0,
+                    rn: Register::X1,
+                },
+            ),
+            (
+                "Rev32",
+                Instruction::Rev32 {
+                    rd: Register::X0,
+                    rn: Register::X1,
+                },
+            ),
+            (
+                "Rev16",
+                Instruction::Rev16 {
+                    rd: Register::X0,
+                    rn: Register::X1,
+                },
+            ),
+        ] {
+            let id = opcode_id(&instr);
+            let count = counts.get(&id).copied().unwrap_or(0);
+            assert!(
+                count >= 500,
+                "expected >= 500 samples for {} (id {}) in {} draws, got {}",
+                label,
+                id,
+                N,
+                count
+            );
+        }
     }
 
     #[test]
