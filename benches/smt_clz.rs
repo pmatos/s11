@@ -99,6 +99,10 @@ fn smt_clz(c: &mut Criterion) {
                 let config = EquivalenceConfig::with_live_out(case.live_out.clone())
                     .random_tests(0)
                     .timeout(Duration::from_secs(30));
+                // Each case is compared against itself: `random_tests(0)` forces the
+                // SMT path, and Z3 still builds the full CLZ/CLS formula to prove
+                // f(x) == f(x), so self-comparison isolates the encoding/solve cost
+                // under test rather than the cost of finding a distinct equivalent.
                 let (result, metrics) = check_equivalence_with_config_metrics(
                     black_box(&case.sequence),
                     black_box(&case.sequence),
