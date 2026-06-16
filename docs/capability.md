@@ -10,6 +10,12 @@ Status: primary target. Assembly text and ELF/Capstone input share the same
 parser path for accepted mnemonics. Search rewrites the straight-line prefix of
 a region; supported control-flow terminators are parsed and then held fixed.
 
+The parser and Capstone bridge accept `w0`-`w30` as aliases for the same
+physical IR registers as `x0`-`x30` where an instruction rule uses the generic
+register parser. Width-aware logical-immediate and memory forms keep their
+existing `W`/`X` behavior; widthless data-processing IR variants still use the
+existing 64-bit semantics and do not yet model bit-accurate 32-bit writes.
+
 Algorithms:
 - Enumerative, stochastic, symbolic, hybrid, and LLM-assisted search are
   available for AArch64.
