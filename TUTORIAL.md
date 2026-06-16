@@ -303,6 +303,11 @@ Exhaustively searches all possible instruction sequences up to a given length. G
 
 **Best for:** Small windows (1-3 instructions) where exhaustive search is feasible.
 
+Note: enumerative search scales with the generated instruction families in its
+candidate pool. At the default AArch64 8-register CLI scope,
+multiply-accumulate and high-half multiply add 9,728 candidates per length
+bucket; use `--timeout` or smaller optimization windows to bound runtime.
+
 ### 2. Stochastic Search (MCMC)
 
 Uses Markov Chain Monte Carlo to randomly explore the search space. Can handle larger windows but may not find optimal solutions.
