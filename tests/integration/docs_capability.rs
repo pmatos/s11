@@ -69,6 +69,12 @@ fn docs_capability_documents_w_logical_immediates() {
         ),
         "docs/capability.md must document W-register logical-immediate support"
     );
+    assert!(
+        matrix.contains(
+            "capstone `mov wd|wsp, #imm` bitmask aliases are accepted for the `orr wd|wsp, wzr, #imm` form"
+        ),
+        "docs/capability.md must document Capstone MOV aliases for W logical-immediate ORR"
+    );
 }
 
 #[test]
