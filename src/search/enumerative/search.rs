@@ -361,13 +361,17 @@ fn run_length_two<I>(
         if shared.stop.load(Ordering::Relaxed) {
             return;
         }
-        // Mirror symbolic's timeout granularity (instr1 level).
+        // Let idle workers stop before claiming a new outer-loop item.
         if EnumerativeSearch::<I>::timed_out(start, config.timeout) {
             shared.stop.store(true, Ordering::Relaxed);
             return;
         }
         for instr2 in all_instructions {
             if shared.stop.load(Ordering::Relaxed) {
+                return;
+            }
+            if EnumerativeSearch::<I>::timed_out(start, config.timeout) {
+                shared.stop.store(true, Ordering::Relaxed);
                 return;
             }
             let mut candidate = vec![*instr1, *instr2];
@@ -518,7 +522,10 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::AtomicUsize;
+
     use crate::ir::{Instruction, Operand, Register};
+    use crate::isa::{ISAMutator, InstructionType, U64};
     use crate::search::config::SymbolicConfig;
 
     #[test]
@@ -585,6 +592,152 @@ mod tests {
             .with_registers(vec![Register::X0, Register::X1])
             .with_immediates(vec![0, 1])
             .with_timeout(std::time::Duration::from_secs(10))
+    }
+
+    #[derive(Clone)]
+    struct InnerTimeoutIsa;
+
+    #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+    struct InnerTimeoutInstruction(u8);
+
+    impl std::fmt::Display for InnerTimeoutInstruction {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            write!(f, "probe{}", self.0)
+        }
+    }
+
+    impl InstructionType for InnerTimeoutInstruction {
+        type Register = Register;
+        type Operand = Operand;
+
+        fn destination(&self) -> Option<Self::Register> {
+            Some(Register::X0)
+        }
+
+        fn source_registers(&self) -> Vec<Self::Register> {
+            Vec::new()
+        }
+
+        fn opcode_id(&self) -> u8 {
+            self.0
+        }
+
+        fn mnemonic(&self) -> &'static str {
+            "probe"
+        }
+    }
+
+    struct InnerTimeoutMutator;
+
+    impl ISAMutator<InnerTimeoutInstruction> for InnerTimeoutMutator {
+        fn mutate<R: rand::RngExt>(
+            &self,
+            _rng: &mut R,
+            sequence: &[InnerTimeoutInstruction],
+        ) -> Vec<InnerTimeoutInstruction> {
+            sequence.to_vec()
+        }
+    }
+
+    impl ISA for InnerTimeoutIsa {
+        type Register = Register;
+        type Operand = Operand;
+        type Instruction = InnerTimeoutInstruction;
+        type Width = U64;
+        type Flags = ();
+        type Mutator = InnerTimeoutMutator;
+
+        fn name(&self) -> &'static str {
+            "InnerTimeout"
+        }
+
+        fn register_count(&self) -> usize {
+            1
+        }
+
+        fn instruction_size(&self) -> Option<usize> {
+            Some(1)
+        }
+
+        fn general_registers(&self) -> Vec<Self::Register> {
+            vec![Register::X0]
+        }
+
+        fn zero_register(&self) -> Option<Self::Register> {
+            Some(Register::XZR)
+        }
+    }
+
+    static INNER_TIMEOUT_COST_CALLS: AtomicUsize = AtomicUsize::new(0);
+
+    impl EnumerativeBackend<InnerTimeoutIsa> for InnerTimeoutIsa {
+        type LiveOut = ();
+
+        fn registers_from_config(_config: &SearchConfig) -> Vec<Register> {
+            vec![Register::X0]
+        }
+
+        fn immediates_from_config(_config: &SearchConfig) -> Vec<i64> {
+            vec![0]
+        }
+
+        fn enumerate_all(_regs: &[Register], _imms: &[i64]) -> Vec<InnerTimeoutInstruction> {
+            vec![InnerTimeoutInstruction(0), InnerTimeoutInstruction(1)]
+        }
+
+        fn sequence_cost(_seq: &[InnerTimeoutInstruction], _config: &SearchConfig) -> u64 {
+            INNER_TIMEOUT_COST_CALLS.fetch_add(1, Ordering::Relaxed);
+            std::thread::sleep(std::time::Duration::from_millis(50));
+            1
+        }
+
+        fn check_equivalence(
+            _target: &[InnerTimeoutInstruction],
+            _candidate: &[InnerTimeoutInstruction],
+            _live_out: &Self::LiveOut,
+            _config: &SearchConfig,
+        ) -> (EquivalenceResult, EquivalenceMetrics) {
+            panic!("cost pruning should prevent equivalence checks")
+        }
+    }
+
+    #[test]
+    fn run_length_two_sets_stop_when_inner_deadline_expires() {
+        INNER_TIMEOUT_COST_CALLS.store(0, Ordering::Relaxed);
+
+        let config = SearchConfig::default().with_timeout(std::time::Duration::from_millis(25));
+        let target = vec![InnerTimeoutInstruction(9), InnerTimeoutInstruction(8)];
+        let all_instructions =
+            <InnerTimeoutIsa as EnumerativeBackend<InnerTimeoutIsa>>::enumerate_all(&[], &[]);
+        // Positive candidate costs prune before equivalence, isolating timeout behavior.
+        let shared = SharedState::<InnerTimeoutIsa>::new(0);
+        let pool = rayon::ThreadPoolBuilder::new()
+            .num_threads(1)
+            .build()
+            .expect("private rayon pool should build");
+
+        pool.install(|| {
+            let start = Instant::now();
+            run_length_two::<InnerTimeoutIsa>(
+                &target,
+                &(),
+                &config,
+                &all_instructions,
+                None,
+                &shared,
+                start,
+            );
+        });
+
+        assert!(
+            shared.stop.load(Ordering::Relaxed),
+            "inner loop should set stop after the timeout expires"
+        );
+        assert_eq!(
+            INNER_TIMEOUT_COST_CALLS.load(Ordering::Relaxed),
+            1,
+            "timeout should be checked before evaluating the second inner candidate"
+        );
     }
 
     #[test]
