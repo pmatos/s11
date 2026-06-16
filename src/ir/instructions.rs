@@ -1052,7 +1052,8 @@ impl Instruction {
                 match shift {
                     Operand::Register(r) => regs.push(*r),
                     Operand::ShiftedRegister { reg, .. } => regs.push(*reg),
-                    Operand::Immediate(_) | Operand::ExtendedRegister { .. } => {}
+                    Operand::ExtendedRegister { reg, .. } => regs.push(*reg),
+                    Operand::Immediate(_) => {}
                 }
                 regs
             }
@@ -1124,7 +1125,8 @@ impl Instruction {
                 match shift {
                     Operand::Register(r) => regs.push(*r),
                     Operand::ShiftedRegister { reg, .. } => regs.push(*reg),
-                    Operand::Immediate(_) | Operand::ExtendedRegister { .. } => {}
+                    Operand::ExtendedRegister { reg, .. } => regs.push(*reg),
+                    Operand::Immediate(_) => {}
                 }
                 regs
             }
@@ -2320,46 +2322,55 @@ mod tests {
 
     #[test]
     fn test_source_registers_shift_slot_shifted_register_defensive() {
-        // Shift-slot ShiftedRegister operands are not encodable, but
-        // source_registers should still be conservative for programmatic IR.
+        use crate::ir::ExtendKind;
+        // Shift-slot ShiftedRegister and ExtendedRegister operands are not
+        // encodable, but source_registers should still be conservative for
+        // programmatic IR and report the inner register either way.
         let shifted = Operand::ShiftedRegister {
             reg: Register::X5,
             kind: ShiftKind::Lsl,
             amount: 1,
         };
-        for instr in [
-            Instruction::Lsl {
-                rd: Register::X0,
-                rn: Register::X1,
-                shift: shifted,
-            },
-            Instruction::Lsr {
-                rd: Register::X0,
-                rn: Register::X1,
-                shift: shifted,
-            },
-            Instruction::Asr {
-                rd: Register::X0,
-                rn: Register::X1,
-                shift: shifted,
-            },
-            Instruction::Ror {
-                rd: Register::X0,
-                rn: Register::X1,
-                shift: shifted,
-            },
-        ] {
-            assert!(
-                !instr.is_encodable_aarch64(),
-                "instr {} should remain unencodable",
-                instr
-            );
-            assert_eq!(
-                instr.source_registers(),
-                vec![Register::X1, Register::X5],
-                "instr {} must report the inner shift-slot register",
-                instr
-            );
+        let extended = Operand::ExtendedRegister {
+            reg: Register::X5,
+            kind: ExtendKind::Uxtx,
+            shift: 0,
+        };
+        for shift in [shifted, extended] {
+            for instr in [
+                Instruction::Lsl {
+                    rd: Register::X0,
+                    rn: Register::X1,
+                    shift,
+                },
+                Instruction::Lsr {
+                    rd: Register::X0,
+                    rn: Register::X1,
+                    shift,
+                },
+                Instruction::Asr {
+                    rd: Register::X0,
+                    rn: Register::X1,
+                    shift,
+                },
+                Instruction::Ror {
+                    rd: Register::X0,
+                    rn: Register::X1,
+                    shift,
+                },
+            ] {
+                assert!(
+                    !instr.is_encodable_aarch64(),
+                    "instr {} should remain unencodable",
+                    instr
+                );
+                assert_eq!(
+                    instr.source_registers(),
+                    vec![Register::X1, Register::X5],
+                    "instr {} must report the inner shift-slot register",
+                    instr
+                );
+            }
         }
     }
 
