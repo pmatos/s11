@@ -142,7 +142,7 @@ impl Mutator {
         let instr = &mut sequence[idx];
 
         match instr {
-            Instruction::MovReg { rd, rn } => {
+            Instruction::MovReg { rd, rn } | Instruction::MovRegW { rd, rn } => {
                 if rng.random_bool(0.5) {
                     *rd = self.random_register(rng);
                 } else {
@@ -156,7 +156,10 @@ impl Mutator {
                     *imm = self.random_immediate(rng);
                 }
             }
-            Instruction::Add { rd, rn, rm } | Instruction::Sub { rd, rn, rm } => {
+            Instruction::Add { rd, rn, rm }
+            | Instruction::AddW { rd, rn, rm }
+            | Instruction::Sub { rd, rn, rm }
+            | Instruction::SubW { rd, rn, rm } => {
                 let choice = rng.random_range(0..3);
                 match choice {
                     0 => *rd = self.random_register(rng),
@@ -481,6 +484,22 @@ impl Mutator {
                     Instruction::MovReg { rd, rn }
                 }
             }
+            Instruction::MovRegW { rd, rn } => {
+                // Opcode mutation must keep the W/X family compatible, so stay
+                // within the W family here (AddW/SubW already do). There is no
+                // `MovImmW`, so mirror the `MovReg -> MovImm` step by mutating to
+                // a W-form `AddW` with a freshly generated (clamped) rm, or
+                // keeping `MovRegW`.
+                if rng.random_bool(0.5) {
+                    Instruction::AddW {
+                        rd,
+                        rn,
+                        rm: Self::clamp_imm12(self.random_operand_3op(rng, false)),
+                    }
+                } else {
+                    Instruction::MovRegW { rd, rn }
+                }
+            }
             Instruction::MovImm { rd, .. } => {
                 if rng.random_bool(0.5) {
                     Instruction::MovReg {
@@ -516,6 +535,10 @@ impl Mutator {
                 },
                 _ => Instruction::Add { rd, rn, rm },
             },
+            Instruction::AddW { rd, rn, rm } => match rng.random_range(0..3) {
+                0 => Instruction::SubW { rd, rn, rm },
+                _ => Instruction::AddW { rd, rn, rm },
+            },
             Instruction::Sub { rd, rn, rm } => match rng.random_range(0..5) {
                 0 => Instruction::Add { rd, rn, rm },
                 1 => Instruction::And {
@@ -537,6 +560,10 @@ impl Mutator {
                     width: RegisterWidth::X64,
                 },
                 _ => Instruction::Sub { rd, rn, rm },
+            },
+            Instruction::SubW { rd, rn, rm } => match rng.random_range(0..3) {
+                0 => Instruction::AddW { rd, rn, rm },
+                _ => Instruction::SubW { rd, rn, rm },
             },
             Instruction::And { rd, rn, rm, width } => match rng.random_range(0..5) {
                 // Logical -> arithmetic: drop ROR from the shifted-register form.

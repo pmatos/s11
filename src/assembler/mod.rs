@@ -65,6 +65,33 @@ macro_rules! emit_shifted_reg_3op_arith {
     }};
 }
 
+macro_rules! emit_shifted_reg_3op_arith_w {
+    ($ops:expr, $mnem:ident, $rd:expr, $rn:expr, $rm:expr, $kind:expr, $amt:expr) => {{
+        let rd_n: u8 = $rd;
+        let rn_n: u8 = $rn;
+        let rm_n: u8 = $rm;
+        let amt_n: u32 = ($amt) as u32;
+        match $kind {
+            ShiftKind::Lsl => {
+                dynasm!($ops ; .arch aarch64 ; $mnem W(rd_n), W(rn_n), W(rm_n), LSL amt_n);
+                Ok(())
+            }
+            ShiftKind::Lsr => {
+                dynasm!($ops ; .arch aarch64 ; $mnem W(rd_n), W(rn_n), W(rm_n), LSR amt_n);
+                Ok(())
+            }
+            ShiftKind::Asr => {
+                dynasm!($ops ; .arch aarch64 ; $mnem W(rd_n), W(rn_n), W(rm_n), ASR amt_n);
+                Ok(())
+            }
+            ShiftKind::Ror => Err(format!(
+                "{} cannot use ROR shift (rejected by is_encodable_aarch64)",
+                stringify!($mnem)
+            )),
+        }
+    }};
+}
+
 /// 3-operand logical shifted-register instruction (And/Orr/Eor) — accepts all
 /// four ShiftKinds including ROR.
 macro_rules! emit_shifted_reg_3op_logical {
@@ -658,6 +685,16 @@ impl AArch64Assembler {
                 );
                 Ok(())
             }
+            Instruction::MovRegW { rd, rn } => {
+                let rd_reg = register_to_dynasm(*rd)?;
+                let rn_reg = register_to_dynasm(*rn)?;
+
+                dynasm!(ops
+                    ; .arch aarch64
+                    ; mov W(rd_reg), W(rn_reg)
+                );
+                Ok(())
+            }
             Instruction::MovImm { rd, imm } => {
                 let rd_reg = register_to_dynasm(*rd)?;
 
@@ -729,6 +766,41 @@ impl AArch64Assembler {
                     }
                 }
             }
+            Instruction::AddW { rd, rn, rm } => match rm {
+                Operand::Register(rm_reg) => {
+                    let rd_reg = register_to_dynasm(*rd)?;
+                    let rn_reg = register_to_dynasm(*rn)?;
+                    let rm_reg_num = register_to_dynasm(*rm_reg)?;
+                    dynasm!(ops
+                        ; .arch aarch64
+                        ; add W(rd_reg), W(rn_reg), W(rm_reg_num)
+                    );
+                    Ok(())
+                }
+                Operand::Immediate(imm) => {
+                    if *imm < 0 || *imm > 0xFFF {
+                        return Err(format!("Immediate {} out of range for ADD W", imm));
+                    }
+                    let rd_reg = register_to_dynasm_wsp(*rd)?;
+                    let rn_reg = register_to_dynasm_wsp(*rn)?;
+                    dynasm!(ops
+                        ; .arch aarch64
+                        ; add WSP(rd_reg), WSP(rn_reg), #*imm as u32
+                    );
+                    Ok(())
+                }
+                Operand::ShiftedRegister { reg, kind, amount } => {
+                    let rd_reg = register_to_dynasm(*rd)?;
+                    let rn_reg = register_to_dynasm(*rn)?;
+                    let rm_reg_num = register_to_dynasm(*reg)?;
+                    emit_shifted_reg_3op_arith_w!(
+                        ops, add, rd_reg, rn_reg, rm_reg_num, kind, *amount
+                    )
+                }
+                Operand::ExtendedRegister { .. } => Err(
+                    "ADD W extended-register form is not wired in the assembler yet".to_string(),
+                ),
+            },
             Instruction::Sub { rd, rn, rm } => {
                 // See the ADD arm: rd is resolved inside each operand branch so
                 // the immediate/extended forms gate it through the Xn|SP encoder
@@ -780,6 +852,41 @@ impl AArch64Assembler {
                     }
                 }
             }
+            Instruction::SubW { rd, rn, rm } => match rm {
+                Operand::Register(rm_reg) => {
+                    let rd_reg = register_to_dynasm(*rd)?;
+                    let rn_reg = register_to_dynasm(*rn)?;
+                    let rm_reg_num = register_to_dynasm(*rm_reg)?;
+                    dynasm!(ops
+                        ; .arch aarch64
+                        ; sub W(rd_reg), W(rn_reg), W(rm_reg_num)
+                    );
+                    Ok(())
+                }
+                Operand::Immediate(imm) => {
+                    if *imm < 0 || *imm > 0xFFF {
+                        return Err(format!("Immediate {} out of range for SUB W", imm));
+                    }
+                    let rd_reg = register_to_dynasm_wsp(*rd)?;
+                    let rn_reg = register_to_dynasm_wsp(*rn)?;
+                    dynasm!(ops
+                        ; .arch aarch64
+                        ; sub WSP(rd_reg), WSP(rn_reg), #*imm as u32
+                    );
+                    Ok(())
+                }
+                Operand::ShiftedRegister { reg, kind, amount } => {
+                    let rd_reg = register_to_dynasm(*rd)?;
+                    let rn_reg = register_to_dynasm(*rn)?;
+                    let rm_reg_num = register_to_dynasm(*reg)?;
+                    emit_shifted_reg_3op_arith_w!(
+                        ops, sub, rd_reg, rn_reg, rm_reg_num, kind, *amount
+                    )
+                }
+                Operand::ExtendedRegister { .. } => Err(
+                    "SUB W extended-register form is not wired in the assembler yet".to_string(),
+                ),
+            },
             // For AND/ORR/EOR: rd resolution depends on the rm operand shape —
             // the immediate form encodes Rd in the Xn|SP slot (accepts SP,
             // rejects XZR), while the register and shifted-register forms use
@@ -2160,6 +2267,42 @@ mod tests {
         let bytes = result.expect("ADD immediate encoding should succeed");
         assert_eq!(bytes.len(), 4);
         assert_ne!(bytes, [0, 0, 0, 0]);
+    }
+
+    #[test]
+    fn assemble_w_add_sub_mov_forms() {
+        let mut assembler = AArch64Assembler::new();
+        let instructions = vec![
+            Instruction::MovRegW {
+                rd: Register::X0,
+                rn: Register::X1,
+            },
+            Instruction::AddW {
+                rd: Register::X2,
+                rn: Register::X3,
+                rm: Operand::Register(Register::X4),
+            },
+            Instruction::AddW {
+                rd: Register::X5,
+                rn: Register::X6,
+                rm: Operand::Immediate(7),
+            },
+            Instruction::SubW {
+                rd: Register::X7,
+                rn: Register::X8,
+                rm: Operand::Register(Register::X9),
+            },
+            Instruction::SubW {
+                rd: Register::X10,
+                rn: Register::X11,
+                rm: Operand::Immediate(12),
+            },
+        ];
+
+        let bytes = assembler
+            .assemble_instructions(&instructions, 0)
+            .expect("W register forms should assemble");
+        assert_eq!(bytes.len(), instructions.len() * 4);
     }
 
     #[test]

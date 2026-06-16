@@ -98,6 +98,10 @@ pub enum Instruction {
         rd: Register,
         rn: Register,
     },
+    MovRegW {
+        rd: Register,
+        rn: Register,
+    },
     MovImm {
         rd: Register,
         imm: i64,
@@ -109,7 +113,17 @@ pub enum Instruction {
         rn: Register,
         rm: Operand,
     },
+    AddW {
+        rd: Register,
+        rn: Register,
+        rm: Operand,
+    },
     Sub {
+        rd: Register,
+        rn: Register,
+        rm: Operand,
+    },
+    SubW {
         rd: Register,
         rn: Register,
         rm: Operand,
@@ -548,9 +562,12 @@ impl Instruction {
     pub fn destination(&self) -> Option<Register> {
         match self {
             Instruction::MovReg { rd, .. }
+            | Instruction::MovRegW { rd, .. }
             | Instruction::MovImm { rd, .. }
             | Instruction::Add { rd, .. }
+            | Instruction::AddW { rd, .. }
             | Instruction::Sub { rd, .. }
+            | Instruction::SubW { rd, .. }
             | Instruction::And { rd, .. }
             | Instruction::Orr { rd, .. }
             | Instruction::Eor { rd, .. }
@@ -730,6 +747,7 @@ impl Instruction {
         match self {
             // MovReg is always encodable
             Instruction::MovReg { .. } => true,
+            Instruction::MovRegW { rd, rn } => *rd != Register::SP && *rn != Register::SP,
 
             // MOV immediate: 16-bit range
             Instruction::MovImm { imm, .. } => *imm >= 0 && *imm <= 0xFFFF,
@@ -768,6 +786,22 @@ impl Instruction {
                         && *rn != Register::SP
                         && *rn != Register::XZR
                 }
+            },
+            Instruction::AddW { rd, rn, rm } | Instruction::SubW { rd, rn, rm } => match rm {
+                Operand::Register(reg) => {
+                    *rd != Register::SP && *rn != Register::SP && *reg != Register::SP
+                }
+                Operand::Immediate(imm) => {
+                    *imm >= 0 && *imm <= 0xFFF && *rd != Register::XZR && *rn != Register::XZR
+                }
+                Operand::ShiftedRegister { reg, kind, amount } => {
+                    *kind != ShiftKind::Ror
+                        && *amount <= 31
+                        && *reg != Register::SP
+                        && *rd != Register::SP
+                        && *rn != Register::SP
+                }
+                Operand::ExtendedRegister { .. } => false,
             },
 
             // AND/ORR/EOR: register, encodable bitmask immediate (issue #65), or
@@ -1039,10 +1073,12 @@ impl Instruction {
     #[allow(dead_code)]
     pub fn source_registers(&self) -> Vec<Register> {
         match self {
-            Instruction::MovReg { rn, .. } => vec![*rn],
+            Instruction::MovReg { rn, .. } | Instruction::MovRegW { rn, .. } => vec![*rn],
             Instruction::MovImm { .. } => vec![],
             Instruction::Add { rn, rm, .. }
+            | Instruction::AddW { rn, rm, .. }
             | Instruction::Sub { rn, rm, .. }
+            | Instruction::SubW { rn, rm, .. }
             | Instruction::And { rn, rm, .. }
             | Instruction::Orr { rn, rm, .. }
             | Instruction::Eor { rn, rm, .. } => {
@@ -1337,9 +1373,29 @@ impl fmt::Display for Instruction {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Instruction::MovReg { rd, rn } => write!(f, "mov {}, {}", rd, rn),
+            Instruction::MovRegW { rd, rn } => write!(
+                f,
+                "mov {}, {}",
+                RegisterWidth::W32.register_name(*rd),
+                RegisterWidth::W32.register_name(*rn)
+            ),
             Instruction::MovImm { rd, imm } => write!(f, "mov {}, #{}", rd, imm),
             Instruction::Add { rd, rn, rm } => write!(f, "add {}, {}, {}", rd, rn, rm),
+            Instruction::AddW { rd, rn, rm } => write!(
+                f,
+                "add {}, {}, {}",
+                RegisterWidth::W32.register_name(*rd),
+                RegisterWidth::W32.register_name(*rn),
+                rm.display_with_width(RegisterWidth::W32)
+            ),
             Instruction::Sub { rd, rn, rm } => write!(f, "sub {}, {}, {}", rd, rn, rm),
+            Instruction::SubW { rd, rn, rm } => write!(
+                f,
+                "sub {}, {}, {}",
+                RegisterWidth::W32.register_name(*rd),
+                RegisterWidth::W32.register_name(*rn),
+                rm.display_with_width(RegisterWidth::W32)
+            ),
             Instruction::And { rd, rn, rm, width } => write!(
                 f,
                 "and {}, {}, {}",

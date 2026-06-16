@@ -182,10 +182,10 @@ impl InstructionType for Instruction {
 
     fn opcode_id(&self) -> u8 {
         match self {
-            Instruction::MovReg { .. } => 0,
+            Instruction::MovReg { .. } | Instruction::MovRegW { .. } => 0,
             Instruction::MovImm { .. } => 1,
-            Instruction::Add { .. } => 2,
-            Instruction::Sub { .. } => 3,
+            Instruction::Add { .. } | Instruction::AddW { .. } => 2,
+            Instruction::Sub { .. } | Instruction::SubW { .. } => 3,
             Instruction::And { .. } => 4,
             Instruction::Orr { .. } => 5,
             Instruction::Eor { .. } => 6,
@@ -273,9 +273,11 @@ impl InstructionType for Instruction {
 
     fn mnemonic(&self) -> &'static str {
         match self {
-            Instruction::MovReg { .. } | Instruction::MovImm { .. } => "mov",
-            Instruction::Add { .. } => "add",
-            Instruction::Sub { .. } => "sub",
+            Instruction::MovReg { .. }
+            | Instruction::MovRegW { .. }
+            | Instruction::MovImm { .. } => "mov",
+            Instruction::Add { .. } | Instruction::AddW { .. } => "add",
+            Instruction::Sub { .. } | Instruction::SubW { .. } => "sub",
             Instruction::And { .. } => "and",
             Instruction::Orr { .. } => "orr",
             Instruction::Eor { .. } => "eor",
@@ -407,6 +409,7 @@ impl InstructionGenerator<Instruction> for AArch64InstructionGenerator {
         for &rd in registers {
             for &rn in registers {
                 instructions.push(Instruction::MovReg { rd, rn });
+                instructions.push(Instruction::MovRegW { rd, rn });
             }
         }
 
@@ -423,7 +426,9 @@ impl InstructionGenerator<Instruction> for AArch64InstructionGenerator {
                 for &rm in registers {
                     let rm_op = Operand::Register(rm);
                     instructions.push(Instruction::Add { rd, rn, rm: rm_op });
+                    instructions.push(Instruction::AddW { rd, rn, rm: rm_op });
                     instructions.push(Instruction::Sub { rd, rn, rm: rm_op });
+                    instructions.push(Instruction::SubW { rd, rn, rm: rm_op });
                     instructions.push(Instruction::And {
                         rd,
                         rn,
@@ -452,7 +457,9 @@ impl InstructionGenerator<Instruction> for AArch64InstructionGenerator {
                 for &imm in immediates {
                     let imm_op = Operand::Immediate(imm);
                     instructions.push(Instruction::Add { rd, rn, rm: imm_op });
+                    instructions.push(Instruction::AddW { rd, rn, rm: imm_op });
                     instructions.push(Instruction::Sub { rd, rn, rm: imm_op });
+                    instructions.push(Instruction::SubW { rd, rn, rm: imm_op });
                 }
             }
         }
@@ -1046,9 +1053,12 @@ impl InstructionGenerator<Instruction> for AArch64InstructionGenerator {
                 let new_rd = registers[rng.random_range(0..registers.len())];
                 match *instruction {
                     Instruction::MovReg { rn, .. } => Instruction::MovReg { rd: new_rd, rn },
+                    Instruction::MovRegW { rn, .. } => Instruction::MovRegW { rd: new_rd, rn },
                     Instruction::MovImm { imm, .. } => Instruction::MovImm { rd: new_rd, imm },
                     Instruction::Add { rn, rm, .. } => Instruction::Add { rd: new_rd, rn, rm },
+                    Instruction::AddW { rn, rm, .. } => Instruction::AddW { rd: new_rd, rn, rm },
                     Instruction::Sub { rn, rm, .. } => Instruction::Sub { rd: new_rd, rn, rm },
+                    Instruction::SubW { rn, rm, .. } => Instruction::SubW { rd: new_rd, rn, rm },
                     Instruction::And { rn, rm, width, .. } => Instruction::And {
                         rd: new_rd,
                         rn,
@@ -1242,6 +1252,10 @@ impl InstructionGenerator<Instruction> for AArch64InstructionGenerator {
                         let new_rn = registers[rng.random_range(0..registers.len())];
                         Instruction::MovReg { rd, rn: new_rn }
                     }
+                    Instruction::MovRegW { rd, .. } => {
+                        let new_rn = registers[rng.random_range(0..registers.len())];
+                        Instruction::MovRegW { rd, rn: new_rn }
+                    }
                     Instruction::MovImm { rd, .. } => {
                         let new_imm = immediates[rng.random_range(0..immediates.len())];
                         Instruction::MovImm { rd, imm: new_imm }
@@ -1250,9 +1264,17 @@ impl InstructionGenerator<Instruction> for AArch64InstructionGenerator {
                         let new_rm = mutate_operand(rng, rm, registers, immediates, 0xFFF);
                         Instruction::Add { rd, rn, rm: new_rm }
                     }
+                    Instruction::AddW { rd, rn, rm } => {
+                        let new_rm = mutate_operand(rng, rm, registers, immediates, 0xFFF);
+                        Instruction::AddW { rd, rn, rm: new_rm }
+                    }
                     Instruction::Sub { rd, rn, rm } => {
                         let new_rm = mutate_operand(rng, rm, registers, immediates, 0xFFF);
                         Instruction::Sub { rd, rn, rm: new_rm }
+                    }
+                    Instruction::SubW { rd, rn, rm } => {
+                        let new_rm = mutate_operand(rng, rm, registers, immediates, 0xFFF);
+                        Instruction::SubW { rd, rn, rm: new_rm }
                     }
                     Instruction::And {
                         rd,
