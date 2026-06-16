@@ -2780,7 +2780,7 @@ mod tests {
             assert!(is_extend_keyword(kw), "{kw} should be an extend keyword");
         }
 
-        for kw in ["lsl", "lsr", "asr", "uxt", "uxtb2", "sxtq", ""] {
+        for kw in ["lsl", "lsr", "asr", "ror", "uxt", "uxtb2", "sxtq", ""] {
             assert!(
                 !is_extend_keyword(kw),
                 "{kw} should not be an extend keyword"
