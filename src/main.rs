@@ -12,7 +12,7 @@ mod test_utils;
 use s11::assembler::AArch64Assembler;
 use s11::elf_patcher::{AddressWindow, DetectedArch, ElfPatcher, parse_hex_address};
 use s11::ir::instructions::{MOVW_LEGAL_SHIFTS, split_terminator};
-use s11::ir::{Instruction, Register};
+use s11::ir::{Condition, Instruction, Register};
 use s11::search::config::{
     Algorithm, LlmConfig, SearchConfig, SearchMode, StochasticConfig, SymbolicConfig,
 };
@@ -1268,10 +1268,51 @@ fn normalize_mov_wide_alias(op_str: &str) -> Result<Option<String>, String> {
     Ok(None)
 }
 
+fn normalize_cond_select_alias(mnemonic: &str, op_str: &str) -> Result<String, String> {
+    let operands = split_capstone_alias_operands(op_str);
+    if operands.len() != 3 {
+        return Err(format!(
+            "{} alias requires 3 operands (rd, rn, cond), got {}",
+            mnemonic,
+            operands.len()
+        ));
+    }
+
+    let rd = operands[0];
+    let rn = operands[1];
+    parser::parse_register(rd).map_err(|err| format!("invalid {mnemonic} destination: {err}"))?;
+    parser::parse_register(rn).map_err(|err| format!("invalid {mnemonic} source: {err}"))?;
+
+    let cond = parser::parse_condition(operands[2])?;
+    if matches!(cond, Condition::AL | Condition::NV) {
+        return Err(format!(
+            "{} alias does not support {} condition",
+            mnemonic, cond
+        ));
+    }
+
+    let canonical = match mnemonic {
+        "cinc" => "csinc",
+        "cinv" => "csinv",
+        "cneg" => "csneg",
+        _ => unreachable!("conditional-select alias normalizer called for {mnemonic}"),
+    };
+
+    Ok(format!(
+        "{} {}, {}, {}, {}",
+        canonical,
+        rd,
+        rn,
+        rn,
+        cond.invert()
+    ))
+}
+
 fn normalize_capstone_alias(mnemonic: &str, op_str: &str) -> Result<Option<String>, String> {
     let mnemonic = mnemonic.to_ascii_lowercase();
     match mnemonic.as_str() {
         "mov" => normalize_mov_wide_alias(op_str),
+        "cinc" | "cinv" | "cneg" => normalize_cond_select_alias(&mnemonic, op_str).map(Some),
         _ => Ok(None),
     }
 }
@@ -2399,6 +2440,49 @@ mod cli_helper_tests {
             match convert_capstone_op("mov", ops) {
                 ConvertOutcome::Instruction(instr) => assert_eq!(instr, expected),
                 other => panic!("expected normalized Instruction for `mov {ops}`, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn convert_capstone_op_normalizes_cond_select_aliases() {
+        for (mnemonic, ops, expected) in [
+            (
+                "cinc",
+                "x0, x1, eq",
+                Instruction::Csinc {
+                    rd: Register::X0,
+                    rn: Register::X1,
+                    rm: Register::X1,
+                    cond: ir::Condition::NE,
+                },
+            ),
+            (
+                "cinv",
+                "x2, x3, lt",
+                Instruction::Csinv {
+                    rd: Register::X2,
+                    rn: Register::X3,
+                    rm: Register::X3,
+                    cond: ir::Condition::GE,
+                },
+            ),
+            (
+                "cneg",
+                "x4, x5, ge",
+                Instruction::Csneg {
+                    rd: Register::X4,
+                    rn: Register::X5,
+                    rm: Register::X5,
+                    cond: ir::Condition::LT,
+                },
+            ),
+        ] {
+            match convert_capstone_op(mnemonic, ops) {
+                ConvertOutcome::Instruction(instr) => assert_eq!(instr, expected),
+                other => {
+                    panic!("expected normalized Instruction for `{mnemonic} {ops}`, got {other:?}")
+                }
             }
         }
     }
