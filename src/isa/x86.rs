@@ -543,12 +543,10 @@ impl crate::isa::traits::FlagsAnalysis<X86Instruction> for X86_32 {
     }
 }
 
-// --- Trait surface impls (#77 stage 2 step 17) ---
-// Each impl delegates to the existing free function so the parallel
-// pipeline files (concrete_x86.rs / smt_x86.rs / cost_x86.rs /
-// assembler/x86.rs) can be deleted in stage 2 step 18 once stage 1's
-// SearchAlgorithm<I> follow-up wires the consumer side through these
-// trait impls.
+// --- Trait surface impls (#77) ---
+// The x86 executor, symbolic, cost, assembler, and generator traits are the
+// consumer-facing contract. The x86-specific modules remain as backend
+// implementation details behind these impls.
 
 impl crate::isa::traits::ConcreteExecutor<X86Instruction> for X86_64 {
     type Value = u64;
