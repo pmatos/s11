@@ -1,6 +1,9 @@
 //! Markov Chain Monte Carlo (MCMC) search implementation
 //!
-//! Implements stochastic superoptimization using Metropolis-Hastings MCMC.
+//! Implements stochastic superoptimization using MCMC-style mutation plus
+//! Metropolis cost acceptance. Proposal probabilities are heuristic and no
+//! Hastings ratio is computed.
+//!
 //! The algorithm:
 //! 1. Generate test cases for fast validation
 //! 2. Start with a random initial program (or copy of target)
@@ -8,10 +11,10 @@
 //!    a. Mutate current program
 //!    b. Evaluate on tests (fast rejection if fails)
 //!    c. If passes tests with zero cost → verify with SMT
+//!    d. Accept/reject based on Metropolis cost acceptance
+//! 4. Return best found optimization
 
 #![allow(dead_code)]
-//!    d. Accept/reject based on Metropolis-Hastings criterion
-//! 4. Return best found optimization
 
 use crate::ir::{Instruction, Register};
 use crate::isa::{ISA, ISAMutator};
@@ -30,7 +33,8 @@ use std::marker::PhantomData;
 use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
 
-/// Stochastic search using Metropolis-Hastings MCMC, generic over ISA.
+/// Stochastic search using MCMC-style proposals and Metropolis cost
+/// acceptance, generic over ISA.
 ///
 /// The body routes through the `StochasticBackend<I>` dispatch trait
 /// (`src/search/stochastic/backend.rs`) for every ISA-specific
@@ -851,7 +855,7 @@ mod tests {
     fn x86_stochastic_runs_end_to_end() {
         use crate::isa::X86_64;
         use crate::isa::x86::{X86Instruction, X86Register};
-        use crate::semantics::state::X86LiveOutMask;
+        use crate::semantics::live_out::X86LiveOut;
 
         let mut search: StochasticSearch<X86_64> = StochasticSearch::new();
         let config = SearchConfig::default()
@@ -864,7 +868,7 @@ mod tests {
             .with_immediates(vec![0, 1])
             .with_x86_width(64);
 
-        let live_out = X86LiveOutMask::from_registers(vec![X86Register::RAX]).with_flags(false);
+        let live_out = X86LiveOut::from_registers(vec![X86Register::RAX]).with_flags(false);
 
         let target = vec![
             X86Instruction::MovImm {
@@ -896,7 +900,7 @@ mod tests {
     fn x86_stochastic_mode32_runs_end_to_end() {
         use crate::isa::X86_32;
         use crate::isa::x86::{X86Instruction, X86Register};
-        use crate::semantics::state::X86LiveOutMask;
+        use crate::semantics::live_out::X86LiveOut;
 
         let mut search: StochasticSearch<X86_32> = StochasticSearch::new();
         let config = SearchConfig::default()
@@ -910,7 +914,7 @@ mod tests {
             .with_immediates(vec![0, 1])
             .with_x86_width(32);
 
-        let live_out = X86LiveOutMask::from_registers(vec![X86Register::RAX]).with_flags(false);
+        let live_out = X86LiveOut::from_registers(vec![X86Register::RAX]).with_flags(false);
         let target = vec![
             X86Instruction::MovImm {
                 rd: X86Register::RAX,

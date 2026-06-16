@@ -269,7 +269,7 @@ pub fn compute_live_in_registers(instructions: &[Instruction]) -> RegisterSet<Re
     live_in
 }
 
-/// Build an `X86LiveOutMask` from a target sequence by treating every
+/// Build an x86 `RegisterSet` from a target sequence by treating every
 /// written register as live-out and declaring EFLAGS live whenever the
 /// target contains any instruction with observable side effects (i.e.
 /// any non-MOV / non-CMOV / non-Jcc variant — see
@@ -278,21 +278,20 @@ pub fn compute_live_in_registers(instructions: &[Instruction]) -> RegisterSet<Re
 /// **Asymmetry:** CMOV and Jcc READ EFLAGS but report
 /// `has_side_effects=false` (they don't write flags), so a CMOV-only or
 /// Jcc-only target gets `flags_live=false` from this helper.
-/// `find_shorter_equivalent_x86` (`src/main.rs`) compensates by
-/// dropping `.fast_only()` when the target contains any flag-reader,
-/// forcing the SMT path to fully account for incoming EFLAGS. Direct
-/// callers that bypass that helper must apply their own equivalent
-/// guard if their downstream code reads flags.
+/// x86 equivalence compensates for a fixed trailing Jcc by forcing flags into
+/// the effective live-out contract before comparing prefixes. Direct callers
+/// that bypass the generic equivalence entry point must apply their own
+/// equivalent guard if their downstream code reads flags.
 pub fn x86_live_out_from_target(
     target: &[crate::isa::x86::X86Instruction],
-) -> crate::semantics::state::X86LiveOutMask {
+) -> crate::semantics::live_out::X86LiveOut {
     use crate::isa::InstructionType;
-    use crate::semantics::state::X86LiveOutMask;
+    use crate::semantics::live_out::RegisterSet;
 
     let registers: Vec<crate::isa::x86::X86Register> =
         target.iter().filter_map(|i| i.destination()).collect();
     let flags_live = target.iter().any(InstructionType::has_side_effects);
-    X86LiveOutMask::from_registers(registers).with_flags(flags_live)
+    RegisterSet::from_registers(registers).with_flags(flags_live)
 }
 
 #[cfg(test)]
@@ -848,7 +847,8 @@ mod tests {
             rd: X86Register::RAX,
             rs: X86Register::RBX,
         }];
-        let mask = x86_live_out_from_target(&target);
+        let mask: crate::semantics::live_out::RegisterSet<X86Register> =
+            x86_live_out_from_target(&target);
         assert!(mask.contains(X86Register::RAX));
         assert!(
             !mask.flags_live(),
