@@ -110,6 +110,8 @@ pub trait StochasticBackend<I: ISA>: Sized {
 
     /// Width parameter for cost + state masking. Architecture markers own
     /// this width so a mismatched config cannot silently change semantics.
+    /// `config` is retained only for API symmetry; implementations are
+    /// expected to return an architectural constant and must not read it.
     fn width(config: &SearchConfig) -> u32;
 }
 
@@ -449,6 +451,8 @@ mod tests {
             32
         );
 
+        // X86_64 was already correct; this cross-check guards against a
+        // future regression and is not part of the x86-32 bug being fixed.
         assert_eq!(
             <crate::isa::X86_64 as StochasticBackend<crate::isa::X86_64>>::width(
                 &SearchConfig::default().with_x86_width(32),
