@@ -110,89 +110,49 @@ impl std::error::Error for ParseLineError {}
 
 /// Parse a register name (case-insensitive)
 pub fn parse_register(s: &str) -> Result<Register, String> {
-    match s.to_lowercase().as_str() {
-        "x0" => Ok(Register::X0),
-        "x1" => Ok(Register::X1),
-        "x2" => Ok(Register::X2),
-        "x3" => Ok(Register::X3),
-        "x4" => Ok(Register::X4),
-        "x5" => Ok(Register::X5),
-        "x6" => Ok(Register::X6),
-        "x7" => Ok(Register::X7),
-        "x8" => Ok(Register::X8),
-        "x9" => Ok(Register::X9),
-        "x10" => Ok(Register::X10),
-        "x11" => Ok(Register::X11),
-        "x12" => Ok(Register::X12),
-        "x13" => Ok(Register::X13),
-        "x14" => Ok(Register::X14),
-        "x15" => Ok(Register::X15),
-        "x16" => Ok(Register::X16),
-        "x17" => Ok(Register::X17),
-        "x18" => Ok(Register::X18),
-        "x19" => Ok(Register::X19),
-        "x20" => Ok(Register::X20),
-        "x21" => Ok(Register::X21),
-        "x22" => Ok(Register::X22),
-        "x23" => Ok(Register::X23),
-        "x24" => Ok(Register::X24),
-        "x25" => Ok(Register::X25),
-        "x26" => Ok(Register::X26),
-        "x27" => Ok(Register::X27),
-        "x28" => Ok(Register::X28),
-        "x29" | "fp" => Ok(Register::X29),
-        "x30" | "lr" => Ok(Register::X30),
+    let lower = s.to_lowercase();
+
+    if let Some(raw_index) = lower.strip_prefix('x')
+        && !raw_index.is_empty()
+        && raw_index.bytes().all(|b| b.is_ascii_digit())
+        && (raw_index == "0" || !raw_index.starts_with('0'))
+        && let Ok(index) = raw_index.parse::<u8>()
+        && index <= 30
+    {
+        return Ok(Register::from_index(index).expect("valid AArch64 register index"));
+    }
+
+    match lower.as_str() {
+        "fp" => Ok(Register::X29),
+        "lr" => Ok(Register::X30),
         "xzr" | "wzr" => Ok(Register::XZR),
         "sp" => Ok(Register::SP),
         _ => Err(format!("unknown register: {}", s)),
     }
 }
 
-/// Parse a register that may be written in W-form. Scoped to the inner
-/// register of `Operand::ExtendedRegister`, where the ARM ARM architecturally
-/// writes byte/half/word extends with a W-form source and UXTX/SXTX with an
-/// X-form source. Issue #60.
+/// Parse a register for scoped W/X grammar slots.
 ///
-/// Accepting W-form names is **only** valid here — `parse_register` itself
-/// still rejects them, so e.g. `add w0, w1, w2` (a 32-bit ADD that this IR
-/// does not model) remains a parse error instead of silently parsing as a
-/// 64-bit ADD.
+/// Accepts the generic register set, numbered W registers as aliases for the
+/// same physical registers, and WSP for places where the surrounding parser
+/// carries the architectural width or W/X operand contract.
 pub fn parse_w_or_x_register(s: &str) -> Result<Register, String> {
     if let Ok(reg) = parse_register(s) {
         return Ok(reg);
     }
-    match s.to_lowercase().as_str() {
-        "w0" => Ok(Register::X0),
-        "w1" => Ok(Register::X1),
-        "w2" => Ok(Register::X2),
-        "w3" => Ok(Register::X3),
-        "w4" => Ok(Register::X4),
-        "w5" => Ok(Register::X5),
-        "w6" => Ok(Register::X6),
-        "w7" => Ok(Register::X7),
-        "w8" => Ok(Register::X8),
-        "w9" => Ok(Register::X9),
-        "w10" => Ok(Register::X10),
-        "w11" => Ok(Register::X11),
-        "w12" => Ok(Register::X12),
-        "w13" => Ok(Register::X13),
-        "w14" => Ok(Register::X14),
-        "w15" => Ok(Register::X15),
-        "w16" => Ok(Register::X16),
-        "w17" => Ok(Register::X17),
-        "w18" => Ok(Register::X18),
-        "w19" => Ok(Register::X19),
-        "w20" => Ok(Register::X20),
-        "w21" => Ok(Register::X21),
-        "w22" => Ok(Register::X22),
-        "w23" => Ok(Register::X23),
-        "w24" => Ok(Register::X24),
-        "w25" => Ok(Register::X25),
-        "w26" => Ok(Register::X26),
-        "w27" => Ok(Register::X27),
-        "w28" => Ok(Register::X28),
-        "w29" => Ok(Register::X29),
-        "w30" => Ok(Register::X30),
+
+    let lower = s.to_lowercase();
+    if let Some(raw_index) = lower.strip_prefix('w')
+        && !raw_index.is_empty()
+        && raw_index.bytes().all(|b| b.is_ascii_digit())
+        && (raw_index == "0" || !raw_index.starts_with('0'))
+        && let Ok(index) = raw_index.parse::<u8>()
+        && index <= 30
+    {
+        return Ok(Register::from_index(index).expect("valid AArch64 register index"));
+    }
+
+    match lower.as_str() {
         "wsp" => Ok(Register::SP),
         _ => Err(format!("unknown register: {}", s)),
     }
@@ -207,6 +167,9 @@ fn parse_sized_register(s: &str) -> Result<(Register, RegisterWidth), String> {
     }
 
     if let Some(raw_index) = lower.strip_prefix('w')
+        && !raw_index.is_empty()
+        && raw_index.bytes().all(|b| b.is_ascii_digit())
+        && (raw_index == "0" || !raw_index.starts_with('0'))
         && let Ok(index) = raw_index.parse::<u8>()
         && index <= 30
     {
@@ -2076,6 +2039,7 @@ mod tests {
         assert_eq!(parse_register("x30").unwrap(), Register::X30);
         assert_eq!(parse_register("xzr").unwrap(), Register::XZR);
         assert_eq!(parse_register("XZR").unwrap(), Register::XZR);
+        assert_eq!(parse_register("wzr").unwrap(), Register::XZR);
         assert_eq!(parse_register("sp").unwrap(), Register::SP);
         assert_eq!(parse_register("SP").unwrap(), Register::SP);
         assert_eq!(parse_register("fp").unwrap(), Register::X29);
@@ -2197,7 +2161,15 @@ mod tests {
 
     #[test]
     fn test_parse_register_invalid() {
+        assert!(parse_register("w0").is_err());
+        assert!(parse_register("W0").is_err());
+        assert!(parse_register("w29").is_err());
+        assert!(parse_register("w30").is_err());
+        assert!(parse_register("x00").is_err());
         assert!(parse_register("x32").is_err());
+        assert!(parse_register("w31").is_err());
+        assert!(parse_register("w32").is_err());
+        assert!(parse_register("wsp").is_err());
         assert!(parse_register("r0").is_err());
         assert!(parse_register("").is_err());
     }
@@ -2612,15 +2584,30 @@ mod tests {
     #[test]
     fn parse_all_aarch64_register_names() {
         for idx in 0..=30 {
-            let name = format!("x{}", idx);
+            let x_name = format!("x{}", idx);
+            let w_name = format!("w{}", idx);
+            let expected = Register::from_index(idx).unwrap();
+            assert_eq!(parse_register(&x_name).unwrap(), expected);
+            assert!(
+                parse_register(&w_name).is_err(),
+                "{w_name} should not parse through the generic register parser"
+            );
             assert_eq!(
-                parse_register(&name).unwrap(),
-                Register::from_index(idx).unwrap()
+                parse_w_or_x_register(&w_name).unwrap(),
+                expected,
+                "{w_name} should alias {x_name} in scoped W/X parser paths"
+            );
+            assert_eq!(
+                parse_sized_register(&w_name).unwrap(),
+                (expected, RegisterWidth::W32),
+                "{w_name} should carry W32 width in sized parser paths"
             );
         }
         assert_eq!(parse_register("wzr").unwrap(), Register::XZR);
         assert_eq!(parse_register("fp").unwrap(), Register::X29);
         assert_eq!(parse_register("lr").unwrap(), Register::X30);
+        assert!(parse_w_or_x_register("w00").is_err());
+        assert!(parse_sized_register("w00").is_err());
     }
 
     #[test]
@@ -3383,6 +3370,7 @@ mod tests {
                 target: LabelId(0x1000),
             }
         );
+        assert!(parse_line("cbz w0, 0x1000").is_err());
     }
 
     #[test]
@@ -3394,6 +3382,7 @@ mod tests {
                 target: LabelId(0x1000),
             }
         );
+        assert!(parse_line("cbnz w5, 0x1000").is_err());
     }
 
     #[test]
@@ -3416,6 +3405,33 @@ mod tests {
                 rt: Register::X3,
                 bit: 7,
                 target: LabelId(0x1000),
+            }
+        );
+    }
+
+    #[test]
+    fn test_parse_tbz_accepts_w_form() {
+        // Capstone prints TBZ with a W register when the tested bit is < 32.
+        // TBZ is a width-aware path, so the scoped helper accepts that spelling
+        // and canonicalizes to the shared physical register (issue #142).
+        assert_eq!(
+            parse_one("tbz w3, #5, 0x1000"),
+            Instruction::Tbz {
+                rt: Register::X3,
+                bit: 5,
+                target: LabelId(0x1000),
+            }
+        );
+    }
+
+    #[test]
+    fn test_parse_tbnz_accepts_w_form() {
+        assert_eq!(
+            parse_one("tbnz w7, #31, 0x2000"),
+            Instruction::Tbnz {
+                rt: Register::X7,
+                bit: 31,
+                target: LabelId(0x2000),
             }
         );
     }

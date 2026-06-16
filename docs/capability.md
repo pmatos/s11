@@ -17,6 +17,12 @@ immediate is representable by one move-wide instruction, and Capstone
 Aliases that require multiple instructions remain unsupported and make
 optimization reject the selected window.
 
+Numbered `W` registers are accepted only by width-aware parser rules (such as
+logical-immediate and memory forms) or scoped W/X register slots (such as
+extended-register operands and TBZ/TBNZ). Generic widthless data-processing and
+CBZ/CBNZ forms still reject `w0`-`w30` because the current IR would otherwise
+model 32-bit instructions with existing 64-bit semantics.
+
 Algorithms:
 - Enumerative, stochastic, symbolic, hybrid, and LLM-assisted search are
   available for AArch64.
