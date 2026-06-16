@@ -1247,6 +1247,30 @@ mod tests {
         );
     }
 
+    /// Safety invariant (restored from the deleted `candidate_x86.rs`): the
+    /// default search register pool must never include the stack or frame
+    /// pointer, and must contain no duplicates. A regression here would let
+    /// search clobber RSP/RBP in a patched binary.
+    #[test]
+    fn default_register_pool_excludes_stack_pointer_and_base_pointer() {
+        use std::collections::HashSet;
+        let pool = default_x86_registers();
+        assert!(
+            !pool.contains(&X86Register::RSP),
+            "RSP must not be in the default search pool"
+        );
+        assert!(
+            !pool.contains(&X86Register::RBP),
+            "RBP must not be in the default search pool"
+        );
+        let unique: HashSet<_> = pool.iter().collect();
+        assert_eq!(
+            unique.len(),
+            pool.len(),
+            "default register pool must not contain duplicates"
+        );
+    }
+
     #[test]
     fn x86_generator_random_can_emit_cmov_without_emitting_jcc() {
         use crate::isa::traits::InstructionGenerator;
