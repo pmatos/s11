@@ -268,7 +268,7 @@ impl Mutator {
                             // CCMP/CCMN reject shifted-register or extended-
                             // register operands; collapse to a plain register
                             // (consistent with candidate::generate_random_-
-                            // instruction case 27).
+                            // instruction's conditional-compare arm).
                             Operand::ShiftedRegister { reg, .. }
                             | Operand::ExtendedRegister { reg, .. } => Operand::Register(reg),
                         };
