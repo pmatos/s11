@@ -131,10 +131,11 @@ pub fn parse_register(s: &str) -> Result<Register, String> {
     }
 }
 
-/// Parse a register that may be written as WSP. Scoped to the inner
-/// register of `Operand::ExtendedRegister`, where the ARM ARM architecturally
-/// writes byte/half/word extends with a W-form source and UXTX/SXTX with an
-/// X-form source. Issue #60.
+/// Parse a register for scoped W/X grammar slots.
+///
+/// Accepts the generic register set, numbered W registers as aliases for the
+/// same physical registers, and WSP for places where the surrounding parser
+/// carries the architectural width or W/X operand contract.
 pub fn parse_w_or_x_register(s: &str) -> Result<Register, String> {
     if let Ok(reg) = parse_register(s) {
         return Ok(reg);
@@ -166,6 +167,9 @@ fn parse_sized_register(s: &str) -> Result<(Register, RegisterWidth), String> {
     }
 
     if let Some(raw_index) = lower.strip_prefix('w')
+        && !raw_index.is_empty()
+        && raw_index.bytes().all(|b| b.is_ascii_digit())
+        && (raw_index == "0" || !raw_index.starts_with('0'))
         && let Ok(index) = raw_index.parse::<u8>()
         && index <= 30
     {
@@ -334,13 +338,12 @@ fn parse_mov(operands: &[&str]) -> Result<Instruction, String> {
                 rm: Operand::Immediate(imm),
                 width: RegisterWidth::W32,
             }),
-            Operand::Register(_) => Err(
-                "mov W-register source is unsupported until the IR models register width"
+            Operand::Register(_)
+            | Operand::ShiftedRegister { .. }
+            | Operand::ExtendedRegister { .. } => Err(
+                "mov W-register form only supports immediate sources until the IR models register width"
                     .to_string(),
             ),
-            Operand::ShiftedRegister { .. } | Operand::ExtendedRegister { .. } => {
-                Err("mov second operand must be a register or immediate".to_string())
-            }
         };
     }
 
@@ -2095,6 +2098,7 @@ mod tests {
         assert!(parse_register("W0").is_err());
         assert!(parse_register("w29").is_err());
         assert!(parse_register("w30").is_err());
+        assert!(parse_register("x00").is_err());
         assert!(parse_register("x32").is_err());
         assert!(parse_register("w31").is_err());
         assert!(parse_register("w32").is_err());
@@ -2167,7 +2171,11 @@ mod tests {
 
         assert!(parse_line("mov w0, w1").is_err());
         assert!(parse_line("mov W0, W1").is_err());
-        assert!(parse_line("mov w0, x1").is_err());
+        let err = parse_line("mov w0, x1").unwrap_err();
+        assert!(
+            err.to_string().contains("IR models register width"),
+            "unexpected mov W-register error: {err}"
+        );
     }
 
     #[test]
@@ -2460,6 +2468,8 @@ mod tests {
         assert_eq!(parse_register("wzr").unwrap(), Register::XZR);
         assert_eq!(parse_register("fp").unwrap(), Register::X29);
         assert_eq!(parse_register("lr").unwrap(), Register::X30);
+        assert!(parse_w_or_x_register("w00").is_err());
+        assert!(parse_sized_register("w00").is_err());
     }
 
     #[test]
