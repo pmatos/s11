@@ -15,7 +15,7 @@ This ADR also supersedes the equivalence-semantics portion of [ADR-0002](0002-mv
 
 ## Decision
 
-1. Add a free function `validation::live_out::parse_live_out_contract(s: &str) -> Result<LiveOut, ParseRegisterSetError>` implementing the grammar `<regs>` or `<regs>;<flags>`:
+1. Add a free function `validation::live_out::parse_live_out_contract(s: &str) -> Result<LiveOut, ParseLiveOutError>` implementing the grammar `<regs>` or `<regs>;<flags>`:
    - Register half follows the existing `RegisterSet::<Register>::from_str` rules (comma- or space-separated, case-insensitive, accepts `x0..x30`, `sp`, `xzr`).
    - Flag half accepts only the group token `nzcv` (case-insensitive). The per-flag tokens `n`, `z`, `c`, `v` are **explicitly reserved** so a future per-flag liveness rev can add them without a second grammar break. They are rejected today with a "reserved" diagnostic.
    - Bareword `nzcv` (no leading `;`) is rejected so the bareword reservation is unambiguous.
@@ -45,4 +45,4 @@ This ADR also supersedes the equivalence-semantics portion of [ADR-0002](0002-mv
 
 **Reversibility:** high for the per-flag rev — the `n`/`z`/`c`/`v` tokens are rejected with a "reserved" message today, so adding their semantics later is a strict superset of the current grammar. Reversibility low for the parser function itself: it becomes load-bearing for both CLI subcommands.
 
-**Resolution note (issue #80, 2026-05-18):** `ParseLiveOutRegistersError`'s `Display` impl writes only the message body. The `"invalid live-out: "` prefix from `run_equiv`/`run_llm_opt` (§2) is the sole documented user-visible prefix; pinned by `validation::live_out::tests::display_renders_message_without_type_prefix`.
+**Resolution note (issue #80, 2026-05-18; issue #180, 2026-06-16):** `ParseLiveOutError`'s `Display` impl writes only the message body. It is a contract-facing alias over the shared `ParseRegisterSetError` wrapper used by `RegisterSet<Register>::from_str`. The `"invalid live-out: "` prefix from `run_equiv`/`run_llm_opt` (§2) is the sole documented user-visible prefix; pinned by `validation::live_out::tests::display_renders_message_without_type_prefix`.
