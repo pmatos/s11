@@ -1049,8 +1049,10 @@ impl Instruction {
             | Instruction::Lsr { rn, shift, .. }
             | Instruction::Asr { rn, shift, .. } => {
                 let mut regs = vec![*rn];
-                if let Operand::Register(r) = shift {
-                    regs.push(*r);
+                match shift {
+                    Operand::Register(r) => regs.push(*r),
+                    Operand::ShiftedRegister { reg, .. } => regs.push(*reg),
+                    Operand::Immediate(_) | Operand::ExtendedRegister { .. } => {}
                 }
                 regs
             }
@@ -1119,8 +1121,10 @@ impl Instruction {
             // ROR reads rn and shift (if register)
             Instruction::Ror { rn, shift, .. } => {
                 let mut regs = vec![*rn];
-                if let Operand::Register(r) = shift {
-                    regs.push(*r);
+                match shift {
+                    Operand::Register(r) => regs.push(*r),
+                    Operand::ShiftedRegister { reg, .. } => regs.push(*reg),
+                    Operand::Immediate(_) | Operand::ExtendedRegister { .. } => {}
                 }
                 regs
             }
@@ -2311,6 +2315,51 @@ mod tests {
             },
         ] {
             assert_eq!(instr.source_registers(), vec![Register::X1, Register::X3]);
+        }
+    }
+
+    #[test]
+    fn test_source_registers_shift_slot_shifted_register_defensive() {
+        // Shift-slot ShiftedRegister operands are not encodable, but
+        // source_registers should still be conservative for programmatic IR.
+        let shifted = Operand::ShiftedRegister {
+            reg: Register::X5,
+            kind: ShiftKind::Lsl,
+            amount: 1,
+        };
+        for instr in [
+            Instruction::Lsl {
+                rd: Register::X0,
+                rn: Register::X1,
+                shift: shifted,
+            },
+            Instruction::Lsr {
+                rd: Register::X0,
+                rn: Register::X1,
+                shift: shifted,
+            },
+            Instruction::Asr {
+                rd: Register::X0,
+                rn: Register::X1,
+                shift: shifted,
+            },
+            Instruction::Ror {
+                rd: Register::X0,
+                rn: Register::X1,
+                shift: shifted,
+            },
+        ] {
+            assert!(
+                !instr.is_encodable_aarch64(),
+                "instr {} should remain unencodable",
+                instr
+            );
+            assert_eq!(
+                instr.source_registers(),
+                vec![Register::X1, Register::X5],
+                "instr {} must report the inner shift-slot register",
+                instr
+            );
         }
     }
 
