@@ -1614,7 +1614,17 @@ mod tests {
                     rn,
                     rm: Operand::ShiftedRegister { reg, .. },
                 }
+                | Instruction::AddW {
+                    rd,
+                    rn,
+                    rm: Operand::ShiftedRegister { reg, .. },
+                }
                 | Instruction::Sub {
+                    rd,
+                    rn,
+                    rm: Operand::ShiftedRegister { reg, .. },
+                }
+                | Instruction::SubW {
                     rd,
                     rn,
                     rm: Operand::ShiftedRegister { reg, .. },
