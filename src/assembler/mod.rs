@@ -76,19 +76,19 @@ macro_rules! emit_shifted_reg_3op_logical {
         match $kind {
             ShiftKind::Lsl => {
                 dynasm!($ops ; .arch aarch64 ; $mnem X(rd_n), X(rn_n), X(rm_n), LSL amt_n);
-                Ok::<(), String>(())
+                Ok(())
             }
             ShiftKind::Lsr => {
                 dynasm!($ops ; .arch aarch64 ; $mnem X(rd_n), X(rn_n), X(rm_n), LSR amt_n);
-                Ok::<(), String>(())
+                Ok(())
             }
             ShiftKind::Asr => {
                 dynasm!($ops ; .arch aarch64 ; $mnem X(rd_n), X(rn_n), X(rm_n), ASR amt_n);
-                Ok::<(), String>(())
+                Ok(())
             }
             ShiftKind::Ror => {
                 dynasm!($ops ; .arch aarch64 ; $mnem X(rd_n), X(rn_n), X(rm_n), ROR amt_n);
-                Ok::<(), String>(())
+                Ok(())
             }
         }
     }};
@@ -130,19 +130,19 @@ macro_rules! emit_shifted_reg_2op_logical {
         match $kind {
             ShiftKind::Lsl => {
                 dynasm!($ops ; .arch aarch64 ; $mnem X(rn_n), X(rm_n), LSL amt_n);
-                Ok::<(), String>(())
+                Ok(())
             }
             ShiftKind::Lsr => {
                 dynasm!($ops ; .arch aarch64 ; $mnem X(rn_n), X(rm_n), LSR amt_n);
-                Ok::<(), String>(())
+                Ok(())
             }
             ShiftKind::Asr => {
                 dynasm!($ops ; .arch aarch64 ; $mnem X(rn_n), X(rm_n), ASR amt_n);
-                Ok::<(), String>(())
+                Ok(())
             }
             ShiftKind::Ror => {
                 dynasm!($ops ; .arch aarch64 ; $mnem X(rn_n), X(rm_n), ROR amt_n);
-                Ok::<(), String>(())
+                Ok(())
             }
         }
     }};
