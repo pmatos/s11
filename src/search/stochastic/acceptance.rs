@@ -1,6 +1,8 @@
-//! Metropolis-Hastings acceptance criterion for MCMC
+//! Metropolis acceptance criterion for stochastic search
 //!
-//! Implements the acceptance decision for stochastic search.
+//! Implements the cost-only acceptance decision for stochastic search. This
+//! module does not receive proposal probabilities and therefore does not apply
+//! a Hastings correction for asymmetric mutation proposals.
 //! A proposal is accepted if:
 //!   proposal_cost < current_cost - ln(random) / beta
 //!
@@ -12,7 +14,7 @@
 
 use rand::RngExt;
 
-/// Acceptance criterion for Metropolis-Hastings MCMC
+/// Cost-only Metropolis acceptance criterion.
 pub struct AcceptanceCriterion {
     /// Inverse temperature (higher = more greedy)
     beta: f64,

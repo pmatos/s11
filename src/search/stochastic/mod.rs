@@ -1,8 +1,10 @@
 //! Stochastic (MCMC) search for superoptimization
 //!
-//! Implements Metropolis-Hastings MCMC search for finding shorter equivalent
-//! instruction sequences. The algorithm randomly mutates candidate programs
-//! and accepts/rejects mutations based on their cost using a temperature parameter.
+//! Implements MCMC-style search for finding shorter equivalent instruction
+//! sequences. The algorithm randomly mutates candidate programs with heuristic
+//! proposals and accepts/rejects mutations based on their cost using a
+//! Metropolis temperature parameter. It does not compute a Hastings ratio for
+//! proposal asymmetry.
 
 pub mod acceptance;
 pub mod backend;

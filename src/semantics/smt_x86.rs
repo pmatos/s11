@@ -337,7 +337,7 @@ pub fn apply_sequence(
 }
 
 /// Bool predicate asserting that any of the five tracked flags differs
-/// between two symbolic x86 states. Used by `check_equivalence_x86` to
+/// between two symbolic x86 states. Used by x86's equivalence backend to
 /// reject sequences whose flag effects diverge under `flags_live=true`.
 /// AF is intentionally excluded — see module docs.
 pub fn flags_not_equal_x86(a: &MachineStateX86, b: &MachineStateX86) -> z3::ast::Bool {
