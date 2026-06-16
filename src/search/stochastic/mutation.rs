@@ -2,7 +2,7 @@
 //!
 //! Implements four mutation operators:
 //! 1. Operand mutation (50%): Change a register or immediate in a random instruction
-//! 2. Opcode mutation (16%): Change the opcode while keeping operand structure
+//! 2. Opcode mutation (16%): Change the opcode while mostly keeping operand structure
 //! 3. Swap mutation (16%): Swap two instructions
 //! 4. Instruction mutation (18%): Replace an entire instruction
 
@@ -446,7 +446,7 @@ impl Mutator {
         }
     }
 
-    /// Opcode mutation: change the opcode while keeping operand structure
+    /// Opcode mutation: change the opcode while mostly keeping operand structure
     fn mutate_opcode<R: RngExt>(&self, rng: &mut R, sequence: &mut [Instruction]) {
         if sequence.is_empty() {
             return;
@@ -912,7 +912,9 @@ impl Mutator {
                 2 => Instruction::Asr { rd, rn, shift },
                 _ => Instruction::Ror { rd, rn, shift },
             },
-            // Multiply-accumulate cluster — widens as SMULH/UMULH land.
+            // Multiply-accumulate cluster. MADD/MSUB preserve or collapse
+            // `ra`; MNEG introduces a fresh `ra` when expanding back to an
+            // accumulating form because it has no accumulator operand.
             Instruction::Madd { rd, rn, rm, ra } => match rng.random_range(0..3) {
                 0 => Instruction::Msub { rd, rn, rm, ra },
                 1 => Instruction::Mneg { rd, rn, rm },
@@ -924,10 +926,20 @@ impl Mutator {
                 _ => Instruction::Msub { rd, rn, rm, ra },
             },
             // MNEG ↔ MUL is the sign-flip bridge (MNEG = -(rn*rm), MUL = rn*rm).
-            // MNEG also already receives reverse edges from MADD/MSUB above
-            // (which collapse `ra` when they convert).
-            Instruction::Mneg { rd, rn, rm } => match rng.random_range(0..2) {
+            Instruction::Mneg { rd, rn, rm } => match rng.random_range(0..4) {
                 0 => Instruction::Mul { rd, rn, rm },
+                1 => Instruction::Madd {
+                    rd,
+                    rn,
+                    rm,
+                    ra: self.random_register(rng),
+                },
+                2 => Instruction::Msub {
+                    rd,
+                    rn,
+                    rm,
+                    ra: self.random_register(rng),
+                },
                 _ => Instruction::Mneg { rd, rn, rm },
             },
             // High-half multiply cluster (signed ↔ unsigned).
@@ -1248,7 +1260,7 @@ pub fn mutate_operand_in_place<R: RngExt>(
     *instr = seq[0];
 }
 
-/// Change opcode while preserving operand structure (for testing)
+/// Change opcode while mostly preserving operand structure (for testing)
 pub fn mutate_opcode_in_place<R: RngExt>(rng: &mut R, instr: &mut Instruction) {
     let mutator = Mutator::new(
         vec![Register::X0, Register::X1, Register::X2],
@@ -1644,6 +1656,53 @@ mod tests {
         }
 
         assert!(changed_to_different_opcode);
+    }
+
+    #[test]
+    fn mneg_opcode_mutation_reaches_madd_and_msub() {
+        let mutator = Mutator::new(vec![Register::X3], vec![0], MutationWeights::default());
+        let mut rng = StdRng::seed_from_u64(127);
+        let original = Instruction::Mneg {
+            rd: Register::X0,
+            rn: Register::X1,
+            rm: Register::X2,
+        };
+        let mut seen_madd = false;
+        let mut seen_msub = false;
+
+        for _ in 0..200 {
+            let mut seq = vec![original];
+            mutator.mutate_opcode(&mut rng, &mut seq);
+            assert!(
+                seq[0].is_encodable_aarch64(),
+                "MNEG opcode mutation must stay encodable: {}",
+                seq[0]
+            );
+
+            match seq[0] {
+                Instruction::Madd { rd, rn, rm, ra } => {
+                    assert_eq!(
+                        (rd, rn, rm, ra),
+                        (Register::X0, Register::X1, Register::X2, Register::X3)
+                    );
+                    seen_madd = true;
+                }
+                Instruction::Msub { rd, rn, rm, ra } => {
+                    assert_eq!(
+                        (rd, rn, rm, ra),
+                        (Register::X0, Register::X1, Register::X2, Register::X3)
+                    );
+                    seen_msub = true;
+                }
+                Instruction::Mul { rd, rn, rm } | Instruction::Mneg { rd, rn, rm } => {
+                    assert_eq!((rd, rn, rm), (Register::X0, Register::X1, Register::X2));
+                }
+                other => panic!("unexpected MNEG opcode mutation: {other:?}"),
+            }
+        }
+
+        assert!(seen_madd, "MNEG opcode mutation must reach MADD");
+        assert!(seen_msub, "MNEG opcode mutation must reach MSUB");
     }
 
     #[test]
