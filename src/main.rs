@@ -1672,11 +1672,12 @@ fn convert_to_x86_ir(
 /// registers (destinations + sources). The trait refactor regressed coverage by
 /// defaulting to the fixed `default_x86_registers()` pool, so a window over
 /// R10–R15 had no representable rewrite. Mirrors the pre-refactor
-/// `find_shorter_equivalent_x86` derivation. `RSP` is deliberately excluded:
-/// the single candidate pool can place registers in writable positions, while
-/// live-out tracking does not make source-only stack-pointer references
-/// observable. Falls back to the default pool when no usable non-`RSP`
-/// registers remain.
+/// `find_shorter_equivalent_x86` derivation. `RSP` and `RBP` are deliberately
+/// excluded: the single candidate pool can place registers in writable
+/// positions, while live-out tracking does not make source-only stack/frame
+/// references observable. Falls back to the default pool only for an empty
+/// target; a non-empty target with no usable non-stack/frame registers returns
+/// an empty pool so search does not introduce unrelated writable registers.
 fn x86_registers_from_target(target: &[isa::x86::X86Instruction]) -> Vec<isa::x86::X86Register> {
     let mut pool: Vec<isa::x86::X86Register> = Vec::new();
     let referenced = target.iter().flat_map(|instr| {
@@ -1686,14 +1687,14 @@ fn x86_registers_from_target(target: &[isa::x86::X86Instruction]) -> Vec<isa::x8
             .chain(instr.source_registers())
     });
     for reg in referenced {
-        if reg == isa::x86::X86Register::RSP {
+        if matches!(reg, isa::x86::X86Register::RSP | isa::x86::X86Register::RBP) {
             continue;
         }
         if !pool.contains(&reg) {
             pool.push(reg);
         }
     }
-    if pool.is_empty() {
+    if target.is_empty() {
         return isa::x86::default_x86_registers();
     }
     pool
@@ -1790,6 +1791,9 @@ fn run_x86_stochastic(
     use validation::live_out::x86_live_out_from_target;
 
     let config = build_x86_stochastic_search_config(target, width, options);
+    if config.x86_available_registers.is_empty() {
+        return None;
+    }
     let live_out = x86_live_out_from_target(target);
 
     // Extract (optimized, statistics) in each width branch separately:
@@ -3139,6 +3143,10 @@ mod cli_helper_tests {
                 rn: X86Register::RSP,
                 rs: X86Register::R11,
             },
+            X86Instruction::CmpReg {
+                rn: X86Register::RBP,
+                rs: X86Register::R12,
+            },
             X86Instruction::MovImm {
                 rd: X86Register::R11,
                 imm: 5,
@@ -3158,11 +3166,17 @@ mod cli_helper_tests {
             isa::x86::default_x86_registers()
         );
         assert_eq!(
-            x86_registers_from_target(&[X86Instruction::CmpImm {
-                rn: X86Register::RSP,
-                imm: 1,
-            }]),
-            isa::x86::default_x86_registers()
+            x86_registers_from_target(&[
+                X86Instruction::CmpImm {
+                    rn: X86Register::RSP,
+                    imm: 1,
+                },
+                X86Instruction::CmpReg {
+                    rn: X86Register::RBP,
+                    rs: X86Register::RBP,
+                },
+            ]),
+            Vec::<X86Register>::new()
         );
     }
 
@@ -3298,6 +3312,10 @@ mod cli_helper_tests {
                 rn: X86Register::RSP,
                 rs: X86Register::R11,
             },
+            X86Instruction::CmpReg {
+                rn: X86Register::RBP,
+                rs: X86Register::R12,
+            },
             X86Instruction::MovImm {
                 rd: X86Register::R11,
                 imm: -1,
@@ -3328,8 +3346,31 @@ mod cli_helper_tests {
             "stochastic register pool must not make RSP writable"
         );
         assert!(
+            !config.x86_available_registers.contains(&X86Register::RBP),
+            "stochastic register pool must not make RBP writable"
+        );
+        assert!(
             !config.x86_available_registers.contains(&X86Register::RAX),
             "stochastic register pool must be derived from the target"
+        );
+        assert!(
+            build_x86_stochastic_search_config(
+                &[
+                    X86Instruction::CmpImm {
+                        rn: X86Register::RSP,
+                        imm: 1,
+                    },
+                    X86Instruction::CmpReg {
+                        rn: X86Register::RBP,
+                        rs: X86Register::RBP,
+                    },
+                ],
+                64,
+                &opts,
+            )
+            .x86_available_registers
+            .is_empty(),
+            "all stack/frame targets must not fall back to writable defaults"
         );
         assert_eq!(
             config.available_immediates,
@@ -3353,6 +3394,10 @@ mod cli_helper_tests {
                 rn: X86Register::RSP,
                 imm: 1,
             },
+            X86Instruction::CmpReg {
+                rn: X86Register::RBP,
+                rs: X86Register::RBP,
+            },
             X86Instruction::CmpImm {
                 rn: X86Register::R11,
                 imm: -1,
@@ -3366,8 +3411,31 @@ mod cli_helper_tests {
             "symbolic register pool must not make RSP writable"
         );
         assert!(
+            !config.x86_available_registers.contains(&X86Register::RBP),
+            "symbolic register pool must not make RBP writable"
+        );
+        assert!(
             !config.x86_available_registers.contains(&X86Register::RAX),
             "symbolic register pool must be derived from the target"
+        );
+        assert!(
+            build_x86_symbolic_search_config(
+                &[
+                    X86Instruction::CmpImm {
+                        rn: X86Register::RSP,
+                        imm: 1,
+                    },
+                    X86Instruction::CmpReg {
+                        rn: X86Register::RBP,
+                        rs: X86Register::RBP,
+                    },
+                ],
+                64,
+                &opts,
+            )
+            .x86_available_registers
+            .is_empty(),
+            "all stack/frame targets must not fall back to writable defaults"
         );
         assert_eq!(config.symbolic.search_mode, SearchMode::Binary);
         assert_eq!(
