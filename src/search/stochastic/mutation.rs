@@ -22,6 +22,32 @@ use crate::search::config::MutationWeights;
 use rand::RngExt;
 
 const ADDRESS_OFFSET_POOL: [i64; 8] = [0, 8, 16, 24, 32, 64, -8, -256];
+const LOGICAL_IMM32_POOL: &[i64] = &[
+    0x1,
+    0x2,
+    0x4,
+    0x8,
+    0xff,
+    0xffff,
+    0x8000_0000,
+    0x5555_5555,
+    0xaaaa_aaaa,
+    -256,
+];
+const LOGICAL_IMM64_POOL: &[i64] = &[
+    0x1,
+    0x2,
+    0x4,
+    0x8,
+    0xff,
+    0xffff,
+    0xffff_ffff,
+    0x5555_5555_5555_5555,
+    0xaaaa_aaaa_aaaa_aaaa_u64 as i64,
+    0xf0f0_f0f0_f0f0_f0f0_u64 as i64,
+    0x8000_0000_0000_0000_u64 as i64,
+    -256,
+];
 
 /// Drop ROR from a shifted-register operand when bridging from a logical
 /// opcode (AND/ORR/EOR/TST — ROR allowed) to an arithmetic opcode
@@ -34,18 +60,6 @@ fn strip_ror_for_arith(rm: Operand) -> Operand {
         ..
     } = rm
     {
-        Operand::Register(reg)
-    } else {
-        rm
-    }
-}
-
-/// Drop the extended-register modifier when bridging from arithmetic
-/// opcodes (ADD/SUB/CMP/CMN — extended form allowed) to logical opcodes
-/// (AND/ORR/EOR/TST — extended form rejected). Other operand shapes pass
-/// through unchanged.
-fn strip_extended_for_logical(rm: Operand) -> Operand {
-    if let Operand::ExtendedRegister { reg, .. } = rm {
         Operand::Register(reg)
     } else {
         rm
@@ -65,29 +79,6 @@ fn single_source_opcode_peer<R: RngExt>(rng: &mut R, rd: Register, rn: Register)
         8 => Instruction::Sxtw { rd, rn },
         9 => Instruction::Uxtb { rd, rn },
         _ => Instruction::Uxth { rd, rn },
-    }
-}
-
-/// If `rm` is already a register, keep it; if it's an immediate, replace it
-/// with a random register from `registers`. Used when mutating an
-/// immediate-accepting opcode (ADDS/SUBS) into a register-only opcode
-/// (ANDS) — keeps the resulting instruction encodable.
-fn clamp_to_register<R: RngExt>(rm: Operand, registers: &[Register], rng: &mut R) -> Operand {
-    match rm {
-        Operand::Register(_) => rm,
-        // ShiftedRegister/ExtendedRegister carry a real register; preserve
-        // it as a plain register (drop the modifier) when the destination
-        // opcode is register-only.
-        Operand::ShiftedRegister { reg, .. } | Operand::ExtendedRegister { reg, .. } => {
-            Operand::Register(reg)
-        }
-        Operand::Immediate(_) => {
-            if registers.is_empty() {
-                rm
-            } else {
-                Operand::Register(registers[rng.random_range(0..registers.len())])
-            }
-        }
     }
 }
 
@@ -205,14 +196,7 @@ impl Mutator {
                 match choice {
                     0 => *rd = self.random_register(rng),
                     1 => *rn = self.random_register(rng),
-                    // Logical ops accept ROR in the shifted-register form.
-                    _ => {
-                        *rm = if *width == RegisterWidth::W32 {
-                            Operand::Immediate(self.random_immediate(rng))
-                        } else {
-                            self.random_operand_3op(rng, true)
-                        }
-                    }
+                    _ => *rm = self.random_logical_operand(rng, *width, true),
                 }
             }
             Instruction::Lsl { rd, rn, shift }
@@ -269,17 +253,8 @@ impl Mutator {
             Instruction::Tst { rn, rm, width } => {
                 if rng.random_bool(0.5) {
                     *rn = self.random_register(rng);
-                } else if *width == RegisterWidth::W32 {
-                    *rm = Operand::Immediate(self.random_immediate(rng));
                 } else {
-                    // Tst is register-only for non-shifted form. Use the 3op
-                    // helper but force the non-shifted fallback to a Register
-                    // (immediates aren't encodable for TST).
-                    if rng.random_bool(0.15) && !self.registers.is_empty() {
-                        *rm = self.random_shifted_register(rng, true);
-                    } else {
-                        *rm = Operand::Register(self.random_register(rng));
-                    }
+                    *rm = self.random_logical_operand(rng, *width, true);
                 }
             }
             // CCMP / CCMN: rn (register), rm (operand), nzcv (0..=15), cond.
@@ -390,13 +365,7 @@ impl Mutator {
                 match choice {
                     0 => *rd = self.random_register(rng),
                     1 => *rn = self.random_register(rng),
-                    _ => {
-                        *rm = if *width == RegisterWidth::W32 {
-                            Operand::Immediate(self.random_immediate(rng))
-                        } else {
-                            Operand::Register(self.random_register(rng))
-                        }
-                    }
+                    _ => *rm = self.random_logical_operand(rng, *width, false),
                 }
             }
             // CSET / CSETM: only rd and cond can change; cond from the 14
@@ -546,19 +515,19 @@ impl Mutator {
                 1 => Instruction::And {
                     rd,
                     rn,
-                    rm: strip_extended_for_logical(rm),
+                    rm: self.logical_rm_from_existing(rng, rm, RegisterWidth::X64, true),
                     width: RegisterWidth::X64,
                 },
                 2 => Instruction::Orr {
                     rd,
                     rn,
-                    rm: strip_extended_for_logical(rm),
+                    rm: self.logical_rm_from_existing(rng, rm, RegisterWidth::X64, true),
                     width: RegisterWidth::X64,
                 },
                 3 => Instruction::Eor {
                     rd,
                     rn,
-                    rm: strip_extended_for_logical(rm),
+                    rm: self.logical_rm_from_existing(rng, rm, RegisterWidth::X64, true),
                     width: RegisterWidth::X64,
                 },
                 _ => Instruction::Add { rd, rn, rm },
@@ -572,19 +541,19 @@ impl Mutator {
                 1 => Instruction::And {
                     rd,
                     rn,
-                    rm: strip_extended_for_logical(rm),
+                    rm: self.logical_rm_from_existing(rng, rm, RegisterWidth::X64, true),
                     width: RegisterWidth::X64,
                 },
                 2 => Instruction::Orr {
                     rd,
                     rn,
-                    rm: strip_extended_for_logical(rm),
+                    rm: self.logical_rm_from_existing(rng, rm, RegisterWidth::X64, true),
                     width: RegisterWidth::X64,
                 },
                 3 => Instruction::Eor {
                     rd,
                     rn,
-                    rm: strip_extended_for_logical(rm),
+                    rm: self.logical_rm_from_existing(rng, rm, RegisterWidth::X64, true),
                     width: RegisterWidth::X64,
                 },
                 _ => Instruction::Sub { rd, rn, rm },
@@ -594,16 +563,17 @@ impl Mutator {
                 _ => Instruction::SubW { rd, rn, rm },
             },
             Instruction::And { rd, rn, rm, width } => match rng.random_range(0..5) {
-                // Logical -> arithmetic: drop ROR from the shifted-register form.
+                // Logical -> arithmetic: drop ROR from shifted-register form
+                // and clamp bitmask immediates into ADD/SUB's imm12 range.
                 0 => Instruction::Add {
                     rd,
                     rn,
-                    rm: strip_ror_for_arith(rm),
+                    rm: Self::clamp_imm12(strip_ror_for_arith(rm)),
                 },
                 1 => Instruction::Sub {
                     rd,
                     rn,
-                    rm: strip_ror_for_arith(rm),
+                    rm: Self::clamp_imm12(strip_ror_for_arith(rm)),
                 },
                 2 => Instruction::Orr { rd, rn, rm, width },
                 3 => Instruction::Eor { rd, rn, rm, width },
@@ -613,12 +583,12 @@ impl Mutator {
                 0 => Instruction::Add {
                     rd,
                     rn,
-                    rm: strip_ror_for_arith(rm),
+                    rm: Self::clamp_imm12(strip_ror_for_arith(rm)),
                 },
                 1 => Instruction::Sub {
                     rd,
                     rn,
-                    rm: strip_ror_for_arith(rm),
+                    rm: Self::clamp_imm12(strip_ror_for_arith(rm)),
                 },
                 2 => Instruction::And { rd, rn, rm, width },
                 3 => Instruction::Eor { rd, rn, rm, width },
@@ -628,12 +598,12 @@ impl Mutator {
                 0 => Instruction::Add {
                     rd,
                     rn,
-                    rm: strip_ror_for_arith(rm),
+                    rm: Self::clamp_imm12(strip_ror_for_arith(rm)),
                 },
                 1 => Instruction::Sub {
                     rd,
                     rn,
-                    rm: strip_ror_for_arith(rm),
+                    rm: Self::clamp_imm12(strip_ror_for_arith(rm)),
                 },
                 2 => Instruction::And { rd, rn, rm, width },
                 3 => Instruction::Orr { rd, rn, rm, width },
@@ -675,7 +645,7 @@ impl Mutator {
                 0 => Instruction::Cmn { rn, rm },
                 1 => Instruction::Tst {
                     rn,
-                    rm: strip_extended_for_logical(rm),
+                    rm: self.logical_rm_from_existing(rng, rm, RegisterWidth::X64, true),
                     width: RegisterWidth::X64,
                 },
                 _ => Instruction::Cmp { rn, rm },
@@ -684,20 +654,21 @@ impl Mutator {
                 0 => Instruction::Cmp { rn, rm },
                 1 => Instruction::Tst {
                     rn,
-                    rm: strip_extended_for_logical(rm),
+                    rm: self.logical_rm_from_existing(rng, rm, RegisterWidth::X64, true),
                     width: RegisterWidth::X64,
                 },
                 _ => Instruction::Cmn { rn, rm },
             },
             Instruction::Tst { rn, rm, width } => match rng.random_range(0..3) {
-                // Tst (logical) -> Cmp/Cmn (arithmetic): drop ROR.
+                // Tst (logical) -> Cmp/Cmn (arithmetic): drop ROR and clamp
+                // bitmask immediates into the arithmetic imm12 range.
                 0 => Instruction::Cmp {
                     rn,
-                    rm: strip_ror_for_arith(rm),
+                    rm: Self::clamp_imm12(strip_ror_for_arith(rm)),
                 },
                 1 => Instruction::Cmn {
                     rn,
-                    rm: strip_ror_for_arith(rm),
+                    rm: Self::clamp_imm12(strip_ror_for_arith(rm)),
                 },
                 _ => Instruction::Tst { rn, rm, width },
             },
@@ -893,19 +864,16 @@ impl Mutator {
             // The ADD/SUB/AND bridges make this another intentionally
             // asymmetric proposal family.
             //
-            // Note: ADDS/SUBS accept `Operand::Immediate` (12-bit). ANDS and
-            // AND now accept *bitmask* immediates (issue #65), but the table
-            // the mutator draws from is 12-bit-tuned — forwarding such an imm
-            // into ANDS/AND would almost always fail `is_encodable_aarch64`
-            // and burn iterations. When mutating into ANDS/AND, clamp `rm`
-            // to a register until a curated bitmask-immediate table lands.
+            // ADDS/SUBS use 12-bit arithmetic immediates; ANDS uses logical
+            // bitmask immediates. Crossing into ANDS therefore resamples
+            // immediate operands from the curated bitmask pool.
             Instruction::Adds { rd, rn, rm } => match rng.random_range(0..4) {
                 0 => Instruction::Add { rd, rn, rm },
                 1 => Instruction::Subs { rd, rn, rm },
                 2 => Instruction::Ands {
                     rd,
                     rn,
-                    rm: clamp_to_register(rm, &self.registers, rng),
+                    rm: self.logical_rm_from_existing(rng, rm, RegisterWidth::X64, false),
                     width: RegisterWidth::X64,
                 },
                 _ => Instruction::Adds { rd, rn, rm },
@@ -916,15 +884,23 @@ impl Mutator {
                 2 => Instruction::Ands {
                     rd,
                     rn,
-                    rm: clamp_to_register(rm, &self.registers, rng),
+                    rm: self.logical_rm_from_existing(rng, rm, RegisterWidth::X64, false),
                     width: RegisterWidth::X64,
                 },
                 _ => Instruction::Subs { rd, rn, rm },
             },
             Instruction::Ands { rd, rn, rm, width } => match rng.random_range(0..4) {
                 0 => Instruction::And { rd, rn, rm, width },
-                1 => Instruction::Adds { rd, rn, rm },
-                2 => Instruction::Subs { rd, rn, rm },
+                1 => Instruction::Adds {
+                    rd,
+                    rn,
+                    rm: Self::clamp_imm12(rm),
+                },
+                2 => Instruction::Subs {
+                    rd,
+                    rn,
+                    rm: Self::clamp_imm12(rm),
+                },
                 _ => Instruction::Ands { rd, rn, rm, width },
             },
             // CSET ↔ CSETM
@@ -1128,6 +1104,62 @@ impl Mutator {
             0
         } else {
             self.immediates[rng.random_range(0..self.immediates.len())]
+        }
+    }
+
+    fn random_logical_immediate<R: RngExt>(&self, rng: &mut R, width: RegisterWidth) -> i64 {
+        let pool = match width {
+            RegisterWidth::W32 => LOGICAL_IMM32_POOL,
+            RegisterWidth::X64 => LOGICAL_IMM64_POOL,
+        };
+        pool[rng.random_range(0..pool.len())]
+    }
+
+    fn random_logical_operand<R: RngExt>(
+        &self,
+        rng: &mut R,
+        width: RegisterWidth,
+        allow_shifted: bool,
+    ) -> Operand {
+        if width == RegisterWidth::W32 {
+            return Operand::Immediate(self.random_logical_immediate(rng, width));
+        }
+
+        if allow_shifted && rng.random_bool(0.15) && !self.registers.is_empty() {
+            self.random_shifted_register(rng, true)
+        } else if rng.random_bool(0.5) {
+            Operand::Register(self.random_register(rng))
+        } else {
+            Operand::Immediate(self.random_logical_immediate(rng, width))
+        }
+    }
+
+    fn logical_rm_from_existing<R: RngExt>(
+        &self,
+        rng: &mut R,
+        rm: Operand,
+        width: RegisterWidth,
+        allow_shifted: bool,
+    ) -> Operand {
+        match rm {
+            Operand::Immediate(_) => Operand::Immediate(self.random_logical_immediate(rng, width)),
+            Operand::Register(reg) if width == RegisterWidth::X64 => Operand::Register(reg),
+            Operand::ShiftedRegister { reg, kind, amount }
+                if width == RegisterWidth::X64 && allow_shifted =>
+            {
+                Operand::ShiftedRegister { reg, kind, amount }
+            }
+            Operand::ShiftedRegister { reg, .. } if width == RegisterWidth::X64 => {
+                Operand::Register(reg)
+            }
+            Operand::ExtendedRegister { reg, .. } if width == RegisterWidth::X64 => {
+                Operand::Register(reg)
+            }
+            Operand::Register(_)
+            | Operand::ShiftedRegister { .. }
+            | Operand::ExtendedRegister { .. } => {
+                Operand::Immediate(self.random_logical_immediate(rng, width))
+            }
         }
     }
 
@@ -1359,6 +1391,409 @@ mod tests {
             vec![-1, 0, 1, 2],
             MutationWeights::default(),
         )
+    }
+
+    fn logical_immediate_instrs(imm: i64, width: RegisterWidth) -> [Instruction; 5] {
+        [
+            Instruction::And {
+                rd: Register::X0,
+                rn: Register::X1,
+                rm: Operand::Immediate(imm),
+                width,
+            },
+            Instruction::Orr {
+                rd: Register::X0,
+                rn: Register::X1,
+                rm: Operand::Immediate(imm),
+                width,
+            },
+            Instruction::Eor {
+                rd: Register::X0,
+                rn: Register::X1,
+                rm: Operand::Immediate(imm),
+                width,
+            },
+            Instruction::Tst {
+                rn: Register::X1,
+                rm: Operand::Immediate(imm),
+                width,
+            },
+            Instruction::Ands {
+                rd: Register::X0,
+                rn: Register::X1,
+                rm: Operand::Immediate(imm),
+                width,
+            },
+        ]
+    }
+
+    #[test]
+    fn logical_immediate_pools_are_unique_nontrivial_and_encodable() {
+        for (name, pool, width) in [
+            ("W32", LOGICAL_IMM32_POOL, RegisterWidth::W32),
+            ("X64", LOGICAL_IMM64_POOL, RegisterWidth::X64),
+        ] {
+            assert!(!pool.is_empty(), "{name} logical immediate pool is empty");
+
+            let mut unique = pool.to_vec();
+            unique.sort_unstable();
+            assert!(
+                unique.windows(2).all(|window| window[0] != window[1]),
+                "{name} logical immediate pool contains duplicates: {pool:?}"
+            );
+
+            assert!(
+                pool.iter().all(|imm| *imm != 0 && *imm != -1),
+                "{name} logical immediate pool must exclude all-zero/all-one masks"
+            );
+
+            for &imm in pool {
+                for instr in logical_immediate_instrs(imm, width) {
+                    assert!(
+                        instr.is_encodable_aarch64(),
+                        "{name} pool value 0x{:x} produced non-encodable {}",
+                        imm as u64,
+                        instr
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn random_logical_immediate_ignores_generic_immediate_pool() {
+        let mutator = Mutator::new(
+            vec![Register::X0, Register::X1, Register::X2],
+            vec![0, -1, 5, 0x1_0000_00ff, 12345],
+            MutationWeights::default(),
+        );
+        let mut rng = ChaCha8Rng::seed_from_u64(0x3740);
+
+        for width in [RegisterWidth::W32, RegisterWidth::X64] {
+            for _ in 0..500 {
+                let imm = mutator.random_logical_immediate(&mut rng, width);
+                for instr in logical_immediate_instrs(imm, width) {
+                    assert!(
+                        instr.is_encodable_aarch64(),
+                        "sampled {:?} logical immediate 0x{:x} produced non-encodable {}",
+                        width,
+                        imm as u64,
+                        instr
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn mutate_operand_samples_encodable_logical_immediates_for_both_widths() {
+        let mutator = Mutator::new(
+            vec![Register::X0, Register::X1, Register::X2],
+            vec![0, -1, 5, 0x1_0000_00ff, 12345],
+            MutationWeights::default(),
+        );
+        let starts = [
+            (
+                "AND W32",
+                Instruction::And {
+                    rd: Register::X0,
+                    rn: Register::X1,
+                    rm: Operand::Immediate(0xff),
+                    width: RegisterWidth::W32,
+                },
+            ),
+            (
+                "ORR W32",
+                Instruction::Orr {
+                    rd: Register::X0,
+                    rn: Register::X1,
+                    rm: Operand::Immediate(0xff),
+                    width: RegisterWidth::W32,
+                },
+            ),
+            (
+                "EOR W32",
+                Instruction::Eor {
+                    rd: Register::X0,
+                    rn: Register::X1,
+                    rm: Operand::Immediate(0xff),
+                    width: RegisterWidth::W32,
+                },
+            ),
+            (
+                "TST W32",
+                Instruction::Tst {
+                    rn: Register::X1,
+                    rm: Operand::Immediate(0xff),
+                    width: RegisterWidth::W32,
+                },
+            ),
+            (
+                "ANDS W32",
+                Instruction::Ands {
+                    rd: Register::X0,
+                    rn: Register::X1,
+                    rm: Operand::Immediate(0xff),
+                    width: RegisterWidth::W32,
+                },
+            ),
+            (
+                "AND X64",
+                Instruction::And {
+                    rd: Register::X0,
+                    rn: Register::X1,
+                    rm: Operand::Register(Register::X2),
+                    width: RegisterWidth::X64,
+                },
+            ),
+            (
+                "ORR X64",
+                Instruction::Orr {
+                    rd: Register::X0,
+                    rn: Register::X1,
+                    rm: Operand::Register(Register::X2),
+                    width: RegisterWidth::X64,
+                },
+            ),
+            (
+                "EOR X64",
+                Instruction::Eor {
+                    rd: Register::X0,
+                    rn: Register::X1,
+                    rm: Operand::Register(Register::X2),
+                    width: RegisterWidth::X64,
+                },
+            ),
+            (
+                "TST X64",
+                Instruction::Tst {
+                    rn: Register::X1,
+                    rm: Operand::Register(Register::X2),
+                    width: RegisterWidth::X64,
+                },
+            ),
+            (
+                "ANDS X64",
+                Instruction::Ands {
+                    rd: Register::X0,
+                    rn: Register::X1,
+                    rm: Operand::Register(Register::X2),
+                    width: RegisterWidth::X64,
+                },
+            ),
+        ];
+
+        for (idx, (name, start)) in starts.into_iter().enumerate() {
+            let mut rng = ChaCha8Rng::seed_from_u64(0x3741 + idx as u64);
+            let mut saw_immediate = false;
+
+            for _ in 0..5000 {
+                let mut seq = vec![start];
+                mutator.mutate_operand(&mut rng, &mut seq);
+                assert!(
+                    seq[0].is_encodable_aarch64(),
+                    "{name} operand mutation produced non-encodable {}",
+                    seq[0]
+                );
+
+                let rm = match seq[0] {
+                    Instruction::And { rm, .. }
+                    | Instruction::Orr { rm, .. }
+                    | Instruction::Eor { rm, .. }
+                    | Instruction::Tst { rm, .. }
+                    | Instruction::Ands { rm, .. } => rm,
+                    other => panic!("mutate_operand changed {name} opcode: {other:?}"),
+                };
+                if matches!(rm, Operand::Immediate(_)) {
+                    saw_immediate = true;
+                }
+            }
+
+            assert!(
+                saw_immediate,
+                "{name} operand mutation never sampled a logical immediate"
+            );
+        }
+    }
+
+    #[test]
+    fn opcode_bridges_to_logical_replace_arithmetic_immediates_with_bitmasks() {
+        let mutator = Mutator::new(
+            vec![Register::X0, Register::X1, Register::X2],
+            vec![0, -1, 5, 12345],
+            MutationWeights::default(),
+        );
+        let starts = [
+            (
+                "ADD",
+                Instruction::Add {
+                    rd: Register::X0,
+                    rn: Register::X1,
+                    rm: Operand::Immediate(5),
+                },
+            ),
+            (
+                "SUB",
+                Instruction::Sub {
+                    rd: Register::X0,
+                    rn: Register::X1,
+                    rm: Operand::Immediate(5),
+                },
+            ),
+            (
+                "CMP",
+                Instruction::Cmp {
+                    rn: Register::X1,
+                    rm: Operand::Immediate(5),
+                },
+            ),
+            (
+                "CMN",
+                Instruction::Cmn {
+                    rn: Register::X1,
+                    rm: Operand::Immediate(5),
+                },
+            ),
+            (
+                "ADDS",
+                Instruction::Adds {
+                    rd: Register::X0,
+                    rn: Register::X1,
+                    rm: Operand::Immediate(5),
+                },
+            ),
+            (
+                "SUBS",
+                Instruction::Subs {
+                    rd: Register::X0,
+                    rn: Register::X1,
+                    rm: Operand::Immediate(5),
+                },
+            ),
+        ];
+
+        for (idx, (name, start)) in starts.into_iter().enumerate() {
+            let mut rng = ChaCha8Rng::seed_from_u64(0x3742 + idx as u64);
+            let mut saw_logical = false;
+
+            for _ in 0..5000 {
+                let mut seq = vec![start];
+                mutator.mutate_opcode(&mut rng, &mut seq);
+
+                let rm = match seq[0] {
+                    Instruction::And { rm, .. }
+                    | Instruction::Orr { rm, .. }
+                    | Instruction::Eor { rm, .. }
+                    | Instruction::Tst { rm, .. }
+                    | Instruction::Ands { rm, .. } => rm,
+                    _ => continue,
+                };
+
+                saw_logical = true;
+                assert!(
+                    seq[0].is_encodable_aarch64(),
+                    "{name} logical opcode bridge produced non-encodable {}",
+                    seq[0]
+                );
+                match rm {
+                    Operand::Immediate(imm) => assert_ne!(
+                        imm, 5,
+                        "{name} logical opcode bridge preserved arithmetic-only #5"
+                    ),
+                    other => panic!(
+                        "{name} logical opcode bridge from immediate source produced {other:?}"
+                    ),
+                }
+            }
+
+            assert!(
+                saw_logical,
+                "expected {name} opcode mutation to reach a logical peer"
+            );
+        }
+    }
+
+    #[test]
+    fn opcode_bridges_from_logical_clamp_bitmask_immediates_for_arithmetic() {
+        let mutator = default_mutator();
+        let starts = [
+            (
+                "AND",
+                Instruction::And {
+                    rd: Register::X0,
+                    rn: Register::X1,
+                    rm: Operand::Immediate(0xff00),
+                    width: RegisterWidth::X64,
+                },
+            ),
+            (
+                "ORR",
+                Instruction::Orr {
+                    rd: Register::X0,
+                    rn: Register::X1,
+                    rm: Operand::Immediate(0xff00),
+                    width: RegisterWidth::X64,
+                },
+            ),
+            (
+                "EOR",
+                Instruction::Eor {
+                    rd: Register::X0,
+                    rn: Register::X1,
+                    rm: Operand::Immediate(0xff00),
+                    width: RegisterWidth::X64,
+                },
+            ),
+            (
+                "TST",
+                Instruction::Tst {
+                    rn: Register::X1,
+                    rm: Operand::Immediate(0xff00),
+                    width: RegisterWidth::X64,
+                },
+            ),
+            (
+                "ANDS",
+                Instruction::Ands {
+                    rd: Register::X0,
+                    rn: Register::X1,
+                    rm: Operand::Immediate(0xff00),
+                    width: RegisterWidth::X64,
+                },
+            ),
+        ];
+
+        for (idx, (name, start)) in starts.into_iter().enumerate() {
+            let mut rng = ChaCha8Rng::seed_from_u64(0x3743 + idx as u64);
+            let mut saw_arithmetic = false;
+
+            for _ in 0..5000 {
+                let mut seq = vec![start];
+                mutator.mutate_opcode(&mut rng, &mut seq);
+
+                match seq[0] {
+                    Instruction::Add { .. }
+                    | Instruction::Sub { .. }
+                    | Instruction::Cmp { .. }
+                    | Instruction::Cmn { .. }
+                    | Instruction::Adds { .. }
+                    | Instruction::Subs { .. } => {
+                        saw_arithmetic = true;
+                        assert!(
+                            seq[0].is_encodable_aarch64(),
+                            "{name} arithmetic opcode bridge produced non-encodable {}",
+                            seq[0]
+                        );
+                    }
+                    _ => {}
+                }
+            }
+
+            assert!(
+                saw_arithmetic,
+                "expected {name} opcode mutation to reach an arithmetic peer"
+            );
+        }
     }
 
     #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
