@@ -5,6 +5,12 @@
 //! 2. Opcode mutation (16%): Change the opcode while keeping operand structure
 //! 3. Swap mutation (16%): Swap two instructions
 //! 4. Instruction mutation (18%): Replace an entire instruction
+//!
+//! These operators are heuristic proposal generators. In particular,
+//! opcode peer clusters are not required to have equal forward/reverse
+//! transition probabilities, and the stochastic search does not apply a
+//! Hastings ratio to correct that asymmetry. The search is intended as an
+//! optimization heuristic, not as a detailed-balance sampler.
 
 #![allow(dead_code)]
 
@@ -265,7 +271,7 @@ impl Mutator {
                             // CCMP/CCMN reject shifted-register or extended-
                             // register operands; collapse to a plain register
                             // (consistent with candidate::generate_random_-
-                            // instruction case 27).
+                            // instruction's conditional-compare arm).
                             Operand::ShiftedRegister { reg, .. }
                             | Operand::ExtendedRegister { reg, .. } => Operand::Register(reg),
                         };
@@ -449,7 +455,12 @@ impl Mutator {
         }
     }
 
-    /// Opcode mutation: change the opcode while keeping operand structure
+    /// Opcode mutation: change the opcode while keeping operand structure.
+    ///
+    /// The match arms below are intentionally heuristic. Some clusters are
+    /// asymmetric because certain instructions have extra bridges or
+    /// encodability clamps; acceptance uses only the Metropolis cost rule, not
+    /// a Hastings correction for the proposal probabilities.
     fn mutate_opcode<R: RngExt>(&self, rng: &mut R, sequence: &mut [Instruction]) {
         if sequence.is_empty() {
             return;
@@ -474,10 +485,11 @@ impl Mutator {
                 }
             }
             Instruction::MovRegW { rd, rn } => {
-                // Stay within the W family (PLAN.md: opcode mutation must choose
-                // compatible W/X families). There is no `MovImmW`, so mirror the
-                // `MovReg -> MovImm` step by mutating to a W-form `AddW` with a
-                // freshly generated (clamped) rm, or keeping `MovRegW`.
+                // Opcode mutation must keep the W/X family compatible, so stay
+                // within the W family here (AddW/SubW already do). There is no
+                // `MovImmW`, so mirror the `MovReg -> MovImm` step by mutating to
+                // a W-form `AddW` with a freshly generated (clamped) rm, or
+                // keeping `MovRegW`.
                 if rng.random_bool(0.5) {
                     Instruction::AddW {
                         rd,
@@ -764,6 +776,10 @@ impl Mutator {
             // Move-wide cluster: MOVN ↔ MOVZ ↔ MOVK (all share rd/imm/shift),
             // plus a single MovImm bridge anchored at MOVZ.
             //
+            // This is not a symmetric proposal table: MOVZ has one more
+            // outgoing arm than MOVN/MOVK. The top-level search accepts it as
+            // a heuristic proposal without a Hastings correction.
+            //
             // Topology note: before this PR, MOVN had a direct MOVN ↔ MovImm
             // edge. We removed it so MOVN now reaches MovImm via two hops
             // (MOVN → MOVZ → MovImm). Ergodicity is preserved — every move
@@ -799,7 +815,9 @@ impl Mutator {
                 1 => Instruction::MovZ { rd, imm, shift },
                 _ => Instruction::MovK { rd, imm, shift },
             },
-            // Inverted-logical join the AND/ORR/EOR cluster.
+            // Inverted-logical instructions join the AND/ORR/EOR cluster.
+            // The peer counts differ across BIC/BICS/ORN/EON, so these arms
+            // are also heuristic rather than detailed-balance transitions.
             Instruction::Bic { rd, rn, rm } => match rng.random_range(0..7) {
                 0 => Instruction::And {
                     rd,
@@ -887,6 +905,8 @@ impl Mutator {
                 _ => Instruction::Eon { rd, rn, rm },
             },
             // Flag-setting cluster: ADDS↔SUBS↔ANDS, and into/out of ADD/SUB/AND.
+            // The ADD/SUB/AND bridges make this another intentionally
+            // asymmetric proposal family.
             //
             // Note: ADDS/SUBS accept `Operand::Immediate` (12-bit). ANDS and
             // AND now accept *bitmask* immediates (issue #65), but the table
@@ -1292,6 +1312,8 @@ mod tests {
     use proptest::prelude::*;
     use rand::SeedableRng;
     use rand::rngs::StdRng;
+    use rand_chacha::ChaCha8Rng;
+    use std::collections::BTreeMap;
 
     fn default_mutator() -> Mutator {
         Mutator::new(
@@ -1299,6 +1321,74 @@ mod tests {
             vec![-1, 0, 1, 2],
             MutationWeights::default(),
         )
+    }
+
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+    enum MoveWideOpcode {
+        MovImm,
+        MovK,
+        MovN,
+        MovZ,
+    }
+
+    fn classify_move_wide_opcode(instr: Instruction) -> MoveWideOpcode {
+        match instr {
+            Instruction::MovImm { .. } => MoveWideOpcode::MovImm,
+            Instruction::MovK { .. } => MoveWideOpcode::MovK,
+            Instruction::MovN { .. } => MoveWideOpcode::MovN,
+            Instruction::MovZ { .. } => MoveWideOpcode::MovZ,
+            other => panic!("unexpected move-wide opcode mutation output: {other:?}"),
+        }
+    }
+
+    fn move_wide_opcode_mutation_counts(
+        start: Instruction,
+        expected_mov_imm_payload: Option<(Register, i64)>,
+    ) -> BTreeMap<MoveWideOpcode, usize> {
+        let mutator = default_mutator();
+        let mut rng = ChaCha8Rng::seed_from_u64(0x114);
+        let mut counts = BTreeMap::new();
+
+        for _ in 0..5000 {
+            let mut seq = vec![start];
+            mutator.mutate_opcode(&mut rng, &mut seq);
+
+            if let Instruction::MovImm { rd, imm } = seq[0]
+                && let Some((expected_rd, expected_imm)) = expected_mov_imm_payload
+            {
+                assert_eq!(rd, expected_rd, "MovZ -> MovImm must preserve rd");
+                assert_eq!(
+                    imm, expected_imm,
+                    "MovZ -> MovImm must use the raw u16 immediate"
+                );
+            }
+
+            *counts.entry(classify_move_wide_opcode(seq[0])).or_insert(0) += 1;
+        }
+
+        counts
+    }
+
+    fn assert_move_wide_opcode_peers(
+        start: Instruction,
+        expected: &[MoveWideOpcode],
+        expected_mov_imm_payload: Option<(Register, i64)>,
+    ) {
+        let counts = move_wide_opcode_mutation_counts(start, expected_mov_imm_payload);
+
+        for observed in counts.keys() {
+            assert!(
+                expected.contains(observed),
+                "unexpected move-wide opcode {observed:?} from {start:?}; counts: {counts:?}"
+            );
+        }
+
+        for expected_opcode in expected {
+            assert!(
+                counts.get(expected_opcode).copied().unwrap_or(0) > 0,
+                "missing move-wide opcode {expected_opcode:?} from {start:?}; counts: {counts:?}"
+            );
+        }
     }
 
     #[test]
@@ -1520,6 +1610,39 @@ mod tests {
         assert!(
             saw_arith_after_bridge,
             "expected the bridge to occasionally produce Add/Sub from And"
+        );
+    }
+
+    #[test]
+    fn test_move_wide_opcode_mutation_reaches_declared_peers() {
+        use MoveWideOpcode::{MovImm, MovK, MovN, MovZ};
+
+        assert_move_wide_opcode_peers(
+            Instruction::MovN {
+                rd: Register::X0,
+                imm: 0x1234,
+                shift: 16,
+            },
+            &[MovN, MovZ, MovK],
+            None,
+        );
+        assert_move_wide_opcode_peers(
+            Instruction::MovZ {
+                rd: Register::X0,
+                imm: 0x1234,
+                shift: 16,
+            },
+            &[MovZ, MovN, MovK, MovImm],
+            Some((Register::X0, 0x1234)),
+        );
+        assert_move_wide_opcode_peers(
+            Instruction::MovK {
+                rd: Register::X0,
+                imm: 0x1234,
+                shift: 16,
+            },
+            &[MovK, MovN, MovZ],
+            None,
         );
     }
 

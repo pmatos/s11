@@ -2733,7 +2733,7 @@ mod tests {
     #[test]
     fn parse_movz_and_movk_accept_canonical_forms() {
         let cases = [
-            ("movz x0, #0x1234", "movz x0, #4660"),
+            ("movz x0, #0x1234", "mov x0, #4660"),
             ("movz x0, #0xFFFF, lsl #48", "movz x0, #65535, lsl #48"),
             ("movk x1, #0", "movk x1, #0"),
             ("movk x1, #0x5678, lsl #16", "movk x1, #22136, lsl #16"),
@@ -2745,6 +2745,38 @@ mod tests {
             };
             assert_eq!(format!("{}", parsed), display);
         }
+    }
+
+    #[test]
+    fn parse_movz_shift0_display_normalizes_to_mov_alias() {
+        let parsed = match parse_line("movz x0, #0x1234").unwrap() {
+            LineResult::Instruction(instr) => instr,
+            LineResult::Skip => panic!("unexpected skip for movz"),
+        };
+        assert_eq!(
+            parsed,
+            Instruction::MovZ {
+                rd: Register::X0,
+                imm: 0x1234,
+                shift: 0,
+            }
+        );
+
+        let printed = parsed.to_string();
+        assert_eq!(printed, "mov x0, #4660");
+
+        let reparsed = match parse_line(&printed).unwrap() {
+            LineResult::Instruction(instr) => instr,
+            LineResult::Skip => panic!("unexpected skip for {}", printed),
+        };
+        assert_eq!(
+            reparsed,
+            Instruction::MovImm {
+                rd: Register::X0,
+                imm: 4660,
+            }
+        );
+        assert_eq!(reparsed.to_string(), printed);
     }
 
     #[test]

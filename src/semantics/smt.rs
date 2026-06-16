@@ -107,24 +107,37 @@ fn zero_extend_to_state_width(value: BV, value_width: u32, state_width: u32) -> 
     }
 }
 
-/// Count leading zeros of a `width`-bit BV using a nested ITE chain.
-/// Iterates bit positions from LSB upward; later iterations overwrite the
-/// result when their bit is set, so the final result is the CLZ of the
-/// input — the number of leading zeros — derived from the highest-set-bit
-/// position found (or `width` if no bit is set).
-//
-// TODO(#112): replace this width-deep ITE chain with an O(log n) binary-search
-// decomposition (top-W/2 / top-W/4 / … / top-1) to reduce Z3 formula depth.
+/// Count leading zeros of a `width`-bit BV with a binary-search decomposition.
+///
+/// The result remains `width` bits wide, while the selected chunk halves on
+/// each step. If the upper half is zero, add its width to the count and
+/// continue with the lower half; otherwise continue with the upper half.
 fn bv_clz(value: &BV, width: u32) -> BV {
-    let mut result = BV::from_u64(width as u64, width);
-    let one_bit = BV::from_u64(1, 1);
-    for pos in 0..width {
-        let bit = value.extract(pos, pos);
-        let is_set = bit.eq(&one_bit);
-        let clz_if_top = BV::from_u64((width - 1 - pos) as u64, width);
-        result = is_set.ite(&clz_if_top, &result);
+    debug_assert!(width > 0, "bv_clz requires a nonzero width");
+    debug_assert!(
+        width.is_power_of_two(),
+        "bv_clz binary-search decomposition requires power-of-two width"
+    );
+
+    let mut chunk = value.clone();
+    let mut chunk_width = width;
+    let mut count = BV::from_u64(0, width);
+
+    while chunk_width > 1 {
+        let half = chunk_width / 2;
+        let upper = chunk.extract(chunk_width - 1, half);
+        let lower = chunk.extract(half - 1, 0);
+        let upper_is_zero = upper.eq(BV::from_u64(0, half));
+
+        let incremented = count.bvadd(BV::from_u64(half as u64, width));
+        count = upper_is_zero.ite(&incremented, &count);
+        chunk = upper_is_zero.ite(&lower, &upper);
+        chunk_width = half;
     }
-    result
+
+    let bit_is_zero = chunk.eq(BV::from_u64(0, 1));
+    let incremented = count.bvadd(BV::from_u64(1, width));
+    bit_is_zero.ite(&incremented, &count)
 }
 
 /// Configuration for the SMT solver
@@ -1256,6 +1269,44 @@ mod tests {
     use super::*;
     use z3::{SatResult, Solver};
 
+    fn max_nested_ite_depth(smt: &str) -> usize {
+        let bytes = smt.as_bytes();
+        let mut paren_depth = 0usize;
+        let mut ite_paren_depths = Vec::new();
+        let mut max_depth = 0usize;
+        let mut i = 0usize;
+
+        while i < bytes.len() {
+            match bytes[i] {
+                b'(' => {
+                    paren_depth += 1;
+                    if is_ite_head(bytes, i) {
+                        ite_paren_depths.push(paren_depth);
+                        max_depth = max_depth.max(ite_paren_depths.len());
+                    }
+                    i += 1;
+                }
+                b')' => {
+                    while ite_paren_depths.last().copied() == Some(paren_depth) {
+                        ite_paren_depths.pop();
+                    }
+                    paren_depth = paren_depth.saturating_sub(1);
+                    i += 1;
+                }
+                _ => i += 1,
+            }
+        }
+
+        max_depth
+    }
+
+    fn is_ite_head(bytes: &[u8], open_paren: usize) -> bool {
+        matches!(bytes.get(open_paren + 1..open_paren + 4), Some(b"ite"))
+            && bytes
+                .get(open_paren + 4)
+                .is_some_and(|b| b.is_ascii_whitespace() || *b == b')')
+    }
+
     #[test]
     fn test_mov_zero_equivalence() {
         let solver = Solver::new();
@@ -1280,7 +1331,7 @@ mod tests {
         let state2 = apply_sequence(initial_state, &seq2);
 
         // Assert states are not equal
-        solver.assert(&states_not_equal(&state1, &state2));
+        solver.assert(states_not_equal(&state1, &state2));
 
         // If UNSAT, states are always equal
         assert_eq!(solver.check(), SatResult::Unsat);
@@ -1392,7 +1443,7 @@ mod tests {
         let expected = BV::from_i64(15, 64);
 
         let solver = Solver::new();
-        solver.assert(&x0_val.eq(&expected).not());
+        solver.assert(x0_val.eq(&expected).not());
         assert_eq!(solver.check(), SatResult::Unsat);
     }
 
@@ -1419,7 +1470,7 @@ mod tests {
         let final_x0 = final_state.get_register(Register::X0);
 
         let solver = Solver::new();
-        solver.assert(&final_x0.eq(&initial_x1).not());
+        solver.assert(final_x0.eq(&initial_x1).not());
         assert_eq!(
             solver.check(),
             SatResult::Unsat,
@@ -1458,7 +1509,7 @@ mod tests {
         //                       ⇒ the two sequences are NOT proved equivalent
         // states_not_equal UNSAT ⇒ they are always equal ⇒ unsound for CSEL
         let solver = Solver::new();
-        solver.assert(&states_not_equal(&state_csel, &state_mov));
+        solver.assert(states_not_equal(&state_csel, &state_mov));
         assert_eq!(
             solver.check(),
             SatResult::Sat,
@@ -1477,7 +1528,7 @@ mod tests {
         let final_x0 = final_state.get_register(Register::X0);
 
         let solver = Solver::new();
-        solver.assert(&final_x0.eq(&initial_x1).not());
+        solver.assert(final_x0.eq(&initial_x1).not());
         assert_eq!(
             solver.check(),
             SatResult::Unsat,
@@ -1691,8 +1742,21 @@ mod tests {
         let final_state = apply_sequence(initial, &seq);
         let final_x0 = final_state.get_register(Register::X0);
         let solver = Solver::new();
-        solver.assert(&final_x0.eq(&BV::from_u64(63, 64)).not());
+        solver.assert(final_x0.eq(BV::from_u64(63, 64)).not());
         assert_eq!(solver.check(), SatResult::Unsat, "CLZ(1) must be 63");
+    }
+
+    #[test]
+    fn test_bv_clz_formula_has_logarithmic_ite_depth() {
+        let value = BV::new_const("x", 64);
+        let clz = bv_clz(&value, 64);
+        let smt = clz.to_string();
+
+        assert!(
+            max_nested_ite_depth(&smt) <= 16,
+            "CLZ SMT term should be logarithmic-depth, got nested ite depth {}",
+            max_nested_ite_depth(&smt)
+        );
     }
 
     /// Floor-log2 acceptance test (issue #58): for nonzero `x1`, the sequence
@@ -1762,10 +1826,10 @@ mod tests {
         let (n2, z2, c2, v2) = s2.get_flags();
 
         let solver = Solver::new();
-        solver.assert(&n1.eq(n2).not());
-        solver.assert(&z1.eq(z2).not());
-        solver.assert(&c1.eq(c2).not());
-        solver.assert(&v1.eq(v2).not());
+        solver.assert(n1.eq(n2).not());
+        solver.assert(z1.eq(z2).not());
+        solver.assert(c1.eq(c2).not());
+        solver.assert(v1.eq(v2).not());
         assert_eq!(solver.check(), SatResult::Sat);
     }
 
@@ -1812,7 +1876,7 @@ mod tests {
 
     fn assert_register_eq(state: &MachineState, reg: Register, expected: &BV, ctx: &str) {
         let solver = Solver::new();
-        solver.assert(&state.get_register(reg).eq(expected).not());
+        solver.assert(state.get_register(reg).eq(expected).not());
         assert_eq!(solver.check(), SatResult::Unsat, "{}", ctx);
     }
 
@@ -1840,7 +1904,7 @@ mod tests {
         force_flags(&mut s2, 0, 0, 0, 0);
 
         let solver = Solver::new();
-        solver.assert(&states_not_equal(&s1, &s2));
+        solver.assert(states_not_equal(&s1, &s2));
         assert_eq!(solver.check(), SatResult::Sat);
     }
 
@@ -2121,7 +2185,7 @@ mod tests {
                     rn: Register::X0,
                     rm: rm_reg.clone(),
                 },
-                compute_flags_logical(&x0.bvand(&x1.bvnot()), 64),
+                compute_flags_logical(&x0.bvand(x1.bvnot()), 64),
                 "BICS x2, x0, x1",
             ),
         ];
@@ -2249,7 +2313,7 @@ mod tests {
                 let smt = condition_to_smt(cond, &n_bv, &z_bv, &c_bv, &v_bv);
                 let solver = Solver::new();
                 let expected_bv = BV::from_u64(expected as u64, 1);
-                solver.assert(&smt.eq(&expected_bv).not());
+                solver.assert(smt.eq(&expected_bv).not());
                 assert_eq!(
                     solver.check(),
                     SatResult::Unsat,
@@ -2310,13 +2374,13 @@ mod tests {
         let symbolic_pre = MachineState::new_symbolic("pre");
         let solver = Solver::new();
         for &(reg, val) in pre_values {
-            solver.assert(&symbolic_pre.get_register(reg).eq(&BV::from_u64(val, 64)));
+            solver.assert(symbolic_pre.get_register(reg).eq(BV::from_u64(val, 64)));
         }
         let symbolic_post = apply_instruction(symbolic_pre, instr);
         solver.assert(
-            &symbolic_post
+            symbolic_post
                 .get_register(dest)
-                .eq(&BV::from_u64(concrete_dest, 64))
+                .eq(BV::from_u64(concrete_dest, 64))
                 .not(),
         );
 
@@ -2358,13 +2422,13 @@ mod tests {
         let symbolic_pre = MachineState::new_symbolic("pre");
         let solver = Solver::new();
         for &(reg, val) in pre_values {
-            solver.assert(&symbolic_pre.get_register(reg).eq(&BV::from_u64(val, 64)));
+            solver.assert(symbolic_pre.get_register(reg).eq(BV::from_u64(val, 64)));
         }
         if let Some(flags) = &pre_flags {
-            solver.assert(&symbolic_pre.n.eq(&BV::from_u64(flags.n as u64, 1)));
-            solver.assert(&symbolic_pre.z.eq(&BV::from_u64(flags.z as u64, 1)));
-            solver.assert(&symbolic_pre.c.eq(&BV::from_u64(flags.c as u64, 1)));
-            solver.assert(&symbolic_pre.v.eq(&BV::from_u64(flags.v as u64, 1)));
+            solver.assert(symbolic_pre.n.eq(BV::from_u64(flags.n as u64, 1)));
+            solver.assert(symbolic_pre.z.eq(BV::from_u64(flags.z as u64, 1)));
+            solver.assert(symbolic_pre.c.eq(BV::from_u64(flags.c as u64, 1)));
+            solver.assert(symbolic_pre.v.eq(BV::from_u64(flags.v as u64, 1)));
         }
         let symbolic_post = apply_instruction(symbolic_pre, instr);
 
@@ -2375,17 +2439,17 @@ mod tests {
         }
         if check_post_flags {
             let cf = concrete_post.get_flags();
-            disagreements.push(symbolic_post.n.eq(&BV::from_u64(cf.n as u64, 1)).not());
-            disagreements.push(symbolic_post.z.eq(&BV::from_u64(cf.z as u64, 1)).not());
-            disagreements.push(symbolic_post.c.eq(&BV::from_u64(cf.c as u64, 1)).not());
-            disagreements.push(symbolic_post.v.eq(&BV::from_u64(cf.v as u64, 1)).not());
+            disagreements.push(symbolic_post.n.eq(BV::from_u64(cf.n as u64, 1)).not());
+            disagreements.push(symbolic_post.z.eq(BV::from_u64(cf.z as u64, 1)).not());
+            disagreements.push(symbolic_post.c.eq(BV::from_u64(cf.c as u64, 1)).not());
+            disagreements.push(symbolic_post.v.eq(BV::from_u64(cf.v as u64, 1)).not());
         }
         assert!(
             !disagreements.is_empty(),
             "assert_concrete_smt_parity_full needs either dest or check_post_flags"
         );
         let refs: Vec<&z3::ast::Bool> = disagreements.iter().collect();
-        solver.assert(&z3::ast::Bool::or(&refs));
+        solver.assert(z3::ast::Bool::or(&refs));
 
         assert_eq!(
             solver.check(),
@@ -2922,7 +2986,12 @@ mod tests {
         let values: &[u64] = &[
             0,
             1,
-            0x8000_0000_0000_0000,
+            2,
+            3,
+            0x10,
+            1 << 31,
+            1 << 32,
+            1 << 63,
             0x0000_0000_0000_0080,
             0x0000_0000_FFFF_FFFF,
             0xFFFF_FFFF_FFFF_FFFF,
@@ -2944,7 +3013,20 @@ mod tests {
             0,                     // all zero -> 63
             0xFFFF_FFFF_FFFF_FFFF, // all one -> 63
             0x8000_0000_0000_0000, // sign-bit only -> 0
-            0x4000_0000_0000_0000, // alternate sign -> 0
+            0x4000_0000_0000_0000, // opposite sign after sign bit -> 0
+            0xBFFF_FFFF_FFFF_FFFF, // negative opposite sign after sign bit -> 0
+            0xC000_0000_0000_0000, // one leading sign replica -> 1
+            1,                     // positive sign-fold boundary -> 62
+            2,                     // positive sign-fold boundary -> 61
+            3,                     // positive sign-fold boundary -> 61
+            0x10,                  // positive sign-fold nibble boundary -> 59
+            1 << 31,               // positive sign-fold 32-bit boundary -> 31
+            1 << 32,               // positive sign-fold 32-bit boundary -> 30
+            0xFFFF_FFFF_FFFF_FFFE, // negative sign-fold boundary -> 62
+            0xFFFF_FFFF_FFFF_FFFD, // negative sign-fold boundary -> 61
+            0xFFFF_FFFF_FFFF_FFEF, // negative sign-fold nibble boundary -> 59
+            0xFFFF_FFFF_7FFF_FFFF, // negative sign-fold 32-bit boundary -> 31
+            0xFFFF_FFFE_FFFF_FFFF, // negative sign-fold 32-bit boundary -> 30
             0x0000_0000_FFFF_FFFF, // mid run -> 31
         ];
         for &v1 in values {

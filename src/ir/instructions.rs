@@ -1453,7 +1453,7 @@ impl fmt::Display for Instruction {
             }
             Instruction::MovZ { rd, imm, shift } => {
                 if *shift == 0 {
-                    write!(f, "movz {}, #{}", rd, imm)
+                    write!(f, "mov {}, #{}", rd, imm)
                 } else {
                     write!(f, "movz {}, #{}, lsl #{}", rd, imm, shift)
                 }
@@ -1617,6 +1617,23 @@ mod tests {
             width: crate::ir::RegisterWidth::X64,
         };
         assert_eq!(format!("{}", eor), "eor x0, x0, x0");
+    }
+
+    #[test]
+    fn movz_shift0_display_uses_mov_alias() {
+        let shift0 = Instruction::MovZ {
+            rd: Register::X0,
+            imm: 0x1234,
+            shift: 0,
+        };
+        assert_eq!(shift0.to_string(), "mov x0, #4660");
+
+        let shift16 = Instruction::MovZ {
+            rd: Register::X0,
+            imm: 0x1234,
+            shift: 16,
+        };
+        assert_eq!(shift16.to_string(), "movz x0, #4660, lsl #16");
     }
 
     #[test]

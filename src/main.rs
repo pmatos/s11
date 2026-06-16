@@ -412,16 +412,264 @@ struct OptimizationOptions {
 
 // --- Optimization Function ---
 
-// AArch64 dispatch target for `s11 opt`. Receives a pre-built `ElfPatcher`
-// from the CLI arm so the file is read exactly once (issue #88).
-//
-// Issue #77 stage 2 step 20 will merge this with `optimize_elf_binary_x86`
-// into a single `optimize_elf_binary_generic<I: ISA>` once x86 has its own
-// `SearchAlgorithm` impl; the merge dispatch will branch on
-// `patcher.arch()` (now that the Opt arm already has a patcher in scope).
-// Currently blocked on the `SearchAlgorithm<I>` follow-up to step 11 —
-// `optimize_elf_binary_x86` still drives `find_shorter_equivalent_x86`
-// over `X86Instruction` directly.
+enum OptimizedWindowBytes {
+    Patch(Vec<u8>),
+    LeaveInputUnchanged,
+}
+
+trait ElfOptimizationBackend {
+    type Instruction: std::fmt::Display;
+
+    fn arch(&self) -> DetectedArch;
+
+    fn arch_description(&self) -> String {
+        format!("{:?}", self.arch())
+    }
+
+    fn ir_label(&self) -> &'static str {
+        "IR"
+    }
+
+    fn disassembler(&self) -> Result<Capstone, Box<dyn std::error::Error>>;
+
+    fn convert_ir(
+        &self,
+        instructions: &capstone::Instructions,
+    ) -> Result<Vec<Self::Instruction>, String>;
+
+    fn validate_window_ir(&self, ir: &[Self::Instruction]) -> Result<(), String>;
+
+    fn run_search(
+        &self,
+        ir: &[Self::Instruction],
+        options: &OptimizationOptions,
+    ) -> Result<Option<Vec<Self::Instruction>>, Box<dyn std::error::Error>>;
+
+    fn no_optimization_message(&self) -> &'static str;
+
+    fn assemble_window(
+        &self,
+        original_ir: &[Self::Instruction],
+        final_ir: &[Self::Instruction],
+        optimized_found: bool,
+        capstone_instructions: &capstone::Instructions,
+        original_bytes: &[u8],
+        start_addr: u64,
+    ) -> Result<OptimizedWindowBytes, Box<dyn std::error::Error>>;
+}
+
+struct AArch64OptimizationBackend;
+
+impl ElfOptimizationBackend for AArch64OptimizationBackend {
+    type Instruction = Instruction;
+
+    fn arch(&self) -> DetectedArch {
+        DetectedArch::Aarch64
+    }
+
+    fn disassembler(&self) -> Result<Capstone, Box<dyn std::error::Error>> {
+        Ok(Capstone::new()
+            .arm64()
+            .mode(capstone::arch::arm64::ArchMode::Arm)
+            .detail(true)
+            .build()?)
+    }
+
+    fn convert_ir(
+        &self,
+        instructions: &capstone::Instructions,
+    ) -> Result<Vec<Self::Instruction>, String> {
+        convert_to_ir(instructions)
+    }
+
+    fn validate_window_ir(&self, ir: &[Self::Instruction]) -> Result<(), String> {
+        validate_basic_block(ir)
+    }
+
+    fn run_search(
+        &self,
+        ir: &[Self::Instruction],
+        options: &OptimizationOptions,
+    ) -> Result<Option<Vec<Self::Instruction>>, Box<dyn std::error::Error>> {
+        run_optimization(ir, options)
+    }
+
+    fn no_optimization_message(&self) -> &'static str {
+        "No optimization found, using original instructions."
+    }
+
+    fn assemble_window(
+        &self,
+        _original_ir: &[Self::Instruction],
+        final_ir: &[Self::Instruction],
+        _optimized_found: bool,
+        _capstone_instructions: &capstone::Instructions,
+        _original_bytes: &[u8],
+        start_addr: u64,
+    ) -> Result<OptimizedWindowBytes, Box<dyn std::error::Error>> {
+        let mut assembler = AArch64Assembler::new();
+        let assembled_bytes = assembler.assemble_instructions(final_ir, start_addr)?;
+        Ok(OptimizedWindowBytes::Patch(assembled_bytes))
+    }
+}
+
+struct X86OptimizationBackend {
+    arch: DetectedArch,
+    width: u32,
+}
+
+impl X86OptimizationBackend {
+    fn new(arch: DetectedArch) -> Result<Self, Box<dyn std::error::Error>> {
+        let width = match arch {
+            DetectedArch::X86_64 => 64,
+            DetectedArch::X86_32 => 32,
+            DetectedArch::Aarch64 => {
+                return Err("expected x86 binary; got AArch64".into());
+            }
+        };
+        Ok(Self { arch, width })
+    }
+}
+
+impl ElfOptimizationBackend for X86OptimizationBackend {
+    type Instruction = isa::x86::X86Instruction;
+
+    fn arch(&self) -> DetectedArch {
+        self.arch
+    }
+
+    fn arch_description(&self) -> String {
+        format!("{:?} (width {})", self.arch, self.width)
+    }
+
+    fn ir_label(&self) -> &'static str {
+        "x86 IR"
+    }
+
+    fn disassembler(&self) -> Result<Capstone, Box<dyn std::error::Error>> {
+        let mut builder = Capstone::new().x86();
+        builder = match self.arch {
+            DetectedArch::X86_64 => builder.mode(capstone::arch::x86::ArchMode::Mode64),
+            DetectedArch::X86_32 => builder.mode(capstone::arch::x86::ArchMode::Mode32),
+            DetectedArch::Aarch64 => unreachable!("x86 backend never receives AArch64"),
+        };
+        Ok(builder
+            .syntax(capstone::arch::x86::ArchSyntax::Intel)
+            .build()?)
+    }
+
+    fn convert_ir(
+        &self,
+        instructions: &capstone::Instructions,
+    ) -> Result<Vec<Self::Instruction>, String> {
+        convert_to_x86_ir(instructions)
+    }
+
+    fn validate_window_ir(&self, ir: &[Self::Instruction]) -> Result<(), String> {
+        validate_x86_window_terminator_placement(ir)
+    }
+
+    fn run_search(
+        &self,
+        ir: &[Self::Instruction],
+        options: &OptimizationOptions,
+    ) -> Result<Option<Vec<Self::Instruction>>, Box<dyn std::error::Error>> {
+        let optimized = match options.algorithm {
+            Algorithm::Enumerative => run_x86_enumerative(ir, self.width, options),
+            Algorithm::Stochastic => run_x86_stochastic(ir, self.width, options),
+            Algorithm::Symbolic => run_x86_symbolic(ir, self.width, options),
+            Algorithm::Hybrid | Algorithm::Llm => {
+                // Rejected upstream at the CLI layer; defensive check here
+                // in case a programmatic caller bypasses it.
+                return Err("hybrid and llm are AArch64-only".into());
+            }
+        };
+        Ok(optimized)
+    }
+
+    fn no_optimization_message(&self) -> &'static str {
+        "No optimization found; not patching (input binary left untouched)."
+    }
+
+    fn assemble_window(
+        &self,
+        original_ir: &[Self::Instruction],
+        final_ir: &[Self::Instruction],
+        optimized_found: bool,
+        capstone_instructions: &capstone::Instructions,
+        original_bytes: &[u8],
+        _start_addr: u64,
+    ) -> Result<OptimizedWindowBytes, Box<dyn std::error::Error>> {
+        if !optimized_found {
+            // Without a shorter sequence to substitute there is nothing to
+            // patch. Round-tripping the original IR through dynasm could emit
+            // different bytes than the source compiler, so leave the input
+            // untouched.
+            return Ok(OptimizedWindowBytes::LeaveInputUnchanged);
+        }
+
+        // If the original window ended in a Jcc, the search holds that
+        // terminator fixed. Re-encoding it via dynasm would emit a placeholder
+        // zero displacement and overwrite the real branch target. Peel the
+        // Jcc from `final_ir` and splice the ORIGINAL Jcc bytes back at the
+        // same offset they had in the source window so the displacement
+        // stays valid.
+        let (final_prefix_ir, final_terminator) =
+            crate::ir::instructions::split_terminator_x86(final_ir);
+        let (_, original_terminator) = crate::ir::instructions::split_terminator_x86(original_ir);
+        if final_terminator != original_terminator {
+            return Err(format!(
+                "search returned a terminator ({:?}) that does not match the \
+                 original window's terminator ({:?}); refusing to patch",
+                final_terminator, original_terminator
+            )
+            .into());
+        }
+        let pinned_terminator_bytes: Option<Vec<u8>> = if original_terminator.is_some() {
+            let last = capstone_instructions
+                .iter()
+                .last()
+                .ok_or("expected non-empty disassembly when peeling terminator")?;
+            Some(last.bytes().to_vec())
+        } else {
+            None
+        };
+        let original_prefix_byte_size =
+            original_bytes.len() - pinned_terminator_bytes.as_ref().map_or(0, |b| b.len());
+
+        let new_bytes = reassemble_x86_prefix_with_pinned_terminator(
+            final_prefix_ir,
+            self.arch,
+            pinned_terminator_bytes.as_deref(),
+            original_prefix_byte_size,
+        )?;
+        Ok(OptimizedWindowBytes::Patch(new_bytes))
+    }
+}
+
+fn optimized_output_path(path: &Path) -> PathBuf {
+    let mut new_path = path.to_path_buf();
+    let stem = new_path.file_stem().unwrap().to_str().unwrap();
+    let extension = new_path.extension().map(|e| e.to_str().unwrap());
+
+    let new_name = if let Some(ext) = extension {
+        format!("{}_optimized.{}", stem, ext)
+    } else {
+        format!("{}_optimized", stem)
+    };
+
+    new_path.set_file_name(new_name);
+    new_path
+}
+
+fn decode_arch_label(arch: DetectedArch) -> &'static str {
+    match arch {
+        DetectedArch::Aarch64 => "AArch64",
+        DetectedArch::X86_64 => "x86-64",
+        DetectedArch::X86_32 => "x86-32",
+    }
+}
+
 fn optimize_elf_binary(
     patcher: &ElfPatcher,
     path: &Path,
@@ -429,7 +677,36 @@ fn optimize_elf_binary(
     end_addr: u64,
     options: &OptimizationOptions,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    match patcher.arch() {
+        DetectedArch::Aarch64 => optimize_elf_binary_with_backend(
+            AArch64OptimizationBackend,
+            patcher,
+            path,
+            start_addr,
+            end_addr,
+            options,
+        ),
+        DetectedArch::X86_64 | DetectedArch::X86_32 => optimize_elf_binary_with_backend(
+            X86OptimizationBackend::new(patcher.arch())?,
+            patcher,
+            path,
+            start_addr,
+            end_addr,
+            options,
+        ),
+    }
+}
+
+fn optimize_elf_binary_with_backend<B: ElfOptimizationBackend>(
+    backend: B,
+    patcher: &ElfPatcher,
+    path: &Path,
+    start_addr: u64,
+    end_addr: u64,
+    options: &OptimizationOptions,
+) -> Result<(), Box<dyn std::error::Error>> {
     println!("Optimizing ELF binary: {}", path.display());
+    println!("Detected: {}", backend.arch_description());
     println!("Address window: 0x{:x} - 0x{:x}", start_addr, end_addr);
     println!("Algorithm: {:?}", options.algorithm);
 
@@ -447,11 +724,7 @@ fn optimize_elf_binary(
     println!("Original code: {} bytes", original_bytes.len());
 
     // Initialize Capstone disassembler
-    let cs = Capstone::new()
-        .arm64()
-        .mode(capstone::arch::arm64::ArchMode::Arm)
-        .detail(true)
-        .build()?;
+    let cs = backend.disassembler()?;
 
     // Disassemble instructions in the window
     let instructions = cs.disasm_all(&original_bytes, start_addr)?;
@@ -467,25 +740,35 @@ fn optimize_elf_binary(
     }
 
     let decoded_bytes: usize = instructions.iter().map(|i| i.bytes().len()).sum();
-    ensure_window_fully_decoded(decoded_bytes, original_bytes.len(), start_addr, end_addr)?;
+    ensure_window_fully_decoded_for_arch(
+        decode_arch_label(backend.arch()),
+        decoded_bytes,
+        original_bytes.len(),
+        start_addr,
+        end_addr,
+    )?;
 
     // Convert to IR
-    let ir_instructions = convert_to_ir(&instructions)?;
-    println!("Converted {} instructions to IR:", ir_instructions.len());
+    let ir_instructions = backend.convert_ir(&instructions)?;
+    println!(
+        "Converted {} instructions to {}:",
+        ir_instructions.len(),
+        backend.ir_label()
+    );
 
     for instr in &ir_instructions {
         println!("  {}", instr);
     }
 
-    // Issue #69: the optimization unit is a single basic block. Reject regions
-    // with branches at non-terminal positions before invoking search.
-    validate_basic_block(&ir_instructions)?;
+    backend.validate_window_ir(&ir_instructions)?;
 
     // Run optimization based on selected algorithm
-    let optimized_instructions = run_optimization(&ir_instructions, options)?;
+    let optimized_instructions = backend.run_search(&ir_instructions, options)?;
 
     // Use optimized instructions if found, otherwise use original
-    let final_instructions = optimized_instructions.as_ref().unwrap_or(&ir_instructions);
+    let final_instructions = optimized_instructions
+        .as_deref()
+        .unwrap_or(&ir_instructions);
 
     if optimized_instructions.is_some() {
         println!("Optimized to {} instructions:", final_instructions.len());
@@ -493,29 +776,25 @@ fn optimize_elf_binary(
             println!("  {}", instr);
         }
     } else {
-        println!("No optimization found, using original instructions.");
+        println!("{}", backend.no_optimization_message());
     }
 
     // Reassemble the instructions
-    let mut assembler = AArch64Assembler::new();
-    let assembled_bytes = assembler.assemble_instructions(final_instructions, start_addr)?;
+    let assembled_bytes = backend.assemble_window(
+        &ir_instructions,
+        final_instructions,
+        optimized_instructions.is_some(),
+        &instructions,
+        &original_bytes,
+        start_addr,
+    )?;
+    let OptimizedWindowBytes::Patch(assembled_bytes) = assembled_bytes else {
+        return Ok(());
+    };
     println!("Reassembled to {} bytes", assembled_bytes.len());
 
     // Create output filename
-    let output_path = {
-        let mut new_path = path.to_path_buf();
-        let stem = new_path.file_stem().unwrap().to_str().unwrap();
-        let extension = new_path.extension().map(|e| e.to_str().unwrap());
-
-        let new_name = if let Some(ext) = extension {
-            format!("{}_optimized.{}", stem, ext)
-        } else {
-            format!("{}_optimized", stem)
-        };
-
-        new_path.set_file_name(new_name);
-        new_path
-    };
+    let output_path = optimized_output_path(path);
 
     // Create patched ELF file
     patcher.create_patched_copy(&output_path, &window, &assembled_bytes)?;
@@ -608,8 +887,8 @@ fn build_x86_stochastic_search_config(width: u32, options: &OptimizationOptions)
         .with_cost_metric(options.cost_metric)
         .with_timeout_option(options.timeout)
         .with_verbose(options.verbose)
-        .with_x86_registers(search::candidate_x86::default_x86_registers())
-        .with_immediates(search::candidate_x86::default_x86_immediates())
+        .with_x86_registers(isa::x86::default_x86_registers())
+        .with_immediates(isa::x86::default_x86_immediates())
         .with_x86_width(width)
 }
 
@@ -680,7 +959,7 @@ fn run_optimization(
                 .with_immediates(available_immediates)
                 .with_cores(options.cores);
 
-            let mut search = EnumerativeSearch::new();
+            let mut search = EnumerativeSearch::<isa::AArch64>::new();
             let result = search.search(prefix, &live_out, &config);
 
             print_search_statistics(&result.statistics);
@@ -942,7 +1221,24 @@ fn convert_capstone_op(mnemonic: &str, op_str: &str) -> ConvertOutcome {
     }
 }
 
+#[cfg(test)]
 fn ensure_window_fully_decoded(
+    decoded_bytes: usize,
+    window_bytes: usize,
+    start_addr: u64,
+    end_addr: u64,
+) -> Result<(), String> {
+    ensure_window_fully_decoded_for_arch(
+        "AArch64",
+        decoded_bytes,
+        window_bytes,
+        start_addr,
+        end_addr,
+    )
+}
+
+fn ensure_window_fully_decoded_for_arch(
+    arch_label: &str,
     decoded_bytes: usize,
     window_bytes: usize,
     start_addr: u64,
@@ -952,14 +1248,14 @@ fn ensure_window_fully_decoded(
     match decoded_bytes.cmp(&window_bytes) {
         Ordering::Equal => Ok(()),
         Ordering::Less => Err(format!(
-            "AArch64 window 0x{:x}-0x{:x} ({} bytes) was not fully decoded by Capstone; decoded only {} bytes",
-            start_addr, end_addr, window_bytes, decoded_bytes
+            "{} window 0x{:x}-0x{:x} ({} bytes) was not fully decoded by Capstone; decoded only {} bytes",
+            arch_label, start_addr, end_addr, window_bytes, decoded_bytes
         )),
         // Defensive: cs.disasm_all only emits bytes it was given, so this
         // branch is an internal-invariant guard, not a user-facing condition.
         Ordering::Greater => Err(format!(
-            "AArch64 window 0x{:x}-0x{:x} ({} bytes) decoded {} bytes by Capstone — more than the window holds",
-            start_addr, end_addr, window_bytes, decoded_bytes
+            "{} window 0x{:x}-0x{:x} ({} bytes) decoded {} bytes by Capstone — more than the window holds",
+            arch_label, start_addr, end_addr, window_bytes, decoded_bytes
         )),
     }
 }
@@ -1089,100 +1385,108 @@ fn convert_to_x86_ir(
     Ok(out)
 }
 
-/// Length-1 enumerator for x86: try every candidate of length 1 against
-/// the target sequence, return the first equivalent shorter sequence.
-fn find_shorter_equivalent_x86(
+/// Candidate register pool for the x86 enumerative path, drawn from the
+/// target's own registers (destinations + sources). The trait refactor
+/// regressed coverage by defaulting to the fixed `default_x86_registers()`
+/// pool, so a window over R10–R15 had no representable rewrite. Mirrors the
+/// pre-refactor `find_shorter_equivalent_x86` derivation. Falls back to the
+/// default pool only for an empty target (no rewrite is possible there).
+fn x86_enumerative_registers_from_target(
     target: &[isa::x86::X86Instruction],
-    width: u32,
-) -> Option<Vec<isa::x86::X86Instruction>> {
-    use isa::InstructionType;
-    use isa::x86::X86Register;
-    use search::candidate_x86::generate_all_x86_instructions;
-    use semantics::cost_x86;
-    use semantics::equivalence::{X86EquivalenceConfig, check_equivalence_x86};
-    use semantics::state::X86LiveOutMask;
-
-    if target.len() < 2 {
-        // Already length 1 (or empty); nothing strictly shorter exists.
-        return None;
-    }
-    let target_cost =
-        cost_x86::sequence_cost(target, &semantics::cost::CostMetric::CodeSize, width);
-
-    // Peel any trailing Jcc terminator. Candidates never include Jcc, so
-    // a non-Jcc proposal against a Jcc-terminated target would otherwise
-    // be immediately rejected by `check_equivalence_x86`'s terminator-
-    // equality precheck. We append the original terminator to each
-    // proposal so the equivalence check sees matching terminators and
-    // its flag-observability guard fires correctly.
-    let (_, target_terminator) = crate::ir::instructions::split_terminator_x86(target);
-
-    // Live-out registers = everything the target writes.
-    let live_regs: Vec<X86Register> = target.iter().filter_map(|i| i.destination()).collect();
-    // Flags are live whenever the target contains any instruction with
-    // observable side-effects beyond the register write — every variant
-    // except MOV reports `has_side_effects() == true` because it touches
-    // EFLAGS. Without this, a rewrite like `add rax, 0; mov rax, rbx`
-    // → `mov rax, rbx` could be silently accepted, dropping the EFLAGS
-    // write the surrounding code may consume via Jcc.
-    let flags_live = target.iter().any(InstructionType::has_side_effects);
-    let live_out = X86LiveOutMask::from_registers(live_regs.clone()).with_flags(flags_live);
-
-    // Build a register pool from the registers actually used in the
-    // target. The candidate enumeration over this pool is bounded by the
-    // target's own register references — any scratch register not in
-    // `live_regs` cannot appear in a length-1 equivalent rewrite of a
-    // length-≥2 target, because the rewrite's write to that register is
-    // either unobservable (so it's wasted work) or contradicts live-out.
-    let mut pool: Vec<X86Register> = live_regs.clone();
-    for reg in target.iter().flat_map(|i| i.source_registers()) {
+) -> Vec<isa::x86::X86Register> {
+    let mut pool: Vec<isa::x86::X86Register> = Vec::new();
+    let referenced = target.iter().flat_map(|instr| {
+        instr
+            .destination()
+            .into_iter()
+            .chain(instr.source_registers())
+    });
+    for reg in referenced {
         if !pool.contains(&reg) {
             pool.push(reg);
         }
     }
-    let imms = vec![0i64, 1, -1];
+    if pool.is_empty() {
+        return isa::x86::default_x86_registers();
+    }
+    pool
+}
 
-    let candidates = generate_all_x86_instructions(&pool, &imms);
-    // Defense-in-depth: when EITHER side reads EFLAGS (CMOV/Jcc), the
-    // fast-path's 10 random trials may not cover every flag combination
-    // the reader depends on. Drop `.fast_only()` for those iterations so
-    // the SMT path also runs. The two configs differ only in fast_only;
-    // building them once outside the loop avoids per-iteration churn.
-    // Route through `isa::x86::x86_reads_flags` so a future flag-reader
-    // (e.g. SETcc) only needs the predicate updated in one place.
-    let reads_flags =
-        |seq: &[isa::x86::X86Instruction]| -> bool { seq.iter().any(isa::x86::x86_reads_flags) };
-    let target_reads_flags = reads_flags(target);
-    let cfg_fast = X86EquivalenceConfig::new(width)
-        .live_out(live_out.clone())
-        .fast_only();
-    let cfg_smt = X86EquivalenceConfig::new(width).live_out(live_out.clone());
-    for cand in candidates {
-        // Build the proposal as [candidate] + original_terminator so
-        // both sides share the same trailing Jcc (if any). The
-        // equivalence check peels them in lockstep and runs the prefix
-        // comparison under forced flags_live (since the terminator
-        // reads flags).
-        let mut seq = vec![cand];
-        if let Some(t) = target_terminator {
-            seq.push(*t);
-        }
-        let cand_cost =
-            cost_x86::sequence_cost(&seq, &semantics::cost::CostMetric::CodeSize, width);
-        if cand_cost >= target_cost {
-            continue;
-        }
-        let cfg = if target_reads_flags || reads_flags(&seq) {
-            &cfg_smt
-        } else {
-            &cfg_fast
-        };
-        match check_equivalence_x86(target, &seq, cfg) {
-            semantics::equivalence::EquivalenceResult::Equivalent => return Some(seq),
-            _ => continue,
+/// Candidate immediate pool for the x86 enumerative path: the target's own
+/// immediates plus `0`, `1`, and `-1`. The fixed `default_x86_immediates()`
+/// pool holds no negatives, so the trait refactor lost rewrites like
+/// `mov rax, -1; mov rax, -1` → `mov rax, -1`.
+fn x86_enumerative_immediates_from_target(target: &[isa::x86::X86Instruction]) -> Vec<i64> {
+    use isa::x86::X86Instruction;
+    let mut imms = vec![0i64, 1, -1];
+    let referenced = target.iter().filter_map(|instr| match instr {
+        X86Instruction::MovImm { imm, .. }
+        | X86Instruction::AddImm { imm, .. }
+        | X86Instruction::SubImm { imm, .. }
+        | X86Instruction::AndImm { imm, .. }
+        | X86Instruction::OrImm { imm, .. }
+        | X86Instruction::XorImm { imm, .. }
+        | X86Instruction::CmpImm { imm, .. } => Some(*imm),
+        _ => None,
+    });
+    for imm in referenced {
+        if !imms.contains(&imm) {
+            imms.push(imm);
         }
     }
-    None
+    imms
+}
+
+/// Build the search config for the x86 *enumerative* path. Unlike stochastic
+/// search (which samples a broad fixed pool), enumerative search draws
+/// candidates from the target's own registers/immediates and honours --cores
+/// now that the trait-backed search is rayon-parallel.
+fn build_x86_enumerative_search_config(
+    target: &[isa::x86::X86Instruction],
+    width: u32,
+    options: &OptimizationOptions,
+) -> SearchConfig {
+    build_x86_stochastic_search_config(width, options)
+        .with_x86_registers(x86_enumerative_registers_from_target(target))
+        .with_immediates(x86_enumerative_immediates_from_target(target))
+        .with_cores(options.cores)
+}
+
+/// Run x86 enumerative search and return the optimized sequence if any.
+fn run_x86_enumerative(
+    target: &[isa::x86::X86Instruction],
+    width: u32,
+    options: &OptimizationOptions,
+) -> Option<Vec<isa::x86::X86Instruction>> {
+    use search::SearchAlgorithm;
+    use validation::live_out::x86_live_out_from_target;
+
+    let config = build_x86_enumerative_search_config(target, width, options);
+    let live_out = x86_live_out_from_target(target);
+
+    let (optimized, statistics) = if width == 32 {
+        let mut search: EnumerativeSearch<isa::X86_32> = EnumerativeSearch::new();
+        let result = search.search(target, &live_out, &config);
+        (
+            result
+                .found_optimization
+                .then_some(result.optimized_sequence)
+                .flatten(),
+            result.statistics,
+        )
+    } else {
+        let mut search: EnumerativeSearch<isa::X86_64> = EnumerativeSearch::new();
+        let result = search.search(target, &live_out, &config);
+        (
+            result
+                .found_optimization
+                .then_some(result.optimized_sequence)
+                .flatten(),
+            result.statistics,
+        )
+    };
+    print_search_statistics(&statistics);
+    optimized
 }
 
 /// Run x86 stochastic search and return the optimized sequence if any.
@@ -1250,8 +1554,8 @@ fn run_x86_symbolic(
         .with_cost_metric(options.cost_metric)
         .with_timeout_option(options.timeout)
         .with_verbose(options.verbose)
-        .with_x86_registers(search::candidate_x86::default_x86_registers())
-        .with_immediates(search::candidate_x86::default_x86_immediates())
+        .with_x86_registers(isa::x86::default_x86_registers())
+        .with_immediates(isa::x86::default_x86_immediates())
         .with_x86_width(width);
     let live_out = x86_live_out_from_target(target);
 
@@ -1345,174 +1649,6 @@ fn reassemble_x86_prefix_with_pinned_terminator(
     }
     out.extend_from_slice(jcc_bytes);
     Ok(out)
-}
-
-fn optimize_elf_binary_x86(
-    patcher: &ElfPatcher,
-    path: &Path,
-    start_addr: u64,
-    end_addr: u64,
-    options: &OptimizationOptions,
-) -> Result<(), Box<dyn std::error::Error>> {
-    println!("Optimizing x86 ELF binary: {}", path.display());
-    println!("Address window: 0x{:x} - 0x{:x}", start_addr, end_addr);
-
-    let window = AddressWindow {
-        start: start_addr,
-        end: end_addr,
-    };
-    let arch = patcher.arch();
-    let width = match arch {
-        DetectedArch::X86_64 => 64u32,
-        DetectedArch::X86_32 => 32u32,
-        DetectedArch::Aarch64 => {
-            return Err("expected x86 binary; got AArch64".into());
-        }
-    };
-    println!("Detected: {:?} (width {})", arch, width);
-
-    let section = patcher.validate_address_window(&window)?;
-    println!("Window is within section: {}", section.name);
-
-    let bytes = patcher.get_instructions_in_window(&window)?;
-    println!("Original code: {} bytes", bytes.len());
-
-    let cs = match arch {
-        DetectedArch::X86_64 => Capstone::new()
-            .x86()
-            .mode(capstone::arch::x86::ArchMode::Mode64)
-            .syntax(capstone::arch::x86::ArchSyntax::Intel)
-            .build()?,
-        DetectedArch::X86_32 => Capstone::new()
-            .x86()
-            .mode(capstone::arch::x86::ArchMode::Mode32)
-            .syntax(capstone::arch::x86::ArchSyntax::Intel)
-            .build()?,
-        DetectedArch::Aarch64 => unreachable!(),
-    };
-    let cs_instrs = cs.disasm_all(&bytes, start_addr)?;
-    println!("Disassembled {} instructions:", cs_instrs.len());
-    for i in cs_instrs.iter() {
-        println!(
-            "  0x{:x}: {} {}",
-            i.address(),
-            i.mnemonic().unwrap_or("???"),
-            i.op_str().unwrap_or("")
-        );
-    }
-
-    // Validate that the disassembled instructions cover the entire byte
-    // window. x86 is variable-length, so an `--end-addr` that lands
-    // mid-instruction (or leaves any undecodable tail bytes) makes
-    // disasm_all return only the complete decoded prefix; the patcher
-    // then overwrites the entire requested byte range with the
-    // reassembled IR, which can replace or NOP part of the next
-    // instruction in the binary. Refuse the window in that case.
-    let decoded_bytes: usize = cs_instrs.iter().map(|i| i.bytes().len()).sum();
-    if decoded_bytes != bytes.len() {
-        return Err(format!(
-            "x86 window 0x{:x}-0x{:x} ({} bytes) does not end on an \
-             instruction boundary: Capstone decoded only {} bytes. Adjust \
-             --end-addr to align with the next instruction's start address.",
-            start_addr,
-            end_addr,
-            bytes.len(),
-            decoded_bytes
-        )
-        .into());
-    }
-
-    let ir = convert_to_x86_ir(&cs_instrs)?;
-    println!("Converted {} instructions to x86 IR:", ir.len());
-    for instr in &ir {
-        println!("  {}", instr);
-    }
-
-    // Reject any non-terminal Jcc. The optimizer only special-cases a
-    // trailing Jcc (peeled by `split_terminator_x86`, displacement
-    // preserved by the reassemble helper); a mid-window Jcc would be a
-    // data-state no-op in both the concrete executor and the SMT path,
-    // letting the equivalence check accept rewrites that silently
-    // corrupt control flow in the patched binary.
-    validate_x86_window_terminator_placement(&ir)?;
-
-    let optimized = match options.algorithm {
-        Algorithm::Enumerative => find_shorter_equivalent_x86(&ir, width),
-        Algorithm::Stochastic => run_x86_stochastic(&ir, width, options),
-        Algorithm::Symbolic => run_x86_symbolic(&ir, width, options),
-        Algorithm::Hybrid | Algorithm::Llm => {
-            // Rejected upstream at the CLI layer; defensive check here
-            // in case a programmatic caller bypasses it.
-            return Err("hybrid and llm are AArch64-only".into());
-        }
-    };
-    let Some(final_ir) = optimized else {
-        // Without a shorter sequence to substitute there is nothing to
-        // patch. Round-tripping the original IR through dynasm could
-        // emit different bytes than the source compiler (e.g. a
-        // different MOV imm32 form, or different NOP padding) and
-        // silently produce a non-byte-identical "no-op" output binary.
-        // Leave the input untouched and exit.
-        println!("No optimization found; not patching (input binary left untouched).");
-        return Ok(());
-    };
-    println!("Optimized to {} instructions:", final_ir.len());
-    for i in &final_ir {
-        println!("  {}", i);
-    }
-
-    // If the original window ended in a Jcc, the search holds that
-    // terminator fixed. Re-encoding it via dynasm would emit a placeholder
-    // zero displacement and overwrite the real branch target. Peel the
-    // Jcc from `final_ir` and splice the ORIGINAL Jcc bytes back at the
-    // same offset they had in the source window so the displacement
-    // stays valid.
-    let (final_prefix_ir, final_terminator) =
-        crate::ir::instructions::split_terminator_x86(&final_ir);
-    let (_, original_terminator) = crate::ir::instructions::split_terminator_x86(&ir);
-    if final_terminator != original_terminator {
-        return Err(format!(
-            "search returned a terminator ({:?}) that does not match the \
-             original window's terminator ({:?}); refusing to patch",
-            final_terminator, original_terminator
-        )
-        .into());
-    }
-    let pinned_terminator_bytes: Option<Vec<u8>> = if original_terminator.is_some() {
-        let last = cs_instrs
-            .iter()
-            .last()
-            .ok_or("expected non-empty disassembly when peeling terminator")?;
-        Some(last.bytes().to_vec())
-    } else {
-        None
-    };
-    let original_prefix_byte_size =
-        bytes.len() - pinned_terminator_bytes.as_ref().map_or(0, |b| b.len());
-
-    let new_bytes = reassemble_x86_prefix_with_pinned_terminator(
-        final_prefix_ir,
-        arch,
-        pinned_terminator_bytes.as_deref(),
-        original_prefix_byte_size,
-    )?;
-    println!("Reassembled to {} bytes", new_bytes.len());
-
-    let output_path = {
-        let mut new_path = path.to_path_buf();
-        let stem = new_path.file_stem().unwrap().to_str().unwrap();
-        let extension = new_path.extension().map(|e| e.to_str().unwrap());
-        let new_name = if let Some(ext) = extension {
-            format!("{}_optimized.{}", stem, ext)
-        } else {
-            format!("{}_optimized", stem)
-        };
-        new_path.set_file_name(new_name);
-        new_path
-    };
-    patcher.create_patched_copy(&output_path, &window, &new_bytes)?;
-    println!("Created optimized binary: {}", output_path.display());
-    Ok(())
 }
 
 // --- Equivalence Checking Command ---
@@ -1793,27 +1929,6 @@ fn main() {
                 );
                 std::process::exit(1);
             }
-            if is_x86 && matches!(algorithm, CliAlgorithm::Enumerative) {
-                // Enumerative x86 still ignores most search-tuning flags
-                // (it's a fixed length-1 enumerator with a fast-path-only
-                // equivalence check).
-                let mut ignored: Vec<&str> = Vec::new();
-                if timeout.is_some() {
-                    ignored.push("--timeout");
-                }
-                if !matches!(cost_metric, CliCostMetric::CodeSize) {
-                    ignored.push("--cost-metric (x86 enumerative always uses CodeSize)");
-                }
-                if cores.is_some() {
-                    ignored.push("--cores (x86 enumerative is single-threaded)");
-                }
-                if !ignored.is_empty() {
-                    eprintln!(
-                        "warning: x86 enumerative ignores the following option(s): {}.",
-                        ignored.join(", ")
-                    );
-                }
-            }
             // Optimization mode
             let start_addr = match parse_hex_address(&start_addr) {
                 Ok(addr) => addr,
@@ -1847,12 +1962,7 @@ fn main() {
                 llm_model,
             };
 
-            let opt_result = if is_x86 {
-                optimize_elf_binary_x86(&patcher, &binary, start_addr, end_addr, &options)
-            } else {
-                optimize_elf_binary(&patcher, &binary, start_addr, end_addr, &options)
-            };
-            match opt_result {
+            match optimize_elf_binary(&patcher, &binary, start_addr, end_addr, &options) {
                 Ok(()) => println!("\nOptimization completed successfully."),
                 Err(e) => {
                     eprintln!("Error during optimization: {}", e);
@@ -2297,18 +2407,23 @@ mod cli_helper_tests {
         assert!(x86_ir_from_mnemonic("add", "rax").unwrap().is_none());
         assert!(x86_ir_from_mnemonic("add", "rax, nope").is_err());
 
-        assert!(find_shorter_equivalent_x86(&[], 64).is_none());
+        let mut opts = options_for(Algorithm::Enumerative);
+        opts.timeout = Some(Duration::from_secs(5));
+        opts.solver_timeout = Duration::from_secs(5);
+        opts.cost_metric = CostMetric::CodeSize;
+        assert!(run_x86_enumerative(&[], 64, &opts).is_none());
         assert!(
-            find_shorter_equivalent_x86(
+            run_x86_enumerative(
                 &[X86Instruction::MovImm {
                     rd: X86Register::RAX,
                     imm: 1,
                 }],
-                64
+                64,
+                &opts
             )
             .is_none()
         );
-        let optimized = find_shorter_equivalent_x86(
+        let optimized = run_x86_enumerative(
             &[
                 X86Instruction::MovImm {
                     rd: X86Register::RAX,
@@ -2320,16 +2435,12 @@ mod cli_helper_tests {
                 },
             ],
             64,
+            &opts,
         )
         .expect("two identical writes can be shortened");
         assert_eq!(optimized.len(), 1);
     }
 
-    /// Regression: `find_shorter_equivalent_x86` must collapse a target
-    /// that references only non-RAX/RDI registers. Pins the
-    /// pool-narrowing change (issue #84 item 8) so any future
-    /// reintroduction of unconditional scratch-register inflation is
-    /// caught.
     #[test]
     fn validate_x86_window_rejects_mid_window_jcc() {
         use isa::x86::{X86Condition, X86Instruction, X86Register};
@@ -2380,12 +2491,18 @@ mod cli_helper_tests {
         validate_x86_window_terminator_placement(&ir).expect("Jcc-free window must be accepted");
     }
 
+    /// Regression: x86 enumerative search must preserve a trailing Jcc while
+    /// optimizing the straight-line prefix.
     #[test]
-    fn find_shorter_equivalent_x86_can_optimize_jcc_terminated_window() {
+    fn x86_enumerative_can_optimize_jcc_terminated_window() {
         use isa::x86::X86Condition;
         // Two redundant MovImms followed by a Jcc terminator. Search
         // should collapse the prefix and re-attach the original Jcc.
-        let optimized = find_shorter_equivalent_x86(
+        let mut opts = options_for(Algorithm::Enumerative);
+        opts.timeout = Some(Duration::from_secs(5));
+        opts.solver_timeout = Duration::from_secs(5);
+        opts.cost_metric = CostMetric::CodeSize;
+        let optimized = run_x86_enumerative(
             &[
                 X86Instruction::MovImm {
                     rd: X86Register::RBX,
@@ -2400,6 +2517,7 @@ mod cli_helper_tests {
                 },
             ],
             64,
+            &opts,
         )
         .expect("redundant prefix + Jcc must be optimizable");
         // Expect: [MovImm RBX, 1, Jcc E].
@@ -2420,8 +2538,12 @@ mod cli_helper_tests {
     }
 
     #[test]
-    fn find_shorter_equivalent_x86_collapses_without_rax_or_rdi_in_target() {
-        let optimized = find_shorter_equivalent_x86(
+    fn x86_enumerative_collapses_without_rax_or_rdi_in_target() {
+        let mut opts = options_for(Algorithm::Enumerative);
+        opts.timeout = Some(Duration::from_secs(5));
+        opts.solver_timeout = Duration::from_secs(5);
+        opts.cost_metric = CostMetric::CodeSize;
+        let optimized = run_x86_enumerative(
             &[
                 X86Instruction::MovImm {
                     rd: X86Register::RBX,
@@ -2433,6 +2555,7 @@ mod cli_helper_tests {
                 },
             ],
             64,
+            &opts,
         )
         .expect("two identical RBX writes can be shortened");
         assert_eq!(optimized.len(), 1);
@@ -2443,6 +2566,72 @@ mod cli_helper_tests {
             }
             ref other => panic!("expected MovImm RBX, 1, got {:?}", other),
         }
+    }
+
+    /// Regression (PR #384): the trait-backed enumerative path must draw
+    /// candidates from the target's own registers/immediates. R10 is outside
+    /// `default_x86_registers()` and `-1` outside `default_x86_immediates()`,
+    /// so the fixed-pool config could not express the obvious one-instruction
+    /// rewrite and reported no optimization.
+    #[test]
+    fn x86_enumerative_finds_rewrite_for_nondefault_register_and_immediate() {
+        let mut opts = options_for(Algorithm::Enumerative);
+        // No wall-clock deadline: the bounded length-1 search terminates on
+        // its own and a finite timeout flakes under coverage instrumentation.
+        opts.timeout = None;
+        opts.solver_timeout = Duration::from_secs(30);
+        opts.cost_metric = CostMetric::CodeSize;
+        let optimized = run_x86_enumerative(
+            &[
+                X86Instruction::MovImm {
+                    rd: X86Register::R10,
+                    imm: -1,
+                },
+                X86Instruction::MovImm {
+                    rd: X86Register::R10,
+                    imm: -1,
+                },
+            ],
+            64,
+            &opts,
+        )
+        .expect("two identical R10/-1 writes must collapse to one");
+        assert_eq!(optimized.len(), 1);
+        assert_eq!(optimized[0].destination(), Some(X86Register::R10));
+    }
+
+    /// Regression (PR #384): the enumerative config must be target-derived and
+    /// must thread `--cores` (the trait-backed search is rayon-parallel and
+    /// honours `config.cores`, but the old builder left it `None`).
+    #[test]
+    fn build_x86_enumerative_search_config_is_target_derived_and_honors_cores() {
+        let mut opts = options_for(Algorithm::Enumerative);
+        opts.cores = Some(3);
+        let target = vec![
+            X86Instruction::MovImm {
+                rd: X86Register::R11,
+                imm: -1,
+            },
+            X86Instruction::AddReg {
+                rd: X86Register::R11,
+                rs: X86Register::R12,
+            },
+        ];
+        let config = build_x86_enumerative_search_config(&target, 64, &opts);
+        assert_eq!(config.cores, Some(3), "--cores must be threaded through");
+        assert!(
+            config.x86_available_registers.contains(&X86Register::R11)
+                && config.x86_available_registers.contains(&X86Register::R12),
+            "register pool must be derived from the target"
+        );
+        assert!(
+            !config.x86_available_registers.contains(&X86Register::RAX),
+            "register pool must not fall back to the fixed default pool"
+        );
+        assert!(
+            config.available_immediates.contains(&-1),
+            "immediate pool must include -1"
+        );
     }
 
     #[test]
@@ -2552,11 +2741,11 @@ mod cli_helper_tests {
         assert!(config.verbose);
         assert_eq!(
             config.x86_available_registers,
-            search::candidate_x86::default_x86_registers()
+            isa::x86::default_x86_registers()
         );
         assert_eq!(
             config.available_immediates,
-            search::candidate_x86::default_x86_immediates()
+            isa::x86::default_x86_immediates()
         );
         assert_eq!(config.x86_width, 32);
         assert_eq!(config.x86_mode, assembler::x86::X86Mode::Mode32);
@@ -2775,7 +2964,7 @@ mod cli_helper_tests {
         let config = SearchConfig::default()
             .with_registers(vec![Register::X0, Register::X1])
             .with_immediates(vec![0, 1]);
-        let mut search = EnumerativeSearch::new();
+        let mut search = EnumerativeSearch::<isa::AArch64>::new();
         let result = search.search(prefix, &live_out, &config);
 
         if let Some(shorter_prefix) = result.optimized_sequence {
@@ -2956,9 +3145,9 @@ mod cli_helper_tests {
     fn issue_74_cmp_cmov_pipeline_distinguishes_different_cmov_sources_when_flags_live() {
         use isa::x86::{X86Condition, X86Instruction, X86Register};
         use semantics::equivalence::{
-            EquivalenceResult, X86EquivalenceConfig, check_equivalence_x86,
+            EquivalenceConfigFor, EquivalenceResult, check_equivalence_for,
         };
-        use semantics::state::X86LiveOutMask;
+        use semantics::live_out::X86LiveOut;
 
         let target = vec![
             X86Instruction::CmpReg {
@@ -2982,10 +3171,10 @@ mod cli_helper_tests {
                 cond: X86Condition::E,
             },
         ];
-        let cfg = X86EquivalenceConfig::new(64)
-            .live_out(X86LiveOutMask::from_registers(vec![X86Register::RAX]).with_flags(true));
+        let cfg = EquivalenceConfigFor::<isa::X86_64>::default()
+            .live_out(X86LiveOut::from_registers(vec![X86Register::RAX]).with_flags(true));
         assert!(matches!(
-            check_equivalence_x86(&target, &proposal, &cfg),
+            check_equivalence_for::<isa::X86_64>(&target, &proposal, &cfg),
             EquivalenceResult::NotEquivalent
         ));
     }
@@ -2994,9 +3183,9 @@ mod cli_helper_tests {
     fn issue_74_cmp_cmov_pipeline_self_equivalent_under_flags_live() {
         use isa::x86::{X86Condition, X86Instruction, X86Register};
         use semantics::equivalence::{
-            EquivalenceResult, X86EquivalenceConfig, check_equivalence_x86,
+            EquivalenceConfigFor, EquivalenceResult, check_equivalence_for,
         };
-        use semantics::state::X86LiveOutMask;
+        use semantics::live_out::X86LiveOut;
 
         let seq = vec![
             X86Instruction::CmpReg {
@@ -3009,10 +3198,10 @@ mod cli_helper_tests {
                 cond: X86Condition::NE,
             },
         ];
-        let cfg = X86EquivalenceConfig::new(64)
-            .live_out(X86LiveOutMask::from_registers(vec![X86Register::RAX]).with_flags(true));
+        let cfg = EquivalenceConfigFor::<isa::X86_64>::default()
+            .live_out(X86LiveOut::from_registers(vec![X86Register::RAX]).with_flags(true));
         assert_eq!(
-            check_equivalence_x86(&seq.clone(), &seq, &cfg),
+            check_equivalence_for::<isa::X86_64>(&seq.clone(), &seq, &cfg),
             EquivalenceResult::Equivalent
         );
     }
