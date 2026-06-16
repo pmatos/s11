@@ -703,6 +703,9 @@ impl InstructionGenerator<Instruction> for AArch64InstructionGenerator {
         // 32 = ROR (issue #93: each of these four held the old slot 23
         // sub-multiplexer; promoted to top-level slots so their sampling
         // probability matches the rest of the table).
+        // See also `src/search/candidate.rs::generate_random_instruction`:
+        // it is a parallel 33-slot sampler, but its slot numbers differ
+        // (notably, ROR is slot 23 there and slot 32 here).
         let opcode = rng.random_range(0..33);
         let rd = registers[rng.random_range(0..registers.len())];
         let rn = registers[rng.random_range(0..registers.len())];
