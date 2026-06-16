@@ -142,6 +142,9 @@ enum Commands {
         arch: Option<CliArch>,
     },
     /// Optimize a window of instructions in an ELF binary
+    #[command(
+        after_help = "Note: enumerative search scales with the generated instruction families in its candidate pool. At the default AArch64 8-register CLI scope, multiply-accumulate and high-half multiply add 9,728 candidates per length bucket; use --timeout or smaller windows to bound runtime."
+    )]
     Opt {
         /// Path to ELF binary to optimize
         binary: PathBuf,
@@ -1918,6 +1921,27 @@ mod cli_helper_tests {
             llm_max_calls: 0,
             llm_model: "test-model".to_string(),
         }
+    }
+
+    #[test]
+    fn opt_help_mentions_enumerative_candidate_pool_growth() {
+        use clap::CommandFactory;
+
+        let mut command = Args::command();
+        let opt_help = command
+            .find_subcommand_mut("opt")
+            .expect("opt subcommand should be registered")
+            .render_long_help()
+            .to_string();
+
+        assert!(
+            opt_help.contains("enumerative search scales with the generated instruction families"),
+            "opt help should explain enumerative candidate pool growth:\n{opt_help}"
+        );
+        assert!(
+            opt_help.contains("9,728"),
+            "opt help should mention the default AArch64 multiply candidate growth:\n{opt_help}"
+        );
     }
 
     #[test]
