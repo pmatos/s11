@@ -1385,6 +1385,73 @@ fn convert_to_x86_ir(
     Ok(out)
 }
 
+/// Candidate register pool for the x86 enumerative path, drawn from the
+/// target's own registers (destinations + sources). The trait refactor
+/// regressed coverage by defaulting to the fixed `default_x86_registers()`
+/// pool, so a window over R10–R15 had no representable rewrite. Mirrors the
+/// pre-refactor `find_shorter_equivalent_x86` derivation. Falls back to the
+/// default pool only for an empty target (no rewrite is possible there).
+fn x86_enumerative_registers_from_target(
+    target: &[isa::x86::X86Instruction],
+) -> Vec<isa::x86::X86Register> {
+    let mut pool: Vec<isa::x86::X86Register> = Vec::new();
+    let referenced = target.iter().flat_map(|instr| {
+        instr
+            .destination()
+            .into_iter()
+            .chain(instr.source_registers())
+    });
+    for reg in referenced {
+        if !pool.contains(&reg) {
+            pool.push(reg);
+        }
+    }
+    if pool.is_empty() {
+        return isa::x86::default_x86_registers();
+    }
+    pool
+}
+
+/// Candidate immediate pool for the x86 enumerative path: the target's own
+/// immediates plus `0`, `1`, and `-1`. The fixed `default_x86_immediates()`
+/// pool holds no negatives, so the trait refactor lost rewrites like
+/// `mov rax, -1; mov rax, -1` → `mov rax, -1`.
+fn x86_enumerative_immediates_from_target(target: &[isa::x86::X86Instruction]) -> Vec<i64> {
+    use isa::x86::X86Instruction;
+    let mut imms = vec![0i64, 1, -1];
+    let referenced = target.iter().filter_map(|instr| match instr {
+        X86Instruction::MovImm { imm, .. }
+        | X86Instruction::AddImm { imm, .. }
+        | X86Instruction::SubImm { imm, .. }
+        | X86Instruction::AndImm { imm, .. }
+        | X86Instruction::OrImm { imm, .. }
+        | X86Instruction::XorImm { imm, .. }
+        | X86Instruction::CmpImm { imm, .. } => Some(*imm),
+        _ => None,
+    });
+    for imm in referenced {
+        if !imms.contains(&imm) {
+            imms.push(imm);
+        }
+    }
+    imms
+}
+
+/// Build the search config for the x86 *enumerative* path. Unlike stochastic
+/// search (which samples a broad fixed pool), enumerative search draws
+/// candidates from the target's own registers/immediates and honours --cores
+/// now that the trait-backed search is rayon-parallel.
+fn build_x86_enumerative_search_config(
+    target: &[isa::x86::X86Instruction],
+    width: u32,
+    options: &OptimizationOptions,
+) -> SearchConfig {
+    build_x86_stochastic_search_config(width, options)
+        .with_x86_registers(x86_enumerative_registers_from_target(target))
+        .with_immediates(x86_enumerative_immediates_from_target(target))
+        .with_cores(options.cores)
+}
+
 /// Run x86 enumerative search and return the optimized sequence if any.
 fn run_x86_enumerative(
     target: &[isa::x86::X86Instruction],
@@ -1394,7 +1461,7 @@ fn run_x86_enumerative(
     use search::SearchAlgorithm;
     use validation::live_out::x86_live_out_from_target;
 
-    let config = build_x86_stochastic_search_config(width, options);
+    let config = build_x86_enumerative_search_config(target, width, options);
     let live_out = x86_live_out_from_target(target);
 
     let (optimized, statistics) = if width == 32 {
@@ -2487,6 +2554,72 @@ mod cli_helper_tests {
             }
             ref other => panic!("expected MovImm RBX, 1, got {:?}", other),
         }
+    }
+
+    /// Regression (PR #384): the trait-backed enumerative path must draw
+    /// candidates from the target's own registers/immediates. R10 is outside
+    /// `default_x86_registers()` and `-1` outside `default_x86_immediates()`,
+    /// so the fixed-pool config could not express the obvious one-instruction
+    /// rewrite and reported no optimization.
+    #[test]
+    fn x86_enumerative_finds_rewrite_for_nondefault_register_and_immediate() {
+        let mut opts = options_for(Algorithm::Enumerative);
+        // No wall-clock deadline: the bounded length-1 search terminates on
+        // its own and a finite timeout flakes under coverage instrumentation.
+        opts.timeout = None;
+        opts.solver_timeout = Duration::from_secs(30);
+        opts.cost_metric = CostMetric::CodeSize;
+        let optimized = run_x86_enumerative(
+            &[
+                X86Instruction::MovImm {
+                    rd: X86Register::R10,
+                    imm: -1,
+                },
+                X86Instruction::MovImm {
+                    rd: X86Register::R10,
+                    imm: -1,
+                },
+            ],
+            64,
+            &opts,
+        )
+        .expect("two identical R10/-1 writes must collapse to one");
+        assert_eq!(optimized.len(), 1);
+        assert_eq!(optimized[0].destination(), Some(X86Register::R10));
+    }
+
+    /// Regression (PR #384): the enumerative config must be target-derived and
+    /// must thread `--cores` (the trait-backed search is rayon-parallel and
+    /// honours `config.cores`, but the old builder left it `None`).
+    #[test]
+    fn build_x86_enumerative_search_config_is_target_derived_and_honors_cores() {
+        let mut opts = options_for(Algorithm::Enumerative);
+        opts.cores = Some(3);
+        let target = vec![
+            X86Instruction::MovImm {
+                rd: X86Register::R11,
+                imm: -1,
+            },
+            X86Instruction::AddReg {
+                rd: X86Register::R11,
+                rs: X86Register::R12,
+            },
+        ];
+        let config = build_x86_enumerative_search_config(&target, 64, &opts);
+        assert_eq!(config.cores, Some(3), "--cores must be threaded through");
+        assert!(
+            config.x86_available_registers.contains(&X86Register::R11)
+                && config.x86_available_registers.contains(&X86Register::R12),
+            "register pool must be derived from the target"
+        );
+        assert!(
+            !config.x86_available_registers.contains(&X86Register::RAX),
+            "register pool must not fall back to the fixed default pool"
+        );
+        assert!(
+            config.available_immediates.contains(&-1),
+            "immediate pool must include -1"
+        );
     }
 
     #[test]
