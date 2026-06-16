@@ -99,8 +99,8 @@ fn misplaced_flag_token_error(token: &str, input: &str) -> ParseRegisterSetError
         )
     } else {
         format!(
-            "per-flag token '{}' is reserved for a future extension and cannot appear in the register list; use ';nzcv' for all flags",
-            token
+            "per-flag token '{}' is reserved for a future extension and cannot appear in the register list; use ';nzcv' for all flags; got '{}'",
+            token, input
         )
     };
     ParseRegisterSetError { message }
@@ -721,7 +721,13 @@ mod tests {
 
     #[test]
     fn test_parse_live_out_contract_nzcv_in_register_list_hints_semicolon() {
-        for input in ["nzcv,x0", "x0,nzcv", "x0 nzcv"] {
+        for input in [
+            "nzcv,x0",
+            "x0,nzcv",
+            "x0 nzcv",
+            "nzcv,x0;nzcv",
+            "x0,nzcv;nzcv",
+        ] {
             let err = parse_live_out_contract(input).unwrap_err();
             assert!(
                 err.message.contains("'nzcv'"),
@@ -747,26 +753,27 @@ mod tests {
     #[test]
     fn test_parse_live_out_contract_per_flag_tokens_in_register_list_hint_semicolon() {
         for tok in ["n", "z", "c", "v"] {
-            let input = format!("{},x0", tok);
-            let err = parse_live_out_contract(&input).unwrap_err();
-            assert!(
-                err.message.contains(&format!("'{}'", tok)),
-                "expected error to name misplaced flag token in '{}', got: {}",
-                input,
-                err.message
-            );
-            assert!(
-                err.message.contains("reserved") || err.message.contains(";nzcv"),
-                "expected error to hint at reserved flag syntax for '{}', got: {}",
-                input,
-                err.message
-            );
-            assert!(
-                !err.message.contains("invalid register name"),
-                "expected live-out grammar diagnostic for '{}', got: {}",
-                input,
-                err.message
-            );
+            for input in [format!("{},x0", tok), format!("{} x0", tok)] {
+                let err = parse_live_out_contract(&input).unwrap_err();
+                assert!(
+                    err.message.contains(&format!("'{}'", tok)),
+                    "expected error to name misplaced flag token in '{}', got: {}",
+                    input,
+                    err.message
+                );
+                assert!(
+                    err.message.contains("reserved") || err.message.contains(";nzcv"),
+                    "expected error to hint at reserved flag syntax for '{}', got: {}",
+                    input,
+                    err.message
+                );
+                assert!(
+                    !err.message.contains("invalid register name"),
+                    "expected live-out grammar diagnostic for '{}', got: {}",
+                    input,
+                    err.message
+                );
+            }
         }
     }
 
