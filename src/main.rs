@@ -11,7 +11,7 @@ mod test_utils;
 
 use s11::assembler::AArch64Assembler;
 use s11::elf_patcher::{AddressWindow, DetectedArch, ElfPatcher, parse_hex_address};
-use s11::ir::instructions::split_terminator;
+use s11::ir::instructions::{MOVW_LEGAL_SHIFTS, split_terminator};
 use s11::ir::{Instruction, Register};
 use s11::search::config::{
     Algorithm, LlmConfig, SearchConfig, SearchMode, StochasticConfig, SymbolicConfig,
@@ -1195,6 +1195,87 @@ enum ConvertOutcome {
     Unsupported(String),
 }
 
+fn capstone_instruction_line(mnemonic: &str, op_str: &str) -> String {
+    if op_str.is_empty() {
+        mnemonic.to_string()
+    } else {
+        format!("{} {}", mnemonic, op_str)
+    }
+}
+
+fn split_capstone_alias_operands(op_str: &str) -> Vec<&str> {
+    op_str.split(',').map(str::trim).collect()
+}
+
+fn move_wide_movz_encoding(value: u64) -> Option<(u16, u8)> {
+    for shift in MOVW_LEGAL_SHIFTS {
+        let mask = 0xffff_u64 << shift;
+        if value & !mask == 0 {
+            let imm = ((value >> shift) & 0xffff) as u16;
+            if imm != 0 {
+                return Some((imm, shift));
+            }
+        }
+    }
+    None
+}
+
+fn move_wide_movn_encoding(value: u64) -> Option<(u16, u8)> {
+    let inverted = !value;
+    for shift in MOVW_LEGAL_SHIFTS {
+        let imm = ((inverted >> shift) & 0xffff) as u16;
+        if inverted == u64::from(imm) << shift {
+            return Some((imm, shift));
+        }
+    }
+    None
+}
+
+fn format_move_wide(mnemonic: &str, rd: &str, imm: u16, shift: u8) -> String {
+    if shift == 0 {
+        format!("{} {}, #{}", mnemonic, rd, imm)
+    } else {
+        format!("{} {}, #{}, lsl #{}", mnemonic, rd, imm, shift)
+    }
+}
+
+fn normalize_mov_wide_alias(op_str: &str) -> Result<Option<String>, String> {
+    let operands = split_capstone_alias_operands(op_str);
+    if operands.len() != 2 {
+        return Ok(None);
+    }
+
+    let rd = operands[0];
+    if !rd.to_ascii_lowercase().starts_with('x') || parser::parse_register(rd).is_err() {
+        return Ok(None);
+    }
+
+    let Ok(imm) = parser::parse_immediate(operands[1]) else {
+        return Ok(None);
+    };
+    if (0..=0xffff).contains(&imm) {
+        return Ok(None);
+    }
+
+    let value = imm as u64;
+    if let Some((imm, shift)) = move_wide_movz_encoding(value) {
+        return Ok(Some(format_move_wide("movz", rd, imm, shift)));
+    }
+    if let Some((imm, shift)) = move_wide_movn_encoding(value) {
+        return Ok(Some(format_move_wide("movn", rd, imm, shift)));
+    }
+
+    Ok(None)
+}
+
+fn normalize_capstone_alias(mnemonic: &str, op_str: &str) -> Result<Option<String>, String> {
+    let mnemonic = mnemonic.to_ascii_lowercase();
+    match mnemonic.as_str() {
+        "mov" => normalize_mov_wide_alias(op_str),
+        _ => Ok(None),
+    }
+}
+
 /// Convert one Capstone (mnemonic, op_str) pair into an IR outcome by
 /// delegating to `parser::parse_line`. Keeping a single shared parser is what
 /// guarantees the asm-text path and the ELF/Capstone path support exactly the
@@ -1205,18 +1286,28 @@ fn convert_capstone_op(mnemonic: &str, op_str: &str) -> ConvertOutcome {
         return ConvertOutcome::Skip;
     }
 
-    let line = if op_str.is_empty() {
-        mnemonic.to_string()
-    } else {
-        format!("{} {}", mnemonic, op_str)
+    let raw_line = capstone_instruction_line(mnemonic, op_str);
+    let line = match normalize_capstone_alias(mnemonic, op_str) {
+        Ok(Some(normalized)) => normalized,
+        Ok(None) => raw_line.clone(),
+        Err(err) => return ConvertOutcome::Unsupported(format!("{} ({})", raw_line, err)),
     };
 
     match parser::parse_line(&line) {
         Ok(parser::LineResult::Instruction(instr)) => ConvertOutcome::Instruction(instr),
         Ok(parser::LineResult::Skip) => ConvertOutcome::Skip,
-        Err(parser::ParseLineError::UnknownInstruction(_)) => ConvertOutcome::Unsupported(line),
+        Err(parser::ParseLineError::UnknownInstruction(_)) => {
+            ConvertOutcome::Unsupported(raw_line.clone())
+        }
         Err(parser::ParseLineError::Other(err)) => {
-            ConvertOutcome::Unsupported(format!("{} ({})", line, err))
+            if line == raw_line {
+                ConvertOutcome::Unsupported(format!("{} ({})", raw_line, err))
+            } else {
+                ConvertOutcome::Unsupported(format!(
+                    "{} normalized as `{}` ({})",
+                    raw_line, line, err
+                ))
+            }
         }
     }
 }
@@ -2265,6 +2356,49 @@ mod cli_helper_tests {
                     "expected Instruction for `{} {}`, got {:?}",
                     mnem, ops, other
                 ),
+            }
+        }
+    }
+
+    #[test]
+    fn convert_capstone_op_normalizes_mov_wide_aliases() {
+        for (ops, expected) in [
+            (
+                "x0, #0x10000",
+                Instruction::MovZ {
+                    rd: Register::X0,
+                    imm: 1,
+                    shift: 16,
+                },
+            ),
+            (
+                "x1, #0x100000000",
+                Instruction::MovZ {
+                    rd: Register::X1,
+                    imm: 1,
+                    shift: 32,
+                },
+            ),
+            (
+                "x2, #-1",
+                Instruction::MovN {
+                    rd: Register::X2,
+                    imm: 0,
+                    shift: 0,
+                },
+            ),
+            (
+                "x3, #0xffffffffffff0000",
+                Instruction::MovN {
+                    rd: Register::X3,
+                    imm: 0xffff,
+                    shift: 0,
+                },
+            ),
+        ] {
+            match convert_capstone_op("mov", ops) {
+                ConvertOutcome::Instruction(instr) => assert_eq!(instr, expected),
+                other => panic!("expected normalized Instruction for `mov {ops}`, got {other:?}"),
             }
         }
     }
