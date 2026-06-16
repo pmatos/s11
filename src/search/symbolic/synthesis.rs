@@ -412,6 +412,9 @@ mod tests {
 
     static TEST_EQUIVALENCE_CHECKS: AtomicUsize = AtomicUsize::new(0);
     static SYMBOLIC_INNER_LOOP_TEST_LOCK: Mutex<()> = Mutex::new(());
+    static TEST_STOP_AFTER_FIRST_EQUIVALENCE_CHECK: Mutex<
+        Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
+    > = Mutex::new(None);
 
     #[derive(Clone)]
     struct TestIsa;
@@ -581,7 +584,15 @@ mod tests {
             _width: u32,
             _timeout: Duration,
         ) -> (EquivalenceResult, EquivalenceMetrics) {
-            TEST_EQUIVALENCE_CHECKS.fetch_add(1, Ordering::SeqCst);
+            if TEST_EQUIVALENCE_CHECKS.fetch_add(1, Ordering::SeqCst) == 0 {
+                if let Some(flag) = TEST_STOP_AFTER_FIRST_EQUIVALENCE_CHECK
+                    .lock()
+                    .expect("test stop flag lock poisoned")
+                    .as_ref()
+                {
+                    flag.store(true, Ordering::SeqCst);
+                }
+            }
             std::thread::sleep(Duration::from_millis(1));
             (
                 EquivalenceResult::NotEquivalent,
@@ -774,7 +785,6 @@ mod tests {
     fn symbolic_length_two_inner_loop_respects_cooperative_stop_flag() {
         use std::sync::Arc;
         use std::sync::atomic::AtomicBool;
-        use std::thread;
         use std::time::Instant;
 
         let _guard = SYMBOLIC_INNER_LOOP_TEST_LOCK
@@ -783,14 +793,9 @@ mod tests {
         TEST_EQUIVALENCE_CHECKS.store(0, Ordering::SeqCst);
 
         let flag = Arc::new(AtomicBool::new(false));
-        let flag_for_stop = Arc::clone(&flag);
-
-        let stopper = thread::spawn(move || {
-            while TEST_EQUIVALENCE_CHECKS.load(Ordering::SeqCst) == 0 {
-                thread::yield_now();
-            }
-            flag_for_stop.store(true, Ordering::SeqCst);
-        });
+        *TEST_STOP_AFTER_FIRST_EQUIVALENCE_CHECK
+            .lock()
+            .expect("test stop flag lock poisoned") = Some(Arc::clone(&flag));
 
         let mut search: SymbolicSearch<TestIsa> = SymbolicSearch::new();
         let config = SearchConfig::default()
@@ -814,7 +819,9 @@ mod tests {
             Instant::now(),
         );
 
-        stopper.join().expect("stopper thread panicked");
+        *TEST_STOP_AFTER_FIRST_EQUIVALENCE_CHECK
+            .lock()
+            .expect("test stop flag lock poisoned") = None;
 
         let checks = TEST_EQUIVALENCE_CHECKS.load(Ordering::SeqCst);
         assert_eq!(result, None);
@@ -828,7 +835,6 @@ mod tests {
     fn symbolic_length_three_inner_loops_respect_cooperative_stop_flag() {
         use std::sync::Arc;
         use std::sync::atomic::AtomicBool;
-        use std::thread;
         use std::time::Instant;
 
         let _guard = SYMBOLIC_INNER_LOOP_TEST_LOCK
@@ -837,14 +843,9 @@ mod tests {
         TEST_EQUIVALENCE_CHECKS.store(0, Ordering::SeqCst);
 
         let flag = Arc::new(AtomicBool::new(false));
-        let flag_for_stop = Arc::clone(&flag);
-
-        let stopper = thread::spawn(move || {
-            while TEST_EQUIVALENCE_CHECKS.load(Ordering::SeqCst) == 0 {
-                thread::yield_now();
-            }
-            flag_for_stop.store(true, Ordering::SeqCst);
-        });
+        *TEST_STOP_AFTER_FIRST_EQUIVALENCE_CHECK
+            .lock()
+            .expect("test stop flag lock poisoned") = Some(Arc::clone(&flag));
 
         let mut search: SymbolicSearch<TestIsa> = SymbolicSearch::new();
         let config = SearchConfig::default()
@@ -869,7 +870,9 @@ mod tests {
             Instant::now(),
         );
 
-        stopper.join().expect("stopper thread panicked");
+        *TEST_STOP_AFTER_FIRST_EQUIVALENCE_CHECK
+            .lock()
+            .expect("test stop flag lock poisoned") = None;
 
         let checks = TEST_EQUIVALENCE_CHECKS.load(Ordering::SeqCst);
         assert_eq!(result, None);
