@@ -916,7 +916,12 @@ mod tests {
             .with_immediates(vec![0])
             .with_cost_metric(CostMetric::CodeSize)
             .with_x86_width(64)
-            .with_timeout_option(Some(Duration::from_secs(5)));
+            // No wall-clock deadline: the length-1 search over a tiny pool is
+            // bounded and terminates on its own. A finite timeout here is
+            // nondeterministic under coverage instrumentation (the slow
+            // instrumented suite can exceed it and spuriously report no
+            // optimization).
+            .with_timeout_option(None);
 
         let mut search = EnumerativeSearch::<X86_64>::new();
         let result = search.search(&target, &live_out, &config);
@@ -953,7 +958,9 @@ mod tests {
             .with_immediates(vec![0])
             .with_cost_metric(CostMetric::CodeSize)
             .with_x86_width(32)
-            .with_timeout_option(Some(Duration::from_secs(5)));
+            // See the x86-64 sibling test: a bounded length-1 search needs no
+            // wall-clock deadline, and a finite one flakes under coverage.
+            .with_timeout_option(None);
 
         let mut search = EnumerativeSearch::<X86_32>::new();
         let result = search.search(&target, &live_out, &config);
