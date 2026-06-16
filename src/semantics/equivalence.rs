@@ -1422,6 +1422,7 @@ mod tests {
                 rd: Register::X3,
                 rn: Register::X3,
                 rm: Operand::Register(Register::X4),
+                width: crate::ir::RegisterWidth::X64,
             },
         ];
         // Deliberately omit `.with_flags(true)`: the two forms produce
@@ -1605,6 +1606,7 @@ mod tests {
             rd: Register::X0,
             rn: Register::X0,
             rm: Operand::Register(Register::X0),
+            width: crate::ir::RegisterWidth::X64,
         }];
 
         assert_eq!(
@@ -1688,6 +1690,7 @@ mod tests {
                 rd: reg,
                 rn: reg,
                 rm: Operand::Register(reg),
+                width: crate::ir::RegisterWidth::X64,
             }];
 
             assert_eq!(
@@ -1703,6 +1706,7 @@ mod tests {
             rd: Register::X0,
             rn: Register::X1,
             rm: Operand::Immediate(0),
+            width: crate::ir::RegisterWidth::X64,
         }];
 
         let seq2 = vec![Instruction::MovImm {
@@ -1722,6 +1726,7 @@ mod tests {
             rd: Register::X0,
             rn: Register::X1,
             rm: Operand::Immediate(0),
+            width: crate::ir::RegisterWidth::X64,
         }];
 
         let seq2 = vec![Instruction::MovReg {
@@ -1767,6 +1772,7 @@ mod tests {
             rd: Register::X0,
             rn: Register::X0,
             rm: Operand::Register(Register::X0),
+            width: crate::ir::RegisterWidth::X64,
         }];
 
         let config = EquivalenceConfig::default();
@@ -1860,6 +1866,7 @@ mod tests {
             rd: Register::X0,
             rn: Register::X0,
             rm: Operand::Register(Register::X0),
+            width: crate::ir::RegisterWidth::X64,
         }];
         let seq2 = vec![Instruction::Bic {
             rd: Register::X0,
@@ -2044,6 +2051,7 @@ mod tests {
                 rd: Register::X0,
                 rn: Register::X1,
                 rm: Operand::Register(Register::X3),
+                width: crate::ir::RegisterWidth::X64,
             },
         ];
         let config = EquivalenceConfig::with_live_out(LiveOut::from_registers(vec![Register::X0]));
@@ -2070,6 +2078,7 @@ mod tests {
                 rd: Register::X0,
                 rn: Register::X1,
                 rm: Operand::Register(Register::X3),
+                width: crate::ir::RegisterWidth::X64,
             },
         ];
         let config = EquivalenceConfig::with_live_out(LiveOut::from_registers(vec![Register::X0]));
@@ -2096,6 +2105,7 @@ mod tests {
                 rd: Register::X0,
                 rn: Register::X1,
                 rm: Operand::Register(Register::X3),
+                width: crate::ir::RegisterWidth::X64,
             },
         ];
         let config = EquivalenceConfig::with_live_out(LiveOut::from_registers(vec![Register::X0]));
@@ -2431,6 +2441,7 @@ mod tests {
                 rd: Register::X2,
                 rn: Register::X1,
                 rm: Operand::Immediate(low_mask),
+                width: crate::ir::RegisterWidth::X64,
             },
             // tmp_shift (X2) = tmp_field << lsb
             Instruction::Lsl {
@@ -2443,12 +2454,14 @@ mod tests {
                 rd: Register::X3,
                 rn: Register::X0,
                 rm: Operand::Immediate(clear_mask),
+                width: crate::ir::RegisterWidth::X64,
             },
             // rd = tmp_clear | tmp_shift
             Instruction::Orr {
                 rd: Register::X0,
                 rn: Register::X3,
                 rm: Operand::Register(Register::X2),
+                width: crate::ir::RegisterWidth::X64,
             },
         ];
 
@@ -2484,6 +2497,7 @@ mod tests {
                 rd: Register::X0,
                 rn: Register::X2,
                 rm: Operand::Immediate(mask),
+                width: crate::ir::RegisterWidth::X64,
             },
         ];
 
@@ -2719,10 +2733,12 @@ mod tests {
         let seq1 = vec![Instruction::Tst {
             rn: Register::X1,
             rm: Operand::Immediate(1),
+            width: crate::ir::RegisterWidth::X64,
         }];
         let seq2 = vec![Instruction::Tst {
             rn: Register::X1,
             rm: Operand::Immediate(2),
+            width: crate::ir::RegisterWidth::X64,
         }];
         let config = EquivalenceConfig::fast_only()
             .live_out(LiveOut::from_registers(vec![]))
@@ -2817,6 +2833,7 @@ mod tests {
             rd: Register::X0,
             rn: Register::X0,
             rm: Operand::Register(Register::X0),
+            width: crate::ir::RegisterWidth::X64,
         }];
         let cfg =
             EquivalenceConfig::default().live_out(LiveOut::from_registers(vec![Register::X0]));

@@ -10,7 +10,7 @@
 
 use crate::ir::instructions::MOVW_LEGAL_SHIFTS;
 use crate::ir::types::Condition;
-use crate::ir::{Instruction, Operand, Register};
+use crate::ir::{Instruction, Operand, Register, RegisterWidth};
 use crate::search::candidate::generate_random_instruction;
 use crate::search::config::MutationWeights;
 use rand::RngExt;
@@ -161,15 +161,21 @@ impl Mutator {
                     _ => *rm = Self::clamp_imm12(self.random_operand_3op(rng, false)),
                 }
             }
-            Instruction::And { rd, rn, rm }
-            | Instruction::Orr { rd, rn, rm }
-            | Instruction::Eor { rd, rn, rm } => {
+            Instruction::And { rd, rn, rm, width }
+            | Instruction::Orr { rd, rn, rm, width }
+            | Instruction::Eor { rd, rn, rm, width } => {
                 let choice = rng.random_range(0..3);
                 match choice {
                     0 => *rd = self.random_register(rng),
                     1 => *rn = self.random_register(rng),
                     // Logical ops accept ROR in the shifted-register form.
-                    _ => *rm = self.random_operand_3op(rng, true),
+                    _ => {
+                        *rm = if *width == RegisterWidth::W32 {
+                            Operand::Immediate(self.random_immediate(rng))
+                        } else {
+                            self.random_operand_3op(rng, true)
+                        }
+                    }
                 }
             }
             Instruction::Lsl { rd, rn, shift }
@@ -223,9 +229,11 @@ impl Mutator {
                     *rm = Self::clamp_imm12(self.random_operand_3op(rng, false));
                 }
             }
-            Instruction::Tst { rn, rm } => {
+            Instruction::Tst { rn, rm, width } => {
                 if rng.random_bool(0.5) {
                     *rn = self.random_register(rng);
+                } else if *width == RegisterWidth::W32 {
+                    *rm = Operand::Immediate(self.random_immediate(rng));
                 } else {
                     // Tst is register-only for non-shifted form. Use the 3op
                     // helper but force the non-shifted fallback to a Register
@@ -340,12 +348,18 @@ impl Mutator {
                     _ => *rm = Self::clamp_imm12(self.random_operand(rng)),
                 }
             }
-            Instruction::Ands { rd, rn, rm } => {
+            Instruction::Ands { rd, rn, rm, width } => {
                 let choice = rng.random_range(0..3);
                 match choice {
                     0 => *rd = self.random_register(rng),
                     1 => *rn = self.random_register(rng),
-                    _ => *rm = Operand::Register(self.random_register(rng)),
+                    _ => {
+                        *rm = if *width == RegisterWidth::W32 {
+                            Operand::Immediate(self.random_immediate(rng))
+                        } else {
+                            Operand::Register(self.random_register(rng))
+                        }
+                    }
                 }
             }
             // CSET / CSETM: only rd and cond can change; cond from the 14
@@ -471,19 +485,49 @@ impl Mutator {
             }
             Instruction::Add { rd, rn, rm } => match rng.random_range(0..5) {
                 0 => Instruction::Sub { rd, rn, rm },
-                1 => Instruction::And { rd, rn, rm },
-                2 => Instruction::Orr { rd, rn, rm },
-                3 => Instruction::Eor { rd, rn, rm },
+                1 => Instruction::And {
+                    rd,
+                    rn,
+                    rm,
+                    width: RegisterWidth::X64,
+                },
+                2 => Instruction::Orr {
+                    rd,
+                    rn,
+                    rm,
+                    width: RegisterWidth::X64,
+                },
+                3 => Instruction::Eor {
+                    rd,
+                    rn,
+                    rm,
+                    width: RegisterWidth::X64,
+                },
                 _ => Instruction::Add { rd, rn, rm },
             },
             Instruction::Sub { rd, rn, rm } => match rng.random_range(0..5) {
                 0 => Instruction::Add { rd, rn, rm },
-                1 => Instruction::And { rd, rn, rm },
-                2 => Instruction::Orr { rd, rn, rm },
-                3 => Instruction::Eor { rd, rn, rm },
+                1 => Instruction::And {
+                    rd,
+                    rn,
+                    rm,
+                    width: RegisterWidth::X64,
+                },
+                2 => Instruction::Orr {
+                    rd,
+                    rn,
+                    rm,
+                    width: RegisterWidth::X64,
+                },
+                3 => Instruction::Eor {
+                    rd,
+                    rn,
+                    rm,
+                    width: RegisterWidth::X64,
+                },
                 _ => Instruction::Sub { rd, rn, rm },
             },
-            Instruction::And { rd, rn, rm } => match rng.random_range(0..5) {
+            Instruction::And { rd, rn, rm, width } => match rng.random_range(0..5) {
                 // Logical -> arithmetic: drop ROR from the shifted-register form.
                 0 => Instruction::Add {
                     rd,
@@ -495,11 +539,11 @@ impl Mutator {
                     rn,
                     rm: strip_ror_for_arith(rm),
                 },
-                2 => Instruction::Orr { rd, rn, rm },
-                3 => Instruction::Eor { rd, rn, rm },
-                _ => Instruction::And { rd, rn, rm },
+                2 => Instruction::Orr { rd, rn, rm, width },
+                3 => Instruction::Eor { rd, rn, rm, width },
+                _ => Instruction::And { rd, rn, rm, width },
             },
-            Instruction::Orr { rd, rn, rm } => match rng.random_range(0..5) {
+            Instruction::Orr { rd, rn, rm, width } => match rng.random_range(0..5) {
                 0 => Instruction::Add {
                     rd,
                     rn,
@@ -510,11 +554,11 @@ impl Mutator {
                     rn,
                     rm: strip_ror_for_arith(rm),
                 },
-                2 => Instruction::And { rd, rn, rm },
-                3 => Instruction::Eor { rd, rn, rm },
-                _ => Instruction::Orr { rd, rn, rm },
+                2 => Instruction::And { rd, rn, rm, width },
+                3 => Instruction::Eor { rd, rn, rm, width },
+                _ => Instruction::Orr { rd, rn, rm, width },
             },
-            Instruction::Eor { rd, rn, rm } => match rng.random_range(0..5) {
+            Instruction::Eor { rd, rn, rm, width } => match rng.random_range(0..5) {
                 0 => Instruction::Add {
                     rd,
                     rn,
@@ -525,9 +569,9 @@ impl Mutator {
                     rn,
                     rm: strip_ror_for_arith(rm),
                 },
-                2 => Instruction::And { rd, rn, rm },
-                3 => Instruction::Orr { rd, rn, rm },
-                _ => Instruction::Eor { rd, rn, rm },
+                2 => Instruction::And { rd, rn, rm, width },
+                3 => Instruction::Orr { rd, rn, rm, width },
+                _ => Instruction::Eor { rd, rn, rm, width },
             },
             Instruction::Lsl { rd, rn, shift } => match rng.random_range(0..3) {
                 0 => Instruction::Lsr { rd, rn, shift },
@@ -563,15 +607,23 @@ impl Mutator {
             // Comparison instructions can mutate between each other
             Instruction::Cmp { rn, rm } => match rng.random_range(0..3) {
                 0 => Instruction::Cmn { rn, rm },
-                1 => Instruction::Tst { rn, rm },
+                1 => Instruction::Tst {
+                    rn,
+                    rm,
+                    width: RegisterWidth::X64,
+                },
                 _ => Instruction::Cmp { rn, rm },
             },
             Instruction::Cmn { rn, rm } => match rng.random_range(0..3) {
                 0 => Instruction::Cmp { rn, rm },
-                1 => Instruction::Tst { rn, rm },
+                1 => Instruction::Tst {
+                    rn,
+                    rm,
+                    width: RegisterWidth::X64,
+                },
                 _ => Instruction::Cmn { rn, rm },
             },
-            Instruction::Tst { rn, rm } => match rng.random_range(0..3) {
+            Instruction::Tst { rn, rm, width } => match rng.random_range(0..3) {
                 // Tst (logical) -> Cmp/Cmn (arithmetic): drop ROR.
                 0 => Instruction::Cmp {
                     rn,
@@ -581,7 +633,7 @@ impl Mutator {
                     rn,
                     rm: strip_ror_for_arith(rm),
                 },
-                _ => Instruction::Tst { rn, rm },
+                _ => Instruction::Tst { rn, rm, width },
             },
             // CCMP ↔ CCMN swap (both share (rn, rm, nzcv, cond)).
             Instruction::Ccmp { rn, rm, nzcv, cond } => Instruction::Ccmn { rn, rm, nzcv, cond },
@@ -723,9 +775,24 @@ impl Mutator {
             },
             // Inverted-logical join the AND/ORR/EOR cluster.
             Instruction::Bic { rd, rn, rm } => match rng.random_range(0..7) {
-                0 => Instruction::And { rd, rn, rm },
-                1 => Instruction::Orr { rd, rn, rm },
-                2 => Instruction::Eor { rd, rn, rm },
+                0 => Instruction::And {
+                    rd,
+                    rn,
+                    rm,
+                    width: RegisterWidth::X64,
+                },
+                1 => Instruction::Orr {
+                    rd,
+                    rn,
+                    rm,
+                    width: RegisterWidth::X64,
+                },
+                2 => Instruction::Eor {
+                    rd,
+                    rn,
+                    rm,
+                    width: RegisterWidth::X64,
+                },
                 3 => Instruction::Bics { rd, rn, rm },
                 4 => Instruction::Orn { rd, rn, rm },
                 5 => Instruction::Eon { rd, rn, rm },
@@ -736,24 +803,59 @@ impl Mutator {
             // BIC. The original 1-peer version made BICS effectively a
             // dead-end neighbour, slowing convergence.
             Instruction::Bics { rd, rn, rm } => match rng.random_range(0..7) {
-                0 => Instruction::And { rd, rn, rm },
-                1 => Instruction::Orr { rd, rn, rm },
-                2 => Instruction::Eor { rd, rn, rm },
+                0 => Instruction::And {
+                    rd,
+                    rn,
+                    rm,
+                    width: RegisterWidth::X64,
+                },
+                1 => Instruction::Orr {
+                    rd,
+                    rn,
+                    rm,
+                    width: RegisterWidth::X64,
+                },
+                2 => Instruction::Eor {
+                    rd,
+                    rn,
+                    rm,
+                    width: RegisterWidth::X64,
+                },
                 3 => Instruction::Bic { rd, rn, rm },
                 4 => Instruction::Orn { rd, rn, rm },
                 5 => Instruction::Eon { rd, rn, rm },
                 _ => Instruction::Bics { rd, rn, rm },
             },
             Instruction::Orn { rd, rn, rm } => match rng.random_range(0..5) {
-                0 => Instruction::And { rd, rn, rm },
-                1 => Instruction::Orr { rd, rn, rm },
+                0 => Instruction::And {
+                    rd,
+                    rn,
+                    rm,
+                    width: RegisterWidth::X64,
+                },
+                1 => Instruction::Orr {
+                    rd,
+                    rn,
+                    rm,
+                    width: RegisterWidth::X64,
+                },
                 2 => Instruction::Bic { rd, rn, rm },
                 3 => Instruction::Eon { rd, rn, rm },
                 _ => Instruction::Orn { rd, rn, rm },
             },
             Instruction::Eon { rd, rn, rm } => match rng.random_range(0..5) {
-                0 => Instruction::And { rd, rn, rm },
-                1 => Instruction::Eor { rd, rn, rm },
+                0 => Instruction::And {
+                    rd,
+                    rn,
+                    rm,
+                    width: RegisterWidth::X64,
+                },
+                1 => Instruction::Eor {
+                    rd,
+                    rn,
+                    rm,
+                    width: RegisterWidth::X64,
+                },
                 2 => Instruction::Bic { rd, rn, rm },
                 3 => Instruction::Orn { rd, rn, rm },
                 _ => Instruction::Eon { rd, rn, rm },
@@ -773,6 +875,7 @@ impl Mutator {
                     rd,
                     rn,
                     rm: clamp_to_register(rm, &self.registers, rng),
+                    width: RegisterWidth::X64,
                 },
                 _ => Instruction::Adds { rd, rn, rm },
             },
@@ -783,14 +886,15 @@ impl Mutator {
                     rd,
                     rn,
                     rm: clamp_to_register(rm, &self.registers, rng),
+                    width: RegisterWidth::X64,
                 },
                 _ => Instruction::Subs { rd, rn, rm },
             },
-            Instruction::Ands { rd, rn, rm } => match rng.random_range(0..4) {
-                0 => Instruction::And { rd, rn, rm },
+            Instruction::Ands { rd, rn, rm, width } => match rng.random_range(0..4) {
+                0 => Instruction::And { rd, rn, rm, width },
                 1 => Instruction::Adds { rd, rn, rm },
                 2 => Instruction::Subs { rd, rn, rm },
-                _ => Instruction::Ands { rd, rn, rm },
+                _ => Instruction::Ands { rd, rn, rm, width },
             },
             // CSET ↔ CSETM
             Instruction::Cset { rd, cond } => match rng.random_range(0..2) {
@@ -1367,6 +1471,7 @@ mod tests {
                 kind: crate::ir::ShiftKind::Ror,
                 amount: 4,
             },
+            width: RegisterWidth::X64,
         };
         let mut saw_arith_after_bridge = false;
         for _ in 0..2000 {
@@ -1816,6 +1921,7 @@ mod tests {
                         kind: crate::ir::ShiftKind::Ror,
                         amount: 4,
                     },
+                    width: RegisterWidth::X64,
                 }],
             ];
 

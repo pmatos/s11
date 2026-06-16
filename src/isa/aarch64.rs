@@ -6,7 +6,7 @@
 
 use crate::ir::instructions::MOVW_LEGAL_SHIFTS;
 use crate::ir::types::Condition;
-use crate::ir::{Instruction, Operand, Register};
+use crate::ir::{Instruction, Operand, Register, RegisterWidth};
 use crate::isa::traits::{ISA, InstructionGenerator, InstructionType, OperandType, RegisterType};
 
 use rand::RngExt;
@@ -423,9 +423,24 @@ impl InstructionGenerator<Instruction> for AArch64InstructionGenerator {
                     let rm_op = Operand::Register(rm);
                     instructions.push(Instruction::Add { rd, rn, rm: rm_op });
                     instructions.push(Instruction::Sub { rd, rn, rm: rm_op });
-                    instructions.push(Instruction::And { rd, rn, rm: rm_op });
-                    instructions.push(Instruction::Orr { rd, rn, rm: rm_op });
-                    instructions.push(Instruction::Eor { rd, rn, rm: rm_op });
+                    instructions.push(Instruction::And {
+                        rd,
+                        rn,
+                        rm: rm_op,
+                        width: RegisterWidth::X64,
+                    });
+                    instructions.push(Instruction::Orr {
+                        rd,
+                        rn,
+                        rm: rm_op,
+                        width: RegisterWidth::X64,
+                    });
+                    instructions.push(Instruction::Eor {
+                        rd,
+                        rn,
+                        rm: rm_op,
+                        width: RegisterWidth::X64,
+                    });
                 }
             }
         }
@@ -571,7 +586,12 @@ impl InstructionGenerator<Instruction> for AArch64InstructionGenerator {
                     instructions.push(Instruction::Eon { rd, rn, rm: rm_op });
                     instructions.push(Instruction::Adds { rd, rn, rm: rm_op });
                     instructions.push(Instruction::Subs { rd, rn, rm: rm_op });
-                    instructions.push(Instruction::Ands { rd, rn, rm: rm_op });
+                    instructions.push(Instruction::Ands {
+                        rd,
+                        rn,
+                        rm: rm_op,
+                        width: RegisterWidth::X64,
+                    });
                 }
                 // ADDS / SUBS immediate forms (ANDS is register-only).
                 for &imm in immediates {
@@ -705,9 +725,24 @@ impl InstructionGenerator<Instruction> for AArch64InstructionGenerator {
                 match opcode {
                     2 => Instruction::Add { rd, rn, rm },
                     3 => Instruction::Sub { rd, rn, rm },
-                    4 => Instruction::And { rd, rn, rm },
-                    5 => Instruction::Orr { rd, rn, rm },
-                    6 => Instruction::Eor { rd, rn, rm },
+                    4 => Instruction::And {
+                        rd,
+                        rn,
+                        rm,
+                        width: RegisterWidth::X64,
+                    },
+                    5 => Instruction::Orr {
+                        rd,
+                        rn,
+                        rm,
+                        width: RegisterWidth::X64,
+                    },
+                    6 => Instruction::Eor {
+                        rd,
+                        rn,
+                        rm,
+                        width: RegisterWidth::X64,
+                    },
                     _ => unreachable!(),
                 }
             }
@@ -799,6 +834,7 @@ impl InstructionGenerator<Instruction> for AArch64InstructionGenerator {
                 rd,
                 rn,
                 rm: Operand::Register(pick_reg(rng)),
+                width: RegisterWidth::X64,
             },
             24 => {
                 let imm = (rng.random::<u32>() & 0xFFFF) as u16;
@@ -998,9 +1034,24 @@ impl InstructionGenerator<Instruction> for AArch64InstructionGenerator {
                     Instruction::MovImm { imm, .. } => Instruction::MovImm { rd: new_rd, imm },
                     Instruction::Add { rn, rm, .. } => Instruction::Add { rd: new_rd, rn, rm },
                     Instruction::Sub { rn, rm, .. } => Instruction::Sub { rd: new_rd, rn, rm },
-                    Instruction::And { rn, rm, .. } => Instruction::And { rd: new_rd, rn, rm },
-                    Instruction::Orr { rn, rm, .. } => Instruction::Orr { rd: new_rd, rn, rm },
-                    Instruction::Eor { rn, rm, .. } => Instruction::Eor { rd: new_rd, rn, rm },
+                    Instruction::And { rn, rm, width, .. } => Instruction::And {
+                        rd: new_rd,
+                        rn,
+                        rm,
+                        width,
+                    },
+                    Instruction::Orr { rn, rm, width, .. } => Instruction::Orr {
+                        rd: new_rd,
+                        rn,
+                        rm,
+                        width,
+                    },
+                    Instruction::Eor { rn, rm, width, .. } => Instruction::Eor {
+                        rd: new_rd,
+                        rn,
+                        rm,
+                        width,
+                    },
                     Instruction::Lsl { rn, shift, .. } => Instruction::Lsl {
                         rd: new_rd,
                         rn,
@@ -1089,7 +1140,12 @@ impl InstructionGenerator<Instruction> for AArch64InstructionGenerator {
                     Instruction::Eon { rn, rm, .. } => Instruction::Eon { rd: new_rd, rn, rm },
                     Instruction::Adds { rn, rm, .. } => Instruction::Adds { rd: new_rd, rn, rm },
                     Instruction::Subs { rn, rm, .. } => Instruction::Subs { rd: new_rd, rn, rm },
-                    Instruction::Ands { rn, rm, .. } => Instruction::Ands { rd: new_rd, rn, rm },
+                    Instruction::Ands { rn, rm, width, .. } => Instruction::Ands {
+                        rd: new_rd,
+                        rn,
+                        rm,
+                        width,
+                    },
                     Instruction::Cset { cond, .. } => Instruction::Cset { rd: new_rd, cond },
                     Instruction::Csetm { cond, .. } => Instruction::Csetm { rd: new_rd, cond },
                     Instruction::Ror { rn, shift, .. } => Instruction::Ror {
@@ -1183,21 +1239,51 @@ impl InstructionGenerator<Instruction> for AArch64InstructionGenerator {
                         let new_rm = mutate_operand(rng, rm, registers, immediates, 0xFFF);
                         Instruction::Sub { rd, rn, rm: new_rm }
                     }
-                    Instruction::And { rd, rn, rm: _ } => {
+                    Instruction::And {
+                        rd,
+                        rn,
+                        rm: _,
+                        width,
+                    } => {
                         // AND doesn't support immediates, so only change register
                         let new_rm =
                             Operand::Register(registers[rng.random_range(0..registers.len())]);
-                        Instruction::And { rd, rn, rm: new_rm }
+                        Instruction::And {
+                            rd,
+                            rn,
+                            rm: new_rm,
+                            width,
+                        }
                     }
-                    Instruction::Orr { rd, rn, rm: _ } => {
+                    Instruction::Orr {
+                        rd,
+                        rn,
+                        rm: _,
+                        width,
+                    } => {
                         let new_rm =
                             Operand::Register(registers[rng.random_range(0..registers.len())]);
-                        Instruction::Orr { rd, rn, rm: new_rm }
+                        Instruction::Orr {
+                            rd,
+                            rn,
+                            rm: new_rm,
+                            width,
+                        }
                     }
-                    Instruction::Eor { rd, rn, rm: _ } => {
+                    Instruction::Eor {
+                        rd,
+                        rn,
+                        rm: _,
+                        width,
+                    } => {
                         let new_rm =
                             Operand::Register(registers[rng.random_range(0..registers.len())]);
-                        Instruction::Eor { rd, rn, rm: new_rm }
+                        Instruction::Eor {
+                            rd,
+                            rn,
+                            rm: new_rm,
+                            width,
+                        }
                     }
                     Instruction::Lsl { rd, rn, shift } => {
                         let new_shift = mutate_shift_operand(rng, shift, registers);
@@ -1296,10 +1382,14 @@ impl InstructionGenerator<Instruction> for AArch64InstructionGenerator {
                         let new_rm = mutate_operand(rng, rm, registers, immediates, 0xFFF);
                         Instruction::Cmn { rn, rm: new_rm }
                     }
-                    Instruction::Tst { rn, rm: _ } => {
+                    Instruction::Tst { rn, rm: _, width } => {
                         let new_rm =
                             Operand::Register(registers[rng.random_range(0..registers.len())]);
-                        Instruction::Tst { rn, rm: new_rm }
+                        Instruction::Tst {
+                            rn,
+                            rm: new_rm,
+                            width,
+                        }
                     }
                     // CCMP / CCMN: pick a new rm (register or imm5). The
                     // dedicated mutate_operand path in
@@ -1438,10 +1528,20 @@ impl InstructionGenerator<Instruction> for AArch64InstructionGenerator {
                         let new_rm = mutate_operand(rng, rm, registers, immediates, 0xFFF);
                         Instruction::Subs { rd, rn, rm: new_rm }
                     }
-                    Instruction::Ands { rd, rn, rm: _ } => {
+                    Instruction::Ands {
+                        rd,
+                        rn,
+                        rm: _,
+                        width,
+                    } => {
                         let new_rm =
                             Operand::Register(registers[rng.random_range(0..registers.len())]);
-                        Instruction::Ands { rd, rn, rm: new_rm }
+                        Instruction::Ands {
+                            rd,
+                            rn,
+                            rm: new_rm,
+                            width,
+                        }
                     }
                     // CSET / CSETM: only thing to "change as operand" is the cond.
                     // Pick from the 14 sensible conditions (skip AL/NV).
@@ -1677,16 +1777,19 @@ mod tests {
                 rd: Register::X0,
                 rn: Register::X1,
                 rm: Operand::Register(Register::X2),
+                width: RegisterWidth::X64,
             },
             Instruction::Orr {
                 rd: Register::X0,
                 rn: Register::X1,
                 rm: Operand::Register(Register::X2),
+                width: RegisterWidth::X64,
             },
             Instruction::Eor {
                 rd: Register::X0,
                 rn: Register::X1,
                 rm: Operand::Register(Register::X2),
+                width: RegisterWidth::X64,
             },
             Instruction::Lsl {
                 rd: Register::X0,
@@ -1729,6 +1832,7 @@ mod tests {
             Instruction::Tst {
                 rn: Register::X1,
                 rm: Operand::Register(Register::X2),
+                width: RegisterWidth::X64,
             },
             Instruction::Csel {
                 rd: Register::X0,
@@ -1815,6 +1919,7 @@ mod tests {
                 rd: Register::X0,
                 rn: Register::X1,
                 rm: Operand::Register(Register::X2),
+                width: RegisterWidth::X64,
             },
             Instruction::Cset {
                 rd: Register::X0,
@@ -2394,6 +2499,7 @@ mod tests {
                 rd: Register::X0,
                 rn: Register::X1,
                 rm: Operand::Register(Register::X2),
+                width: RegisterWidth::X64,
             },
             Instruction::Cset {
                 rd: Register::X0,

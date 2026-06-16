@@ -3,7 +3,7 @@
 #![allow(dead_code)]
 
 use crate::ir::types::{AccessWidth, AddressOperand, IndexMode};
-use crate::ir::{ExtendKind, Instruction, Operand, Register};
+use crate::ir::{ExtendKind, Instruction, Operand, Register, RegisterWidth};
 use crate::semantics::live_out::RegisterSet;
 use std::collections::HashMap;
 use std::time::Duration;
@@ -56,6 +56,37 @@ fn bv_reverse_bits(value: &BV, width: u32) -> BV {
         result = result.concat(value.extract(i, i));
     }
     result
+}
+
+fn logical_smt_width(width: RegisterWidth, state_width: u32) -> u32 {
+    match width {
+        RegisterWidth::W32 => 32,
+        RegisterWidth::X64 => state_width,
+    }
+}
+
+fn register_logical_value(state: &MachineState, reg: Register, width: RegisterWidth) -> BV {
+    let value = state.get_register(reg).clone();
+    match width {
+        RegisterWidth::W32 => value.extract(31, 0),
+        RegisterWidth::X64 => value,
+    }
+}
+
+fn eval_logical_operand(state: &MachineState, operand: &Operand, width: RegisterWidth) -> BV {
+    let value = state.eval_operand(operand);
+    match width {
+        RegisterWidth::W32 => value.extract(31, 0),
+        RegisterWidth::X64 => value,
+    }
+}
+
+fn zero_extend_to_state_width(value: BV, value_width: u32, state_width: u32) -> BV {
+    if value_width == state_width {
+        value
+    } else {
+        value.zero_ext(state_width - value_width)
+    }
 }
 
 /// Count leading zeros of a `width`-bit BV with a binary-search decomposition.
@@ -508,23 +539,41 @@ pub fn apply_instruction(mut state: MachineState, instruction: &Instruction) -> 
             let result = lhs.bvsub(&rhs);
             state.set_register(*rd, result);
         }
-        Instruction::And { rd, rn, rm } => {
-            let lhs = state.get_register(*rn).clone();
-            let rhs = state.eval_operand(rm);
+        Instruction::And {
+            rd,
+            rn,
+            rm,
+            width: reg_width,
+        } => {
+            let op_width = logical_smt_width(*reg_width, width);
+            let lhs = register_logical_value(&state, *rn, *reg_width);
+            let rhs = eval_logical_operand(&state, rm, *reg_width);
             let result = lhs.bvand(&rhs);
-            state.set_register(*rd, result);
+            state.set_register(*rd, zero_extend_to_state_width(result, op_width, width));
         }
-        Instruction::Orr { rd, rn, rm } => {
-            let lhs = state.get_register(*rn).clone();
-            let rhs = state.eval_operand(rm);
+        Instruction::Orr {
+            rd,
+            rn,
+            rm,
+            width: reg_width,
+        } => {
+            let op_width = logical_smt_width(*reg_width, width);
+            let lhs = register_logical_value(&state, *rn, *reg_width);
+            let rhs = eval_logical_operand(&state, rm, *reg_width);
             let result = lhs.bvor(&rhs);
-            state.set_register(*rd, result);
+            state.set_register(*rd, zero_extend_to_state_width(result, op_width, width));
         }
-        Instruction::Eor { rd, rn, rm } => {
-            let lhs = state.get_register(*rn).clone();
-            let rhs = state.eval_operand(rm);
+        Instruction::Eor {
+            rd,
+            rn,
+            rm,
+            width: reg_width,
+        } => {
+            let op_width = logical_smt_width(*reg_width, width);
+            let lhs = register_logical_value(&state, *rn, *reg_width);
+            let rhs = eval_logical_operand(&state, rm, *reg_width);
             let result = lhs.bvxor(&rhs);
-            state.set_register(*rd, result);
+            state.set_register(*rd, zero_extend_to_state_width(result, op_width, width));
         }
         Instruction::Lsl { rd, rn, shift } => {
             let value = state.get_register(*rn).clone();
@@ -622,11 +671,16 @@ pub fn apply_instruction(mut state: MachineState, instruction: &Instruction) -> 
             let (n, z, c, v) = compute_flags_add(&lhs, &rhs, width);
             state.set_flags(n, z, c, v);
         }
-        Instruction::Tst { rn, rm } => {
-            let lhs = state.get_register(*rn).clone();
-            let rhs = state.eval_operand(rm);
+        Instruction::Tst {
+            rn,
+            rm,
+            width: reg_width,
+        } => {
+            let op_width = logical_smt_width(*reg_width, width);
+            let lhs = register_logical_value(&state, *rn, *reg_width);
+            let rhs = eval_logical_operand(&state, rm, *reg_width);
             let result = lhs.bvand(&rhs);
-            let (n, z, c, v) = compute_flags_logical(&result, width);
+            let (n, z, c, v) = compute_flags_logical(&result, op_width);
             state.set_flags(n, z, c, v);
         }
         // CCMP / CCMN: ITE between freshly-computed sub/add NZCV (true branch)
@@ -763,12 +817,18 @@ pub fn apply_instruction(mut state: MachineState, instruction: &Instruction) -> 
             state.set_register(*rd, lhs.bvsub(&rhs));
             state.set_flags(n, z, c, v);
         }
-        Instruction::Ands { rd, rn, rm } => {
-            let lhs = state.get_register(*rn).clone();
-            let rhs = state.eval_operand(rm);
+        Instruction::Ands {
+            rd,
+            rn,
+            rm,
+            width: reg_width,
+        } => {
+            let op_width = logical_smt_width(*reg_width, width);
+            let lhs = register_logical_value(&state, *rn, *reg_width);
+            let rhs = eval_logical_operand(&state, rm, *reg_width);
             let result = lhs.bvand(&rhs);
-            let (n, z, c, v) = compute_flags_logical(&result, width);
-            state.set_register(*rd, result);
+            let (n, z, c, v) = compute_flags_logical(&result, op_width);
+            state.set_register(*rd, zero_extend_to_state_width(result, op_width, width));
             state.set_flags(n, z, c, v);
         }
         // CSET / CSETM: rd = cond ? 1 : 0 (or all-ones for CSETM).
@@ -1232,6 +1292,7 @@ mod tests {
             rd: Register::X0,
             rn: Register::X0,
             rm: Operand::Register(Register::X0),
+            width: crate::ir::RegisterWidth::X64,
         }];
         let state2 = apply_sequence(initial_state, &seq2);
 
@@ -1301,6 +1362,7 @@ mod tests {
                 rd: Register::X0,
                 rn: Register::X1,
                 rm: Operand::Register(Register::X10),
+                width: crate::ir::RegisterWidth::X64,
             },
         ];
         let seq_fused = vec![Instruction::And {
@@ -1311,6 +1373,7 @@ mod tests {
                 kind: crate::ir::ShiftKind::Ror,
                 amount: 4,
             },
+            width: crate::ir::RegisterWidth::X64,
         }];
 
         let s1 = apply_sequence(initial.clone(), &seq_split);
@@ -1478,6 +1541,7 @@ mod tests {
                 rd: Register::X0,
                 rn: Register::X1,
                 rm: Operand::Register(Register::X10),
+                width: crate::ir::RegisterWidth::X64,
             },
             Instruction::Clz {
                 rd: Register::X0,
@@ -2040,6 +2104,7 @@ mod tests {
                 Instruction::Tst {
                     rn: Register::X0,
                     rm: rm_reg.clone(),
+                    width: crate::ir::RegisterWidth::X64,
                 },
                 compute_flags_logical(&x0.bvand(&x1), 64),
                 "TST x0, x1",
@@ -2067,6 +2132,7 @@ mod tests {
                     rd: Register::X2,
                     rn: Register::X0,
                     rm: rm_reg.clone(),
+                    width: crate::ir::RegisterWidth::X64,
                 },
                 compute_flags_logical(&x0.bvand(&x1), 64),
                 "ANDS x2, x0, x1",
@@ -2432,6 +2498,7 @@ mod tests {
             rd: Register::X0,
             rn: Register::X1,
             rm: Operand::Register(Register::X2),
+            width: crate::ir::RegisterWidth::X64,
         };
         let samples: &[(u64, u64)] = &[
             (0, 0xFFFF_FFFF_FFFF_FFFF),
@@ -2454,6 +2521,7 @@ mod tests {
             rd: Register::X0,
             rn: Register::X1,
             rm: Operand::Register(Register::X2),
+            width: crate::ir::RegisterWidth::X64,
         };
         let samples: &[(u64, u64)] = &[
             (0, 0),
@@ -2476,6 +2544,7 @@ mod tests {
             rd: Register::X0,
             rn: Register::X1,
             rm: Operand::Register(Register::X2),
+            width: crate::ir::RegisterWidth::X64,
         };
         let samples: &[(u64, u64)] = &[
             (0, 0),
@@ -2489,6 +2558,41 @@ mod tests {
                 &[(Register::X1, v1), (Register::X2, v2)],
                 Register::X0,
             );
+        }
+    }
+
+    #[test]
+    fn test_w32_logical_immediate_concrete_smt_parity() {
+        for (instr, pre) in [
+            (
+                Instruction::And {
+                    rd: Register::X0,
+                    rn: Register::X1,
+                    rm: Operand::Immediate(0xFF),
+                    width: RegisterWidth::W32,
+                },
+                0xFFFF_FFFF_1234_00FF,
+            ),
+            (
+                Instruction::Orr {
+                    rd: Register::X0,
+                    rn: Register::X1,
+                    rm: Operand::Immediate(0x0F),
+                    width: RegisterWidth::W32,
+                },
+                0xFFFF_FFFF_0000_00F0,
+            ),
+            (
+                Instruction::Eor {
+                    rd: Register::X0,
+                    rn: Register::X1,
+                    rm: Operand::Immediate(0xFF),
+                    width: RegisterWidth::W32,
+                },
+                0xFFFF_FFFF_FFFF_00FF,
+            ),
+        ] {
+            assert_concrete_smt_parity(&instr, &[(Register::X1, pre)], Register::X0);
         }
     }
 
@@ -3263,6 +3367,7 @@ mod tests {
         let instr = Instruction::Tst {
             rn: Register::X1,
             rm: Operand::Register(Register::X2),
+            width: crate::ir::RegisterWidth::X64,
         };
         let samples: &[(u64, u64)] = &[
             (0, 0xFFFF_FFFF_FFFF_FFFF),                     // result=0 -> Z=1
@@ -3333,6 +3438,7 @@ mod tests {
             rd: Register::X0,
             rn: Register::X1,
             rm: Operand::Register(Register::X2),
+            width: crate::ir::RegisterWidth::X64,
         };
         let samples: &[(u64, u64)] = &[
             (0, 0xFFFF_FFFF_FFFF_FFFF),
@@ -3349,6 +3455,51 @@ mod tests {
                 true,
             );
         }
+    }
+
+    #[test]
+    fn test_w32_logical_flag_immediates_concrete_smt_parity() {
+        use crate::semantics::state::ConditionFlags;
+
+        let tst_n = Instruction::Tst {
+            rn: Register::X1,
+            rm: Operand::Immediate(0x8000_0000),
+            width: RegisterWidth::W32,
+        };
+        assert_concrete_smt_parity_full(
+            &tst_n,
+            &[(Register::X1, 0x8000_0000)],
+            Some(ConditionFlags::default()),
+            None,
+            true,
+        );
+
+        let tst_z = Instruction::Tst {
+            rn: Register::X1,
+            rm: Operand::Immediate(0xFF),
+            width: RegisterWidth::W32,
+        };
+        assert_concrete_smt_parity_full(
+            &tst_z,
+            &[(Register::X1, 0xFFFF_FFFF_0000_0000)],
+            Some(ConditionFlags::default()),
+            None,
+            true,
+        );
+
+        let ands = Instruction::Ands {
+            rd: Register::X0,
+            rn: Register::X1,
+            rm: Operand::Immediate(0x8000_0000),
+            width: RegisterWidth::W32,
+        };
+        assert_concrete_smt_parity_full(
+            &ands,
+            &[(Register::X1, 0xFFFF_FFFF_8000_0000)],
+            Some(ConditionFlags::default()),
+            Some(Register::X0),
+            true,
+        );
     }
 
     #[test]
