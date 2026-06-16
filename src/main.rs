@@ -903,7 +903,11 @@ fn build_hybrid_search_config(
         .with_timeout_option(options.timeout)
 }
 
-fn build_x86_stochastic_search_config(width: u32, options: &OptimizationOptions) -> SearchConfig {
+fn build_x86_stochastic_search_config(
+    target: &[isa::x86::X86Instruction],
+    width: u32,
+    options: &OptimizationOptions,
+) -> SearchConfig {
     let stochastic_config = StochasticConfig::default()
         .with_beta(options.beta)
         .with_iterations(options.iterations)
@@ -917,7 +921,26 @@ fn build_x86_stochastic_search_config(width: u32, options: &OptimizationOptions)
         .with_cost_metric(options.cost_metric)
         .with_timeout_option(options.timeout)
         .with_verbose(options.verbose)
-        .with_x86_registers(isa::x86::default_x86_registers())
+        .with_x86_registers(x86_registers_from_target(target))
+        .with_immediates(isa::x86::default_x86_immediates())
+        .with_x86_width(width)
+}
+
+fn build_x86_symbolic_search_config(
+    target: &[isa::x86::X86Instruction],
+    width: u32,
+    options: &OptimizationOptions,
+) -> SearchConfig {
+    let symbolic_config = SymbolicConfig::default()
+        .with_search_mode(options.search_mode)
+        .with_timeout(options.solver_timeout);
+
+    SearchConfig::default()
+        .with_symbolic(symbolic_config)
+        .with_cost_metric(options.cost_metric)
+        .with_timeout_option(options.timeout)
+        .with_verbose(options.verbose)
+        .with_x86_registers(x86_registers_from_target(target))
         .with_immediates(isa::x86::default_x86_immediates())
         .with_x86_width(width)
 }
@@ -1645,15 +1668,13 @@ fn convert_to_x86_ir(
     Ok(out)
 }
 
-/// Candidate register pool for the x86 enumerative path, drawn from the
-/// target's own registers (destinations + sources). The trait refactor
-/// regressed coverage by defaulting to the fixed `default_x86_registers()`
-/// pool, so a window over R10–R15 had no representable rewrite. Mirrors the
-/// pre-refactor `find_shorter_equivalent_x86` derivation. Falls back to the
-/// default pool only for an empty target (no rewrite is possible there).
-fn x86_enumerative_registers_from_target(
-    target: &[isa::x86::X86Instruction],
-) -> Vec<isa::x86::X86Register> {
+/// Candidate register pool for x86 search, drawn from the target's own
+/// registers (destinations + sources). The trait refactor regressed coverage by
+/// defaulting to the fixed `default_x86_registers()` pool, so a window over
+/// R10–R15 had no representable rewrite. Mirrors the pre-refactor
+/// `find_shorter_equivalent_x86` derivation. Falls back to the default pool only
+/// for an empty target (no rewrite is possible there).
+fn x86_registers_from_target(target: &[isa::x86::X86Instruction]) -> Vec<isa::x86::X86Register> {
     let mut pool: Vec<isa::x86::X86Register> = Vec::new();
     let referenced = target.iter().flat_map(|instr| {
         instr
@@ -1697,17 +1718,16 @@ fn x86_enumerative_immediates_from_target(target: &[isa::x86::X86Instruction]) -
     imms
 }
 
-/// Build the search config for the x86 *enumerative* path. Unlike stochastic
-/// search (which samples a broad fixed pool), enumerative search draws
-/// candidates from the target's own registers/immediates and honours --cores
-/// now that the trait-backed search is rayon-parallel.
+/// Build the search config for the x86 *enumerative* path. Like stochastic and
+/// symbolic search, enumerative search draws candidates from the target's own
+/// registers; it additionally derives immediates from the target and honours
+/// --cores now that the trait-backed search is rayon-parallel.
 fn build_x86_enumerative_search_config(
     target: &[isa::x86::X86Instruction],
     width: u32,
     options: &OptimizationOptions,
 ) -> SearchConfig {
-    build_x86_stochastic_search_config(width, options)
-        .with_x86_registers(x86_enumerative_registers_from_target(target))
+    build_x86_stochastic_search_config(target, width, options)
         .with_immediates(x86_enumerative_immediates_from_target(target))
         .with_cores(options.cores)
 }
@@ -1763,7 +1783,7 @@ fn run_x86_stochastic(
     use search::stochastic::StochasticSearch;
     use validation::live_out::x86_live_out_from_target;
 
-    let config = build_x86_stochastic_search_config(width, options);
+    let config = build_x86_stochastic_search_config(target, width, options);
     let live_out = x86_live_out_from_target(target);
 
     // Extract (optimized, statistics) in each width branch separately:
@@ -1806,17 +1826,7 @@ fn run_x86_symbolic(
     use search::symbolic::SymbolicSearch;
     use validation::live_out::x86_live_out_from_target;
 
-    let symbolic_config = search::config::SymbolicConfig::default()
-        .with_search_mode(options.search_mode)
-        .with_timeout(options.solver_timeout);
-    let config = search::config::SearchConfig::default()
-        .with_symbolic(symbolic_config)
-        .with_cost_metric(options.cost_metric)
-        .with_timeout_option(options.timeout)
-        .with_verbose(options.verbose)
-        .with_x86_registers(isa::x86::default_x86_registers())
-        .with_immediates(isa::x86::default_x86_immediates())
-        .with_x86_width(width);
+    let config = build_x86_symbolic_search_config(target, width, options);
     let live_out = x86_live_out_from_target(target);
 
     let (optimized, statistics) = if width == 32 {
@@ -3116,6 +3126,29 @@ mod cli_helper_tests {
         assert_eq!(optimized[0].destination(), Some(X86Register::R10));
     }
 
+    #[test]
+    fn x86_register_pool_is_first_seen_target_derived_and_empty_falls_back() {
+        let target = vec![
+            X86Instruction::MovImm {
+                rd: X86Register::R11,
+                imm: 5,
+            },
+            X86Instruction::AddReg {
+                rd: X86Register::R11,
+                rs: X86Register::R12,
+            },
+        ];
+
+        assert_eq!(
+            x86_registers_from_target(&target),
+            vec![X86Register::R11, X86Register::R12]
+        );
+        assert_eq!(
+            x86_registers_from_target(&[]),
+            isa::x86::default_x86_registers()
+        );
+    }
+
     /// Regression (PR #384): the enumerative config must be target-derived and
     /// must thread `--cores` (the trait-backed search is rayon-parallel and
     /// honours `config.cores`, but the old builder left it `None`).
@@ -3243,7 +3276,17 @@ mod cli_helper_tests {
         opts.cost_metric = CostMetric::CodeSize;
         opts.verbose = true;
 
-        let config = build_x86_stochastic_search_config(32, &opts);
+        let target = vec![
+            X86Instruction::MovImm {
+                rd: X86Register::R11,
+                imm: -1,
+            },
+            X86Instruction::AddReg {
+                rd: X86Register::R11,
+                rs: X86Register::R12,
+            },
+        ];
+        let config = build_x86_stochastic_search_config(&target, 32, &opts);
 
         assert_eq!(
             config.symbolic.solver_timeout,
@@ -3257,7 +3300,11 @@ mod cli_helper_tests {
         assert!(config.verbose);
         assert_eq!(
             config.x86_available_registers,
-            isa::x86::default_x86_registers()
+            vec![X86Register::R11, X86Register::R12]
+        );
+        assert!(
+            !config.x86_available_registers.contains(&X86Register::RAX),
+            "stochastic register pool must be derived from the target"
         );
         assert_eq!(
             config.available_immediates,
@@ -3265,6 +3312,51 @@ mod cli_helper_tests {
         );
         assert_eq!(config.x86_width, 32);
         assert_eq!(config.x86_mode, assembler::x86::X86Mode::Mode32);
+    }
+
+    #[test]
+    fn build_x86_symbolic_search_config_is_target_derived_and_preserves_symbolic_options() {
+        let mut opts = options_for(Algorithm::Symbolic);
+        opts.timeout = Some(Duration::from_millis(23));
+        opts.solver_timeout = Duration::from_millis(29);
+        opts.search_mode = SearchMode::Binary;
+        opts.cost_metric = CostMetric::Latency;
+        opts.verbose = true;
+
+        let target = vec![
+            X86Instruction::MovImm {
+                rd: X86Register::R11,
+                imm: -1,
+            },
+            X86Instruction::AddReg {
+                rd: X86Register::R11,
+                rs: X86Register::R12,
+            },
+        ];
+        let config = build_x86_symbolic_search_config(&target, 64, &opts);
+
+        assert_eq!(
+            config.x86_available_registers,
+            vec![X86Register::R11, X86Register::R12]
+        );
+        assert!(
+            !config.x86_available_registers.contains(&X86Register::RAX),
+            "symbolic register pool must be derived from the target"
+        );
+        assert_eq!(config.symbolic.search_mode, SearchMode::Binary);
+        assert_eq!(
+            config.symbolic.solver_timeout,
+            Some(Duration::from_millis(29))
+        );
+        assert_eq!(config.cost_metric, CostMetric::Latency);
+        assert_eq!(config.timeout, Some(Duration::from_millis(23)));
+        assert!(config.verbose);
+        assert_eq!(
+            config.available_immediates,
+            isa::x86::default_x86_immediates()
+        );
+        assert_eq!(config.x86_width, 64);
+        assert_eq!(config.x86_mode, assembler::x86::X86Mode::Mode64);
     }
 
     #[test]
