@@ -406,12 +406,29 @@ mod tests {
     use crate::semantics::EquivalenceMetrics;
     use crate::semantics::cost::CostMetric;
     use crate::semantics::live_out::LiveOut;
-    use std::sync::Mutex;
-    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    use std::sync::{Arc, Mutex};
     use std::time::Duration;
 
     static TEST_EQUIVALENCE_CHECKS: AtomicUsize = AtomicUsize::new(0);
+    static TEST_STOP_FLAG: Mutex<Option<Arc<AtomicBool>>> = Mutex::new(None);
     static SYMBOLIC_INNER_LOOP_TEST_LOCK: Mutex<()> = Mutex::new(());
+
+    struct TestStopFlagGuard;
+
+    impl Drop for TestStopFlagGuard {
+        fn drop(&mut self) {
+            if let Ok(mut slot) = TEST_STOP_FLAG.lock() {
+                *slot = None;
+            }
+        }
+    }
+
+    fn install_test_stop_flag(flag: Arc<AtomicBool>) -> TestStopFlagGuard {
+        let mut slot = TEST_STOP_FLAG.lock().expect("test stop flag lock poisoned");
+        *slot = Some(flag);
+        TestStopFlagGuard
+    }
 
     #[derive(Clone)]
     struct TestIsa;
@@ -581,7 +598,13 @@ mod tests {
             _width: u32,
             _timeout: Duration,
         ) -> (EquivalenceResult, EquivalenceMetrics) {
-            TEST_EQUIVALENCE_CHECKS.fetch_add(1, Ordering::SeqCst);
+            let check_number = TEST_EQUIVALENCE_CHECKS.fetch_add(1, Ordering::SeqCst) + 1;
+            if check_number == 1 {
+                let slot = TEST_STOP_FLAG.lock().expect("test stop flag lock poisoned");
+                if let Some(flag) = slot.as_ref() {
+                    flag.store(true, Ordering::SeqCst);
+                }
+            }
             std::thread::sleep(Duration::from_millis(1));
             (
                 EquivalenceResult::NotEquivalent,
@@ -772,9 +795,6 @@ mod tests {
 
     #[test]
     fn symbolic_length_two_inner_loop_respects_cooperative_stop_flag() {
-        use std::sync::Arc;
-        use std::sync::atomic::AtomicBool;
-        use std::thread;
         use std::time::Instant;
 
         let _guard = SYMBOLIC_INNER_LOOP_TEST_LOCK
@@ -783,14 +803,7 @@ mod tests {
         TEST_EQUIVALENCE_CHECKS.store(0, Ordering::SeqCst);
 
         let flag = Arc::new(AtomicBool::new(false));
-        let flag_for_stop = Arc::clone(&flag);
-
-        let stopper = thread::spawn(move || {
-            while TEST_EQUIVALENCE_CHECKS.load(Ordering::SeqCst) == 0 {
-                thread::yield_now();
-            }
-            flag_for_stop.store(true, Ordering::SeqCst);
-        });
+        let _stop_guard = install_test_stop_flag(Arc::clone(&flag));
 
         let mut search: SymbolicSearch<TestIsa> = SymbolicSearch::new();
         let config = SearchConfig::default()
@@ -814,8 +827,6 @@ mod tests {
             Instant::now(),
         );
 
-        stopper.join().expect("stopper thread panicked");
-
         let checks = TEST_EQUIVALENCE_CHECKS.load(Ordering::SeqCst);
         assert_eq!(result, None);
         assert!(
@@ -826,9 +837,6 @@ mod tests {
 
     #[test]
     fn symbolic_length_three_inner_loops_respect_cooperative_stop_flag() {
-        use std::sync::Arc;
-        use std::sync::atomic::AtomicBool;
-        use std::thread;
         use std::time::Instant;
 
         let _guard = SYMBOLIC_INNER_LOOP_TEST_LOCK
@@ -837,14 +845,7 @@ mod tests {
         TEST_EQUIVALENCE_CHECKS.store(0, Ordering::SeqCst);
 
         let flag = Arc::new(AtomicBool::new(false));
-        let flag_for_stop = Arc::clone(&flag);
-
-        let stopper = thread::spawn(move || {
-            while TEST_EQUIVALENCE_CHECKS.load(Ordering::SeqCst) == 0 {
-                thread::yield_now();
-            }
-            flag_for_stop.store(true, Ordering::SeqCst);
-        });
+        let _stop_guard = install_test_stop_flag(Arc::clone(&flag));
 
         let mut search: SymbolicSearch<TestIsa> = SymbolicSearch::new();
         let config = SearchConfig::default()
@@ -868,8 +869,6 @@ mod tests {
             &mut best_cost,
             Instant::now(),
         );
-
-        stopper.join().expect("stopper thread panicked");
 
         let checks = TEST_EQUIVALENCE_CHECKS.load(Ordering::SeqCst);
         assert_eq!(result, None);
