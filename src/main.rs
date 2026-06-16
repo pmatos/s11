@@ -1668,24 +1668,19 @@ fn convert_to_x86_ir(
     Ok(out)
 }
 
-/// Candidate register pool for x86 search, drawn from the target's own
-/// registers (destinations + sources). The trait refactor regressed coverage by
-/// defaulting to the fixed `default_x86_registers()` pool, so a window over
-/// R10–R15 had no representable rewrite. Mirrors the pre-refactor
-/// `find_shorter_equivalent_x86` derivation. `RSP` and `RBP` are deliberately
-/// excluded: the single candidate pool can place registers in writable
-/// positions, while live-out tracking does not make source-only stack/frame
-/// references observable. Falls back to the default pool only for an empty
-/// target; a non-empty target with no usable non-stack/frame registers returns
-/// an empty pool so search does not introduce unrelated writable registers.
+/// Candidate register pool for x86 search, drawn from the target's original
+/// destinations. The trait refactor regressed coverage by defaulting to the
+/// fixed `default_x86_registers()` pool, so a window over R10-R15 had no
+/// representable rewrite. Source-only registers are deliberately excluded: the
+/// single candidate pool can place registers in writable positions, while
+/// live-out tracking only makes original destinations plus EFLAGS observable.
+/// `RSP` and `RBP` are also excluded so search never synthesizes stack/frame
+/// writes. Falls back to the default pool only for an empty target; a non-empty
+/// target with no usable destinations returns an empty pool so search does not
+/// introduce unrelated writable registers.
 fn x86_registers_from_target(target: &[isa::x86::X86Instruction]) -> Vec<isa::x86::X86Register> {
     let mut pool: Vec<isa::x86::X86Register> = Vec::new();
-    let referenced = target.iter().flat_map(|instr| {
-        instr
-            .destination()
-            .into_iter()
-            .chain(instr.source_registers())
-    });
+    let referenced = target.iter().filter_map(|instr| instr.destination());
     for reg in referenced {
         if matches!(reg, isa::x86::X86Register::RSP | isa::x86::X86Register::RBP) {
             continue;
@@ -3137,7 +3132,7 @@ mod cli_helper_tests {
     }
 
     #[test]
-    fn x86_register_pool_is_first_seen_target_derived_and_empty_falls_back() {
+    fn x86_register_pool_is_destination_derived_and_empty_falls_back() {
         let target = vec![
             X86Instruction::CmpReg {
                 rn: X86Register::RSP,
@@ -3147,9 +3142,9 @@ mod cli_helper_tests {
                 rn: X86Register::RBP,
                 rs: X86Register::R12,
             },
-            X86Instruction::MovImm {
+            X86Instruction::MovReg {
                 rd: X86Register::R11,
-                imm: 5,
+                rs: X86Register::R10,
             },
             X86Instruction::AddReg {
                 rd: X86Register::R12,
@@ -3164,6 +3159,19 @@ mod cli_helper_tests {
         assert_eq!(
             x86_registers_from_target(&[]),
             isa::x86::default_x86_registers()
+        );
+        assert_eq!(
+            x86_registers_from_target(&[
+                X86Instruction::CmpImm {
+                    rn: X86Register::R10,
+                    imm: 1,
+                },
+                X86Instruction::CmpImm {
+                    rn: X86Register::R10,
+                    imm: 1,
+                },
+            ]),
+            Vec::<X86Register>::new()
         );
         assert_eq!(
             x86_registers_from_target(&[
@@ -3193,8 +3201,12 @@ mod cli_helper_tests {
                 imm: -1,
             },
             X86Instruction::AddReg {
-                rd: X86Register::R11,
-                rs: X86Register::R12,
+                rd: X86Register::R12,
+                rs: X86Register::R11,
+            },
+            X86Instruction::CmpImm {
+                rn: X86Register::R10,
+                imm: 1,
             },
         ];
         let config = build_x86_enumerative_search_config(&target, 64, &opts);
@@ -3203,6 +3215,10 @@ mod cli_helper_tests {
             config.x86_available_registers.contains(&X86Register::R11)
                 && config.x86_available_registers.contains(&X86Register::R12),
             "register pool must be derived from the target"
+        );
+        assert!(
+            !config.x86_available_registers.contains(&X86Register::R10),
+            "source-only registers must not become writable candidates"
         );
         assert!(
             !config.x86_available_registers.contains(&X86Register::RAX),
@@ -3316,6 +3332,10 @@ mod cli_helper_tests {
                 rn: X86Register::RBP,
                 rs: X86Register::R12,
             },
+            X86Instruction::CmpImm {
+                rn: X86Register::R10,
+                imm: 1,
+            },
             X86Instruction::MovImm {
                 rd: X86Register::R11,
                 imm: -1,
@@ -3348,6 +3368,10 @@ mod cli_helper_tests {
         assert!(
             !config.x86_available_registers.contains(&X86Register::RBP),
             "stochastic register pool must not make RBP writable"
+        );
+        assert!(
+            !config.x86_available_registers.contains(&X86Register::R10),
+            "stochastic register pool must not make source-only registers writable"
         );
         assert!(
             !config.x86_available_registers.contains(&X86Register::RAX),
@@ -3399,13 +3423,21 @@ mod cli_helper_tests {
                 rs: X86Register::RBP,
             },
             X86Instruction::CmpImm {
+                rn: X86Register::R10,
+                imm: 1,
+            },
+            X86Instruction::CmpImm {
                 rn: X86Register::R11,
                 imm: -1,
+            },
+            X86Instruction::MovImm {
+                rd: X86Register::R12,
+                imm: 0,
             },
         ];
         let config = build_x86_symbolic_search_config(&target, 64, &opts);
 
-        assert_eq!(config.x86_available_registers, vec![X86Register::R11]);
+        assert_eq!(config.x86_available_registers, vec![X86Register::R12]);
         assert!(
             !config.x86_available_registers.contains(&X86Register::RSP),
             "symbolic register pool must not make RSP writable"
@@ -3413,6 +3445,11 @@ mod cli_helper_tests {
         assert!(
             !config.x86_available_registers.contains(&X86Register::RBP),
             "symbolic register pool must not make RBP writable"
+        );
+        assert!(
+            !config.x86_available_registers.contains(&X86Register::R10)
+                && !config.x86_available_registers.contains(&X86Register::R11),
+            "symbolic register pool must not make source-only registers writable"
         );
         assert!(
             !config.x86_available_registers.contains(&X86Register::RAX),
