@@ -689,8 +689,10 @@ mod tests {
             None
         );
 
-        let mut symbolic_without_solver_timeout = SymbolicConfig::default();
-        symbolic_without_solver_timeout.solver_timeout = None;
+        let symbolic_without_solver_timeout = SymbolicConfig {
+            solver_timeout: None,
+            ..SymbolicConfig::default()
+        };
         let no_search_timeout = SearchConfig::default()
             .with_timeout_option(None)
             .with_symbolic(symbolic_without_solver_timeout);
