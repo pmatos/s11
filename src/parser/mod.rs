@@ -3100,6 +3100,33 @@ mod tests {
     }
 
     #[test]
+    fn test_parse_tbz_accepts_w_form() {
+        // Capstone prints TBZ with a W register when the tested bit is < 32.
+        // TBZ is a width-aware path, so the scoped helper accepts that spelling
+        // and canonicalizes to the shared physical register (issue #142).
+        assert_eq!(
+            parse_one("tbz w3, #5, 0x1000"),
+            Instruction::Tbz {
+                rt: Register::X3,
+                bit: 5,
+                target: LabelId(0x1000),
+            }
+        );
+    }
+
+    #[test]
+    fn test_parse_tbnz_accepts_w_form() {
+        assert_eq!(
+            parse_one("tbnz w7, #31, 0x2000"),
+            Instruction::Tbnz {
+                rt: Register::X7,
+                bit: 31,
+                target: LabelId(0x2000),
+            }
+        );
+    }
+
+    #[test]
     fn test_parse_tbz_bit_out_of_range_errors() {
         let result = parse_line("tbz x3, #64, 0x1000");
         assert!(result.is_err());
