@@ -1317,6 +1317,24 @@ fn normalize_capstone_alias(mnemonic: &str, op_str: &str) -> Result<Option<Strin
     }
 }
 
+/// Render the diagnostic for a Capstone instruction the parser rejected. When
+/// the alias bridge rewrote the raw spelling, the normalized form that was
+/// actually handed to the parser is surfaced too — otherwise a bridge
+/// regression would be invisible in the warning. Both parser failure modes
+/// share this so their diagnostics stay consistent (`UnknownInstruction`
+/// carries no message, `Other` carries one appended in parentheses).
+fn describe_unsupported_line(raw_line: &str, line: &str, err: Option<&str>) -> String {
+    let base = if line == raw_line {
+        raw_line.to_string()
+    } else {
+        format!("{} normalized as `{}`", raw_line, line)
+    };
+    match err {
+        Some(err) => format!("{} ({})", base, err),
+        None => base,
+    }
+}
+
 /// Convert one Capstone (mnemonic, op_str) pair into an IR outcome by
 /// delegating to `parser::parse_line`. Keeping a single shared parser is what
 /// guarantees the asm-text path and the ELF/Capstone path support exactly the
@@ -1338,17 +1356,10 @@ fn convert_capstone_op(mnemonic: &str, op_str: &str) -> ConvertOutcome {
         Ok(parser::LineResult::Instruction(instr)) => ConvertOutcome::Instruction(instr),
         Ok(parser::LineResult::Skip) => ConvertOutcome::Skip,
         Err(parser::ParseLineError::UnknownInstruction(_)) => {
-            ConvertOutcome::Unsupported(raw_line.clone())
+            ConvertOutcome::Unsupported(describe_unsupported_line(&raw_line, &line, None))
         }
         Err(parser::ParseLineError::Other(err)) => {
-            if line == raw_line {
-                ConvertOutcome::Unsupported(format!("{} ({})", raw_line, err))
-            } else {
-                ConvertOutcome::Unsupported(format!(
-                    "{} normalized as `{}` ({})",
-                    raw_line, line, err
-                ))
-            }
+            ConvertOutcome::Unsupported(describe_unsupported_line(&raw_line, &line, Some(&err)))
         }
     }
 }
@@ -2441,6 +2452,27 @@ mod cli_helper_tests {
                 ConvertOutcome::Instruction(instr) => assert_eq!(instr, expected),
                 other => panic!("expected normalized Instruction for `mov {ops}`, got {other:?}"),
             }
+        }
+    }
+
+    #[test]
+    fn convert_capstone_op_passes_mov_alias_fall_through_to_parser() {
+        // The move-wide normalizer deliberately leaves `mov Xd, #imm` alone for
+        // single-halfword values (0..=0xffff) and skips W-register destinations.
+        // `mov` *is* a parser mnemonic, so these fall through to the parser
+        // rather than becoming Unsupported: an x-register small immediate parses
+        // to MovImm, and a W-register logical-immediate alias parses to Orr. Pin
+        // both so the normalizer's fall-through boundary cannot silently regress.
+        match convert_capstone_op("mov", "x0, #5") {
+            ConvertOutcome::Instruction(Instruction::MovImm {
+                rd: Register::X0,
+                imm: 5,
+            }) => {}
+            other => panic!("expected MovImm for `mov x0, #5`, got {other:?}"),
+        }
+        match convert_capstone_op("mov", "w0, #0x10000") {
+            ConvertOutcome::Instruction(Instruction::Orr { .. }) => {}
+            other => panic!("expected Orr for `mov w0, #0x10000`, got {other:?}"),
         }
     }
 
