@@ -52,3 +52,7 @@ harness = false
 [[bench]]
 name = "algebraic_fusion"
 harness = false
+
+[[bench]]
+name = "smt_clz"
+harness = false

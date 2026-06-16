@@ -11,7 +11,7 @@ sequence that is provably equivalent under SMT.
 - Reads an ELF binary, disassembles it with [Capstone], and lifts a window
   into an internal IR.
 - Searches for a cheaper instruction sequence using one of four
-  algorithms: enumerative, stochastic (MCMC / Metropolis–Hastings),
+  algorithms: enumerative, stochastic (MCMC-style Metropolis cost acceptance),
   symbolic (SMT synthesis with Z3), or a hybrid of the symbolic and
   stochastic workers running in parallel.
 - Verifies each candidate first with random-input testing for a quick
@@ -82,6 +82,11 @@ Useful flags on `opt`:
 | `--beta`, `--iterations`, `--seed` | MCMC tuning for `stochastic` |
 | `--search-mode linear\|binary`, `--solver-timeout SECS` | SMT synthesis tuning |
 | `--no-symbolic` | run hybrid as all-stochastic workers |
+
+Note: enumerative search scales with the generated instruction families in its
+candidate pool. At the default AArch64 8-register CLI scope,
+multiply-accumulate and high-half multiply add 9,728 candidates per length
+bucket; use `--timeout` or smaller optimization windows to bound runtime.
 
 `equiv` — check whether two assembly files are semantically equivalent
 on a chosen live-out set:
