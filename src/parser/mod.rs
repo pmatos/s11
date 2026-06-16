@@ -110,89 +110,36 @@ impl std::error::Error for ParseLineError {}
 
 /// Parse a register name (case-insensitive)
 pub fn parse_register(s: &str) -> Result<Register, String> {
-    match s.to_lowercase().as_str() {
-        "x0" => Ok(Register::X0),
-        "x1" => Ok(Register::X1),
-        "x2" => Ok(Register::X2),
-        "x3" => Ok(Register::X3),
-        "x4" => Ok(Register::X4),
-        "x5" => Ok(Register::X5),
-        "x6" => Ok(Register::X6),
-        "x7" => Ok(Register::X7),
-        "x8" => Ok(Register::X8),
-        "x9" => Ok(Register::X9),
-        "x10" => Ok(Register::X10),
-        "x11" => Ok(Register::X11),
-        "x12" => Ok(Register::X12),
-        "x13" => Ok(Register::X13),
-        "x14" => Ok(Register::X14),
-        "x15" => Ok(Register::X15),
-        "x16" => Ok(Register::X16),
-        "x17" => Ok(Register::X17),
-        "x18" => Ok(Register::X18),
-        "x19" => Ok(Register::X19),
-        "x20" => Ok(Register::X20),
-        "x21" => Ok(Register::X21),
-        "x22" => Ok(Register::X22),
-        "x23" => Ok(Register::X23),
-        "x24" => Ok(Register::X24),
-        "x25" => Ok(Register::X25),
-        "x26" => Ok(Register::X26),
-        "x27" => Ok(Register::X27),
-        "x28" => Ok(Register::X28),
-        "x29" | "fp" => Ok(Register::X29),
-        "x30" | "lr" => Ok(Register::X30),
+    let lower = s.to_lowercase();
+
+    if let Some(raw_index) = lower.strip_prefix('x').or_else(|| lower.strip_prefix('w'))
+        && !raw_index.is_empty()
+        && raw_index.bytes().all(|b| b.is_ascii_digit())
+        && (raw_index == "0" || !raw_index.starts_with('0'))
+        && let Ok(index) = raw_index.parse::<u8>()
+        && index <= 30
+    {
+        return Ok(Register::from_index(index).expect("valid AArch64 register index"));
+    }
+
+    match lower.as_str() {
+        "fp" => Ok(Register::X29),
+        "lr" => Ok(Register::X30),
         "xzr" | "wzr" => Ok(Register::XZR),
         "sp" => Ok(Register::SP),
         _ => Err(format!("unknown register: {}", s)),
     }
 }
 
-/// Parse a register that may be written in W-form. Scoped to the inner
+/// Parse a register that may be written as WSP. Scoped to the inner
 /// register of `Operand::ExtendedRegister`, where the ARM ARM architecturally
 /// writes byte/half/word extends with a W-form source and UXTX/SXTX with an
 /// X-form source. Issue #60.
-///
-/// Accepting W-form names is **only** valid here — `parse_register` itself
-/// still rejects them, so e.g. `add w0, w1, w2` (a 32-bit ADD that this IR
-/// does not model) remains a parse error instead of silently parsing as a
-/// 64-bit ADD.
 pub fn parse_w_or_x_register(s: &str) -> Result<Register, String> {
     if let Ok(reg) = parse_register(s) {
         return Ok(reg);
     }
     match s.to_lowercase().as_str() {
-        "w0" => Ok(Register::X0),
-        "w1" => Ok(Register::X1),
-        "w2" => Ok(Register::X2),
-        "w3" => Ok(Register::X3),
-        "w4" => Ok(Register::X4),
-        "w5" => Ok(Register::X5),
-        "w6" => Ok(Register::X6),
-        "w7" => Ok(Register::X7),
-        "w8" => Ok(Register::X8),
-        "w9" => Ok(Register::X9),
-        "w10" => Ok(Register::X10),
-        "w11" => Ok(Register::X11),
-        "w12" => Ok(Register::X12),
-        "w13" => Ok(Register::X13),
-        "w14" => Ok(Register::X14),
-        "w15" => Ok(Register::X15),
-        "w16" => Ok(Register::X16),
-        "w17" => Ok(Register::X17),
-        "w18" => Ok(Register::X18),
-        "w19" => Ok(Register::X19),
-        "w20" => Ok(Register::X20),
-        "w21" => Ok(Register::X21),
-        "w22" => Ok(Register::X22),
-        "w23" => Ok(Register::X23),
-        "w24" => Ok(Register::X24),
-        "w25" => Ok(Register::X25),
-        "w26" => Ok(Register::X26),
-        "w27" => Ok(Register::X27),
-        "w28" => Ok(Register::X28),
-        "w29" => Ok(Register::X29),
-        "w30" => Ok(Register::X30),
         "wsp" => Ok(Register::SP),
         _ => Err(format!("unknown register: {}", s)),
     }
@@ -375,10 +322,15 @@ fn parse_mov(operands: &[&str]) -> Result<Instruction, String> {
                 rm: Operand::Immediate(imm),
                 width: RegisterWidth::W32,
             }),
-            Operand::Register(_)
-            | Operand::ShiftedRegister { .. }
-            | Operand::ExtendedRegister { .. } => {
-                Err("mov W-register form only supports logical-immediate aliases".to_string())
+            Operand::Register(rn) => {
+                if matches!(rd, Register::SP | Register::XZR) {
+                    Err("mov W-register alias requires a numbered destination".to_string())
+                } else {
+                    Ok(Instruction::MovReg { rd, rn })
+                }
+            }
+            Operand::ShiftedRegister { .. } | Operand::ExtendedRegister { .. } => {
+                Err("mov second operand must be a register or immediate".to_string())
             }
         };
     }
@@ -2006,8 +1958,13 @@ mod tests {
         assert_eq!(parse_register("x0").unwrap(), Register::X0);
         assert_eq!(parse_register("X0").unwrap(), Register::X0);
         assert_eq!(parse_register("x30").unwrap(), Register::X30);
+        assert_eq!(parse_register("w0").unwrap(), Register::X0);
+        assert_eq!(parse_register("W0").unwrap(), Register::X0);
+        assert_eq!(parse_register("w29").unwrap(), Register::X29);
+        assert_eq!(parse_register("w30").unwrap(), Register::X30);
         assert_eq!(parse_register("xzr").unwrap(), Register::XZR);
         assert_eq!(parse_register("XZR").unwrap(), Register::XZR);
+        assert_eq!(parse_register("wzr").unwrap(), Register::XZR);
         assert_eq!(parse_register("sp").unwrap(), Register::SP);
         assert_eq!(parse_register("SP").unwrap(), Register::SP);
         assert_eq!(parse_register("fp").unwrap(), Register::X29);
@@ -2130,6 +2087,9 @@ mod tests {
     #[test]
     fn test_parse_register_invalid() {
         assert!(parse_register("x32").is_err());
+        assert!(parse_register("w31").is_err());
+        assert!(parse_register("w32").is_err());
+        assert!(parse_register("wsp").is_err());
         assert!(parse_register("r0").is_err());
         assert!(parse_register("").is_err());
     }
@@ -2195,6 +2155,16 @@ mod tests {
             }
             _ => panic!("expected MovImm"),
         }
+
+        let instr = match parse_line("mov w0, w1").unwrap() {
+            LineResult::Instruction(Instruction::MovReg { rd, rn }) => {
+                assert_eq!(rd, Register::X0);
+                assert_eq!(rn, Register::X1);
+                Instruction::MovReg { rd, rn }
+            }
+            _ => panic!("expected MovReg"),
+        };
+        assert_eq!(format!("{}", instr), "mov x0, x1");
     }
 
     #[test]
@@ -2338,7 +2308,6 @@ mod tests {
             "and w0, w1, w2",
             "mov wzr, #0xff",
             "mov w0, #5",
-            "mov w0, w1",
         ] {
             assert!(parse_line(text).is_err(), "{text} should be rejected");
         }
@@ -2466,10 +2435,14 @@ mod tests {
     #[test]
     fn parse_all_aarch64_register_names() {
         for idx in 0..=30 {
-            let name = format!("x{}", idx);
+            let x_name = format!("x{}", idx);
+            let w_name = format!("w{}", idx);
+            let expected = Register::from_index(idx).unwrap();
+            assert_eq!(parse_register(&x_name).unwrap(), expected);
             assert_eq!(
-                parse_register(&name).unwrap(),
-                Register::from_index(idx).unwrap()
+                parse_register(&w_name).unwrap(),
+                expected,
+                "{w_name} should alias {x_name}"
             );
         }
         assert_eq!(parse_register("wzr").unwrap(), Register::XZR);
@@ -2768,13 +2741,25 @@ mod tests {
     }
 
     #[test]
-    fn parse_w_form_arithmetic_rejected() {
-        // Issue #60 follow-up (Codex P1): the IR does not model 32-bit
-        // W-form arithmetic. `parse_register` rejects W-form globally so
-        // `add w0, w1, w2` (which would otherwise alias to a 64-bit ADD
-        // with the wrong semantics) remains a parse error.
-        assert!(parse_line("add w0, w1, w2").is_err());
-        assert!(parse_line("sub w3, w4, w5").is_err());
+    fn parse_w_form_widthless_register_aliases_canonicalize_to_x_form() {
+        // These IR variants do not carry register width, so accepted W-form
+        // spellings canonicalize to the existing X-form representation.
+        for (w_text, x_text) in [
+            ("add w0, w1, w2", "add x0, x1, x2"),
+            ("add w0, w1, #4", "add x0, x1, #4"),
+            ("sub w3, w4, w5", "sub x3, x4, x5"),
+            ("cmp w1, w2", "cmp x1, x2"),
+            ("csel w0, w1, w2, eq", "csel x0, x1, x2, eq"),
+            ("clz w0, w1", "clz x0, x1"),
+        ] {
+            let w_instr = parse_one(w_text);
+            let x_instr = parse_one(x_text);
+            assert_eq!(w_instr, x_instr, "{w_text} should alias {x_text}");
+            let printed = format!("{}", w_instr);
+            assert_eq!(printed, x_text);
+            assert_eq!(parse_one(&printed), w_instr);
+        }
+
         // The extended-register inner register accepts W-form.
         assert!(parse_line("add x0, x1, w2, uxtb #0").is_ok());
         assert!(parse_line("cmp x1, w2, sxth #1").is_ok());
