@@ -28,8 +28,11 @@ pub fn instruction_cost(instr: &Instruction, metric: &CostMetric) -> u64 {
 /// Get the latency of an instruction (simplified model)
 fn instruction_latency(instr: &Instruction) -> u64 {
     match instr {
-        Instruction::MovReg { .. } | Instruction::MovImm { .. } => 1,
-        Instruction::Add { .. } | Instruction::Sub { .. } => 1,
+        Instruction::MovReg { .. } | Instruction::MovRegW { .. } | Instruction::MovImm { .. } => 1,
+        Instruction::Add { .. }
+        | Instruction::AddW { .. }
+        | Instruction::Sub { .. }
+        | Instruction::SubW { .. } => 1,
         Instruction::And { .. } | Instruction::Orr { .. } | Instruction::Eor { .. } => 1,
         Instruction::Lsl { .. } | Instruction::Lsr { .. } | Instruction::Asr { .. } => 1,
         // Multiply has higher latency than simple ALU ops
