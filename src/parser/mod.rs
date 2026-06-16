@@ -2521,6 +2521,28 @@ mod tests {
     }
 
     #[test]
+    fn parse_ccmp_and_ccmn_reject_al_nv_at_encodability_boundary() {
+        // AL/NV are valid condition tokens, but CCMP/CCMN reserve those
+        // encodings. `parse_line` rejects them at the final encodability gate.
+        for line in [
+            "ccmp x1, x2, #0, al",
+            "ccmp x1, x2, #0, nv",
+            "ccmn x1, x2, #0, al",
+            "ccmn x1, x2, #0, nv",
+        ] {
+            let result = parse_line(line);
+            assert!(
+                matches!(
+                    result,
+                    Err(ParseLineError::Other(ref msg))
+                        if msg.contains("instruction cannot be encoded in AArch64")
+                ),
+                "{line} should be rejected only after parsing reaches encodability validation"
+            );
+        }
+    }
+
+    #[test]
     fn parse_ubfx_roundtrip() {
         let parsed = match parse_line("ubfx x0, x1, #5, #10").unwrap() {
             LineResult::Instruction(instr) => instr,
