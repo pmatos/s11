@@ -231,6 +231,8 @@ impl InstructionType for Instruction {
             Instruction::Umulh { .. } => 46,
             Instruction::Ccmp { .. } => 47,
             Instruction::Ccmn { .. } => 48,
+            // TODO(#173): opcode_id 49..=53 is shared by Sxt*/Uxt*
+            // and Ubfx/Sbfx/Bfi/Bfxil/Ubfiz; do not rely on uniqueness yet.
             Instruction::Sxtb { .. } => 49,
             Instruction::Sxth { .. } => 50,
             Instruction::Sxtw { .. } => 51,
