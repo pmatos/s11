@@ -245,6 +245,16 @@ pub fn reads_flags_before_writing(instructions: &[Instruction]) -> bool {
     false
 }
 
+/// Returns true if a known post-window suffix observes NZCV before overwriting it.
+///
+/// This is the live-out counterpart to `reads_flags_before_writing`: when the
+/// optimizer can inspect the fall-through instructions after a rewrite window,
+/// NZCV remains live only if that suffix reads the flags before its first
+/// flag-writing instruction.
+pub fn flags_read_before_overwrite_after_window(instructions: &[Instruction]) -> bool {
+    reads_flags_before_writing(instructions)
+}
+
 /// Compute the set of registers read before written by a sequence of instructions.
 ///
 /// Returns the set of registers the sequence reads before defining (writing).
@@ -297,7 +307,7 @@ pub fn x86_live_out_from_target(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ir::{Condition, Operand};
+    use crate::ir::{Condition, LabelId, Operand};
 
     #[test]
     fn display_renders_message_without_type_prefix() {
@@ -570,6 +580,57 @@ mod tests {
             },
         ];
         assert!(reads_flags_before_writing(&instructions));
+    }
+
+    #[test]
+    fn test_flags_read_before_overwrite_after_window_csel_marks_live() {
+        let suffix = vec![Instruction::Csel {
+            rd: Register::X0,
+            rn: Register::X1,
+            rm: Register::X2,
+            cond: Condition::EQ,
+        }];
+
+        assert!(flags_read_before_overwrite_after_window(&suffix));
+    }
+
+    #[test]
+    fn test_flags_read_before_overwrite_after_window_bcond_marks_live() {
+        let suffix = vec![Instruction::BCond {
+            target: LabelId(0x1000),
+            cond: Condition::EQ,
+        }];
+
+        assert!(flags_read_before_overwrite_after_window(&suffix));
+    }
+
+    #[test]
+    fn test_flags_read_before_overwrite_after_window_cmp_marks_dead() {
+        let suffix = vec![
+            Instruction::Cmp {
+                rn: Register::X0,
+                rm: Operand::Immediate(0),
+            },
+            Instruction::Csel {
+                rd: Register::X0,
+                rn: Register::X1,
+                rm: Register::X2,
+                cond: Condition::EQ,
+            },
+        ];
+
+        assert!(!flags_read_before_overwrite_after_window(&suffix));
+    }
+
+    #[test]
+    fn test_flags_read_before_overwrite_after_window_non_flag_suffix_marks_dead() {
+        let suffix = vec![Instruction::Add {
+            rd: Register::X0,
+            rn: Register::X1,
+            rm: Operand::Immediate(1),
+        }];
+
+        assert!(!flags_read_before_overwrite_after_window(&suffix));
     }
 
     #[test]

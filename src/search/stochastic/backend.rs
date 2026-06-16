@@ -181,15 +181,13 @@ impl StochasticBackend<crate::isa::AArch64> for crate::isa::AArch64 {
         _width: u32,
         timeout: Duration,
     ) -> (EquivalenceResult, EquivalenceMetrics) {
-        // Treat NZCV as live-out: the pre-refactor `mcmc.rs` body
-        // built the EquivalenceConfig with `.with_flags(true)` so the
-        // SMT solver cannot certify rewrites that diverge on flags
-        // (e.g. `ADD;CMP` → `ADDS`). Symmetry with
-        // `SymbolicBackend<AArch64>::check_equivalence`.
+        // Honor the caller's live-out mask: ELF optimization derives
+        // `flags_live` from the surrounding context, while CLI/test callers
+        // can still opt into conservative NZCV comparison via the mask.
         let cfg = crate::semantics::EquivalenceConfig::with_live_out(live_out.clone())
             .random_tests(0)
             .timeout(timeout)
-            .with_flags(true);
+            .with_flags(live_out.flags_live());
         crate::semantics::equivalence::check_equivalence_with_config_metrics(target, proposal, &cfg)
     }
 
@@ -461,8 +459,50 @@ mod tests {
     //! candidate, which depends on RNG and isn't a reliable coverage
     //! signal).
     use super::*;
+    use crate::ir::{Instruction, Operand, Register};
+    use crate::isa::AArch64;
     use crate::isa::x86::{X86Instruction, X86Register};
+    use crate::semantics::live_out::LiveOut;
     use crate::semantics::live_out::X86LiveOut;
+
+    #[test]
+    fn aarch64_backend_honors_flags_dead_live_out_mask() {
+        let target = vec![
+            Instruction::Cmp {
+                rn: Register::X0,
+                rm: Operand::Immediate(0),
+            },
+            Instruction::MovImm {
+                rd: Register::X1,
+                imm: 7,
+            },
+        ];
+        let proposal = vec![Instruction::MovImm {
+            rd: Register::X1,
+            imm: 7,
+        }];
+        let live_out = LiveOut::from_registers(vec![Register::X1]);
+
+        let result = <AArch64 as StochasticBackend<AArch64>>::check_equivalence(
+            &target,
+            &proposal,
+            &live_out,
+            64,
+            Duration::from_secs(2),
+        );
+
+        assert_eq!(result.0, EquivalenceResult::Equivalent);
+
+        let flags_live_result = <AArch64 as StochasticBackend<AArch64>>::check_equivalence(
+            &target,
+            &proposal,
+            &live_out.with_flags(true),
+            64,
+            Duration::from_secs(2),
+        );
+
+        assert_ne!(flags_live_result.0, EquivalenceResult::Equivalent);
+    }
 
     #[test]
     fn x86_32_stochastic_width_is_architectural_even_with_default_config() {

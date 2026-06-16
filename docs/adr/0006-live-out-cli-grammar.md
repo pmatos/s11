@@ -5,7 +5,7 @@ Date: 2026-05-18
 
 ## Context
 
-Before this ADR, the `--live-out` CLI argument on the `equiv` and `llm-opt` subcommands accepted only a comma-separated register list (e.g. `x0,x1,sp`). NZCV flag-liveness was already a first-class property of the AArch64 equivalence pipeline — `EquivalenceConfig.flags_live` plus `EquivalenceConfig::with_flags(bool)` exist on `src/semantics/equivalence.rs:106,171`, and both the fast-path concrete comparison and the SMT path consume the bit. The search algorithms (enumerative, stochastic, symbolic, LLM) all internally pin `flags_live=true` when verifying candidates (e.g. `src/search/enumerative/search.rs:89`, `src/search/stochastic/mcmc.rs:211`, `src/search/symbolic/synthesis.rs:241`, `src/search/llm/outcome.rs:67`). What was missing was a way for the `equiv` user to opt in.
+Before this ADR, the `--live-out` CLI argument on the `equiv` and `llm-opt` subcommands accepted only a comma-separated register list (e.g. `x0,x1,sp`). NZCV flag-liveness was already a first-class property of the AArch64 equivalence pipeline — `EquivalenceConfig.flags_live` plus `EquivalenceConfig::with_flags(bool)` existed on `src/semantics/equivalence.rs`, and both the fast-path concrete comparison and the SMT path consumed the bit. At the time this ADR was accepted, the search algorithms (enumerative, stochastic, symbolic, LLM) all internally pinned `flags_live=true` when verifying candidates. What was missing was a way for the `equiv` user to opt in.
 
 PR #78 deferred this as issue #81 with the note that once the live-out contract grew beyond registers, the CLI parser would need broadening. The deferral was contingent on a syntax decision and on the absence of a flag bit on the contract object; that absence is no longer load-bearing because the bit lives on `EquivalenceConfig`, not on `LiveOut`.
 
@@ -40,9 +40,11 @@ This ADR also supersedes the equivalence-semantics portion of [ADR-0002](0002-mv
 
 **Negative / scope:**
 - `run_llm_opt --live-out "x0;nzcv"` and `run_llm_opt --live-out "x0"` are observationally identical on the LLM path today because `outcome.rs:67` pins `flags_live=true`. Users may be surprised that the suffix is "accepted but ignored" on this subcommand. Documented in the help text and in the `run_llm_opt` source comment.
-- `opt` (ELF optimization) does not accept `--live-out` and is unchanged. The search algorithms it dispatches still pin `flags_live=true` internally, so the conservative semantics there are preserved.
+- `opt` (ELF optimization) does not accept `--live-out`. As of issue #138, the AArch64 ELF path derives `flags_live` from the fixed terminator and known fall-through suffix for enumerative, stochastic, symbolic, and hybrid search, defaulting to conservative `true` when the context is unknown. LLM-assisted search remains conservative per ADR-0002 and its verifier still pins `flags_live=true`.
 - The mask migration of ADR-0004 §5 has landed in lockstep with this ADR's update. The parser now returns a single `LiveOut`, with `flags_live` set on the mask itself; the explicit `bool` plumbing in `run_equiv` has collapsed.
 
 **Reversibility:** high for the per-flag rev — the `n`/`z`/`c`/`v` tokens are rejected with a "reserved" message today, so adding their semantics later is a strict superset of the current grammar. Reversibility low for the parser function itself: it becomes load-bearing for both CLI subcommands.
 
 **Resolution note (issue #80, 2026-05-18; issue #180, 2026-06-16):** `ParseLiveOutError`'s `Display` impl writes only the message body. It is a contract-facing alias over the shared `ParseRegisterSetError` wrapper used by `RegisterSet<Register>::from_str`. The `"invalid live-out: "` prefix from `run_equiv`/`run_llm_opt` (§2) is the sole documented user-visible prefix; pinned by `validation::live_out::tests::display_renders_message_without_type_prefix`.
+
+**Resolution note (issue #138, 2026-06-16):** AArch64 enumerative, stochastic, and symbolic backend verification now honors `live_out.flags_live()` instead of forcing NZCV live. The ELF `opt` path supplies that bit from a conservative local analysis: terminator windows keep flags live; a known fall-through suffix marks flags live only if it reads NZCV before overwriting it; empty, unsupported, decode-failed, or control-flow-ambiguous suffixes keep flags live.
