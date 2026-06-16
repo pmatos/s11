@@ -2546,6 +2546,16 @@ mod cli_helper_tests {
     }
 
     #[test]
+    fn convert_capstone_op_for_optimization_rejects_unnormalizable_mov_alias() {
+        let err = convert_capstone_op_for_optimization("mov", "x0, #0x12345678", 0x4444)
+            .expect_err("optimization conversion must reject multi-instruction mov aliases");
+
+        assert!(err.contains("mov x0, #0x12345678"));
+        assert!(err.contains("0x4444"));
+        assert!(err.contains("cannot optimize"));
+    }
+
+    #[test]
     fn ensure_window_fully_decoded_accepts_exact_match() {
         ensure_window_fully_decoded(8, 8, 0x1000, 0x1008)
             .expect("equal decoded and window byte counts must pass");
