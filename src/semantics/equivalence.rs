@@ -1050,6 +1050,9 @@ where
             return Some(EquivalenceResult::NotEquivalent);
         }
     }
+    if config.fast_only {
+        return Some(EquivalenceResult::Equivalent);
+    }
     None
 }
 
@@ -1170,6 +1173,28 @@ mod tests {
     }
 
     #[test]
+    fn x86_fast_only_refutation_skips_smt_when_flags_live() {
+        let seq_mov = vec![X86Instruction::MovImm {
+            rd: X86Register::RAX,
+            imm: 0,
+        }];
+        let seq_xor = vec![X86Instruction::XorReg {
+            rd: X86Register::RAX,
+            rs: X86Register::RAX,
+        }];
+        let cfg = EquivalenceConfigFor::<crate::isa::X86_64>::fast_only()
+            .live_out(X86LiveOut::from_registers(vec![X86Register::RAX]).with_flags(true));
+
+        let (result, metrics) =
+            check_equivalence_for_metrics::<crate::isa::X86_64>(&seq_mov, &seq_xor, &cfg);
+
+        assert_eq!(result, EquivalenceResult::NotEquivalent);
+        assert!(!metrics.smt_called);
+        assert_eq!(metrics.smt_elapsed, Duration::ZERO);
+        assert!(metrics.smt_formula_bytes.is_none());
+    }
+
+    #[test]
     fn x86_cmp_difference_caught_by_fast_path_eflags_auto_compare() {
         // Two CMPs that differ in operands -> different EFLAGS even when
         // no register is in live-out.
@@ -1207,6 +1232,71 @@ mod tests {
             check_equivalence_for::<crate::isa::X86_64>(&seq1, &seq2, &cfg),
             EquivalenceResult::Equivalent
         );
+    }
+
+    #[test]
+    fn x86_64_fast_only_equivalent_result_skips_smt() {
+        let seq1 = vec![X86Instruction::MovImm {
+            rd: X86Register::RAX,
+            imm: 42,
+        }];
+        let seq2 = vec![X86Instruction::MovImm {
+            rd: X86Register::RAX,
+            imm: 42,
+        }];
+        let cfg = EquivalenceConfigFor::<crate::isa::X86_64>::fast_only()
+            .live_out(X86LiveOut::from_registers(vec![X86Register::RAX]));
+
+        let (result, metrics) =
+            check_equivalence_for_metrics::<crate::isa::X86_64>(&seq1, &seq2, &cfg);
+
+        assert_eq!(result, EquivalenceResult::Equivalent);
+        assert!(!metrics.smt_called);
+        assert_eq!(metrics.smt_elapsed, Duration::ZERO);
+        assert!(metrics.smt_formula_bytes.is_none());
+    }
+
+    #[test]
+    fn x86_32_fast_only_equivalent_result_skips_smt() {
+        let seq1 = vec![X86Instruction::MovImm {
+            rd: X86Register::RAX,
+            imm: 42,
+        }];
+        let seq2 = vec![X86Instruction::MovImm {
+            rd: X86Register::RAX,
+            imm: 42,
+        }];
+        let cfg = EquivalenceConfigFor::<crate::isa::X86_32>::fast_only()
+            .live_out(X86LiveOut::from_registers(vec![X86Register::RAX]));
+
+        let (result, metrics) =
+            check_equivalence_for_metrics::<crate::isa::X86_32>(&seq1, &seq2, &cfg);
+
+        assert_eq!(result, EquivalenceResult::Equivalent);
+        assert!(!metrics.smt_called);
+        assert_eq!(metrics.smt_elapsed, Duration::ZERO);
+        assert!(metrics.smt_formula_bytes.is_none());
+    }
+
+    #[test]
+    fn x86_non_fast_equivalent_result_still_invokes_smt() {
+        let seq_mov = vec![X86Instruction::MovImm {
+            rd: X86Register::RAX,
+            imm: 0,
+        }];
+        let seq_xor = vec![X86Instruction::XorReg {
+            rd: X86Register::RAX,
+            rs: X86Register::RAX,
+        }];
+        let cfg = EquivalenceConfigFor::<crate::isa::X86_64>::default()
+            .live_out(X86LiveOut::from_registers(vec![X86Register::RAX]));
+
+        let (result, metrics) =
+            check_equivalence_for_metrics::<crate::isa::X86_64>(&seq_mov, &seq_xor, &cfg);
+
+        assert_eq!(result, EquivalenceResult::Equivalent);
+        assert!(metrics.smt_called);
+        assert!(metrics.smt_elapsed > Duration::ZERO);
     }
 
     // --- SMT path catches flag-only divergence when flags_live ---
