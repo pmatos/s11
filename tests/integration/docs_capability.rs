@@ -78,6 +78,40 @@ fn docs_capability_documents_w_logical_immediates() {
 }
 
 #[test]
+fn docs_capability_documents_capstone_aarch64_alias_normalization() {
+    let matrix = normalized_doc("docs/capability.md");
+    assert!(
+        matrix.contains(
+            "capstone `mov xd, #imm` move-wide aliases are normalized to single-instruction `movz`/`movn` forms"
+        ),
+        "docs/capability.md must document Capstone move-wide alias normalization"
+    );
+    assert!(
+        matrix.contains(
+            "capstone `cinc`/`cinv`/`cneg` aliases are normalized to `csinc`/`csinv`/`csneg`"
+        ),
+        "docs/capability.md must document Capstone conditional-select alias normalization"
+    );
+
+    for mnemonic in ["cinc", "cinv", "cneg"] {
+        assert!(
+            !AARCH64_REWRITABLE_MNEMONICS.contains(&mnemonic),
+            "`{mnemonic}` must remain a Capstone bridge alias, not a parser mnemonic"
+        );
+
+        let line = format!("{mnemonic} x0, x1, eq");
+        assert!(
+            matches!(
+                s11::parser::parse_line(&line),
+                Err(s11::parser::ParseLineError::UnknownInstruction(ref unsupported))
+                    if unsupported == mnemonic
+            ),
+            "parser must reject Capstone-only alias `{line}`"
+        );
+    }
+}
+
+#[test]
 fn memory_operations_are_consistently_documented_with_known_gaps() {
     let matrix = normalized_doc("docs/capability.md");
     assert!(

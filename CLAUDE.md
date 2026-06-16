@@ -160,7 +160,7 @@ There are two text-to-IR entry points and they MUST cover the same mnemonic set:
 - `src/parser/mod.rs::parse_line` — GNU assembler syntax (drives `s11 equiv`, `.s` inputs, round-trip tests).
 - `src/main.rs::convert_to_ir` — Capstone disassembly of ELF binaries (drives `s11 opt <elf>`).
 
-To prevent drift, `convert_to_ir` does NOT maintain its own mnemonic switch — it formats `"{mnemonic} {op_str}"` and delegates to `parser::parse_line`. **Adding a new mnemonic means adding it to the parser only**; the binary path picks it up automatically. Do not reintroduce a parallel match-on-mnemonic in `convert_to_ir`.
+To prevent drift, `convert_to_ir` does NOT maintain its own supported-mnemonic switch — it formats `"{mnemonic} {op_str}"` and delegates to `parser::parse_line`. The only pre-parser exception is a narrow, tested Capstone-only alias bridge for spellings that map to one existing IR instruction (currently move-wide `mov Xd, #imm` aliases to `movz`/`movn`, and `cinc`/`cinv`/`cneg` to `csinc`/`csinv`/`csneg`). **Adding a new mnemonic means adding it to the parser only**; the binary path picks it up automatically. If Capstone emits a new alias for an already-supported instruction, add a targeted normalization test and emit canonical parser text rather than growing a second broad mnemonic switch.
 
 The regression test `convert_capstone_op_handles_all_supported_aarch64_mnemonics` in `src/main.rs` pins one canonical operand string per supported mnemonic — extend it whenever you add an opcode so a future Capstone-syntax regression on that mnemonic fails loudly.
 

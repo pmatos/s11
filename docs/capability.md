@@ -9,6 +9,13 @@ mnemonic inventories.
 Status: primary target. Assembly text and ELF/Capstone input share the same
 parser path for accepted mnemonics. Search rewrites the straight-line prefix of
 a region; supported control-flow terminators are parsed and then held fixed.
+The ELF/Capstone bridge first normalizes a small set of Capstone-only aliases
+that map to one existing IR instruction: Capstone `mov Xd, #imm` move-wide
+aliases are normalized to single-instruction `movz`/`movn` forms when the
+immediate is representable by one move-wide instruction, and Capstone
+`cinc`/`cinv`/`cneg` aliases are normalized to `csinc`/`csinv`/`csneg`.
+Aliases that require multiple instructions remain unsupported and make
+optimization reject the selected window.
 
 Algorithms:
 - Enumerative, stochastic, symbolic, hybrid, and LLM-assisted search are
