@@ -100,8 +100,10 @@ pub trait StochasticBackend<I: ISA>: Sized {
         None
     }
 
-    /// Width parameter for cost + state masking. AArch64 returns 64;
-    /// x86 reads `SearchConfig::x86_width` (32 or 64).
+    /// Width parameter for cost + state masking. Architecture markers own
+    /// this width so a mismatched config cannot silently change semantics.
+    /// `config` is retained only for API symmetry; implementations are
+    /// expected to return an architectural constant and must not read it.
     fn width(config: &SearchConfig) -> u32;
 }
 
@@ -443,8 +445,8 @@ impl StochasticBackend<crate::isa::X86_32> for crate::isa::X86_32 {
             .copied()
     }
 
-    fn width(config: &SearchConfig) -> u32 {
-        config.x86_width
+    fn width(_config: &SearchConfig) -> u32 {
+        crate::isa::X86_32.register_width()
     }
 }
 
@@ -461,6 +463,26 @@ mod tests {
     use super::*;
     use crate::isa::x86::{X86Instruction, X86Register};
     use crate::semantics::live_out::X86LiveOut;
+
+    #[test]
+    fn x86_32_stochastic_width_is_architectural_even_with_default_config() {
+        let config = SearchConfig::default();
+        assert_eq!(config.x86_width, 64);
+
+        assert_eq!(
+            <crate::isa::X86_32 as StochasticBackend<crate::isa::X86_32>>::width(&config),
+            32
+        );
+
+        // X86_64 was already correct; this cross-check guards against a
+        // future regression and is not part of the x86-32 bug being fixed.
+        assert_eq!(
+            <crate::isa::X86_64 as StochasticBackend<crate::isa::X86_64>>::width(
+                &SearchConfig::default().with_x86_width(32),
+            ),
+            64
+        );
+    }
 
     #[test]
     fn x86_check_equivalence_helper_handles_width64() {

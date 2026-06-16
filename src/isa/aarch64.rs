@@ -6,7 +6,7 @@
 
 use crate::ir::instructions::MOVW_LEGAL_SHIFTS;
 use crate::ir::types::Condition;
-use crate::ir::{Instruction, Operand, Register};
+use crate::ir::{Instruction, Operand, Register, RegisterWidth};
 use crate::isa::traits::{ISA, InstructionGenerator, InstructionType, OperandType, RegisterType};
 
 use rand::RngExt;
@@ -424,9 +424,24 @@ impl InstructionGenerator<Instruction> for AArch64InstructionGenerator {
                     let rm_op = Operand::Register(rm);
                     instructions.push(Instruction::Add { rd, rn, rm: rm_op });
                     instructions.push(Instruction::Sub { rd, rn, rm: rm_op });
-                    instructions.push(Instruction::And { rd, rn, rm: rm_op });
-                    instructions.push(Instruction::Orr { rd, rn, rm: rm_op });
-                    instructions.push(Instruction::Eor { rd, rn, rm: rm_op });
+                    instructions.push(Instruction::And {
+                        rd,
+                        rn,
+                        rm: rm_op,
+                        width: RegisterWidth::X64,
+                    });
+                    instructions.push(Instruction::Orr {
+                        rd,
+                        rn,
+                        rm: rm_op,
+                        width: RegisterWidth::X64,
+                    });
+                    instructions.push(Instruction::Eor {
+                        rd,
+                        rn,
+                        rm: rm_op,
+                        width: RegisterWidth::X64,
+                    });
                 }
             }
         }
@@ -572,7 +587,12 @@ impl InstructionGenerator<Instruction> for AArch64InstructionGenerator {
                     instructions.push(Instruction::Eon { rd, rn, rm: rm_op });
                     instructions.push(Instruction::Adds { rd, rn, rm: rm_op });
                     instructions.push(Instruction::Subs { rd, rn, rm: rm_op });
-                    instructions.push(Instruction::Ands { rd, rn, rm: rm_op });
+                    instructions.push(Instruction::Ands {
+                        rd,
+                        rn,
+                        rm: rm_op,
+                        width: RegisterWidth::X64,
+                    });
                 }
                 // ADDS / SUBS immediate forms (ANDS is register-only).
                 for &imm in immediates {
@@ -673,18 +693,15 @@ impl InstructionGenerator<Instruction> for AArch64InstructionGenerator {
         registers: &[Register],
         immediates: &[i64],
     ) -> Instruction {
-        // 33 opcode slots: 0..13 original, 13..23 Tier 1, 23 = ANDS,
-        // 24 = MOVZ, 25 = MOVK, 26 = single-source bit-manipulation
-        // (CLZ/CLS/RBIT/REV*) 6-way sub-multiplexer, 27 = multiply-
-        // accumulate family (issue #56: 5-way sub-multiplexer for
-        // MADD/MSUB/MNEG/SMULH/UMULH), 28 = conditional-compare family
-        // (issue #57: 2-way sub-multiplexer for CCMP/CCMN), 29 =
-        // bit-field aliases (issue #61: 6-way sub-multiplexer for
-        // UBFX/SBFX/BFI/BFXIL/UBFIZ/SBFIZ), 30 = CSET, 31 = CSETM,
-        // 32 = ROR (issue #93: each of these four held the old slot 23
-        // sub-multiplexer; promoted to top-level slots so their sampling
-        // probability matches the rest of the table).
-        let opcode = rng.random_range(0..33);
+        // 38 opcode slots: 0..=12 original, 13..=23 Tier 1, 24 = MOVZ,
+        // 25 = MOVK, 26..=31 = CLZ/CLS/RBIT/REV/REV32/REV16 as separate
+        // top-level slots, 32 = multiply-accumulate family (issue #56:
+        // 5-way sub-multiplexer for MADD/MSUB/MNEG/SMULH/UMULH), 33 =
+        // conditional-compare family (issue #57: 2-way sub-multiplexer
+        // for CCMP/CCMN), 34 = bit-field aliases (issue #61: 6-way
+        // sub-multiplexer for UBFX/SBFX/BFI/BFXIL/UBFIZ/SBFIZ), 35 = CSET,
+        // 36 = CSETM, 37 = ROR.
+        let opcode = rng.random_range(0..38);
         let rd = registers[rng.random_range(0..registers.len())];
         let rn = registers[rng.random_range(0..registers.len())];
         let pick_reg = |rng: &mut R| registers[rng.random_range(0..registers.len())];
@@ -706,9 +723,24 @@ impl InstructionGenerator<Instruction> for AArch64InstructionGenerator {
                 match opcode {
                     2 => Instruction::Add { rd, rn, rm },
                     3 => Instruction::Sub { rd, rn, rm },
-                    4 => Instruction::And { rd, rn, rm },
-                    5 => Instruction::Orr { rd, rn, rm },
-                    6 => Instruction::Eor { rd, rn, rm },
+                    4 => Instruction::And {
+                        rd,
+                        rn,
+                        rm,
+                        width: RegisterWidth::X64,
+                    },
+                    5 => Instruction::Orr {
+                        rd,
+                        rn,
+                        rm,
+                        width: RegisterWidth::X64,
+                    },
+                    6 => Instruction::Eor {
+                        rd,
+                        rn,
+                        rm,
+                        width: RegisterWidth::X64,
+                    },
                     _ => unreachable!(),
                 }
             }
@@ -800,6 +832,7 @@ impl InstructionGenerator<Instruction> for AArch64InstructionGenerator {
                 rd,
                 rn,
                 rm: Operand::Register(pick_reg(rng)),
+                width: RegisterWidth::X64,
             },
             24 => {
                 let imm = (rng.random::<u32>() & 0xFFFF) as u16;
@@ -819,20 +852,34 @@ impl InstructionGenerator<Instruction> for AArch64InstructionGenerator {
                     shift: shifts[rng.random_range(0..shifts.len())],
                 }
             }
-            // Single-source bit-manipulation: CLZ / CLS / RBIT / REV / REV32 / REV16.
-            26 => {
-                let rn = pick_reg(rng);
-                match rng.random_range(0..6) {
-                    0 => Instruction::Clz { rd, rn },
-                    1 => Instruction::Cls { rd, rn },
-                    2 => Instruction::Rbit { rd, rn },
-                    3 => Instruction::Rev { rd, rn },
-                    4 => Instruction::Rev32 { rd, rn },
-                    _ => Instruction::Rev16 { rd, rn },
-                }
-            }
+            // Single-source bit-manipulation opcodes each keep a top-level slot
+            // so stochastic search does not starve CLZ/RBIT/REV-shaped targets.
+            26 => Instruction::Clz {
+                rd,
+                rn: pick_reg(rng),
+            },
+            27 => Instruction::Cls {
+                rd,
+                rn: pick_reg(rng),
+            },
+            28 => Instruction::Rbit {
+                rd,
+                rn: pick_reg(rng),
+            },
+            29 => Instruction::Rev {
+                rd,
+                rn: pick_reg(rng),
+            },
+            30 => Instruction::Rev32 {
+                rd,
+                rn: pick_reg(rng),
+            },
+            31 => Instruction::Rev16 {
+                rd,
+                rn: pick_reg(rng),
+            },
             // Multiply-accumulate family.
-            27 => {
+            32 => {
                 let rm = pick_reg(rng);
                 match rng.random_range(0..5) {
                     0 => {
@@ -855,7 +902,7 @@ impl InstructionGenerator<Instruction> for AArch64InstructionGenerator {
             // bounded sample (no retry loop, no infinite-spin risk in
             // release builds on a degenerate `[SP]`-only pool — that
             // case falls back to the next opcode).
-            28 => {
+            33 => {
                 let non_sp: Vec<Register> = registers
                     .iter()
                     .copied()
@@ -900,7 +947,7 @@ impl InstructionGenerator<Instruction> for AArch64InstructionGenerator {
             // family (which tolerates any register). The 2D constraint
             // `lsb + width <= 64` is enforced by sampling width AFTER lsb so
             // width is bounded by `64 - lsb`.
-            29 => {
+            34 => {
                 let non_sp: Vec<Register> = registers
                     .iter()
                     .copied()
@@ -955,15 +1002,15 @@ impl InstructionGenerator<Instruction> for AArch64InstructionGenerator {
                     },
                 }
             }
-            30 => Instruction::Cset {
+            35 => Instruction::Cset {
                 rd,
                 cond: Condition::random_normal(rng),
             },
-            31 => Instruction::Csetm {
+            36 => Instruction::Csetm {
                 rd,
                 cond: Condition::random_normal(rng),
             },
-            32 => {
+            37 => {
                 let shift = if rng.random_bool(0.5) {
                     let amounts = [0i64, 1, 2, 4, 8, 16, 32];
                     Operand::Immediate(amounts[rng.random_range(0..amounts.len())])
@@ -999,9 +1046,24 @@ impl InstructionGenerator<Instruction> for AArch64InstructionGenerator {
                     Instruction::MovImm { imm, .. } => Instruction::MovImm { rd: new_rd, imm },
                     Instruction::Add { rn, rm, .. } => Instruction::Add { rd: new_rd, rn, rm },
                     Instruction::Sub { rn, rm, .. } => Instruction::Sub { rd: new_rd, rn, rm },
-                    Instruction::And { rn, rm, .. } => Instruction::And { rd: new_rd, rn, rm },
-                    Instruction::Orr { rn, rm, .. } => Instruction::Orr { rd: new_rd, rn, rm },
-                    Instruction::Eor { rn, rm, .. } => Instruction::Eor { rd: new_rd, rn, rm },
+                    Instruction::And { rn, rm, width, .. } => Instruction::And {
+                        rd: new_rd,
+                        rn,
+                        rm,
+                        width,
+                    },
+                    Instruction::Orr { rn, rm, width, .. } => Instruction::Orr {
+                        rd: new_rd,
+                        rn,
+                        rm,
+                        width,
+                    },
+                    Instruction::Eor { rn, rm, width, .. } => Instruction::Eor {
+                        rd: new_rd,
+                        rn,
+                        rm,
+                        width,
+                    },
                     Instruction::Lsl { rn, shift, .. } => Instruction::Lsl {
                         rd: new_rd,
                         rn,
@@ -1090,7 +1152,12 @@ impl InstructionGenerator<Instruction> for AArch64InstructionGenerator {
                     Instruction::Eon { rn, rm, .. } => Instruction::Eon { rd: new_rd, rn, rm },
                     Instruction::Adds { rn, rm, .. } => Instruction::Adds { rd: new_rd, rn, rm },
                     Instruction::Subs { rn, rm, .. } => Instruction::Subs { rd: new_rd, rn, rm },
-                    Instruction::Ands { rn, rm, .. } => Instruction::Ands { rd: new_rd, rn, rm },
+                    Instruction::Ands { rn, rm, width, .. } => Instruction::Ands {
+                        rd: new_rd,
+                        rn,
+                        rm,
+                        width,
+                    },
                     Instruction::Cset { cond, .. } => Instruction::Cset { rd: new_rd, cond },
                     Instruction::Csetm { cond, .. } => Instruction::Csetm { rd: new_rd, cond },
                     Instruction::Ror { rn, shift, .. } => Instruction::Ror {
@@ -1184,21 +1251,51 @@ impl InstructionGenerator<Instruction> for AArch64InstructionGenerator {
                         let new_rm = mutate_operand(rng, rm, registers, immediates, 0xFFF);
                         Instruction::Sub { rd, rn, rm: new_rm }
                     }
-                    Instruction::And { rd, rn, rm: _ } => {
+                    Instruction::And {
+                        rd,
+                        rn,
+                        rm: _,
+                        width,
+                    } => {
                         // AND doesn't support immediates, so only change register
                         let new_rm =
                             Operand::Register(registers[rng.random_range(0..registers.len())]);
-                        Instruction::And { rd, rn, rm: new_rm }
+                        Instruction::And {
+                            rd,
+                            rn,
+                            rm: new_rm,
+                            width,
+                        }
                     }
-                    Instruction::Orr { rd, rn, rm: _ } => {
+                    Instruction::Orr {
+                        rd,
+                        rn,
+                        rm: _,
+                        width,
+                    } => {
                         let new_rm =
                             Operand::Register(registers[rng.random_range(0..registers.len())]);
-                        Instruction::Orr { rd, rn, rm: new_rm }
+                        Instruction::Orr {
+                            rd,
+                            rn,
+                            rm: new_rm,
+                            width,
+                        }
                     }
-                    Instruction::Eor { rd, rn, rm: _ } => {
+                    Instruction::Eor {
+                        rd,
+                        rn,
+                        rm: _,
+                        width,
+                    } => {
                         let new_rm =
                             Operand::Register(registers[rng.random_range(0..registers.len())]);
-                        Instruction::Eor { rd, rn, rm: new_rm }
+                        Instruction::Eor {
+                            rd,
+                            rn,
+                            rm: new_rm,
+                            width,
+                        }
                     }
                     Instruction::Lsl { rd, rn, shift } => {
                         let new_shift = mutate_shift_operand(rng, shift, registers);
@@ -1297,10 +1394,14 @@ impl InstructionGenerator<Instruction> for AArch64InstructionGenerator {
                         let new_rm = mutate_operand(rng, rm, registers, immediates, 0xFFF);
                         Instruction::Cmn { rn, rm: new_rm }
                     }
-                    Instruction::Tst { rn, rm: _ } => {
+                    Instruction::Tst { rn, rm: _, width } => {
                         let new_rm =
                             Operand::Register(registers[rng.random_range(0..registers.len())]);
-                        Instruction::Tst { rn, rm: new_rm }
+                        Instruction::Tst {
+                            rn,
+                            rm: new_rm,
+                            width,
+                        }
                     }
                     // CCMP / CCMN: pick a new rm (register or imm5). The
                     // dedicated mutate_operand path in
@@ -1439,10 +1540,20 @@ impl InstructionGenerator<Instruction> for AArch64InstructionGenerator {
                         let new_rm = mutate_operand(rng, rm, registers, immediates, 0xFFF);
                         Instruction::Subs { rd, rn, rm: new_rm }
                     }
-                    Instruction::Ands { rd, rn, rm: _ } => {
+                    Instruction::Ands {
+                        rd,
+                        rn,
+                        rm: _,
+                        width,
+                    } => {
                         let new_rm =
                             Operand::Register(registers[rng.random_range(0..registers.len())]);
-                        Instruction::Ands { rd, rn, rm: new_rm }
+                        Instruction::Ands {
+                            rd,
+                            rn,
+                            rm: new_rm,
+                            width,
+                        }
                     }
                     // CSET / CSETM: only thing to "change as operand" is the cond.
                     // Pick from the 14 sensible conditions (skip AL/NV).
@@ -1567,11 +1678,9 @@ impl InstructionGenerator<Instruction> for AArch64InstructionGenerator {
 
     /// Total number of distinct opcode *families* (the upper bound on
     /// `opcode_id()`). Not the same as `generate_random`'s slot count —
-    /// `generate_random` samples 33 top-level slots and folds several
-    /// families into sub-multiplexers (e.g. CLZ/CLS/RBIT/REV*/REV16 on
-    /// slot 26, the five multiply-accumulate ops on slot 27, the two
-    /// conditional-compare ops on slot 28, and the six bit-field aliases
-    /// on slot 29) — keeping the slot table small. So
+    /// `generate_random` samples 38 top-level slots and still folds several
+    /// families into sub-multiplexers (e.g. the five multiply-accumulate ops,
+    /// the two conditional-compare ops, and the six bit-field aliases). So
     /// `opcode_id < opcode_count` always holds, but the random-generation
     /// distribution is not uniform across all 55 IDs.
     fn opcode_count(&self) -> u8 {
@@ -1678,16 +1787,19 @@ mod tests {
                 rd: Register::X0,
                 rn: Register::X1,
                 rm: Operand::Register(Register::X2),
+                width: RegisterWidth::X64,
             },
             Instruction::Orr {
                 rd: Register::X0,
                 rn: Register::X1,
                 rm: Operand::Register(Register::X2),
+                width: RegisterWidth::X64,
             },
             Instruction::Eor {
                 rd: Register::X0,
                 rn: Register::X1,
                 rm: Operand::Register(Register::X2),
+                width: RegisterWidth::X64,
             },
             Instruction::Lsl {
                 rd: Register::X0,
@@ -1730,6 +1842,7 @@ mod tests {
             Instruction::Tst {
                 rn: Register::X1,
                 rm: Operand::Register(Register::X2),
+                width: RegisterWidth::X64,
             },
             Instruction::Csel {
                 rd: Register::X0,
@@ -1816,6 +1929,7 @@ mod tests {
                 rd: Register::X0,
                 rn: Register::X1,
                 rm: Operand::Register(Register::X2),
+                width: RegisterWidth::X64,
             },
             Instruction::Cset {
                 rd: Register::X0,
@@ -2350,9 +2464,9 @@ mod tests {
     /// pool. The current code collects the non-SP registers up front
     /// and falls back to `Mneg` when the filter yields an empty slice,
     /// so every call must return a valid `Instruction` in finite time.
-    /// Not asserting which opcode comes back — both slot 27 (the
-    /// multiply-accumulate sub-multiplexer) and slot 28's fallback can
-    /// emit Mneg, so any "did slot 28 fire?" proxy gives false
+    /// Not asserting which opcode comes back — both slot 32 (the
+    /// multiply-accumulate sub-multiplexer) and slot 33's fallback can
+    /// emit Mneg, so any "did the conditional-compare slot fire?" proxy gives false
     /// confidence. The 10000 samples + bounded loop is the contract:
     /// completing the loop without panicking or hanging is the test.
     #[test]
@@ -2364,6 +2478,81 @@ mod tests {
         for _ in 0..10_000 {
             let instr = generator.generate_random(&mut rng, &regs, &imms);
             assert!(instr.opcode_id() < generator.opcode_count());
+        }
+    }
+
+    #[test]
+    fn aarch64_random_generation_promotes_single_source_bit_ops_to_top_level_slots() {
+        use std::collections::HashMap;
+
+        let generator = AArch64InstructionGenerator;
+        let regs = vec![Register::X0, Register::X1, Register::X2];
+        let imms = vec![0, 1, 2, 16, 32];
+        let mut rng = ChaCha8Rng::seed_from_u64(0x115);
+        let mut counts: HashMap<u8, u32> = HashMap::new();
+        const N: u32 = 30_000;
+
+        for _ in 0..N {
+            let id = generator
+                .generate_random(&mut rng, &regs, &imms)
+                .opcode_id();
+            *counts.entry(id).or_default() += 1;
+        }
+
+        for (label, instr) in [
+            (
+                "Clz",
+                Instruction::Clz {
+                    rd: Register::X0,
+                    rn: Register::X1,
+                },
+            ),
+            (
+                "Cls",
+                Instruction::Cls {
+                    rd: Register::X0,
+                    rn: Register::X1,
+                },
+            ),
+            (
+                "Rbit",
+                Instruction::Rbit {
+                    rd: Register::X0,
+                    rn: Register::X1,
+                },
+            ),
+            (
+                "Rev",
+                Instruction::Rev {
+                    rd: Register::X0,
+                    rn: Register::X1,
+                },
+            ),
+            (
+                "Rev32",
+                Instruction::Rev32 {
+                    rd: Register::X0,
+                    rn: Register::X1,
+                },
+            ),
+            (
+                "Rev16",
+                Instruction::Rev16 {
+                    rd: Register::X0,
+                    rn: Register::X1,
+                },
+            ),
+        ] {
+            let id = instr.opcode_id();
+            let count = counts.get(&id).copied().unwrap_or(0);
+            assert!(
+                count >= 500,
+                "expected >= 500 samples for {} (id {}) in {} draws, got {}",
+                label,
+                id,
+                N,
+                count
+            );
         }
     }
 
@@ -2395,6 +2584,7 @@ mod tests {
                 rd: Register::X0,
                 rn: Register::X1,
                 rm: Operand::Register(Register::X2),
+                width: RegisterWidth::X64,
             },
             Instruction::Cset {
                 rd: Register::X0,

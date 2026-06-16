@@ -1,6 +1,9 @@
 //! Markov Chain Monte Carlo (MCMC) search implementation
 //!
-//! Implements stochastic superoptimization using Metropolis-Hastings MCMC.
+//! Implements stochastic superoptimization using MCMC-style mutation plus
+//! Metropolis cost acceptance. Proposal probabilities are heuristic and no
+//! Hastings ratio is computed.
+//!
 //! The algorithm:
 //! 1. Generate test cases for fast validation
 //! 2. Start with a random initial program (or copy of target)
@@ -8,10 +11,10 @@
 //!    a. Mutate current program
 //!    b. Evaluate on tests (fast rejection if fails)
 //!    c. If passes tests with zero cost → verify with SMT
+//!    d. Accept/reject based on Metropolis cost acceptance
+//! 4. Return best found optimization
 
 #![allow(dead_code)]
-//!    d. Accept/reject based on Metropolis-Hastings criterion
-//! 4. Return best found optimization
 
 use crate::ir::{Instruction, Register};
 use crate::isa::{ISA, ISAMutator};
@@ -30,7 +33,8 @@ use std::marker::PhantomData;
 use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
 
-/// Stochastic search using Metropolis-Hastings MCMC, generic over ISA.
+/// Stochastic search using MCMC-style proposals and Metropolis cost
+/// acceptance, generic over ISA.
 ///
 /// The body routes through the `StochasticBackend<I>` dispatch trait
 /// (`src/search/stochastic/backend.rs`) for every ISA-specific
@@ -711,6 +715,7 @@ mod tests {
             rd: Register::X0,
             rn: Register::X0,
             rm: Operand::Register(Register::X0),
+            width: crate::ir::RegisterWidth::X64,
         }];
 
         let input = ConcreteMachineState::new_zeroed();

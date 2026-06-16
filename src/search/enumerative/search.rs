@@ -622,11 +622,13 @@ mod tests {
                 rd: Register::X0,
                 rn: Register::X0,
                 rm: Operand::Register(Register::X0),
+                width: crate::ir::RegisterWidth::X64,
             },
             Instruction::Eor {
                 rd: Register::X2,
                 rn: Register::X2,
                 rm: Operand::Register(Register::X2),
+                width: crate::ir::RegisterWidth::X64,
             },
         ];
         let live_out = LiveOut::from_registers(vec![Register::X0, Register::X2]);

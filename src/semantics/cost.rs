@@ -298,16 +298,19 @@ mod tests {
                 rd: Register::X0,
                 rn: Register::X1,
                 rm: Operand::Immediate(1),
+                width: crate::ir::RegisterWidth::X64,
             },
             Instruction::Orr {
                 rd: Register::X0,
                 rn: Register::X1,
                 rm: Operand::Immediate(1),
+                width: crate::ir::RegisterWidth::X64,
             },
             Instruction::Eor {
                 rd: Register::X0,
                 rn: Register::X1,
                 rm: Operand::Immediate(1),
+                width: crate::ir::RegisterWidth::X64,
             },
             Instruction::Lsl {
                 rd: Register::X0,

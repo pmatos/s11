@@ -3,7 +3,7 @@
 #![allow(dead_code)]
 
 use crate::ir::types::{AccessWidth, AddressOperand, IndexMode};
-use crate::ir::{ExtendKind, Instruction, Operand, Register};
+use crate::ir::{ExtendKind, Instruction, Operand, Register, RegisterWidth};
 use crate::semantics::live_out::RegisterSet;
 use std::collections::HashMap;
 use std::time::Duration;
@@ -56,6 +56,37 @@ fn bv_reverse_bits(value: &BV, width: u32) -> BV {
         result = result.concat(value.extract(i, i));
     }
     result
+}
+
+fn logical_smt_width(width: RegisterWidth, state_width: u32) -> u32 {
+    match width {
+        RegisterWidth::W32 => 32,
+        RegisterWidth::X64 => state_width,
+    }
+}
+
+fn register_logical_value(state: &MachineState, reg: Register, width: RegisterWidth) -> BV {
+    let value = state.get_register(reg).clone();
+    match width {
+        RegisterWidth::W32 => value.extract(31, 0),
+        RegisterWidth::X64 => value,
+    }
+}
+
+fn eval_logical_operand(state: &MachineState, operand: &Operand, width: RegisterWidth) -> BV {
+    let value = state.eval_operand(operand);
+    match width {
+        RegisterWidth::W32 => value.extract(31, 0),
+        RegisterWidth::X64 => value,
+    }
+}
+
+fn zero_extend_to_state_width(value: BV, value_width: u32, state_width: u32) -> BV {
+    if value_width == state_width {
+        value
+    } else {
+        value.zero_ext(state_width - value_width)
+    }
 }
 
 /// Count leading zeros of a `width`-bit BV using a nested ITE chain.
@@ -495,23 +526,41 @@ pub fn apply_instruction(mut state: MachineState, instruction: &Instruction) -> 
             let result = lhs.bvsub(&rhs);
             state.set_register(*rd, result);
         }
-        Instruction::And { rd, rn, rm } => {
-            let lhs = state.get_register(*rn).clone();
-            let rhs = state.eval_operand(rm);
+        Instruction::And {
+            rd,
+            rn,
+            rm,
+            width: reg_width,
+        } => {
+            let op_width = logical_smt_width(*reg_width, width);
+            let lhs = register_logical_value(&state, *rn, *reg_width);
+            let rhs = eval_logical_operand(&state, rm, *reg_width);
             let result = lhs.bvand(&rhs);
-            state.set_register(*rd, result);
+            state.set_register(*rd, zero_extend_to_state_width(result, op_width, width));
         }
-        Instruction::Orr { rd, rn, rm } => {
-            let lhs = state.get_register(*rn).clone();
-            let rhs = state.eval_operand(rm);
+        Instruction::Orr {
+            rd,
+            rn,
+            rm,
+            width: reg_width,
+        } => {
+            let op_width = logical_smt_width(*reg_width, width);
+            let lhs = register_logical_value(&state, *rn, *reg_width);
+            let rhs = eval_logical_operand(&state, rm, *reg_width);
             let result = lhs.bvor(&rhs);
-            state.set_register(*rd, result);
+            state.set_register(*rd, zero_extend_to_state_width(result, op_width, width));
         }
-        Instruction::Eor { rd, rn, rm } => {
-            let lhs = state.get_register(*rn).clone();
-            let rhs = state.eval_operand(rm);
+        Instruction::Eor {
+            rd,
+            rn,
+            rm,
+            width: reg_width,
+        } => {
+            let op_width = logical_smt_width(*reg_width, width);
+            let lhs = register_logical_value(&state, *rn, *reg_width);
+            let rhs = eval_logical_operand(&state, rm, *reg_width);
             let result = lhs.bvxor(&rhs);
-            state.set_register(*rd, result);
+            state.set_register(*rd, zero_extend_to_state_width(result, op_width, width));
         }
         Instruction::Lsl { rd, rn, shift } => {
             let value = state.get_register(*rn).clone();
@@ -609,11 +658,16 @@ pub fn apply_instruction(mut state: MachineState, instruction: &Instruction) -> 
             let (n, z, c, v) = compute_flags_add(&lhs, &rhs, width);
             state.set_flags(n, z, c, v);
         }
-        Instruction::Tst { rn, rm } => {
-            let lhs = state.get_register(*rn).clone();
-            let rhs = state.eval_operand(rm);
+        Instruction::Tst {
+            rn,
+            rm,
+            width: reg_width,
+        } => {
+            let op_width = logical_smt_width(*reg_width, width);
+            let lhs = register_logical_value(&state, *rn, *reg_width);
+            let rhs = eval_logical_operand(&state, rm, *reg_width);
             let result = lhs.bvand(&rhs);
-            let (n, z, c, v) = compute_flags_logical(&result, width);
+            let (n, z, c, v) = compute_flags_logical(&result, op_width);
             state.set_flags(n, z, c, v);
         }
         // CCMP / CCMN: ITE between freshly-computed sub/add NZCV (true branch)
@@ -750,12 +804,18 @@ pub fn apply_instruction(mut state: MachineState, instruction: &Instruction) -> 
             state.set_register(*rd, lhs.bvsub(&rhs));
             state.set_flags(n, z, c, v);
         }
-        Instruction::Ands { rd, rn, rm } => {
-            let lhs = state.get_register(*rn).clone();
-            let rhs = state.eval_operand(rm);
+        Instruction::Ands {
+            rd,
+            rn,
+            rm,
+            width: reg_width,
+        } => {
+            let op_width = logical_smt_width(*reg_width, width);
+            let lhs = register_logical_value(&state, *rn, *reg_width);
+            let rhs = eval_logical_operand(&state, rm, *reg_width);
             let result = lhs.bvand(&rhs);
-            let (n, z, c, v) = compute_flags_logical(&result, width);
-            state.set_register(*rd, result);
+            let (n, z, c, v) = compute_flags_logical(&result, op_width);
+            state.set_register(*rd, zero_extend_to_state_width(result, op_width, width));
             state.set_flags(n, z, c, v);
         }
         // CSET / CSETM: rd = cond ? 1 : 0 (or all-ones for CSETM).
@@ -1181,11 +1241,12 @@ mod tests {
             rd: Register::X0,
             rn: Register::X0,
             rm: Operand::Register(Register::X0),
+            width: crate::ir::RegisterWidth::X64,
         }];
         let state2 = apply_sequence(initial_state, &seq2);
 
         // Assert states are not equal
-        solver.assert(&states_not_equal(&state1, &state2));
+        solver.assert(states_not_equal(&state1, &state2));
 
         // If UNSAT, states are always equal
         assert_eq!(solver.check(), SatResult::Unsat);
@@ -1250,6 +1311,7 @@ mod tests {
                 rd: Register::X0,
                 rn: Register::X1,
                 rm: Operand::Register(Register::X10),
+                width: crate::ir::RegisterWidth::X64,
             },
         ];
         let seq_fused = vec![Instruction::And {
@@ -1260,6 +1322,7 @@ mod tests {
                 kind: crate::ir::ShiftKind::Ror,
                 amount: 4,
             },
+            width: crate::ir::RegisterWidth::X64,
         }];
 
         let s1 = apply_sequence(initial.clone(), &seq_split);
@@ -1295,7 +1358,7 @@ mod tests {
         let expected = BV::from_i64(15, 64);
 
         let solver = Solver::new();
-        solver.assert(&x0_val.eq(&expected).not());
+        solver.assert(x0_val.eq(&expected).not());
         assert_eq!(solver.check(), SatResult::Unsat);
     }
 
@@ -1322,7 +1385,7 @@ mod tests {
         let final_x0 = final_state.get_register(Register::X0);
 
         let solver = Solver::new();
-        solver.assert(&final_x0.eq(&initial_x1).not());
+        solver.assert(final_x0.eq(&initial_x1).not());
         assert_eq!(
             solver.check(),
             SatResult::Unsat,
@@ -1361,7 +1424,7 @@ mod tests {
         //                       ⇒ the two sequences are NOT proved equivalent
         // states_not_equal UNSAT ⇒ they are always equal ⇒ unsound for CSEL
         let solver = Solver::new();
-        solver.assert(&states_not_equal(&state_csel, &state_mov));
+        solver.assert(states_not_equal(&state_csel, &state_mov));
         assert_eq!(
             solver.check(),
             SatResult::Sat,
@@ -1380,7 +1443,7 @@ mod tests {
         let final_x0 = final_state.get_register(Register::X0);
 
         let solver = Solver::new();
-        solver.assert(&final_x0.eq(&initial_x1).not());
+        solver.assert(final_x0.eq(&initial_x1).not());
         assert_eq!(
             solver.check(),
             SatResult::Unsat,
@@ -1427,6 +1490,7 @@ mod tests {
                 rd: Register::X0,
                 rn: Register::X1,
                 rm: Operand::Register(Register::X10),
+                width: crate::ir::RegisterWidth::X64,
             },
             Instruction::Clz {
                 rd: Register::X0,
@@ -1593,7 +1657,7 @@ mod tests {
         let final_state = apply_sequence(initial, &seq);
         let final_x0 = final_state.get_register(Register::X0);
         let solver = Solver::new();
-        solver.assert(&final_x0.eq(&BV::from_u64(63, 64)).not());
+        solver.assert(final_x0.eq(BV::from_u64(63, 64)).not());
         assert_eq!(solver.check(), SatResult::Unsat, "CLZ(1) must be 63");
     }
 
@@ -1664,10 +1728,10 @@ mod tests {
         let (n2, z2, c2, v2) = s2.get_flags();
 
         let solver = Solver::new();
-        solver.assert(&n1.eq(n2).not());
-        solver.assert(&z1.eq(z2).not());
-        solver.assert(&c1.eq(c2).not());
-        solver.assert(&v1.eq(v2).not());
+        solver.assert(n1.eq(n2).not());
+        solver.assert(z1.eq(z2).not());
+        solver.assert(c1.eq(c2).not());
+        solver.assert(v1.eq(v2).not());
         assert_eq!(solver.check(), SatResult::Sat);
     }
 
@@ -1714,7 +1778,7 @@ mod tests {
 
     fn assert_register_eq(state: &MachineState, reg: Register, expected: &BV, ctx: &str) {
         let solver = Solver::new();
-        solver.assert(&state.get_register(reg).eq(expected).not());
+        solver.assert(state.get_register(reg).eq(expected).not());
         assert_eq!(solver.check(), SatResult::Unsat, "{}", ctx);
     }
 
@@ -1742,7 +1806,7 @@ mod tests {
         force_flags(&mut s2, 0, 0, 0, 0);
 
         let solver = Solver::new();
-        solver.assert(&states_not_equal(&s1, &s2));
+        solver.assert(states_not_equal(&s1, &s2));
         assert_eq!(solver.check(), SatResult::Sat);
     }
 
@@ -1976,6 +2040,7 @@ mod tests {
                 Instruction::Tst {
                     rn: Register::X0,
                     rm: rm_reg.clone(),
+                    width: crate::ir::RegisterWidth::X64,
                 },
                 compute_flags_logical(&x0.bvand(&x1), 64),
                 "TST x0, x1",
@@ -2003,6 +2068,7 @@ mod tests {
                     rd: Register::X2,
                     rn: Register::X0,
                     rm: rm_reg.clone(),
+                    width: crate::ir::RegisterWidth::X64,
                 },
                 compute_flags_logical(&x0.bvand(&x1), 64),
                 "ANDS x2, x0, x1",
@@ -2021,7 +2087,7 @@ mod tests {
                     rn: Register::X0,
                     rm: rm_reg.clone(),
                 },
-                compute_flags_logical(&x0.bvand(&x1.bvnot()), 64),
+                compute_flags_logical(&x0.bvand(x1.bvnot()), 64),
                 "BICS x2, x0, x1",
             ),
         ];
@@ -2149,7 +2215,7 @@ mod tests {
                 let smt = condition_to_smt(cond, &n_bv, &z_bv, &c_bv, &v_bv);
                 let solver = Solver::new();
                 let expected_bv = BV::from_u64(expected as u64, 1);
-                solver.assert(&smt.eq(&expected_bv).not());
+                solver.assert(smt.eq(&expected_bv).not());
                 assert_eq!(
                     solver.check(),
                     SatResult::Unsat,
@@ -2210,13 +2276,13 @@ mod tests {
         let symbolic_pre = MachineState::new_symbolic("pre");
         let solver = Solver::new();
         for &(reg, val) in pre_values {
-            solver.assert(&symbolic_pre.get_register(reg).eq(&BV::from_u64(val, 64)));
+            solver.assert(symbolic_pre.get_register(reg).eq(BV::from_u64(val, 64)));
         }
         let symbolic_post = apply_instruction(symbolic_pre, instr);
         solver.assert(
-            &symbolic_post
+            symbolic_post
                 .get_register(dest)
-                .eq(&BV::from_u64(concrete_dest, 64))
+                .eq(BV::from_u64(concrete_dest, 64))
                 .not(),
         );
 
@@ -2258,13 +2324,13 @@ mod tests {
         let symbolic_pre = MachineState::new_symbolic("pre");
         let solver = Solver::new();
         for &(reg, val) in pre_values {
-            solver.assert(&symbolic_pre.get_register(reg).eq(&BV::from_u64(val, 64)));
+            solver.assert(symbolic_pre.get_register(reg).eq(BV::from_u64(val, 64)));
         }
         if let Some(flags) = &pre_flags {
-            solver.assert(&symbolic_pre.n.eq(&BV::from_u64(flags.n as u64, 1)));
-            solver.assert(&symbolic_pre.z.eq(&BV::from_u64(flags.z as u64, 1)));
-            solver.assert(&symbolic_pre.c.eq(&BV::from_u64(flags.c as u64, 1)));
-            solver.assert(&symbolic_pre.v.eq(&BV::from_u64(flags.v as u64, 1)));
+            solver.assert(symbolic_pre.n.eq(BV::from_u64(flags.n as u64, 1)));
+            solver.assert(symbolic_pre.z.eq(BV::from_u64(flags.z as u64, 1)));
+            solver.assert(symbolic_pre.c.eq(BV::from_u64(flags.c as u64, 1)));
+            solver.assert(symbolic_pre.v.eq(BV::from_u64(flags.v as u64, 1)));
         }
         let symbolic_post = apply_instruction(symbolic_pre, instr);
 
@@ -2275,17 +2341,17 @@ mod tests {
         }
         if check_post_flags {
             let cf = concrete_post.get_flags();
-            disagreements.push(symbolic_post.n.eq(&BV::from_u64(cf.n as u64, 1)).not());
-            disagreements.push(symbolic_post.z.eq(&BV::from_u64(cf.z as u64, 1)).not());
-            disagreements.push(symbolic_post.c.eq(&BV::from_u64(cf.c as u64, 1)).not());
-            disagreements.push(symbolic_post.v.eq(&BV::from_u64(cf.v as u64, 1)).not());
+            disagreements.push(symbolic_post.n.eq(BV::from_u64(cf.n as u64, 1)).not());
+            disagreements.push(symbolic_post.z.eq(BV::from_u64(cf.z as u64, 1)).not());
+            disagreements.push(symbolic_post.c.eq(BV::from_u64(cf.c as u64, 1)).not());
+            disagreements.push(symbolic_post.v.eq(BV::from_u64(cf.v as u64, 1)).not());
         }
         assert!(
             !disagreements.is_empty(),
             "assert_concrete_smt_parity_full needs either dest or check_post_flags"
         );
         let refs: Vec<&z3::ast::Bool> = disagreements.iter().collect();
-        solver.assert(&z3::ast::Bool::or(&refs));
+        solver.assert(z3::ast::Bool::or(&refs));
 
         assert_eq!(
             solver.check(),
@@ -2368,6 +2434,7 @@ mod tests {
             rd: Register::X0,
             rn: Register::X1,
             rm: Operand::Register(Register::X2),
+            width: crate::ir::RegisterWidth::X64,
         };
         let samples: &[(u64, u64)] = &[
             (0, 0xFFFF_FFFF_FFFF_FFFF),
@@ -2390,6 +2457,7 @@ mod tests {
             rd: Register::X0,
             rn: Register::X1,
             rm: Operand::Register(Register::X2),
+            width: crate::ir::RegisterWidth::X64,
         };
         let samples: &[(u64, u64)] = &[
             (0, 0),
@@ -2412,6 +2480,7 @@ mod tests {
             rd: Register::X0,
             rn: Register::X1,
             rm: Operand::Register(Register::X2),
+            width: crate::ir::RegisterWidth::X64,
         };
         let samples: &[(u64, u64)] = &[
             (0, 0),
@@ -2425,6 +2494,41 @@ mod tests {
                 &[(Register::X1, v1), (Register::X2, v2)],
                 Register::X0,
             );
+        }
+    }
+
+    #[test]
+    fn test_w32_logical_immediate_concrete_smt_parity() {
+        for (instr, pre) in [
+            (
+                Instruction::And {
+                    rd: Register::X0,
+                    rn: Register::X1,
+                    rm: Operand::Immediate(0xFF),
+                    width: RegisterWidth::W32,
+                },
+                0xFFFF_FFFF_1234_00FF,
+            ),
+            (
+                Instruction::Orr {
+                    rd: Register::X0,
+                    rn: Register::X1,
+                    rm: Operand::Immediate(0x0F),
+                    width: RegisterWidth::W32,
+                },
+                0xFFFF_FFFF_0000_00F0,
+            ),
+            (
+                Instruction::Eor {
+                    rd: Register::X0,
+                    rn: Register::X1,
+                    rm: Operand::Immediate(0xFF),
+                    width: RegisterWidth::W32,
+                },
+                0xFFFF_FFFF_FFFF_00FF,
+            ),
+        ] {
+            assert_concrete_smt_parity(&instr, &[(Register::X1, pre)], Register::X0);
         }
     }
 
@@ -3181,6 +3285,7 @@ mod tests {
         let instr = Instruction::Tst {
             rn: Register::X1,
             rm: Operand::Register(Register::X2),
+            width: crate::ir::RegisterWidth::X64,
         };
         let samples: &[(u64, u64)] = &[
             (0, 0xFFFF_FFFF_FFFF_FFFF),                     // result=0 -> Z=1
@@ -3251,6 +3356,7 @@ mod tests {
             rd: Register::X0,
             rn: Register::X1,
             rm: Operand::Register(Register::X2),
+            width: crate::ir::RegisterWidth::X64,
         };
         let samples: &[(u64, u64)] = &[
             (0, 0xFFFF_FFFF_FFFF_FFFF),
@@ -3267,6 +3373,51 @@ mod tests {
                 true,
             );
         }
+    }
+
+    #[test]
+    fn test_w32_logical_flag_immediates_concrete_smt_parity() {
+        use crate::semantics::state::ConditionFlags;
+
+        let tst_n = Instruction::Tst {
+            rn: Register::X1,
+            rm: Operand::Immediate(0x8000_0000),
+            width: RegisterWidth::W32,
+        };
+        assert_concrete_smt_parity_full(
+            &tst_n,
+            &[(Register::X1, 0x8000_0000)],
+            Some(ConditionFlags::default()),
+            None,
+            true,
+        );
+
+        let tst_z = Instruction::Tst {
+            rn: Register::X1,
+            rm: Operand::Immediate(0xFF),
+            width: RegisterWidth::W32,
+        };
+        assert_concrete_smt_parity_full(
+            &tst_z,
+            &[(Register::X1, 0xFFFF_FFFF_0000_0000)],
+            Some(ConditionFlags::default()),
+            None,
+            true,
+        );
+
+        let ands = Instruction::Ands {
+            rd: Register::X0,
+            rn: Register::X1,
+            rm: Operand::Immediate(0x8000_0000),
+            width: RegisterWidth::W32,
+        };
+        assert_concrete_smt_parity_full(
+            &ands,
+            &[(Register::X1, 0xFFFF_FFFF_8000_0000)],
+            Some(ConditionFlags::default()),
+            Some(Register::X0),
+            true,
+        );
     }
 
     #[test]

@@ -11,7 +11,7 @@ sequence that is provably equivalent under SMT.
 - Reads an ELF binary, disassembles it with [Capstone], and lifts a window
   into an internal IR.
 - Searches for a cheaper instruction sequence using one of four
-  algorithms: enumerative, stochastic (MCMC / Metropolis–Hastings),
+  algorithms: enumerative, stochastic (MCMC-style Metropolis cost acceptance),
   symbolic (SMT synthesis with Z3), or a hybrid of the symbolic and
   stochastic workers running in parallel.
 - Verifies each candidate first with random-input testing for a quick

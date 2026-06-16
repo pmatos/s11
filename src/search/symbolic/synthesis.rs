@@ -893,6 +893,7 @@ mod tests {
             rd: Register::X0,
             rn: Register::X0,
             rm: Operand::Register(Register::X0),
+            width: crate::ir::RegisterWidth::X64,
         }];
 
         assert!(search.verify_equivalence(&target, &candidate, &live_out, &config));
@@ -962,8 +963,7 @@ mod tests {
 
     /// Mirror of `x86_symbolic_runs_end_to_end` for x86-32. Covers the
     /// `SymbolicBackend<X86_32>` impl methods, including the width-32
-    /// branch in `x86_check_equivalence` and the `width()` accessor
-    /// reading `config.x86_width`.
+    /// backend path through cost and equivalence checking.
     #[test]
     fn x86_symbolic_mode32_runs_end_to_end() {
         use crate::isa::X86_32;

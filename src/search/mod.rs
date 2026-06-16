@@ -2,7 +2,7 @@
 //!
 //! This module provides multiple search algorithms for superoptimization:
 //! - Enumerative: exhaustive search over instruction sequences
-//! - Stochastic: MCMC-based search using Metropolis-Hastings acceptance
+//! - Stochastic: MCMC-style search using heuristic proposals and Metropolis acceptance
 //! - Symbolic: SMT-based synthesis using Z3
 //! - Hybrid: parallel execution combining symbolic + multiple stochastic workers
 

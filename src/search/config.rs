@@ -14,7 +14,7 @@ pub enum Algorithm {
     /// Exhaustive enumeration over all possible sequences
     #[default]
     Enumerative,
-    /// Stochastic MCMC search using Metropolis-Hastings
+    /// Stochastic MCMC-style search using heuristic proposals and Metropolis acceptance
     Stochastic,
     /// SMT-based symbolic synthesis
     Symbolic,
@@ -89,7 +89,7 @@ impl std::str::FromStr for CostMetricConfig {
 /// Configuration for stochastic (MCMC) search
 #[derive(Debug, Clone)]
 pub struct StochasticConfig {
-    /// Inverse temperature parameter for Metropolis-Hastings (higher = more greedy)
+    /// Inverse temperature parameter for Metropolis acceptance (higher = more greedy)
     pub beta: f64,
     /// Maximum number of MCMC iterations
     pub iterations: u64,

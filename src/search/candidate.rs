@@ -1,7 +1,7 @@
 //! Instruction generation utilities for search algorithms
 
 use crate::ir::instructions::MOVW_LEGAL_SHIFTS;
-use crate::ir::{Instruction, Operand, Register};
+use crate::ir::{Instruction, Operand, Register, RegisterWidth};
 use crate::isa::{AArch64, Assembler, InstructionType};
 
 /// Generic encodability check: for any `<I: InstructionType, A: Assembler<I>>`,
@@ -66,9 +66,24 @@ pub fn generate_all_instructions(registers: &[Register], immediates: &[i64]) -> 
 
                 instrs.push(Instruction::Add { rd, rn, rm: rm_op });
                 instrs.push(Instruction::Sub { rd, rn, rm: rm_op });
-                instrs.push(Instruction::And { rd, rn, rm: rm_op });
-                instrs.push(Instruction::Orr { rd, rn, rm: rm_op });
-                instrs.push(Instruction::Eor { rd, rn, rm: rm_op });
+                instrs.push(Instruction::And {
+                    rd,
+                    rn,
+                    rm: rm_op,
+                    width: RegisterWidth::X64,
+                });
+                instrs.push(Instruction::Orr {
+                    rd,
+                    rn,
+                    rm: rm_op,
+                    width: RegisterWidth::X64,
+                });
+                instrs.push(Instruction::Eor {
+                    rd,
+                    rn,
+                    rm: rm_op,
+                    width: RegisterWidth::X64,
+                });
                 instrs.push(Instruction::Lsl {
                     rd,
                     rn,
@@ -92,9 +107,24 @@ pub fn generate_all_instructions(registers: &[Register], immediates: &[i64]) -> 
 
                 instrs.push(Instruction::Add { rd, rn, rm: imm_op });
                 instrs.push(Instruction::Sub { rd, rn, rm: imm_op });
-                instrs.push(Instruction::And { rd, rn, rm: imm_op });
-                instrs.push(Instruction::Orr { rd, rn, rm: imm_op });
-                instrs.push(Instruction::Eor { rd, rn, rm: imm_op });
+                instrs.push(Instruction::And {
+                    rd,
+                    rn,
+                    rm: imm_op,
+                    width: RegisterWidth::X64,
+                });
+                instrs.push(Instruction::Orr {
+                    rd,
+                    rn,
+                    rm: imm_op,
+                    width: RegisterWidth::X64,
+                });
+                instrs.push(Instruction::Eor {
+                    rd,
+                    rn,
+                    rm: imm_op,
+                    width: RegisterWidth::X64,
+                });
             }
 
             // Shifted-register form (issue #59):
@@ -113,9 +143,24 @@ pub fn generate_all_instructions(registers: &[Register], immediates: &[i64]) -> 
                         };
                         instrs.push(Instruction::Add { rd, rn, rm: sr });
                         instrs.push(Instruction::Sub { rd, rn, rm: sr });
-                        instrs.push(Instruction::And { rd, rn, rm: sr });
-                        instrs.push(Instruction::Orr { rd, rn, rm: sr });
-                        instrs.push(Instruction::Eor { rd, rn, rm: sr });
+                        instrs.push(Instruction::And {
+                            rd,
+                            rn,
+                            rm: sr,
+                            width: RegisterWidth::X64,
+                        });
+                        instrs.push(Instruction::Orr {
+                            rd,
+                            rn,
+                            rm: sr,
+                            width: RegisterWidth::X64,
+                        });
+                        instrs.push(Instruction::Eor {
+                            rd,
+                            rn,
+                            rm: sr,
+                            width: RegisterWidth::X64,
+                        });
                     }
                     // ROR — logical only.
                     let sr_ror = Operand::ShiftedRegister {
@@ -123,9 +168,24 @@ pub fn generate_all_instructions(registers: &[Register], immediates: &[i64]) -> 
                         kind: ShiftKind::Ror,
                         amount,
                     };
-                    instrs.push(Instruction::And { rd, rn, rm: sr_ror });
-                    instrs.push(Instruction::Orr { rd, rn, rm: sr_ror });
-                    instrs.push(Instruction::Eor { rd, rn, rm: sr_ror });
+                    instrs.push(Instruction::And {
+                        rd,
+                        rn,
+                        rm: sr_ror,
+                        width: RegisterWidth::X64,
+                    });
+                    instrs.push(Instruction::Orr {
+                        rd,
+                        rn,
+                        rm: sr_ror,
+                        width: RegisterWidth::X64,
+                    });
+                    instrs.push(Instruction::Eor {
+                        rd,
+                        rn,
+                        rm: sr_ror,
+                        width: RegisterWidth::X64,
+                    });
                 }
                 // Issue #60: extended-register form for ADD/SUB. Cmp/Cmn
                 // are produced once-per-(rn,rm,kind,shift) further below
@@ -200,7 +260,12 @@ pub fn generate_all_instructions(registers: &[Register], immediates: &[i64]) -> 
                 instrs.push(Instruction::Eon { rd, rn, rm: rm_op });
                 instrs.push(Instruction::Adds { rd, rn, rm: rm_op });
                 instrs.push(Instruction::Subs { rd, rn, rm: rm_op });
-                instrs.push(Instruction::Ands { rd, rn, rm: rm_op });
+                instrs.push(Instruction::Ands {
+                    rd,
+                    rn,
+                    rm: rm_op,
+                    width: RegisterWidth::X64,
+                });
             }
             // ADDS / SUBS also accept the same 12-bit-class immediate table
             // ADD / SUB does — keep them in sync. ANDS accepts bitmask
@@ -359,7 +424,11 @@ pub fn generate_all_instructions(registers: &[Register], immediates: &[i64]) -> 
             let rm_op = Operand::Register(rm);
             instrs.push(Instruction::Cmp { rn, rm: rm_op });
             instrs.push(Instruction::Cmn { rn, rm: rm_op });
-            instrs.push(Instruction::Tst { rn, rm: rm_op });
+            instrs.push(Instruction::Tst {
+                rn,
+                rm: rm_op,
+                width: RegisterWidth::X64,
+            });
         }
         for &imm in immediates {
             let imm_op = Operand::Immediate(imm);
@@ -548,7 +617,7 @@ pub fn generate_random_instruction<R: rand::RngExt>(
     let rd = registers[rng.random_range(0..registers.len())];
     let pick_reg = |rng: &mut R| registers[rng.random_range(0..registers.len())];
 
-    match rng.random_range(0..33) {
+    match rng.random_range(0..38) {
         0 => {
             let imm = if immediates.is_empty() {
                 0
@@ -582,17 +651,32 @@ pub fn generate_random_instruction<R: rand::RngExt>(
         4 => {
             let rn = pick_reg(rng);
             let rm = Operand::Register(pick_reg(rng));
-            Instruction::And { rd, rn, rm }
+            Instruction::And {
+                rd,
+                rn,
+                rm,
+                width: RegisterWidth::X64,
+            }
         }
         5 => {
             let rn = pick_reg(rng);
             let rm = Operand::Register(pick_reg(rng));
-            Instruction::Orr { rd, rn, rm }
+            Instruction::Orr {
+                rd,
+                rn,
+                rm,
+                width: RegisterWidth::X64,
+            }
         }
         6 => {
             let rn = pick_reg(rng);
             let rm = Operand::Register(pick_reg(rng));
-            Instruction::Eor { rd, rn, rm }
+            Instruction::Eor {
+                rd,
+                rn,
+                rm,
+                width: RegisterWidth::X64,
+            }
         }
         7 => {
             let rn = pick_reg(rng);
@@ -661,7 +745,12 @@ pub fn generate_random_instruction<R: rand::RngExt>(
         20 => {
             let rn = pick_reg(rng);
             let rm = Operand::Register(pick_reg(rng));
-            Instruction::Ands { rd, rn, rm }
+            Instruction::Ands {
+                rd,
+                rn,
+                rm,
+                width: RegisterWidth::X64,
+            }
         }
         21 => Instruction::Cset {
             rd,
@@ -688,23 +777,37 @@ pub fn generate_random_instruction<R: rand::RngExt>(
             let shift = shifts[rng.random_range(0..shifts.len())];
             Instruction::MovK { rd, imm, shift }
         }
-        // Single-source bit-manipulation: CLZ / CLS / RBIT / REV / REV32 / REV16.
-        26 => {
-            let rn = pick_reg(rng);
-            match rng.random_range(0..6) {
-                0 => Instruction::Clz { rd, rn },
-                1 => Instruction::Cls { rd, rn },
-                2 => Instruction::Rbit { rd, rn },
-                3 => Instruction::Rev { rd, rn },
-                4 => Instruction::Rev32 { rd, rn },
-                _ => Instruction::Rev16 { rd, rn },
-            }
-        }
+        // Single-source bit-manipulation opcodes each keep a top-level slot
+        // so stochastic search does not starve CLZ/RBIT/REV-shaped targets.
+        26 => Instruction::Clz {
+            rd,
+            rn: pick_reg(rng),
+        },
+        27 => Instruction::Cls {
+            rd,
+            rn: pick_reg(rng),
+        },
+        28 => Instruction::Rbit {
+            rd,
+            rn: pick_reg(rng),
+        },
+        29 => Instruction::Rev {
+            rd,
+            rn: pick_reg(rng),
+        },
+        30 => Instruction::Rev32 {
+            rd,
+            rn: pick_reg(rng),
+        },
+        31 => Instruction::Rev16 {
+            rd,
+            rn: pick_reg(rng),
+        },
         // CCMP / CCMN: conditional compare. The dispatch picks Ccmp or Ccmn
         // uniformly; the rm operand is sampled via random_operand and then
         // clamped/coerced to a valid 5-bit immediate if it lands on the
         // immediate side. nzcv is a 4-bit literal; cond from NORMAL_CONDITIONS.
-        27 => {
+        32 => {
             // CCMP/CCMN forbid SP in `rn` and in the register form of `rm`
             // (encoded in the Xn slot, not XSP). `generate_all_instructions`
             // filters SP at enumeration time; mirror that here so the
@@ -746,7 +849,7 @@ pub fn generate_random_instruction<R: rand::RngExt>(
         // SP rejected in rd and rn (matches `generate_all_instructions` and
         // `is_encodable_aarch64`); 2D constraint on (lsb, width) enforced by
         // sampling width AFTER lsb so width is bounded by `64-lsb`.
-        28 => {
+        33 => {
             debug_assert!(
                 registers.iter().any(|r| *r != Register::SP),
                 "bit-field random generator requires at least one non-SP register",
@@ -802,7 +905,7 @@ pub fn generate_random_instruction<R: rand::RngExt>(
             }
         }
         // Multiply-accumulate family: MADD/MSUB (4-operand) and MNEG/SMULH/UMULH (3-operand).
-        29 => {
+        34 => {
             let rn = pick_reg(rng);
             let rm = pick_reg(rng);
             match rng.random_range(0..5) {
@@ -820,7 +923,7 @@ pub fn generate_random_instruction<R: rand::RngExt>(
             }
         }
         // Issue #66 multiply / divide: MUL/SDIV/UDIV. All register-only.
-        30 => {
+        35 => {
             let rn = pick_reg(rng);
             let rm = pick_reg(rng);
             match rng.random_range(0..3) {
@@ -831,7 +934,7 @@ pub fn generate_random_instruction<R: rand::RngExt>(
         }
         // Issue #66 compares: CMP/CMN accept reg or imm; TST is register-only
         // at the encoder, so its `rm` is clamped to a register draw.
-        31 => {
+        36 => {
             let rn = pick_reg(rng);
             match rng.random_range(0..3) {
                 0 => Instruction::Cmp {
@@ -845,13 +948,14 @@ pub fn generate_random_instruction<R: rand::RngExt>(
                 _ => Instruction::Tst {
                     rn,
                     rm: Operand::Register(pick_reg(rng)),
+                    width: RegisterWidth::X64,
                 },
             }
         }
         // Issue #66 conditional selects: CSEL/CSINC/CSINV/CSNEG. Register-only,
         // condition sampled from NORMAL_CONDITIONS (AL/NV excluded — AL
         // collapses to MOV rd,rn and NV is reserved).
-        32 => {
+        37 => {
             let rn = pick_reg(rng);
             let rm = pick_reg(rng);
             let cond = crate::ir::types::Condition::random_normal(rng);
@@ -904,90 +1008,6 @@ pub fn generate_random_sequence<R: rand::RngExt>(
     (0..length)
         .map(|_| generate_random_instruction(rng, registers, immediates))
         .collect()
-}
-
-/// Get the opcode type as a numeric identifier (for mutation)
-#[allow(dead_code)]
-pub fn opcode_id(instr: &Instruction) -> u8 {
-    match instr {
-        Instruction::MovReg { .. } => 0,
-        Instruction::MovImm { .. } => 1,
-        Instruction::Add { .. } => 2,
-        Instruction::Sub { .. } => 3,
-        Instruction::And { .. } => 4,
-        Instruction::Orr { .. } => 5,
-        Instruction::Eor { .. } => 6,
-        Instruction::Lsl { .. } => 7,
-        Instruction::Lsr { .. } => 8,
-        Instruction::Asr { .. } => 9,
-        Instruction::Mul { .. } => 10,
-        Instruction::Sdiv { .. } => 11,
-        Instruction::Udiv { .. } => 12,
-        Instruction::Cmp { .. } => 13,
-        Instruction::Cmn { .. } => 14,
-        Instruction::Tst { .. } => 15,
-        Instruction::Csel { .. } => 16,
-        Instruction::Csinc { .. } => 17,
-        Instruction::Csinv { .. } => 18,
-        Instruction::Csneg { .. } => 19,
-        Instruction::Mvn { .. } => 20,
-        Instruction::Neg { .. } => 21,
-        Instruction::Negs { .. } => 22,
-        Instruction::MovN { .. } => 23,
-        Instruction::Bic { .. } => 24,
-        Instruction::Bics { .. } => 25,
-        Instruction::Orn { .. } => 26,
-        Instruction::Eon { .. } => 27,
-        Instruction::Adds { .. } => 28,
-        Instruction::Subs { .. } => 29,
-        Instruction::Ands { .. } => 30,
-        Instruction::Cset { .. } => 31,
-        Instruction::Csetm { .. } => 32,
-        Instruction::Ror { .. } => 33,
-        Instruction::MovZ { .. } => 34,
-        Instruction::MovK { .. } => 35,
-        Instruction::Clz { .. } => 36,
-        Instruction::Cls { .. } => 37,
-        Instruction::Rbit { .. } => 38,
-        Instruction::Rev { .. } => 39,
-        Instruction::Rev32 { .. } => 40,
-        Instruction::Rev16 { .. } => 41,
-        Instruction::Madd { .. } => 42,
-        Instruction::Msub { .. } => 43,
-        Instruction::Mneg { .. } => 44,
-        Instruction::Smulh { .. } => 45,
-        Instruction::Umulh { .. } => 46,
-        Instruction::Ccmp { .. } => 47,
-        Instruction::Ccmn { .. } => 48,
-        Instruction::Sxtb { .. } => 49,
-        Instruction::Sxth { .. } => 50,
-        Instruction::Sxtw { .. } => 51,
-        Instruction::Uxtb { .. } => 52,
-        Instruction::Uxth { .. } => 53,
-        Instruction::Ubfx { .. } => 49,
-        Instruction::Sbfx { .. } => 50,
-        Instruction::Bfi { .. } => 51,
-        Instruction::Bfxil { .. } => 52,
-        Instruction::Ubfiz { .. } => 53,
-        Instruction::Sbfiz { .. } => 54,
-        // Branches / terminators (issue #69)
-        Instruction::B { .. } => 55,
-        Instruction::BCond { .. } => 56,
-        Instruction::Ret { .. } => 57,
-        Instruction::Cbz { .. } => 58,
-        Instruction::Cbnz { .. } => 59,
-        Instruction::Tbz { .. } => 60,
-        Instruction::Tbnz { .. } => 61,
-        Instruction::Bl { .. } => 62,
-        Instruction::Br { .. } => 63,
-        // Memory ops (issue #68). Mirrors `src/isa/aarch64.rs` so the two
-        // tables stay aligned. See ADR-0007.
-        Instruction::Ldr { .. } => 64,
-        Instruction::Ldrs { .. } => 65,
-        Instruction::Str { .. } => 66,
-        Instruction::Ldp { .. } => 67,
-        Instruction::Stp { .. } => 68,
-    }
 }
 
 /// Check if an instruction has immediate operand support
@@ -1116,7 +1136,8 @@ mod tests {
         // opcode_id collision between Sxt* and Ubfx/Sbfx/Bfi/Bfxil/Ubfiz that
         // isn't in scope here.
         let instrs = generate_all_instructions(&default_registers(), &default_immediates());
-        let ids: std::collections::BTreeSet<u8> = instrs.iter().map(opcode_id).collect();
+        let ids: std::collections::BTreeSet<u8> =
+            instrs.iter().map(InstructionType::opcode_id).collect();
         // Keep this literal range: 10..=19 is the stable issue-66 opcode_id
         // contract for Mul through Csneg. Deriving it from representative
         // Instruction values would hide accidental renumbering, unlike the
@@ -1137,8 +1158,82 @@ mod tests {
         let imms = default_immediates();
         let mut rng = ChaCha8Rng::seed_from_u64(seed);
         (0..draws)
-            .map(|_| opcode_id(&generate_random_instruction(&mut rng, &regs, &imms)))
+            .map(|_| generate_random_instruction(&mut rng, &regs, &imms).opcode_id())
             .collect()
+    }
+
+    #[test]
+    fn generate_random_instruction_promotes_single_source_bit_ops_to_top_level_slots() {
+        use rand::SeedableRng;
+        use rand_chacha::ChaCha8Rng;
+        use std::collections::HashMap;
+
+        let regs = default_registers();
+        let imms = default_immediates();
+        let mut rng = ChaCha8Rng::seed_from_u64(0x115);
+        let mut counts: HashMap<u8, u32> = HashMap::new();
+        const N: u32 = 30_000;
+
+        for _ in 0..N {
+            let id = generate_random_instruction(&mut rng, &regs, &imms).opcode_id();
+            *counts.entry(id).or_default() += 1;
+        }
+
+        for (label, instr) in [
+            (
+                "Clz",
+                Instruction::Clz {
+                    rd: Register::X0,
+                    rn: Register::X1,
+                },
+            ),
+            (
+                "Cls",
+                Instruction::Cls {
+                    rd: Register::X0,
+                    rn: Register::X1,
+                },
+            ),
+            (
+                "Rbit",
+                Instruction::Rbit {
+                    rd: Register::X0,
+                    rn: Register::X1,
+                },
+            ),
+            (
+                "Rev",
+                Instruction::Rev {
+                    rd: Register::X0,
+                    rn: Register::X1,
+                },
+            ),
+            (
+                "Rev32",
+                Instruction::Rev32 {
+                    rd: Register::X0,
+                    rn: Register::X1,
+                },
+            ),
+            (
+                "Rev16",
+                Instruction::Rev16 {
+                    rd: Register::X0,
+                    rn: Register::X1,
+                },
+            ),
+        ] {
+            let id = instr.opcode_id();
+            let count = counts.get(&id).copied().unwrap_or(0);
+            assert!(
+                count >= 500,
+                "expected >= 500 samples for {} (id {}) in {} draws, got {}",
+                label,
+                id,
+                N,
+                count
+            );
+        }
     }
 
     #[test]
@@ -1171,7 +1266,7 @@ mod tests {
             ),
         ] {
             assert!(
-                ids.contains(&opcode_id(&instr)),
+                ids.contains(&instr.opcode_id()),
                 "random never produced {}",
                 label
             );
@@ -1201,11 +1296,12 @@ mod tests {
                 Instruction::Tst {
                     rn: Register::X0,
                     rm: Operand::Register(Register::X1),
+                    width: RegisterWidth::X64,
                 },
             ),
         ] {
             assert!(
-                ids.contains(&opcode_id(&instr)),
+                ids.contains(&instr.opcode_id()),
                 "random never produced {}",
                 label
             );
@@ -1254,7 +1350,7 @@ mod tests {
             ),
         ] {
             assert!(
-                ids.contains(&opcode_id(&instr)),
+                ids.contains(&instr.opcode_id()),
                 "random never produced {}",
                 label
             );
@@ -1309,7 +1405,7 @@ mod tests {
             ),
         ] {
             assert!(
-                ids.contains(&opcode_id(&instr)),
+                ids.contains(&instr.opcode_id()),
                 "random never produced {}",
                 label
             );
@@ -1560,16 +1656,19 @@ mod tests {
                 rd: Register::X0,
                 rn: Register::X1,
                 rm: Operand::Immediate(0),
+                width: RegisterWidth::X64,
             },
             Instruction::Orr {
                 rd: Register::X0,
                 rn: Register::X1,
                 rm: Operand::Immediate(0),
+                width: RegisterWidth::X64,
             },
             Instruction::Eor {
                 rd: Register::X0,
                 rn: Register::X1,
                 rm: Operand::Immediate(0),
+                width: RegisterWidth::X64,
             },
             Instruction::Lsl {
                 rd: Register::X0,
@@ -1588,63 +1687,9 @@ mod tests {
             },
         ];
 
-        let ids: Vec<_> = instrs.iter().map(opcode_id).collect();
+        let ids: Vec<_> = instrs.iter().map(InstructionType::opcode_id).collect();
         let unique: std::collections::HashSet<_> = ids.iter().collect();
         assert_eq!(ids.len(), unique.len());
-    }
-
-    /// Sync test: opcode_id in candidate.rs must agree with
-    /// AArch64InstructionInfo::opcode_id in isa/aarch64.rs for every bitfield
-    /// variant. Catches drift between the two definitions.
-    #[test]
-    fn test_bitfield_opcode_id_matches_isa_backend() {
-        use crate::isa::InstructionType;
-        let instrs = vec![
-            Instruction::Ubfx {
-                rd: Register::X0,
-                rn: Register::X1,
-                lsb: 0,
-                width: 1,
-            },
-            Instruction::Sbfx {
-                rd: Register::X0,
-                rn: Register::X1,
-                lsb: 0,
-                width: 1,
-            },
-            Instruction::Bfi {
-                rd: Register::X0,
-                rn: Register::X1,
-                lsb: 0,
-                width: 1,
-            },
-            Instruction::Bfxil {
-                rd: Register::X0,
-                rn: Register::X1,
-                lsb: 0,
-                width: 1,
-            },
-            Instruction::Ubfiz {
-                rd: Register::X0,
-                rn: Register::X1,
-                lsb: 0,
-                width: 1,
-            },
-            Instruction::Sbfiz {
-                rd: Register::X0,
-                rn: Register::X1,
-                lsb: 0,
-                width: 1,
-            },
-        ];
-        for instr in &instrs {
-            assert_eq!(
-                opcode_id(instr),
-                instr.opcode_id(),
-                "opcode_id drift for {}",
-                instr
-            );
-        }
     }
 
     #[test]
