@@ -1939,6 +1939,51 @@ mod tests {
     }
 
     #[test]
+    fn w_mov_add_fuses_to_w_add() {
+        let seq1 = vec![
+            Instruction::MovRegW {
+                rd: Register::X0,
+                rn: Register::X1,
+            },
+            Instruction::AddW {
+                rd: Register::X0,
+                rn: Register::X0,
+                rm: Operand::Immediate(1),
+            },
+        ];
+
+        let seq2 = vec![Instruction::AddW {
+            rd: Register::X0,
+            rn: Register::X1,
+            rm: Operand::Immediate(1),
+        }];
+
+        assert_eq!(
+            check_equivalence(&seq1, &seq2),
+            EquivalenceResult::Equivalent
+        );
+    }
+
+    #[test]
+    fn w_add_is_not_x_add_when_high_bits_are_live() {
+        let w_add = vec![Instruction::AddW {
+            rd: Register::X0,
+            rn: Register::X1,
+            rm: Operand::Immediate(0),
+        }];
+        let x_add = vec![Instruction::Add {
+            rd: Register::X0,
+            rn: Register::X1,
+            rm: Operand::Immediate(0),
+        }];
+
+        assert_ne!(
+            check_equivalence(&w_add, &x_add),
+            EquivalenceResult::Equivalent
+        );
+    }
+
+    #[test]
     fn test_non_equivalent_sequences() {
         let seq1 = vec![Instruction::MovImm {
             rd: Register::X0,

@@ -142,6 +142,9 @@ enum Commands {
         arch: Option<CliArch>,
     },
     /// Optimize a window of instructions in an ELF binary
+    #[command(
+        after_help = "Note: enumerative search scales with the generated instruction families in its candidate pool. At the default AArch64 8-register CLI scope, multiply-accumulate and high-half multiply add 9,728 candidates per length bucket; use --timeout or smaller windows to bound runtime."
+    )]
     Opt {
         /// Path to ELF binary to optimize
         binary: PathBuf,
@@ -2031,6 +2034,27 @@ mod cli_helper_tests {
     }
 
     #[test]
+    fn opt_help_mentions_enumerative_candidate_pool_growth() {
+        use clap::CommandFactory;
+
+        let mut command = Args::command();
+        let opt_help = command
+            .find_subcommand_mut("opt")
+            .expect("opt subcommand should be registered")
+            .render_long_help()
+            .to_string();
+
+        assert!(
+            opt_help.contains("enumerative search scales with the generated instruction families"),
+            "opt help should explain enumerative candidate pool growth:\n{opt_help}"
+        );
+        assert!(
+            opt_help.contains("9,728"),
+            "opt help should mention the default AArch64 multiply candidate growth:\n{opt_help}"
+        );
+    }
+
+    #[test]
     fn cli_enum_conversions_cover_all_variants() {
         assert_eq!(
             Algorithm::from(CliAlgorithm::Enumerative),
@@ -2069,6 +2093,7 @@ mod cli_helper_tests {
     fn convert_capstone_op_handles_all_supported_aarch64_mnemonics() {
         let cases = [
             ("mov", "x0, x1"),
+            ("mov", "w0, w1"),
             ("mov", "x0, #5"),
             ("mov", "w0, #0xff"),
             ("mov", "wsp, #0xff"),
@@ -2079,9 +2104,13 @@ mod cli_helper_tests {
             ("movz", "x0, #0xffff, lsl #48"),
             ("movk", "x1, #0x1234, lsl #16"),
             ("add", "x0, x1, x2"),
+            ("add", "w0, w1, w2"),
             ("add", "x0, x1, #4"),
+            ("add", "w0, w1, #4"),
             ("add", "x0, x1, x2, lsl #3"),
+            ("add", "w0, w1, w2, lsl #3"),
             ("sub", "x0, x1, #3"),
+            ("sub", "w0, w1, #3"),
             ("adds", "x0, x1, #1"),
             ("subs", "x0, x1, x2"),
             ("and", "x0, x1, x2"),
@@ -2236,7 +2265,7 @@ mod cli_helper_tests {
         // Tripwire: bump in lockstep when adding/removing rows. Catches
         // accidental row deletion and forces a re-read when adding a parser
         // mnemonic without a matching test row.
-        assert_eq!(cases.len(), 139);
+        assert_eq!(cases.len(), 144);
 
         fn docs_mnemonic(mnemonic: &'static str) -> &'static str {
             if mnemonic.starts_with("b.") {
