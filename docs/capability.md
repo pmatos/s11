@@ -13,6 +13,11 @@ a region; supported control-flow terminators are parsed and then held fixed.
 Algorithms:
 - Enumerative, stochastic, symbolic, hybrid, and LLM-assisted search are
   available for AArch64.
+- Enumerative search scales with the generated instruction families in its
+  candidate pool. At the default AArch64 8-register CLI scope, `madd`/`msub`
+  contribute `2 * 8^4` and `mneg`/`smulh`/`umulh` contribute `3 * 8^3`, or
+  9,728 extra candidates per length bucket; use `--timeout` or smaller
+  optimization windows to bound runtime.
 - Hybrid and LLM remain AArch64-only.
 
 Rewritable straight-line mnemonics accepted by the parser and Capstone bridge:
@@ -55,8 +60,8 @@ Known gaps:
 
 ## x86-64 / x86-32
 
-Status: supported through a parallel x86 pipeline for ELF optimization and
-width-parameterised SMT equivalence.
+Status: supported through the shared ISA trait-backed ELF optimization path,
+with width-parameterised SMT equivalence.
 
 Rewritable straight-line mnemonic families:
 

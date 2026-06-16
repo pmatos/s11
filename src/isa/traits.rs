@@ -9,6 +9,8 @@ use std::fmt::{Debug, Display};
 use std::hash::Hash;
 
 use rand::RngExt;
+
+use crate::semantics::cost::CostMetric;
 /// Bitvector width marker.
 ///
 /// Each ISA carries its register width as an associated type implementing this
@@ -221,11 +223,14 @@ pub trait SymbolicExecutor<I: InstructionType>: Send + Sync {
 /// Trait for instruction cost models
 pub trait CostModel<I: InstructionType>: Send + Sync {
     /// Calculate the cost of a single instruction
-    fn instruction_cost(&self, instruction: &I) -> u64;
+    fn instruction_cost(&self, instruction: &I, metric: &CostMetric) -> u64;
 
     /// Calculate the total cost of an instruction sequence
-    fn sequence_cost(&self, instructions: &[I]) -> u64 {
-        instructions.iter().map(|i| self.instruction_cost(i)).sum()
+    fn sequence_cost(&self, instructions: &[I], metric: &CostMetric) -> u64 {
+        instructions
+            .iter()
+            .map(|i| self.instruction_cost(i, metric))
+            .sum()
     }
 }
 
