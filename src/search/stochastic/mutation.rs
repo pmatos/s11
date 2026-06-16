@@ -22,6 +22,7 @@ use crate::search::config::MutationWeights;
 use rand::RngExt;
 
 const ADDRESS_OFFSET_POOL: [i64; 8] = [0, 8, 16, 24, 32, 64, -8, -256];
+const SHIFTED_REGISTER_OPERAND_PROBABILITY: f64 = 0.30;
 
 /// Drop ROR from a shifted-register operand when bridging from a logical
 /// opcode (AND/ORR/EOR/TST — ROR allowed) to an arithmetic opcode
@@ -241,10 +242,13 @@ impl Mutator {
                 } else if *width == RegisterWidth::W32 {
                     *rm = Operand::Immediate(self.random_immediate(rng));
                 } else {
-                    // Tst is register-only for non-shifted form. Use the 3op
-                    // helper but force the non-shifted fallback to a Register
+                    // Tst is register-only for non-shifted form. Use the
+                    // shared shifted-register proposal rate, but force the
+                    // non-shifted fallback to a Register
                     // (immediates aren't encodable for TST).
-                    if rng.random_bool(0.15) && !self.registers.is_empty() {
+                    if rng.random_bool(SHIFTED_REGISTER_OPERAND_PROBABILITY)
+                        && !self.registers.is_empty()
+                    {
                         *rm = self.random_shifted_register(rng, true);
                     } else {
                         *rm = Operand::Register(self.random_register(rng));
@@ -1128,12 +1132,12 @@ impl Mutator {
     }
 
     /// Random rm operand for the in-scope arithmetic/logical/comparison
-    /// shifted-register opcodes (issue #59). With low probability returns a
-    /// `ShiftedRegister`; otherwise falls back to the plain register/immediate
+    /// shifted-register opcodes (issue #59). Uses the tuned shifted-register
+    /// proposal rate; otherwise falls back to the plain register/immediate
     /// distribution. `allow_ror` toggles whether ROR is in the kind pool —
     /// callers in arith bridges must pass false.
     fn random_operand_3op<R: RngExt>(&self, rng: &mut R, allow_ror: bool) -> Operand {
-        if rng.random_bool(0.15) && !self.registers.is_empty() {
+        if rng.random_bool(SHIFTED_REGISTER_OPERAND_PROBABILITY) && !self.registers.is_empty() {
             self.random_shifted_register(rng, allow_ror)
         } else {
             self.random_operand(rng)
@@ -1347,6 +1351,167 @@ mod tests {
         assert!(
             produced_shifted,
             "mutate_operand on Add must occasionally produce ShiftedRegister rm"
+        );
+    }
+
+    #[test]
+    fn random_operand_3op_uses_tuned_shifted_register_probability() {
+        let mutator = default_mutator();
+        let mut rng = StdRng::seed_from_u64(134);
+        let trials = 10_000;
+        let mut shifted = 0;
+
+        for _ in 0..trials {
+            match mutator.random_operand_3op(&mut rng, false) {
+                Operand::ShiftedRegister {
+                    kind: crate::ir::ShiftKind::Ror,
+                    ..
+                } => panic!("arithmetic shifted-register operands must not use ROR"),
+                Operand::ShiftedRegister { .. } => shifted += 1,
+                _ => {}
+            }
+        }
+
+        assert!(
+            (2_500..=3_500).contains(&shifted),
+            "expected shifted-register proposals in the 25%-35% band, got {shifted}/{trials}"
+        );
+    }
+
+    #[test]
+    fn mutate_operand_uses_tuned_shifted_register_probability_for_x64_tst() {
+        let mutator = default_mutator();
+        let trials = 20_000;
+        let mut rng = StdRng::seed_from_u64(135);
+        let mut x64_shifted = 0;
+
+        for _ in 0..trials {
+            let mut seq = vec![Instruction::Tst {
+                rn: Register::X1,
+                rm: Operand::Register(Register::X2),
+                width: RegisterWidth::X64,
+            }];
+            mutator.mutate_operand(&mut rng, &mut seq);
+            if let Instruction::Tst {
+                rm: Operand::ShiftedRegister { .. },
+                ..
+            } = seq[0]
+            {
+                x64_shifted += 1;
+            }
+        }
+
+        assert!(
+            (2_400..=3_600).contains(&x64_shifted),
+            "expected X64 TST shifted-register proposals in the 12%-18% band, got {x64_shifted}/{trials}"
+        );
+
+        let mut rng = StdRng::seed_from_u64(136);
+        for _ in 0..5_000 {
+            let mut seq = vec![Instruction::Tst {
+                rn: Register::X1,
+                rm: Operand::Register(Register::X2),
+                width: RegisterWidth::W32,
+            }];
+            mutator.mutate_operand(&mut rng, &mut seq);
+            if let Instruction::Tst {
+                rm: Operand::ShiftedRegister { .. },
+                ..
+            } = seq[0]
+            {
+                panic!("W32 TST mutation must not emit shifted-register operands");
+            }
+        }
+    }
+
+    #[test]
+    fn shifted_register_operands_respect_arith_and_logical_ror_policy() {
+        let mutator = default_mutator();
+        let mut rng = StdRng::seed_from_u64(137);
+
+        for _ in 0..1_000 {
+            let operand = mutator.random_shifted_register(&mut rng, false);
+            if let Operand::ShiftedRegister {
+                kind: crate::ir::ShiftKind::Ror,
+                ..
+            } = operand
+            {
+                panic!("arithmetic shifted-register operand generator must not emit ROR");
+            }
+
+            for instr in [
+                Instruction::Add {
+                    rd: Register::X0,
+                    rn: Register::X1,
+                    rm: operand,
+                },
+                Instruction::Sub {
+                    rd: Register::X0,
+                    rn: Register::X1,
+                    rm: operand,
+                },
+                Instruction::Cmp {
+                    rn: Register::X1,
+                    rm: operand,
+                },
+                Instruction::Cmn {
+                    rn: Register::X1,
+                    rm: operand,
+                },
+            ] {
+                assert!(
+                    instr.is_encodable_aarch64(),
+                    "arithmetic shifted-register mutation must remain encodable: {instr:?}"
+                );
+            }
+        }
+
+        let mut saw_ror = false;
+        for _ in 0..1_000 {
+            let operand = mutator.random_shifted_register(&mut rng, true);
+            if let Operand::ShiftedRegister {
+                kind: crate::ir::ShiftKind::Ror,
+                ..
+            } = operand
+            {
+                saw_ror = true;
+            }
+
+            for instr in [
+                Instruction::And {
+                    rd: Register::X0,
+                    rn: Register::X1,
+                    rm: operand,
+                    width: RegisterWidth::X64,
+                },
+                Instruction::Orr {
+                    rd: Register::X0,
+                    rn: Register::X1,
+                    rm: operand,
+                    width: RegisterWidth::X64,
+                },
+                Instruction::Eor {
+                    rd: Register::X0,
+                    rn: Register::X1,
+                    rm: operand,
+                    width: RegisterWidth::X64,
+                },
+                Instruction::Tst {
+                    rn: Register::X1,
+                    rm: operand,
+                    width: RegisterWidth::X64,
+                },
+            ] {
+                assert!(
+                    instr.is_encodable_aarch64(),
+                    "logical shifted-register mutation must remain encodable: {instr:?}"
+                );
+            }
+        }
+
+        assert!(
+            saw_ror,
+            "logical shifted-register operand generator should still explore ROR"
         );
     }
 
