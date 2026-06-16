@@ -135,68 +135,71 @@ pub fn generate_all_instructions(registers: &[Register], immediates: &[i64]) -> 
             // Shifted-register form (issue #59):
             //   Add/Sub: LSL/LSR/ASR (no ROR)
             //   And/Orr/Eor: LSL/LSR/ASR/ROR
-            // SP is filtered later by is_encodable_aarch64; we keep enumeration
-            // simple here.
+            // AArch64 shifted-register encodings cannot use SP in rd/rn/rm, so
+            // pre-filter those tuples instead of allocating candidates that the
+            // later encodability pass will discard.
             use crate::ir::ShiftKind;
             for &rm in registers {
-                for &amount in SHIFTED_OP_AMOUNTS {
-                    for kind in [ShiftKind::Lsl, ShiftKind::Lsr, ShiftKind::Asr] {
-                        let sr = Operand::ShiftedRegister {
+                if rd != Register::SP && rn != Register::SP && rm != Register::SP {
+                    for &amount in SHIFTED_OP_AMOUNTS {
+                        for kind in [ShiftKind::Lsl, ShiftKind::Lsr, ShiftKind::Asr] {
+                            let sr = Operand::ShiftedRegister {
+                                reg: rm,
+                                kind,
+                                amount,
+                            };
+                            instrs.push(Instruction::Add { rd, rn, rm: sr });
+                            if amount <= 31 {
+                                instrs.push(Instruction::AddW { rd, rn, rm: sr });
+                            }
+                            instrs.push(Instruction::Sub { rd, rn, rm: sr });
+                            if amount <= 31 {
+                                instrs.push(Instruction::SubW { rd, rn, rm: sr });
+                            }
+                            instrs.push(Instruction::And {
+                                rd,
+                                rn,
+                                rm: sr,
+                                width: RegisterWidth::X64,
+                            });
+                            instrs.push(Instruction::Orr {
+                                rd,
+                                rn,
+                                rm: sr,
+                                width: RegisterWidth::X64,
+                            });
+                            instrs.push(Instruction::Eor {
+                                rd,
+                                rn,
+                                rm: sr,
+                                width: RegisterWidth::X64,
+                            });
+                        }
+                        // ROR — logical only.
+                        let sr_ror = Operand::ShiftedRegister {
                             reg: rm,
-                            kind,
+                            kind: ShiftKind::Ror,
                             amount,
                         };
-                        instrs.push(Instruction::Add { rd, rn, rm: sr });
-                        if amount <= 31 {
-                            instrs.push(Instruction::AddW { rd, rn, rm: sr });
-                        }
-                        instrs.push(Instruction::Sub { rd, rn, rm: sr });
-                        if amount <= 31 {
-                            instrs.push(Instruction::SubW { rd, rn, rm: sr });
-                        }
                         instrs.push(Instruction::And {
                             rd,
                             rn,
-                            rm: sr,
+                            rm: sr_ror,
                             width: RegisterWidth::X64,
                         });
                         instrs.push(Instruction::Orr {
                             rd,
                             rn,
-                            rm: sr,
+                            rm: sr_ror,
                             width: RegisterWidth::X64,
                         });
                         instrs.push(Instruction::Eor {
                             rd,
                             rn,
-                            rm: sr,
+                            rm: sr_ror,
                             width: RegisterWidth::X64,
                         });
                     }
-                    // ROR — logical only.
-                    let sr_ror = Operand::ShiftedRegister {
-                        reg: rm,
-                        kind: ShiftKind::Ror,
-                        amount,
-                    };
-                    instrs.push(Instruction::And {
-                        rd,
-                        rn,
-                        rm: sr_ror,
-                        width: RegisterWidth::X64,
-                    });
-                    instrs.push(Instruction::Orr {
-                        rd,
-                        rn,
-                        rm: sr_ror,
-                        width: RegisterWidth::X64,
-                    });
-                    instrs.push(Instruction::Eor {
-                        rd,
-                        rn,
-                        rm: sr_ror,
-                        width: RegisterWidth::X64,
-                    });
                 }
                 // Issue #60: extended-register form for ADD/SUB. Cmp/Cmn
                 // are produced once-per-(rn,rm,kind,shift) further below
@@ -1708,6 +1711,67 @@ mod tests {
         assert!(
             !any_arith_ror,
             "Add/Sub must NOT enumerate ROR shifted form (ROR is logical-only)"
+        );
+    }
+
+    #[test]
+    fn test_generate_all_instructions_shifted_register_prefilters_sp() {
+        let registers = vec![Register::X0, Register::X1, Register::SP];
+        let instrs = generate_all_instructions(&registers, &[]);
+
+        let mut shifted_count = 0;
+        for instr in &instrs {
+            match instr {
+                Instruction::Add {
+                    rd,
+                    rn,
+                    rm: Operand::ShiftedRegister { reg, .. },
+                }
+                | Instruction::AddW {
+                    rd,
+                    rn,
+                    rm: Operand::ShiftedRegister { reg, .. },
+                }
+                | Instruction::Sub {
+                    rd,
+                    rn,
+                    rm: Operand::ShiftedRegister { reg, .. },
+                }
+                | Instruction::SubW {
+                    rd,
+                    rn,
+                    rm: Operand::ShiftedRegister { reg, .. },
+                }
+                | Instruction::And {
+                    rd,
+                    rn,
+                    rm: Operand::ShiftedRegister { reg, .. },
+                    ..
+                }
+                | Instruction::Orr {
+                    rd,
+                    rn,
+                    rm: Operand::ShiftedRegister { reg, .. },
+                    ..
+                }
+                | Instruction::Eor {
+                    rd,
+                    rn,
+                    rm: Operand::ShiftedRegister { reg, .. },
+                    ..
+                } => {
+                    shifted_count += 1;
+                    assert_ne!(*rd, Register::SP, "shifted-register rd uses SP: {instr}");
+                    assert_ne!(*rn, Register::SP, "shifted-register rn uses SP: {instr}");
+                    assert_ne!(*reg, Register::SP, "shifted-register rm uses SP: {instr}");
+                }
+                _ => {}
+            }
+        }
+
+        assert!(
+            shifted_count > 0,
+            "enumeration must retain valid shifted-register candidates"
         );
     }
 
