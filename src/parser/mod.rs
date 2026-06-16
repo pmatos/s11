@@ -804,13 +804,16 @@ fn parse_extended_register_tail(mnem: &str, reg: Register, tail: &str) -> Result
     })
 }
 
-/// Returns true if the lowercased keyword names an extend kind
+const EXTEND_KEYWORDS: [&str; 8] = [
+    "uxtb", "uxth", "uxtw", "uxtx", "sxtb", "sxth", "sxtw", "sxtx",
+];
+
+/// Returns true if the keyword names an extend kind
 /// (UXTB/UXTH/UXTW/UXTX/SXTB/SXTH/SXTW/SXTX) rather than a shift kind.
 fn is_extend_keyword(kw: &str) -> bool {
-    matches!(
-        kw.to_ascii_lowercase().as_str(),
-        "uxtb" | "uxth" | "uxtw" | "uxtx" | "sxtb" | "sxth" | "sxtw" | "sxtx"
-    )
+    EXTEND_KEYWORDS
+        .iter()
+        .any(|candidate| kw.eq_ignore_ascii_case(candidate))
 }
 
 /// Parse an `AddressOperand` from the bracketed-operand tokens of a
@@ -2928,6 +2931,68 @@ mod tests {
                     kind: ExtendKind::Sxth,
                     shift: 1,
                 },
+            }
+        );
+    }
+
+    #[test]
+    fn is_extend_keyword_recognizes_ascii_case_variants() {
+        for kw in [
+            "uxtb", "UXTB", "UxTb", "uxth", "UXTH", "UxTh", "uxtw", "UXTW", "UxTw", "uxtx", "UXTX",
+            "UxTx", "sxtb", "SXTB", "SxTb", "sxth", "SXTH", "SxTh", "sxtw", "SXTW", "SxTw", "sxtx",
+            "SXTX", "SxTx",
+        ] {
+            assert!(is_extend_keyword(kw), "{kw} should be an extend keyword");
+        }
+
+        for kw in ["lsl", "lsr", "asr", "ror", "uxt", "uxtb2", "sxtq", ""] {
+            assert!(
+                !is_extend_keyword(kw),
+                "{kw} should not be an extend keyword"
+            );
+        }
+    }
+
+    #[test]
+    fn parse_extend_keyword_dispatch_accepts_mixed_case_operands() {
+        use crate::ir::types::{AccessWidth, AddressOperand, ExtendKind};
+
+        assert_eq!(
+            parse_one("add x0, x1, w2, UxTb #2"),
+            Instruction::Add {
+                rd: Register::X0,
+                rn: Register::X1,
+                rm: Operand::ExtendedRegister {
+                    reg: Register::X2,
+                    kind: ExtendKind::Uxtb,
+                    shift: 2,
+                },
+            }
+        );
+
+        assert_eq!(
+            parse_one("cmp x1, w2, SxTh #1"),
+            Instruction::Cmp {
+                rn: Register::X1,
+                rm: Operand::ExtendedRegister {
+                    reg: Register::X2,
+                    kind: ExtendKind::Sxth,
+                    shift: 1,
+                },
+            }
+        );
+
+        assert_eq!(
+            parse_one("ldr x0, [x1, w2, UxTw #2]"),
+            Instruction::Ldr {
+                rt: Register::X0,
+                addr: AddressOperand::Ext {
+                    base: Register::X1,
+                    idx: Register::X2,
+                    kind: ExtendKind::Uxtw,
+                    shift: 2,
+                },
+                width: AccessWidth::Extended,
             }
         );
     }
