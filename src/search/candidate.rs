@@ -1413,6 +1413,44 @@ mod tests {
     }
 
     #[test]
+    fn generate_random_instruction_samples_bitfield_and_madd_families_evenly() {
+        use rand::SeedableRng;
+        use rand_chacha::ChaCha8Rng;
+
+        let regs = default_registers();
+        let imms = default_immediates();
+        let mut rng = ChaCha8Rng::seed_from_u64(0x153);
+        let mut bitfield_count = 0u32;
+        let mut madd_count = 0u32;
+        const DRAWS: u32 = 76_000;
+
+        for _ in 0..DRAWS {
+            let instr = generate_random_instruction(&mut rng, &regs, &imms);
+            match instr {
+                Instruction::Ubfx { .. }
+                | Instruction::Sbfx { .. }
+                | Instruction::Bfi { .. }
+                | Instruction::Bfxil { .. }
+                | Instruction::Ubfiz { .. }
+                | Instruction::Sbfiz { .. } => bitfield_count += 1,
+                Instruction::Madd { .. }
+                | Instruction::Msub { .. }
+                | Instruction::Mneg { .. }
+                | Instruction::Smulh { .. }
+                | Instruction::Umulh { .. } => madd_count += 1,
+                _ => {}
+            }
+        }
+
+        let delta = bitfield_count.abs_diff(madd_count);
+        assert!(
+            delta <= 250,
+            "bit-field and multiply-accumulate should have equal top-level sampling weight \
+             over {DRAWS} draws, got bitfield={bitfield_count}, madd={madd_count}, delta={delta}",
+        );
+    }
+
+    #[test]
     fn test_generate_all_instructions_contains_csel_family() {
         let instrs = generate_all_instructions(&default_registers(), &default_immediates());
         assert!(instrs.iter().any(|i| matches!(i, Instruction::Csel { .. })));
