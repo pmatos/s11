@@ -57,6 +57,7 @@ pub fn generate_all_instructions(registers: &[Register], immediates: &[i64]) -> 
         // MovReg: mov rd, rn
         for &rn in registers {
             instrs.push(Instruction::MovReg { rd, rn });
+            instrs.push(Instruction::MovRegW { rd, rn });
         }
 
         // Binary operations with register second operand
@@ -65,7 +66,9 @@ pub fn generate_all_instructions(registers: &[Register], immediates: &[i64]) -> 
                 let rm_op = Operand::Register(rm);
 
                 instrs.push(Instruction::Add { rd, rn, rm: rm_op });
+                instrs.push(Instruction::AddW { rd, rn, rm: rm_op });
                 instrs.push(Instruction::Sub { rd, rn, rm: rm_op });
+                instrs.push(Instruction::SubW { rd, rn, rm: rm_op });
                 instrs.push(Instruction::And {
                     rd,
                     rn,
@@ -106,7 +109,9 @@ pub fn generate_all_instructions(registers: &[Register], immediates: &[i64]) -> 
                 let imm_op = Operand::Immediate(imm);
 
                 instrs.push(Instruction::Add { rd, rn, rm: imm_op });
+                instrs.push(Instruction::AddW { rd, rn, rm: imm_op });
                 instrs.push(Instruction::Sub { rd, rn, rm: imm_op });
+                instrs.push(Instruction::SubW { rd, rn, rm: imm_op });
                 instrs.push(Instruction::And {
                     rd,
                     rn,
@@ -142,7 +147,13 @@ pub fn generate_all_instructions(registers: &[Register], immediates: &[i64]) -> 
                             amount,
                         };
                         instrs.push(Instruction::Add { rd, rn, rm: sr });
+                        if amount <= 31 {
+                            instrs.push(Instruction::AddW { rd, rn, rm: sr });
+                        }
                         instrs.push(Instruction::Sub { rd, rn, rm: sr });
+                        if amount <= 31 {
+                            instrs.push(Instruction::SubW { rd, rn, rm: sr });
+                        }
                         instrs.push(Instruction::And {
                             rd,
                             rn,
@@ -313,6 +324,10 @@ pub fn generate_all_instructions(registers: &[Register], immediates: &[i64]) -> 
 
         // Multiply-accumulate family. MADD/MSUB take a 4th register slot
         // (`ra`); MNEG/SMULH/UMULH are 3-operand register-only.
+        // At the default 8-register scope this block emits
+        // `2 * 8^4 + 3 * 8^3` = 9,728 candidates per length bucket; keep
+        // docs/capability.md (and the README/TUTORIAL notes) in sync if the
+        // instruction mix here changes.
         for &rn in registers {
             for &rm in registers {
                 instrs.push(Instruction::Mneg { rd, rn, rm });
@@ -617,6 +632,9 @@ pub fn generate_random_instruction<R: rand::RngExt>(
     let rd = registers[rng.random_range(0..registers.len())];
     let pick_reg = |rng: &mut R| registers[rng.random_range(0..registers.len())];
 
+    // See also `src/isa/aarch64.rs::AArch64InstructionGenerator::generate_random`:
+    // this is a parallel 38-slot sampler, but its slot numbers differ
+    // (notably, ROR is slot 37 there and slot 23 here).
     match rng.random_range(0..38) {
         0 => {
             let imm = if immediates.is_empty() {
@@ -1110,6 +1128,39 @@ mod tests {
         let instrs = generate_all_instructions(&default_registers(), &default_immediates());
         let has_add = instrs.iter().any(|i| matches!(i, Instruction::Add { .. }));
         assert!(has_add);
+    }
+
+    #[test]
+    fn generate_encodable_instructions_contains_w_add_sub_mov() {
+        let instrs = generate_all_encodable_instructions(
+            &[Register::X0, Register::X1, Register::X2],
+            &[0, 1],
+        );
+
+        assert!(instrs.iter().any(|i| matches!(
+            i,
+            Instruction::MovRegW {
+                rd: Register::X0,
+                rn: Register::X1
+            }
+        )));
+        assert!(instrs.iter().any(|i| matches!(
+            i,
+            Instruction::AddW {
+                rd: Register::X0,
+                rn: Register::X1,
+                rm: Operand::Register(Register::X2)
+            }
+        )));
+        assert!(instrs.iter().any(|i| matches!(
+            i,
+            Instruction::SubW {
+                rd: Register::X0,
+                rn: Register::X1,
+                rm: Operand::Immediate(1)
+            }
+        )));
+        assert!(instrs.iter().all(Instruction::is_encodable_aarch64));
     }
 
     #[test]

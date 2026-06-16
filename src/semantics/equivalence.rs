@@ -1939,6 +1939,51 @@ mod tests {
     }
 
     #[test]
+    fn w_mov_add_fuses_to_w_add() {
+        let seq1 = vec![
+            Instruction::MovRegW {
+                rd: Register::X0,
+                rn: Register::X1,
+            },
+            Instruction::AddW {
+                rd: Register::X0,
+                rn: Register::X0,
+                rm: Operand::Immediate(1),
+            },
+        ];
+
+        let seq2 = vec![Instruction::AddW {
+            rd: Register::X0,
+            rn: Register::X1,
+            rm: Operand::Immediate(1),
+        }];
+
+        assert_eq!(
+            check_equivalence(&seq1, &seq2),
+            EquivalenceResult::Equivalent
+        );
+    }
+
+    #[test]
+    fn w_add_is_not_x_add_when_high_bits_are_live() {
+        let w_add = vec![Instruction::AddW {
+            rd: Register::X0,
+            rn: Register::X1,
+            rm: Operand::Immediate(0),
+        }];
+        let x_add = vec![Instruction::Add {
+            rd: Register::X0,
+            rn: Register::X1,
+            rm: Operand::Immediate(0),
+        }];
+
+        assert_ne!(
+            check_equivalence(&w_add, &x_add),
+            EquivalenceResult::Equivalent
+        );
+    }
+
+    #[test]
     fn test_non_equivalent_sequences() {
         let seq1 = vec![Instruction::MovImm {
             rd: Register::X0,
@@ -2749,6 +2794,46 @@ mod tests {
         );
     }
 
+    /// SMT proves `SBFX rd,rn,#lsb,#width` ≡
+    /// `LSR tmp,rn,#lsb; LSL tmp,tmp,#(64-width); ASR rd,tmp,#(64-width)`.
+    #[test]
+    fn test_sbfx_equivalent_to_lsr_lsl_asr() {
+        let lsb = 4i64;
+        let width = 8u8;
+        let sign_extend_shift = 64i64 - width as i64;
+
+        let sbfx = vec![Instruction::Sbfx {
+            rd: Register::X0,
+            rn: Register::X1,
+            lsb: lsb as u8,
+            width,
+        }];
+
+        let lsr_lsl_asr = vec![
+            Instruction::Lsr {
+                rd: Register::X2,
+                rn: Register::X1,
+                shift: Operand::Immediate(lsb),
+            },
+            Instruction::Lsl {
+                rd: Register::X2,
+                rn: Register::X2,
+                shift: Operand::Immediate(sign_extend_shift),
+            },
+            Instruction::Asr {
+                rd: Register::X0,
+                rn: Register::X2,
+                shift: Operand::Immediate(sign_extend_shift),
+            },
+        ];
+
+        let config = EquivalenceConfig::with_live_out(LiveOut::from_registers(vec![Register::X0]));
+        assert_eq!(
+            check_equivalence_with_config(&sbfx, &lsr_lsl_asr, &config),
+            EquivalenceResult::Equivalent
+        );
+    }
+
     /// Acceptance criterion #1 from issue #61:
     /// SMT proves `UBFX rd,rn,#lsb,#width` ≡ `LSR t,rn,#lsb; AND rd,t,#((1<<width)-1)`.
     #[test]
@@ -2781,6 +2866,133 @@ mod tests {
         let config = EquivalenceConfig::with_live_out(LiveOut::from_registers(vec![Register::X0]));
         assert_eq!(
             check_equivalence_with_config(&ubfx, &lsr_and, &config),
+            EquivalenceResult::Equivalent
+        );
+    }
+
+    /// SMT proves `BFXIL rd,rn,#lsb,#width` ≡ {
+    ///   LSR tmp,rn,#lsb; AND tmp,tmp,#low_mask;
+    ///   AND clear,rd,#!low_mask; ORR rd,clear,tmp
+    /// }.
+    #[test]
+    fn test_bfxil_equivalent_to_lsr_mask_clear_or() {
+        let lsb = 8i64;
+        let width = 8u8;
+        let low_mask = (1i64 << width) - 1;
+        let clear_mask = !low_mask;
+
+        let bfxil = vec![Instruction::Bfxil {
+            rd: Register::X0,
+            rn: Register::X1,
+            lsb: lsb as u8,
+            width,
+        }];
+
+        let expanded = vec![
+            Instruction::Lsr {
+                rd: Register::X2,
+                rn: Register::X1,
+                shift: Operand::Immediate(lsb),
+            },
+            Instruction::And {
+                rd: Register::X2,
+                rn: Register::X2,
+                rm: Operand::Immediate(low_mask),
+                width: crate::ir::RegisterWidth::X64,
+            },
+            Instruction::And {
+                rd: Register::X3,
+                rn: Register::X0,
+                rm: Operand::Immediate(clear_mask),
+                width: crate::ir::RegisterWidth::X64,
+            },
+            Instruction::Orr {
+                rd: Register::X0,
+                rn: Register::X3,
+                rm: Operand::Register(Register::X2),
+                width: crate::ir::RegisterWidth::X64,
+            },
+        ];
+
+        let config = EquivalenceConfig::with_live_out(LiveOut::from_registers(vec![Register::X0]));
+        assert_eq!(
+            check_equivalence_with_config(&bfxil, &expanded, &config),
+            EquivalenceResult::Equivalent
+        );
+    }
+
+    /// SMT proves `UBFIZ rd,rn,#lsb,#width` ≡
+    /// `AND tmp,rn,#low_mask; LSL rd,tmp,#lsb`.
+    #[test]
+    fn test_ubfiz_equivalent_to_and_lsl() {
+        let lsb = 4i64;
+        let width = 8u8;
+        let low_mask = (1i64 << width) - 1;
+
+        let ubfiz = vec![Instruction::Ubfiz {
+            rd: Register::X0,
+            rn: Register::X1,
+            lsb: lsb as u8,
+            width,
+        }];
+
+        let and_lsl = vec![
+            Instruction::And {
+                rd: Register::X2,
+                rn: Register::X1,
+                rm: Operand::Immediate(low_mask),
+                width: crate::ir::RegisterWidth::X64,
+            },
+            Instruction::Lsl {
+                rd: Register::X0,
+                rn: Register::X2,
+                shift: Operand::Immediate(lsb),
+            },
+        ];
+
+        let config = EquivalenceConfig::with_live_out(LiveOut::from_registers(vec![Register::X0]));
+        assert_eq!(
+            check_equivalence_with_config(&ubfiz, &and_lsl, &config),
+            EquivalenceResult::Equivalent
+        );
+    }
+
+    /// SMT proves `SBFIZ rd,rn,#lsb,#width` ≡
+    /// `LSL tmp,rn,#(64-width); ASR tmp,tmp,#(64-width); LSL rd,tmp,#lsb`.
+    #[test]
+    fn test_sbfiz_equivalent_to_lsl_asr_lsl() {
+        let lsb = 4i64;
+        let width = 8u8;
+        let sign_extend_shift = 64i64 - width as i64;
+
+        let sbfiz = vec![Instruction::Sbfiz {
+            rd: Register::X0,
+            rn: Register::X1,
+            lsb: lsb as u8,
+            width,
+        }];
+
+        let lsl_asr_lsl = vec![
+            Instruction::Lsl {
+                rd: Register::X2,
+                rn: Register::X1,
+                shift: Operand::Immediate(sign_extend_shift),
+            },
+            Instruction::Asr {
+                rd: Register::X2,
+                rn: Register::X2,
+                shift: Operand::Immediate(sign_extend_shift),
+            },
+            Instruction::Lsl {
+                rd: Register::X0,
+                rn: Register::X2,
+                shift: Operand::Immediate(lsb),
+            },
+        ];
+
+        let config = EquivalenceConfig::with_live_out(LiveOut::from_registers(vec![Register::X0]));
+        assert_eq!(
+            check_equivalence_with_config(&sbfiz, &lsl_asr_lsl, &config),
             EquivalenceResult::Equivalent
         );
     }

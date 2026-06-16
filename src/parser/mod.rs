@@ -197,6 +197,24 @@ fn parse_same_width_registers(
     Ok((rd, rn, rd_width))
 }
 
+fn parse_sized_operand(mnem: &str, operand: &str, width: RegisterWidth) -> Result<Operand, String> {
+    if operand.trim().starts_with('#') {
+        return Ok(Operand::Immediate(parse_immediate(operand)?));
+    }
+    if let Ok(imm) = parse_immediate(operand) {
+        return Ok(Operand::Immediate(imm));
+    }
+
+    let (reg, reg_width) = parse_sized_register(operand)?;
+    if reg_width != width {
+        return Err(format!(
+            "{} operands must use matching register widths",
+            mnem
+        ));
+    }
+    Ok(Operand::Register(reg))
+}
+
 /// Parse an immediate value (with or without # prefix, hex or decimal)
 pub fn parse_immediate(s: &str) -> Result<i64, String> {
     let s = s.trim();
@@ -330,21 +348,19 @@ fn parse_mov(operands: &[&str]) -> Result<Instruction, String> {
     }
 
     if let Ok((rd, RegisterWidth::W32)) = parse_sized_register(operands[0]) {
-        let src = parse_operand(operands[1])?;
-        return match src {
-            Operand::Immediate(imm) => Ok(Instruction::Orr {
+        if let Ok(imm) = parse_immediate(operands[1]) {
+            return Ok(Instruction::Orr {
                 rd,
                 rn: Register::XZR,
                 rm: Operand::Immediate(imm),
                 width: RegisterWidth::W32,
-            }),
-            Operand::Register(_)
-            | Operand::ShiftedRegister { .. }
-            | Operand::ExtendedRegister { .. } => Err(
-                "mov W-register form only supports immediate sources until the IR models register width"
-                    .to_string(),
-            ),
-        };
+            });
+        }
+        let (rn, rn_width) = parse_sized_register(operands[1])?;
+        if rn_width != RegisterWidth::W32 {
+            return Err("mov operands must use matching register widths".to_string());
+        }
+        return Ok(Instruction::MovRegW { rd, rn });
     }
 
     let rd = parse_register(operands[0])?;
@@ -1103,20 +1119,68 @@ fn parse_rm_3op(mnem: &str, operands: &[&str]) -> Result<Operand, String> {
     }
 }
 
+fn parse_rm_3op_with_width(
+    mnem: &str,
+    operands: &[&str],
+    width: RegisterWidth,
+) -> Result<Operand, String> {
+    if operands.len() == 3 {
+        parse_sized_operand(mnem, operands[2], width)
+    } else if operands.len() == 4 {
+        let tail = operands[3].trim();
+        let kw = tail.split_whitespace().next().unwrap_or("");
+        if is_extend_keyword(kw) {
+            let reg = parse_w_or_x_register(operands[2])?;
+            parse_extended_register_tail(mnem, reg, tail)
+        } else {
+            let (reg, reg_width) = parse_sized_register(operands[2])?;
+            if reg_width != width {
+                return Err(format!(
+                    "{} operands must use matching register widths",
+                    mnem
+                ));
+            }
+            parse_shifted_register_tail(mnem, reg, tail)
+        }
+    } else {
+        Err(format!(
+            "{} requires 3 or 4 operands, got {}",
+            mnem,
+            operands.len()
+        ))
+    }
+}
+
 /// Parse ADD instruction
 fn parse_add(operands: &[&str]) -> Result<Instruction, String> {
-    let rm = parse_rm_3op("add", operands)?;
-    let rd = parse_register(operands[0])?;
-    let rn = parse_register(operands[1])?;
-    Ok(Instruction::Add { rd, rn, rm })
+    if operands.len() != 3 && operands.len() != 4 {
+        return Err(format!(
+            "add requires 3 or 4 operands, got {}",
+            operands.len()
+        ));
+    }
+    let (rd, rn, width) = parse_same_width_registers("add", operands)?;
+    let rm = parse_rm_3op_with_width("add", operands, width)?;
+    match width {
+        RegisterWidth::W32 => Ok(Instruction::AddW { rd, rn, rm }),
+        RegisterWidth::X64 => Ok(Instruction::Add { rd, rn, rm }),
+    }
 }
 
 /// Parse SUB instruction
 fn parse_sub(operands: &[&str]) -> Result<Instruction, String> {
-    let rm = parse_rm_3op("sub", operands)?;
-    let rd = parse_register(operands[0])?;
-    let rn = parse_register(operands[1])?;
-    Ok(Instruction::Sub { rd, rn, rm })
+    if operands.len() != 3 && operands.len() != 4 {
+        return Err(format!(
+            "sub requires 3 or 4 operands, got {}",
+            operands.len()
+        ));
+    }
+    let (rd, rn, width) = parse_same_width_registers("sub", operands)?;
+    let rm = parse_rm_3op_with_width("sub", operands, width)?;
+    match width {
+        RegisterWidth::W32 => Ok(Instruction::SubW { rd, rn, rm }),
+        RegisterWidth::X64 => Ok(Instruction::Sub { rd, rn, rm }),
+    }
 }
 
 /// Parse AND instruction
@@ -2168,14 +2232,6 @@ mod tests {
             }
             _ => panic!("expected MovImm"),
         }
-
-        assert!(parse_line("mov w0, w1").is_err());
-        assert!(parse_line("mov W0, W1").is_err());
-        let err = parse_line("mov w0, x1").unwrap_err();
-        assert!(
-            err.to_string().contains("IR models register width"),
-            "unexpected mov W-register error: {err}"
-        );
     }
 
     #[test]
@@ -2196,6 +2252,36 @@ mod tests {
                 assert_eq!(rm, Operand::Immediate(1));
             }
             _ => panic!("expected Add"),
+        }
+    }
+
+    #[test]
+    fn parse_w_add_sub_mov_register_forms_roundtrip() {
+        for text in [
+            "add w0, w1, w2",
+            "add w0, w1, #1",
+            "add w0, w1, w2, lsl #3",
+            "sub w3, w4, w5",
+            "sub w3, w4, #7",
+            "sub w3, w4, w5, lsl #2",
+            "mov w6, w7",
+        ] {
+            let instr = parse_one(text);
+            assert_eq!(format!("{}", instr), text);
+        }
+    }
+
+    #[test]
+    fn parse_w_add_sub_mov_rejects_mixed_register_widths() {
+        for text in [
+            "add w0, x1, w2",
+            "add w0, w1, x2",
+            "add w0, w1, x2, lsl #3",
+            "sub x0, w1, x2",
+            "mov w0, x1",
+            "mov x0, w1",
+        ] {
+            assert!(parse_line(text).is_err(), "{text} should be rejected");
         }
     }
 
@@ -2264,6 +2350,35 @@ mod tests {
         // i64::from_str_radix would overflow; we wrap through u64.
         assert!(parse_line("and x0, x1, #0x8000000000000000").is_ok());
         assert!(parse_line("tst x1, #0x8000000000000000").is_ok());
+    }
+
+    #[test]
+    fn parse_line_rejects_sp_in_multiply_family() {
+        for text in [
+            "mul sp, x1, x2",
+            "sdiv x0, sp, x2",
+            "udiv x0, x1, sp",
+            "madd x0, x1, x2, sp",
+            "msub sp, x1, x2, x3",
+            "mneg x0, sp, x2",
+            "smulh x0, x1, sp",
+            "umulh sp, x1, x2",
+        ] {
+            assert!(parse_line(text).is_err(), "SP must be rejected: {text}");
+        }
+
+        for text in [
+            "mul xzr, xzr, xzr",
+            "sdiv xzr, xzr, xzr",
+            "udiv xzr, xzr, xzr",
+            "madd xzr, xzr, xzr, xzr",
+            "msub xzr, xzr, xzr, xzr",
+            "mneg xzr, xzr, xzr",
+            "smulh xzr, xzr, xzr",
+            "umulh xzr, xzr, xzr",
+        ] {
+            assert!(parse_line(text).is_ok(), "XZR must remain valid: {text}");
+        }
     }
 
     #[test]
@@ -2428,6 +2543,26 @@ mod tests {
                 rd: Register::X0,
                 rn: Register::X1,
                 shift: Operand::Register(Register::X2),
+            },
+            Instruction::Uxtb {
+                rd: Register::X0,
+                rn: Register::X1,
+            },
+            Instruction::Uxth {
+                rd: Register::X0,
+                rn: Register::X1,
+            },
+            Instruction::Sxtb {
+                rd: Register::X0,
+                rn: Register::X1,
+            },
+            Instruction::Sxth {
+                rd: Register::X0,
+                rn: Register::X1,
+            },
+            Instruction::Sxtw {
+                rd: Register::X0,
+                rn: Register::X1,
             },
         ];
         for instr in cases {
@@ -2763,20 +2898,12 @@ mod tests {
     }
 
     #[test]
-    fn parse_w_form_widthless_registers_rejected() {
-        // These IR variants do not carry register width, so W-form spellings
-        // must not be accepted as aliases for the existing X-form semantics.
-        for text in [
-            "add w0, w1, w2",
-            "add w0, w1, #4",
-            "sub w3, w4, w5",
-            "cmp w1, w2",
-            "csel w0, w1, w2, eq",
-            "clz w0, w1",
-        ] {
-            assert!(parse_line(text).is_err(), "{text} should be rejected");
-        }
-
+    fn parse_w_form_arithmetic_keeps_extended_register_fallbacks() {
+        // Issue #121: W-form ADD/SUB now have explicit width-aware IR
+        // variants instead of aliasing to the 64-bit ADD/SUB semantics.
+        assert!(parse_line("add w0, w1, w2").is_ok());
+        assert!(parse_line("sub w3, w4, w5").is_ok());
+        assert!(parse_line("add w0, x1, w2").is_err());
         // The extended-register inner register accepts W-form.
         assert!(parse_line("add x0, x1, w2, uxtb #0").is_ok());
         assert!(parse_line("cmp x1, w2, sxth #1").is_ok());
@@ -2837,8 +2964,8 @@ mod tests {
             };
             assert_eq!(parsed, expected, "round-trip failed for {}", line);
         }
-        // The legacy X-form spelling we use internally for Display still
-        // parses correctly (e.g. `uxtb x0, x1` from older tests).
+        // Legacy X-form input remains accepted for compatibility even though
+        // Display now canonicalizes these aliases to architectural widths.
         assert!(parse_line("uxtb x0, x1").is_ok());
         assert!(parse_line("sxtw x0, x1").is_ok());
     }
@@ -2889,7 +3016,7 @@ mod tests {
                 rn: Register::X1,
             }
         );
-        assert_eq!(format!("{}", parsed), "sxtw x0, x1");
+        assert_eq!(format!("{}", parsed), "sxtw x0, w1");
     }
 
     #[test]
@@ -2905,7 +3032,7 @@ mod tests {
                 rn: Register::X1,
             }
         );
-        assert_eq!(format!("{}", parsed), "sxth x0, x1");
+        assert_eq!(format!("{}", parsed), "sxth x0, w1");
     }
 
     #[test]
@@ -2921,7 +3048,7 @@ mod tests {
                 rn: Register::X1,
             }
         );
-        assert_eq!(format!("{}", parsed), "uxth x0, x1");
+        assert_eq!(format!("{}", parsed), "uxth w0, w1");
     }
 
     #[test]
@@ -2937,7 +3064,7 @@ mod tests {
                 rn: Register::X1,
             }
         );
-        assert_eq!(format!("{}", parsed), "sxtb x0, x1");
+        assert_eq!(format!("{}", parsed), "sxtb x0, w1");
     }
 
     #[test]
@@ -2954,7 +3081,7 @@ mod tests {
                 rn: Register::X1,
             }
         );
-        assert_eq!(format!("{}", parsed), "uxtb x0, x1");
+        assert_eq!(format!("{}", parsed), "uxtb w0, w1");
     }
 
     // ===== Issue #69: branch / control-flow parsing =====
