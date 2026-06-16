@@ -141,7 +141,7 @@ src/
 │   ├── candidate.rs     # AArch64 candidate generation
 │   ├── candidate_x86.rs # x86 candidate generation
 │   ├── enumerative/     # Exhaustive search up to target.len()-1 (rayon-parallel; AArch64)
-│   ├── stochastic/      # MCMC with Metropolis-Hastings (AArch64)
+│   ├── stochastic/      # MCMC-style search with Metropolis acceptance (AArch64)
 │   ├── symbolic/        # SMT-based synthesis (AArch64)
 │   ├── parallel/        # Multi-threaded coordination (AArch64)
 │   └── llm/             # LLM-assisted search via Codex CLI (AArch64)
