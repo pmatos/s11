@@ -1,47 +1,41 @@
-# Plan - issue #181: Pin reversed-order `--live-out` error
+# Plan - issue #133: Pre-filter SP from shifted-register candidates
 
 ## 1. Problem Restated
 
-Issue #181 asks for a narrow regression test documenting the current malformed-order behavior for `--live-out "nzcv;x0"`. The accepted grammar is `<regs>` or `<regs>;<flags>` with `nzcv` valid only in the flags half, so the reversed input currently splits into register half `nzcv` and flag half `x0`, then fails through the register parser with `invalid register name: 'nzcv'`. The PR should pin that exact diagnostic so future parser-message changes fail with an actionable test failure, without changing parser behavior.
+`src/search/candidate.rs::generate_all_instructions` currently constructs AArch64 shifted-register `ADD`/`SUB`/`AND`/`ORR`/`EOR` candidates for every `(rd, rn, rm)` tuple, including tuples where one of those slots is `Register::SP`. `Instruction::is_encodable_aarch64` later rejects all shifted-register forms involving SP, so `generate_all_encodable_instructions` stays correct, but the raw candidate pool does unnecessary allocation and filtering work. The fix should pre-filter those known-invalid shifted-register tuples at enumeration time while preserving all valid shifted-register candidates and leaving the broader post-hoc encodability filter in place.
 
 ## 2. Files To Touch
 
-- `src/validation/live_out.rs` - add one unit test in the existing `#[cfg(test)] mod tests`, near the `parse_live_out_contract` malformed-input tests around lines 677-727.
+- `src/search/candidate.rs` - add a focused regression test in the existing `#[cfg(test)] mod tests` near the shifted-register enumeration tests around lines 1476-1543, then update the shifted-register enumeration block around lines 130-189 to skip any tuple where `rd == Register::SP`, `rn == Register::SP`, or `rm == Register::SP`.
 
-No production files should change. There are no `crates/` or `compiler/` directories in this repository, so this is not a Rust-stage/self-hosted compiler cross-cutting change. There is no `docs/spec/` tree in this checkout; the relevant accepted design source is `docs/adr/0006-live-out-cli-grammar.md`, and no ADR/spec update is needed because the grammar and behavior stay unchanged.
+No `crates/` or `compiler/` paths exist in this repository, so this is not a Rust-stage/self-hosted compiler cross-cutting change. No `docs/spec/` tree exists in this checkout. `docs/capability.md` and `docs/adr/` do not need updates because the accepted instruction set, syntax, CLI, equivalence contract, and user-visible semantics are unchanged.
 
 ## 3. TDD Slices
 
-1. Add a focused regression test in `src/validation/live_out.rs`, immediately after `test_parse_live_out_contract_bareword_nzcv_rejected` or before `test_parse_live_out_contract_unknown_flag_rejected`. Name it `test_parse_live_out_contract_reversed_order_nzcv_x0_error`.
+1. Add a red unit test in `src/search/candidate.rs` after `test_generate_all_instructions_arith_excludes_ror`. Name it `test_generate_all_instructions_shifted_register_prefilters_sp`. Use `registers = vec![Register::X0, Register::X1, Register::SP]` and `immediates = vec![]`, call `generate_all_instructions`, filter to `Instruction::Add`, `Sub`, `And`, `Orr`, and `Eor` whose `rm` is `Operand::ShiftedRegister`, and assert that the filtered set is non-empty and no shifted-register instruction has `rd`, `rn`, or inner `reg` equal to `Register::SP`. This fails on the current implementation because the raw enumerator emits those SP-bearing shifted-register candidates.
 
-2. In that test, call `let err = parse_live_out_contract("nzcv;x0").unwrap_err();` and assert the exact rendered message:
-   ```rust
-   assert_eq!(err.to_string(), "invalid register name: 'nzcv'");
-   ```
-   Prefer `err.to_string()` over substring matching so the test pins the user-visible `Display` body already covered by `display_renders_message_without_type_prefix` at `src/validation/live_out.rs:267-271`.
+2. Make the minimal production change in `src/search/candidate.rs::generate_all_instructions`. In the shifted-register block, replace the stale comment saying SP is filtered later with an enumeration-time guard. Keep the guard scoped to shifted-register candidate construction: either wrap the shifted-register pushes in `if rd != Register::SP && rn != Register::SP` plus `continue` for `rm == Register::SP`, or use an equivalent local predicate. Do not remove the later `.filter(|instr| instr.is_encodable_aarch64())` in `generate_all_encodable_instructions`.
 
-3. Red-check the guard without committing sabotage: temporarily change the expected string in the new test, or temporarily mutate the local parser diagnostic at `src/validation/live_out.rs:49-50`, then run:
-   ```bash
-   cargo test validation::live_out::tests::test_parse_live_out_contract_reversed_order_nzcv_x0_error -- --exact
-   ```
-   Confirm the test fails on the message mismatch, then immediately revert the temporary mutation.
+3. Green-check the new test and existing shifted-register coverage. Verify that the new SP pre-filter test passes, and that the existing tests still prove valid shifted-register coverage is retained: `test_generate_all_instructions_contains_shifted_register_add`, `test_generate_all_instructions_includes_all_shifted_kinds_for_logical`, and `test_generate_all_instructions_arith_excludes_ror`.
 
-4. Green-check against the real code. The production path that should satisfy the test already exists: `parse_live_out_contract` counts one semicolon at `src/validation/live_out.rs:94-115`, parses `regs_part` via `RegisterSet::<Register>::from_str`, and `parse_register` emits `invalid register name: 'nzcv'` at `src/validation/live_out.rs:49-50`. No production code should be edited.
-
-5. Refactor only if formatting requires it. Keep the test local and explicit; do not introduce helper functions or convert the surrounding parse-live-out tests to table-driven form for this small coverage addition.
+4. Refactor only if the guard makes the block harder to read. If introducing a helper, keep it private to `src/search/candidate.rs` and name it around the AArch64 shifted-register slot rule, not around a generic "encodable" concept; the authoritative full encodability rule remains `Instruction::is_encodable_aarch64` in `src/ir/instructions.rs`.
 
 ## 4. Verification Surface
 
-- No ESBMC proof work is needed. This change does not touch contracts, codegen, the C model, SMT lowering, concrete semantics, assembler output, or binary patching.
-- No fixtures under `tests/run/`, `tests/asm/`, `tests/integration/`, `examples/`, or benchmark directories should grow.
+- No ESBMC proof work is needed. This repository is the Rust `s11` project, and this change does not touch contracts, codegen, a C model, SMT lowering, concrete semantics, assembler encoding, parser behavior, or binary patching.
+- No fixtures under `tests/`, `examples/`, or `benches/` need to grow; this is covered by unit tests in `src/search/candidate.rs`.
 - Minimum verification:
   ```bash
-  cargo test validation::live_out::tests::test_parse_live_out_contract_reversed_order_nzcv_x0_error -- --exact
+  cargo test test_generate_all_instructions_shifted_register_prefilters_sp
+  cargo test test_generate_all_instructions_contains_shifted_register_add
+  cargo test test_generate_all_instructions_includes_all_shifted_kinds_for_logical
+  cargo test test_generate_all_instructions_arith_excludes_ror
   ```
 - Broader local verification before PR/commit:
   ```bash
-  cargo test validation::live_out
+  cargo test search::candidate
   cargo fmt -- --check
+  cargo clippy --all -- -D warnings
   ```
 - Full pre-push verification remains the repository gate from `CLAUDE.md`:
   ```bash
@@ -50,17 +44,17 @@ No production files should change. There are no `crates/` or `compiler/` directo
 
 ## 5. Risk Areas
 
-- Error-message coupling is intentional here: use an exact assertion because the issue specifically asks to pin the diagnostic text for `nzcv;x0`.
-- Test placement should stay in the parser/error-test cluster so future maintainers understand this as CLI grammar coverage, not live-in/live-out dataflow coverage.
-- Do not change `parse_live_out_contract` to special-case reversed order unless a separate issue asks for a friendlier diagnostic; that would widen the behavioral scope and may require ADR/help-text updates.
-- `parse -> print -> parse` idempotency is unaffected because this is a CLI live-out contract parser test, not assembly IR parsing or formatting.
+- Do not pre-filter `Register::XZR` from shifted-register forms. `src/ir/instructions.rs:749-798` rejects `Register::SP` for shifted-register operands but does not reject `Register::XZR`; filtering XZR would silently shrink valid search space.
+- Do not broaden this issue into plain `Operand::Register` cleanup. Register-form AArch64 slot rules are more nuanced in `is_encodable_aarch64`, and changing them would be a separate behavior/performance audit.
+- Do not remove the final encodability filter in `generate_all_encodable_instructions`; many other deliberately broad enumerations still rely on it for immediates and other forms.
+- Keep the test behavior-oriented. Avoid asserting the total candidate-pool size, which would make future instruction-family additions fail for the wrong reason.
+- `parse -> print -> parse` idempotency is unaffected because the parser and formatter are not touched.
 - Binary fixed-point risks are absent: no `compiler/` tree exists here, and the plan does not touch codegen ordering, map iteration, stack-slot layout, assembler encoding, or `vow-clif-shim`-style components.
-- The `cargo clippy --all -- -D warnings` gate should be unaffected; the added test must avoid unused imports or dead helper functions.
+- The `cargo clippy --all -- -D warnings` gate should stay clean; avoid adding unused helpers/imports while moving the `ShiftKind` use or introducing a local predicate.
 
 ## 6. Out Of Scope
 
-- Changing the grammar for reversed-order input or adding a bespoke "wrong order" diagnostic.
-- Changing any `run_equiv` or `run_llm_opt` error-prefix behavior in `src/main.rs`.
-- Adding docs/spec/ADR updates; this PR documents existing behavior through a regression test only.
-- Refactoring `ParseRegisterSetError`, `parse_register`, or the surrounding `parse_live_out_contract` tests.
-- Running benchmarks, mutation tests, x86/RISC-V flows, LLM search, assembler tests, or integration fixtures for this unit-test-only issue.
+- Changing `Instruction::is_encodable_aarch64` or assembler slot rules.
+- Filtering XZR or SP from unrelated plain-register, immediate, extended-register, memory, bitfield, compare, or conditional-select candidate families.
+- Changing stochastic mutation, symbolic synthesis, x86/RISC-V candidate generation, parser behavior, or CLI behavior.
+- Adding docs/spec, ADR, capability-matrix, benchmark, mutation-test, or integration-fixture updates.
