@@ -373,7 +373,7 @@ impl Default for SearchConfig {
             available_immediates: vec![
                 0, 1, 2, 3, 4, 5, 7, 8, 10, 15, 16, 31, 32, 63, 64, 100, 255, 256, 1000, 4095,
             ],
-            x86_available_registers: crate::search::candidate_x86::default_x86_registers(),
+            x86_available_registers: crate::isa::x86::default_x86_registers(),
             x86_width: 64,
             x86_mode: crate::assembler::x86::X86Mode::Mode64,
             stochastic: StochasticConfig::default(),

@@ -608,8 +608,8 @@ fn build_x86_stochastic_search_config(width: u32, options: &OptimizationOptions)
         .with_cost_metric(options.cost_metric)
         .with_timeout_option(options.timeout)
         .with_verbose(options.verbose)
-        .with_x86_registers(search::candidate_x86::default_x86_registers())
-        .with_immediates(search::candidate_x86::default_x86_immediates())
+        .with_x86_registers(isa::x86::default_x86_registers())
+        .with_immediates(isa::x86::default_x86_immediates())
         .with_x86_width(width)
 }
 
@@ -680,7 +680,7 @@ fn run_optimization(
                 .with_immediates(available_immediates)
                 .with_cores(options.cores);
 
-            let mut search = EnumerativeSearch::new();
+            let mut search = EnumerativeSearch::<isa::AArch64>::new();
             let result = search.search(prefix, &live_out, &config);
 
             print_search_statistics(&result.statistics);
@@ -1089,107 +1089,41 @@ fn convert_to_x86_ir(
     Ok(out)
 }
 
-/// Length-1 enumerator for x86: try every candidate of length 1 against
-/// the target sequence, return the first equivalent shorter sequence.
-fn find_shorter_equivalent_x86(
+/// Run x86 enumerative search and return the optimized sequence if any.
+fn run_x86_enumerative(
     target: &[isa::x86::X86Instruction],
     width: u32,
+    options: &OptimizationOptions,
 ) -> Option<Vec<isa::x86::X86Instruction>> {
-    use isa::InstructionType;
-    use isa::x86::X86Register;
-    use search::candidate_x86::generate_all_x86_instructions;
-    use semantics::cost_x86;
-    use semantics::equivalence::{EquivalenceConfigFor, check_equivalence_for};
-    use semantics::live_out::X86LiveOut;
+    use search::SearchAlgorithm;
+    use validation::live_out::x86_live_out_from_target;
 
-    if target.len() < 2 {
-        // Already length 1 (or empty); nothing strictly shorter exists.
-        return None;
-    }
-    let target_cost =
-        cost_x86::sequence_cost(target, &semantics::cost::CostMetric::CodeSize, width);
+    let config = build_x86_stochastic_search_config(width, options);
+    let live_out = x86_live_out_from_target(target);
 
-    // Peel any trailing Jcc terminator. Candidates never include Jcc, so
-    // a non-Jcc proposal against a Jcc-terminated target would otherwise
-    // be immediately rejected by the equivalence check's terminator-
-    // equality precheck. We append the original terminator to each
-    // proposal so the equivalence check sees matching terminators and
-    // its flag-observability guard fires correctly.
-    let (_, target_terminator) = crate::ir::instructions::split_terminator_x86(target);
-
-    // Live-out registers = everything the target writes.
-    let live_regs: Vec<X86Register> = target.iter().filter_map(|i| i.destination()).collect();
-    // Flags are live whenever the target contains any instruction with
-    // observable side-effects beyond the register write — every variant
-    // except MOV reports `has_side_effects() == true` because it touches
-    // EFLAGS. Without this, a rewrite like `add rax, 0; mov rax, rbx`
-    // → `mov rax, rbx` could be silently accepted, dropping the EFLAGS
-    // write the surrounding code may consume via Jcc.
-    let flags_live = target.iter().any(InstructionType::has_side_effects);
-    let live_out = X86LiveOut::from_registers(live_regs.clone()).with_flags(flags_live);
-
-    // Build a register pool from the registers actually used in the
-    // target. The candidate enumeration over this pool is bounded by the
-    // target's own register references — any scratch register not in
-    // `live_regs` cannot appear in a length-1 equivalent rewrite of a
-    // length-≥2 target, because the rewrite's write to that register is
-    // either unobservable (so it's wasted work) or contradicts live-out.
-    let mut pool: Vec<X86Register> = live_regs.clone();
-    for reg in target.iter().flat_map(|i| i.source_registers()) {
-        if !pool.contains(&reg) {
-            pool.push(reg);
-        }
-    }
-    let imms = vec![0i64, 1, -1];
-
-    let candidates = generate_all_x86_instructions(&pool, &imms);
-    // Defense-in-depth: when EITHER side reads EFLAGS (CMOV/Jcc), the
-    // fast-path's 10 random trials may not cover every flag combination
-    // the reader depends on. Drop `.fast_only()` for those iterations so
-    // the SMT path also runs. The two configs differ only in fast_only;
-    // building them once outside the loop avoids per-iteration churn.
-    // Route through `isa::x86::x86_reads_flags` so a future flag-reader
-    // (e.g. SETcc) only needs the predicate updated in one place.
-    let reads_flags =
-        |seq: &[isa::x86::X86Instruction]| -> bool { seq.iter().any(isa::x86::x86_reads_flags) };
-    let target_reads_flags = reads_flags(target);
-    let cfg_fast64 = EquivalenceConfigFor::<isa::X86_64>::default()
-        .live_out(live_out.clone())
-        .set_fast_only(true);
-    let cfg_smt64 = EquivalenceConfigFor::<isa::X86_64>::default().live_out(live_out.clone());
-    let cfg_fast32 = EquivalenceConfigFor::<isa::X86_32>::default()
-        .live_out(live_out.clone())
-        .set_fast_only(true);
-    let cfg_smt32 = EquivalenceConfigFor::<isa::X86_32>::default().live_out(live_out.clone());
-    for cand in candidates {
-        // Build the proposal as [candidate] + original_terminator so
-        // both sides share the same trailing Jcc (if any). The
-        // equivalence check peels them in lockstep and runs the prefix
-        // comparison under forced flags_live (since the terminator
-        // reads flags).
-        let mut seq = vec![cand];
-        if let Some(t) = target_terminator {
-            seq.push(*t);
-        }
-        let cand_cost =
-            cost_x86::sequence_cost(&seq, &semantics::cost::CostMetric::CodeSize, width);
-        if cand_cost >= target_cost {
-            continue;
-        }
-        let use_smt = target_reads_flags || reads_flags(&seq);
-        let result = if width == 32 {
-            let cfg = if use_smt { &cfg_smt32 } else { &cfg_fast32 };
-            check_equivalence_for::<isa::X86_32>(target, &seq, cfg)
-        } else {
-            let cfg = if use_smt { &cfg_smt64 } else { &cfg_fast64 };
-            check_equivalence_for::<isa::X86_64>(target, &seq, cfg)
-        };
-        match result {
-            semantics::equivalence::EquivalenceResult::Equivalent => return Some(seq),
-            _ => continue,
-        }
-    }
-    None
+    let (optimized, statistics) = if width == 32 {
+        let mut search: EnumerativeSearch<isa::X86_32> = EnumerativeSearch::new();
+        let result = search.search(target, &live_out, &config);
+        (
+            result
+                .found_optimization
+                .then_some(result.optimized_sequence)
+                .flatten(),
+            result.statistics,
+        )
+    } else {
+        let mut search: EnumerativeSearch<isa::X86_64> = EnumerativeSearch::new();
+        let result = search.search(target, &live_out, &config);
+        (
+            result
+                .found_optimization
+                .then_some(result.optimized_sequence)
+                .flatten(),
+            result.statistics,
+        )
+    };
+    print_search_statistics(&statistics);
+    optimized
 }
 
 /// Run x86 stochastic search and return the optimized sequence if any.
@@ -1257,8 +1191,8 @@ fn run_x86_symbolic(
         .with_cost_metric(options.cost_metric)
         .with_timeout_option(options.timeout)
         .with_verbose(options.verbose)
-        .with_x86_registers(search::candidate_x86::default_x86_registers())
-        .with_immediates(search::candidate_x86::default_x86_immediates())
+        .with_x86_registers(isa::x86::default_x86_registers())
+        .with_immediates(isa::x86::default_x86_immediates())
         .with_x86_width(width);
     let live_out = x86_live_out_from_target(target);
 
@@ -1444,7 +1378,7 @@ fn optimize_elf_binary_x86(
     validate_x86_window_terminator_placement(&ir)?;
 
     let optimized = match options.algorithm {
-        Algorithm::Enumerative => find_shorter_equivalent_x86(&ir, width),
+        Algorithm::Enumerative => run_x86_enumerative(&ir, width, options),
         Algorithm::Stochastic => run_x86_stochastic(&ir, width, options),
         Algorithm::Symbolic => run_x86_symbolic(&ir, width, options),
         Algorithm::Hybrid | Algorithm::Llm => {
@@ -1799,27 +1733,6 @@ fn main() {
                      hybrid and llm remain AArch64-only."
                 );
                 std::process::exit(1);
-            }
-            if is_x86 && matches!(algorithm, CliAlgorithm::Enumerative) {
-                // Enumerative x86 still ignores most search-tuning flags
-                // (it's a fixed length-1 enumerator with a fast-path-only
-                // equivalence check).
-                let mut ignored: Vec<&str> = Vec::new();
-                if timeout.is_some() {
-                    ignored.push("--timeout");
-                }
-                if !matches!(cost_metric, CliCostMetric::CodeSize) {
-                    ignored.push("--cost-metric (x86 enumerative always uses CodeSize)");
-                }
-                if cores.is_some() {
-                    ignored.push("--cores (x86 enumerative is single-threaded)");
-                }
-                if !ignored.is_empty() {
-                    eprintln!(
-                        "warning: x86 enumerative ignores the following option(s): {}.",
-                        ignored.join(", ")
-                    );
-                }
             }
             // Optimization mode
             let start_addr = match parse_hex_address(&start_addr) {
@@ -2292,18 +2205,23 @@ mod cli_helper_tests {
         assert!(x86_ir_from_mnemonic("add", "rax").unwrap().is_none());
         assert!(x86_ir_from_mnemonic("add", "rax, nope").is_err());
 
-        assert!(find_shorter_equivalent_x86(&[], 64).is_none());
+        let mut opts = options_for(Algorithm::Enumerative);
+        opts.timeout = Some(Duration::from_secs(5));
+        opts.solver_timeout = Duration::from_secs(5);
+        opts.cost_metric = CostMetric::CodeSize;
+        assert!(run_x86_enumerative(&[], 64, &opts).is_none());
         assert!(
-            find_shorter_equivalent_x86(
+            run_x86_enumerative(
                 &[X86Instruction::MovImm {
                     rd: X86Register::RAX,
                     imm: 1,
                 }],
-                64
+                64,
+                &opts
             )
             .is_none()
         );
-        let optimized = find_shorter_equivalent_x86(
+        let optimized = run_x86_enumerative(
             &[
                 X86Instruction::MovImm {
                     rd: X86Register::RAX,
@@ -2315,16 +2233,12 @@ mod cli_helper_tests {
                 },
             ],
             64,
+            &opts,
         )
         .expect("two identical writes can be shortened");
         assert_eq!(optimized.len(), 1);
     }
 
-    /// Regression: `find_shorter_equivalent_x86` must collapse a target
-    /// that references only non-RAX/RDI registers. Pins the
-    /// pool-narrowing change (issue #84 item 8) so any future
-    /// reintroduction of unconditional scratch-register inflation is
-    /// caught.
     #[test]
     fn validate_x86_window_rejects_mid_window_jcc() {
         use isa::x86::{X86Condition, X86Instruction, X86Register};
@@ -2375,12 +2289,18 @@ mod cli_helper_tests {
         validate_x86_window_terminator_placement(&ir).expect("Jcc-free window must be accepted");
     }
 
+    /// Regression: x86 enumerative search must preserve a trailing Jcc while
+    /// optimizing the straight-line prefix.
     #[test]
-    fn find_shorter_equivalent_x86_can_optimize_jcc_terminated_window() {
+    fn x86_enumerative_can_optimize_jcc_terminated_window() {
         use isa::x86::X86Condition;
         // Two redundant MovImms followed by a Jcc terminator. Search
         // should collapse the prefix and re-attach the original Jcc.
-        let optimized = find_shorter_equivalent_x86(
+        let mut opts = options_for(Algorithm::Enumerative);
+        opts.timeout = Some(Duration::from_secs(5));
+        opts.solver_timeout = Duration::from_secs(5);
+        opts.cost_metric = CostMetric::CodeSize;
+        let optimized = run_x86_enumerative(
             &[
                 X86Instruction::MovImm {
                     rd: X86Register::RBX,
@@ -2395,6 +2315,7 @@ mod cli_helper_tests {
                 },
             ],
             64,
+            &opts,
         )
         .expect("redundant prefix + Jcc must be optimizable");
         // Expect: [MovImm RBX, 1, Jcc E].
@@ -2415,8 +2336,12 @@ mod cli_helper_tests {
     }
 
     #[test]
-    fn find_shorter_equivalent_x86_collapses_without_rax_or_rdi_in_target() {
-        let optimized = find_shorter_equivalent_x86(
+    fn x86_enumerative_collapses_without_rax_or_rdi_in_target() {
+        let mut opts = options_for(Algorithm::Enumerative);
+        opts.timeout = Some(Duration::from_secs(5));
+        opts.solver_timeout = Duration::from_secs(5);
+        opts.cost_metric = CostMetric::CodeSize;
+        let optimized = run_x86_enumerative(
             &[
                 X86Instruction::MovImm {
                     rd: X86Register::RBX,
@@ -2428,6 +2353,7 @@ mod cli_helper_tests {
                 },
             ],
             64,
+            &opts,
         )
         .expect("two identical RBX writes can be shortened");
         assert_eq!(optimized.len(), 1);
@@ -2547,11 +2473,11 @@ mod cli_helper_tests {
         assert!(config.verbose);
         assert_eq!(
             config.x86_available_registers,
-            search::candidate_x86::default_x86_registers()
+            isa::x86::default_x86_registers()
         );
         assert_eq!(
             config.available_immediates,
-            search::candidate_x86::default_x86_immediates()
+            isa::x86::default_x86_immediates()
         );
         assert_eq!(config.x86_width, 32);
         assert_eq!(config.x86_mode, assembler::x86::X86Mode::Mode32);
@@ -2770,7 +2696,7 @@ mod cli_helper_tests {
         let config = SearchConfig::default()
             .with_registers(vec![Register::X0, Register::X1])
             .with_immediates(vec![0, 1]);
-        let mut search = EnumerativeSearch::new();
+        let mut search = EnumerativeSearch::<isa::AArch64>::new();
         let result = search.search(prefix, &live_out, &config);
 
         if let Some(shorter_prefix) = result.optimized_sequence {

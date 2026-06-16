@@ -21,4 +21,7 @@ pub use riscv::{
     RiscV32, RiscV64, RiscVInstruction, RiscVInstructionGenerator, RiscVOperand, RiscVRegister,
 };
 #[allow(unused_imports)]
-pub use x86::{X86_32, X86_64, X86Instruction, X86InstructionGenerator, X86Operand, X86Register};
+pub use x86::{
+    X86_32, X86_64, X86Instruction, X86InstructionGenerator, X86Operand, X86Register,
+    default_x86_immediates, default_x86_registers,
+};

@@ -1,31 +1,32 @@
-//! Enumerative search for AArch64 superoptimization.
+//! Enumerative search for superoptimization.
 //!
 //! Replaces the MVP placeholder that previously lived in `main.rs`. Enumerates
 //! candidate sequences of length `1..target.len()` over the configured
 //! register/immediate sets (shared with the symbolic path) and verifies each
 //! against the target with the live-out/flag-aware equivalence checker.
 
+use std::marker::PhantomData;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use rayon::prelude::*;
 
-use crate::ir::Instruction;
+use crate::isa::{AArch64, CostModel, ISA, InstructionGenerator};
 use crate::search::SearchAlgorithm;
 use crate::search::candidate::generate_all_encodable_instructions;
 use crate::search::config::{Algorithm, SearchConfig};
-use crate::search::result::{SearchResult, SearchStatistics};
-use crate::semantics::cost::sequence_cost;
-use crate::semantics::live_out::LiveOut;
-use crate::semantics::{
-    EquivalenceConfig, EquivalenceResult, check_equivalence_with_config_metrics,
+use crate::search::result::{SearchResultFor, SearchStatistics};
+use crate::semantics::equivalence::{
+    EquivalenceConfigFor, check_equivalence_for_metrics, check_equivalence_with_config_metrics,
 };
+use crate::semantics::live_out::{LiveOut, X86LiveOut};
+use crate::semantics::{EquivalenceConfig, EquivalenceMetrics, EquivalenceResult};
 
 /// Shared state for parallel workers. Counters are atomic to avoid locking; the
 /// best-so-far sequence is behind a `Mutex` because it is only touched on an
 /// improvement (rare relative to candidate evaluation count).
-struct SharedState {
+struct SharedState<I: ISA> {
     best_cost: AtomicU64,
     stop: AtomicBool,
     candidates_evaluated: AtomicU64,
@@ -34,10 +35,10 @@ struct SharedState {
     smt_elapsed_nanos: AtomicU64,
     candidates_passed_fast: AtomicU64,
     improvements_found: AtomicU64,
-    best: Mutex<Option<Vec<Instruction>>>,
+    best: Mutex<Option<Vec<I::Instruction>>>,
 }
 
-impl SharedState {
+impl<I: ISA> SharedState<I> {
     fn new(initial_best_cost: u64) -> Self {
         Self {
             best_cost: AtomicU64::new(initial_best_cost),
@@ -52,7 +53,7 @@ impl SharedState {
         }
     }
 
-    fn record_improvement(&self, candidate: Vec<Instruction>, cost: u64) {
+    fn record_improvement(&self, candidate: Vec<I::Instruction>, cost: u64) {
         // Take the mutex first, then re-check best_cost under the lock. The
         // outer atomic load is still useful for the lock-free cost-prune fast
         // path in the per-length runners, but every actual commit happens
@@ -76,28 +77,191 @@ impl SharedState {
     }
 }
 
+pub trait EnumerativeBackend<I: ISA>: Sized {
+    type LiveOut: Clone + Sync;
+
+    fn registers_from_config(config: &SearchConfig) -> Vec<I::Register>;
+    fn immediates_from_config(config: &SearchConfig) -> Vec<i64>;
+    fn enumerate_all(regs: &[I::Register], imms: &[i64]) -> Vec<I::Instruction>;
+    fn sequence_cost(seq: &[I::Instruction], config: &SearchConfig) -> u64;
+    fn target_terminator(_target: &[I::Instruction]) -> Option<I::Instruction> {
+        None
+    }
+    fn check_equivalence(
+        target: &[I::Instruction],
+        candidate: &[I::Instruction],
+        live_out: &Self::LiveOut,
+        config: &SearchConfig,
+    ) -> (EquivalenceResult, EquivalenceMetrics);
+}
+
+impl EnumerativeBackend<AArch64> for AArch64 {
+    type LiveOut = LiveOut;
+
+    fn registers_from_config(config: &SearchConfig) -> Vec<crate::ir::Register> {
+        config.available_registers.clone()
+    }
+
+    fn immediates_from_config(config: &SearchConfig) -> Vec<i64> {
+        config.available_immediates.clone()
+    }
+
+    fn enumerate_all(regs: &[crate::ir::Register], imms: &[i64]) -> Vec<crate::ir::Instruction> {
+        generate_all_encodable_instructions(regs, imms)
+    }
+
+    fn sequence_cost(seq: &[crate::ir::Instruction], config: &SearchConfig) -> u64 {
+        <AArch64 as CostModel<crate::ir::Instruction>>::sequence_cost(
+            &AArch64,
+            seq,
+            &config.cost_metric,
+        )
+    }
+
+    fn check_equivalence(
+        target: &[crate::ir::Instruction],
+        candidate: &[crate::ir::Instruction],
+        live_out: &Self::LiveOut,
+        config: &SearchConfig,
+    ) -> (EquivalenceResult, EquivalenceMetrics) {
+        let smt_timeout = config
+            .symbolic
+            .solver_timeout
+            .unwrap_or(Duration::from_secs(5));
+        let equiv_config = EquivalenceConfig::with_live_out(live_out.clone())
+            .random_tests(5)
+            .timeout(smt_timeout)
+            .with_flags(true)
+            .with_memory(true);
+
+        check_equivalence_with_config_metrics(target, candidate, &equiv_config)
+    }
+}
+
+impl EnumerativeBackend<crate::isa::X86_64> for crate::isa::X86_64 {
+    type LiveOut = X86LiveOut;
+
+    fn registers_from_config(config: &SearchConfig) -> Vec<crate::isa::x86::X86Register> {
+        config.x86_available_registers.clone()
+    }
+
+    fn immediates_from_config(config: &SearchConfig) -> Vec<i64> {
+        config.available_immediates.clone()
+    }
+
+    fn enumerate_all(
+        regs: &[crate::isa::x86::X86Register],
+        imms: &[i64],
+    ) -> Vec<crate::isa::x86::X86Instruction> {
+        crate::isa::x86::X86InstructionGenerator.generate_all(regs, imms)
+    }
+
+    fn sequence_cost(seq: &[crate::isa::x86::X86Instruction], config: &SearchConfig) -> u64 {
+        <crate::isa::X86_64 as CostModel<crate::isa::x86::X86Instruction>>::sequence_cost(
+            &crate::isa::X86_64,
+            seq,
+            &config.cost_metric,
+        )
+    }
+
+    fn target_terminator(
+        target: &[crate::isa::x86::X86Instruction],
+    ) -> Option<crate::isa::x86::X86Instruction> {
+        crate::ir::instructions::split_terminator_x86(target)
+            .1
+            .copied()
+    }
+
+    fn check_equivalence(
+        target: &[crate::isa::x86::X86Instruction],
+        candidate: &[crate::isa::x86::X86Instruction],
+        live_out: &Self::LiveOut,
+        config: &SearchConfig,
+    ) -> (EquivalenceResult, EquivalenceMetrics) {
+        let smt_timeout = config
+            .symbolic
+            .solver_timeout
+            .unwrap_or(Duration::from_secs(5));
+        let equiv_config =
+            EquivalenceConfigFor::<crate::isa::X86_64>::with_live_out(live_out.clone())
+                .random_tests(5)
+                .timeout(smt_timeout);
+        check_equivalence_for_metrics::<crate::isa::X86_64>(target, candidate, &equiv_config)
+    }
+}
+
+impl EnumerativeBackend<crate::isa::X86_32> for crate::isa::X86_32 {
+    type LiveOut = X86LiveOut;
+
+    fn registers_from_config(config: &SearchConfig) -> Vec<crate::isa::x86::X86Register> {
+        config
+            .x86_available_registers
+            .iter()
+            .copied()
+            .filter(|r| matches!(r.index(), Some(i) if i < 8))
+            .collect()
+    }
+
+    fn immediates_from_config(config: &SearchConfig) -> Vec<i64> {
+        config.available_immediates.clone()
+    }
+
+    fn enumerate_all(
+        regs: &[crate::isa::x86::X86Register],
+        imms: &[i64],
+    ) -> Vec<crate::isa::x86::X86Instruction> {
+        crate::isa::x86::X86InstructionGenerator.generate_all(regs, imms)
+    }
+
+    fn sequence_cost(seq: &[crate::isa::x86::X86Instruction], config: &SearchConfig) -> u64 {
+        <crate::isa::X86_32 as CostModel<crate::isa::x86::X86Instruction>>::sequence_cost(
+            &crate::isa::X86_32,
+            seq,
+            &config.cost_metric,
+        )
+    }
+
+    fn target_terminator(
+        target: &[crate::isa::x86::X86Instruction],
+    ) -> Option<crate::isa::x86::X86Instruction> {
+        crate::ir::instructions::split_terminator_x86(target)
+            .1
+            .copied()
+    }
+
+    fn check_equivalence(
+        target: &[crate::isa::x86::X86Instruction],
+        candidate: &[crate::isa::x86::X86Instruction],
+        live_out: &Self::LiveOut,
+        config: &SearchConfig,
+    ) -> (EquivalenceResult, EquivalenceMetrics) {
+        let smt_timeout = config
+            .symbolic
+            .solver_timeout
+            .unwrap_or(Duration::from_secs(5));
+        let equiv_config =
+            EquivalenceConfigFor::<crate::isa::X86_32>::with_live_out(live_out.clone())
+                .random_tests(5)
+                .timeout(smt_timeout);
+        check_equivalence_for_metrics::<crate::isa::X86_32>(target, candidate, &equiv_config)
+    }
+}
+
 /// Verify a candidate against the target with the symbolic-path verification
 /// posture (live-out + NZCV + 5-test pre-filter). Free function so it can run
 /// inside rayon's parallel closures (no `&mut self` capture).
-fn verify_candidate(
-    target: &[Instruction],
-    candidate: &[Instruction],
-    live_out: &LiveOut,
+fn verify_candidate<I>(
+    target: &[I::Instruction],
+    candidate: &[I::Instruction],
+    live_out: &<I as EnumerativeBackend<I>>::LiveOut,
     config: &SearchConfig,
-    shared: &SharedState,
-) -> bool {
-    let smt_timeout = config
-        .symbolic
-        .solver_timeout
-        .unwrap_or(Duration::from_secs(5));
-    let equiv_config = EquivalenceConfig::with_live_out(live_out.clone())
-        .random_tests(5)
-        .timeout(smt_timeout)
-        .with_flags(true)
-        .with_memory(true);
-
+    shared: &SharedState<I>,
+) -> bool
+where
+    I: ISA + EnumerativeBackend<I>,
+{
     let (verdict, metrics) =
-        check_equivalence_with_config_metrics(target, candidate, &equiv_config);
+        <I as EnumerativeBackend<I>>::check_equivalence(target, candidate, live_out, config);
     let solver_nanos: u64 = metrics
         .smt_elapsed
         .as_nanos()
@@ -127,14 +291,16 @@ fn verify_candidate(
     }
 }
 
-pub struct EnumerativeSearch {
+pub struct EnumerativeSearch<I: ISA = AArch64> {
     statistics: SearchStatistics,
+    _isa: PhantomData<I>,
 }
 
-impl EnumerativeSearch {
+impl<I: ISA> EnumerativeSearch<I> {
     pub fn new() -> Self {
         Self {
             statistics: SearchStatistics::new(Algorithm::Enumerative),
+            _isa: PhantomData,
         }
     }
 
@@ -143,42 +309,51 @@ impl EnumerativeSearch {
     }
 }
 
-fn run_length_one(
-    target: &[Instruction],
-    live_out: &LiveOut,
+fn run_length_one<I>(
+    target: &[I::Instruction],
+    live_out: &<I as EnumerativeBackend<I>>::LiveOut,
     config: &SearchConfig,
-    all_instructions: &[Instruction],
-    shared: &SharedState,
+    all_instructions: &[I::Instruction],
+    terminator: Option<I::Instruction>,
+    shared: &SharedState<I>,
     start: Instant,
-) {
+) where
+    I: ISA + EnumerativeBackend<I>,
+{
     all_instructions.par_iter().for_each(|instr| {
         if shared.stop.load(Ordering::Relaxed) {
             return;
         }
-        if EnumerativeSearch::timed_out(start, config.timeout) {
+        if EnumerativeSearch::<I>::timed_out(start, config.timeout) {
             shared.stop.store(true, Ordering::Relaxed);
             return;
         }
-        let candidate = [*instr];
-        let candidate_cost = sequence_cost(&candidate, &config.cost_metric);
+        let mut candidate = vec![*instr];
+        if let Some(t) = terminator {
+            candidate.push(t);
+        }
+        let candidate_cost = <I as EnumerativeBackend<I>>::sequence_cost(&candidate, config);
         if candidate_cost >= shared.best_cost.load(Ordering::Acquire) {
             return;
         }
         shared.candidates_evaluated.fetch_add(1, Ordering::Relaxed);
-        if verify_candidate(target, &candidate, live_out, config, shared) {
-            shared.record_improvement(candidate.to_vec(), candidate_cost);
+        if verify_candidate::<I>(target, &candidate, live_out, config, shared) {
+            shared.record_improvement(candidate, candidate_cost);
         }
     });
 }
 
-fn run_length_two(
-    target: &[Instruction],
-    live_out: &LiveOut,
+fn run_length_two<I>(
+    target: &[I::Instruction],
+    live_out: &<I as EnumerativeBackend<I>>::LiveOut,
     config: &SearchConfig,
-    all_instructions: &[Instruction],
-    shared: &SharedState,
+    all_instructions: &[I::Instruction],
+    terminator: Option<I::Instruction>,
+    shared: &SharedState<I>,
     start: Instant,
-) {
+) where
+    I: ISA + EnumerativeBackend<I>,
+{
     // Parallelise only over the outer `instr1` loop; the inner loop runs
     // sequentially per worker so we don't oversubscribe rayon with O(pool²)
     // tasks and so cost-pruning observes monotonic best-cost updates locally.
@@ -187,7 +362,7 @@ fn run_length_two(
             return;
         }
         // Mirror symbolic's timeout granularity (instr1 level).
-        if EnumerativeSearch::timed_out(start, config.timeout) {
+        if EnumerativeSearch::<I>::timed_out(start, config.timeout) {
             shared.stop.store(true, Ordering::Relaxed);
             return;
         }
@@ -195,54 +370,60 @@ fn run_length_two(
             if shared.stop.load(Ordering::Relaxed) {
                 return;
             }
-            let candidate = [*instr1, *instr2];
-            let candidate_cost = sequence_cost(&candidate, &config.cost_metric);
+            let mut candidate = vec![*instr1, *instr2];
+            if let Some(t) = terminator {
+                candidate.push(t);
+            }
+            let candidate_cost = <I as EnumerativeBackend<I>>::sequence_cost(&candidate, config);
             if candidate_cost >= shared.best_cost.load(Ordering::Acquire) {
                 continue;
             }
             shared.candidates_evaluated.fetch_add(1, Ordering::Relaxed);
-            if verify_candidate(target, &candidate, live_out, config, shared) {
-                shared.record_improvement(candidate.to_vec(), candidate_cost);
+            if verify_candidate::<I>(target, &candidate, live_out, config, shared) {
+                shared.record_improvement(candidate, candidate_cost);
             }
         }
     });
 }
 
-impl Default for EnumerativeSearch {
+impl<I: ISA> Default for EnumerativeSearch<I> {
     fn default() -> Self {
         Self::new()
     }
 }
 
-impl SearchAlgorithm<crate::isa::AArch64> for EnumerativeSearch {
-    type LiveOut = LiveOut;
-    type Result = SearchResult;
+impl<I> SearchAlgorithm<I> for EnumerativeSearch<I>
+where
+    I: ISA + EnumerativeBackend<I>,
+{
+    type LiveOut = <I as EnumerativeBackend<I>>::LiveOut;
+    type Result = SearchResultFor<I>;
 
     fn search(
         &mut self,
-        target: &[Instruction],
-        live_out: &LiveOut,
+        target: &[I::Instruction],
+        live_out: &Self::LiveOut,
         config: &SearchConfig,
-    ) -> SearchResult {
+    ) -> Self::Result {
         self.reset();
         let start = Instant::now();
 
-        let original_cost = sequence_cost(target, &config.cost_metric);
+        let original_cost = <I as EnumerativeBackend<I>>::sequence_cost(target, config);
         self.statistics.original_cost = original_cost;
         self.statistics.best_cost_found = original_cost;
 
         if target.len() < 2 {
             self.statistics.elapsed_time = start.elapsed();
-            return SearchResult::no_optimization(target.to_vec(), self.statistics.clone());
+            return SearchResultFor::no_optimization(target.to_vec(), self.statistics.clone());
         }
 
-        let all_instructions = generate_all_encodable_instructions(
-            &config.available_registers,
-            &config.available_immediates,
-        );
+        let registers = <I as EnumerativeBackend<I>>::registers_from_config(config);
+        let immediates = <I as EnumerativeBackend<I>>::immediates_from_config(config);
+        let all_instructions = <I as EnumerativeBackend<I>>::enumerate_all(&registers, &immediates);
+        let terminator = <I as EnumerativeBackend<I>>::target_terminator(target);
         let shared = SharedState::new(original_cost);
 
-        let run_lengths = |s: &SharedState| {
+        let run_lengths = |s: &SharedState<I>| {
             // Search increasing lengths up to target.len()-1 so we never
             // propose a candidate as long as the target. We keep going after a
             // hit because length-1 may exist alongside length-2; cost-pruning
@@ -252,8 +433,24 @@ impl SearchAlgorithm<crate::isa::AArch64> for EnumerativeSearch {
                     break;
                 }
                 match length {
-                    1 => run_length_one(target, live_out, config, &all_instructions, s, start),
-                    2 => run_length_two(target, live_out, config, &all_instructions, s, start),
+                    1 => run_length_one::<I>(
+                        target,
+                        live_out,
+                        config,
+                        &all_instructions,
+                        terminator,
+                        s,
+                        start,
+                    ),
+                    2 => run_length_two::<I>(
+                        target,
+                        live_out,
+                        config,
+                        &all_instructions,
+                        terminator,
+                        s,
+                        start,
+                    ),
                     _ => {} // length >= 3 lands in a follow-up TDD cycle.
                 }
             }
@@ -301,10 +498,11 @@ impl SearchAlgorithm<crate::isa::AArch64> for EnumerativeSearch {
 
         match best_solution {
             Some(seq) => {
-                self.statistics.best_cost_found = sequence_cost(&seq, &config.cost_metric);
-                SearchResult::with_optimization(target.to_vec(), seq, self.statistics.clone())
+                self.statistics.best_cost_found =
+                    <I as EnumerativeBackend<I>>::sequence_cost(&seq, config);
+                SearchResultFor::with_optimization(target.to_vec(), seq, self.statistics.clone())
             }
-            None => SearchResult::no_optimization(target.to_vec(), self.statistics.clone()),
+            None => SearchResultFor::no_optimization(target.to_vec(), self.statistics.clone()),
         }
     }
 
@@ -325,7 +523,7 @@ mod tests {
 
     #[test]
     fn empty_target_returns_no_optimization() {
-        let mut search = EnumerativeSearch::new();
+        let mut search = EnumerativeSearch::<crate::isa::AArch64>::new();
         let result = search.search(&[], &LiveOut::all_registers(), &SearchConfig::default());
         assert!(!result.found_optimization);
         assert!(result.optimized_sequence.is_none());
@@ -361,7 +559,7 @@ mod tests {
         let live_out = LiveOut::from_registers(vec![Register::X0]);
         let config = small_config().with_cores(Some(1));
 
-        let mut search = EnumerativeSearch::new();
+        let mut search = EnumerativeSearch::<crate::isa::AArch64>::new();
         let result = search.search(&target, &live_out, &config);
 
         assert!(
@@ -397,7 +595,7 @@ mod tests {
             rn: Register::X1,
             rm: Operand::Immediate(1),
         }];
-        let mut search = EnumerativeSearch::new();
+        let mut search = EnumerativeSearch::<crate::isa::AArch64>::new();
         let result = search.search(&target, &LiveOut::all_registers(), &SearchConfig::default());
         assert!(!result.found_optimization);
     }
@@ -438,7 +636,7 @@ mod tests {
             .with_immediates(vec![0, 1])
             .with_timeout(std::time::Duration::from_secs(30));
 
-        let mut search = EnumerativeSearch::new();
+        let mut search = EnumerativeSearch::<crate::isa::AArch64>::new();
         let result = search.search(&target, &live_out, &config);
 
         assert!(
@@ -478,7 +676,7 @@ mod tests {
             .with_immediates(vec![0, 1])
             .with_timeout(std::time::Duration::from_secs(60));
 
-        let mut search = EnumerativeSearch::new();
+        let mut search = EnumerativeSearch::<crate::isa::AArch64>::new();
         let result = search.search(&target, &live_out, &config);
 
         let optimized = result.optimized_sequence.expect("expected an optimization");
@@ -524,7 +722,7 @@ mod tests {
         let live_out = LiveOut::from_registers(vec![Register::X0]);
         let config = small_config().with_cores(Some(1));
 
-        let mut search = EnumerativeSearch::new();
+        let mut search = EnumerativeSearch::<crate::isa::AArch64>::new();
         let result = search.search(&target, &live_out, &config);
 
         assert!(
@@ -554,7 +752,7 @@ mod tests {
 
         let config = small_config().with_cores(Some(2));
 
-        let mut search = EnumerativeSearch::new();
+        let mut search = EnumerativeSearch::<crate::isa::AArch64>::new();
         let result = search.search(&target, &live_out, &config);
 
         assert!(
@@ -600,7 +798,7 @@ mod tests {
         ];
         let live_out = LiveOut::from_registers(vec![Register::X0]);
 
-        let mut search = EnumerativeSearch::new();
+        let mut search = EnumerativeSearch::<crate::isa::AArch64>::new();
         let result = search.search(&target, &live_out, &small_config());
 
         // The important assertion is that the search returned — i.e. the
@@ -644,7 +842,7 @@ mod tests {
             );
 
         let start = std::time::Instant::now();
-        let mut search = EnumerativeSearch::new();
+        let mut search = EnumerativeSearch::<crate::isa::AArch64>::new();
         let result = search.search(&target, &live_out, &config);
         let elapsed = start.elapsed();
 
@@ -681,7 +879,7 @@ mod tests {
         // it). Test the supported acceptance shape.
         let live_out = LiveOut::from_registers(vec![Register::X0]);
 
-        let mut search = EnumerativeSearch::new();
+        let mut search = EnumerativeSearch::<crate::isa::AArch64>::new();
         let result = search.search(&target, &live_out, &small_config());
 
         assert!(
@@ -693,6 +891,80 @@ mod tests {
             optimized.len(),
             1,
             "should collapse to a single instruction"
+        );
+    }
+
+    #[test]
+    fn x86_64_enumerative_finds_single_instruction_rewrite() {
+        use crate::isa::X86_64;
+        use crate::isa::x86::{X86Instruction, X86Register};
+        use crate::semantics::cost::CostMetric;
+
+        let target = vec![
+            X86Instruction::MovImm {
+                rd: X86Register::RAX,
+                imm: 0,
+            },
+            X86Instruction::AddReg {
+                rd: X86Register::RAX,
+                rs: X86Register::RBX,
+            },
+        ];
+        let live_out = X86LiveOut::from_registers(vec![X86Register::RAX]);
+        let config = SearchConfig::default()
+            .with_x86_registers(vec![X86Register::RAX, X86Register::RBX])
+            .with_immediates(vec![0])
+            .with_cost_metric(CostMetric::CodeSize)
+            .with_x86_width(64)
+            .with_timeout_option(Some(Duration::from_secs(5)));
+
+        let mut search = EnumerativeSearch::<X86_64>::new();
+        let result = search.search(&target, &live_out, &config);
+
+        assert!(result.found_optimization);
+        assert_eq!(
+            result.optimized_sequence,
+            Some(vec![X86Instruction::MovReg {
+                rd: X86Register::RAX,
+                rs: X86Register::RBX,
+            }])
+        );
+    }
+
+    #[test]
+    fn x86_32_enumerative_finds_single_instruction_rewrite() {
+        use crate::isa::X86_32;
+        use crate::isa::x86::{X86Instruction, X86Register};
+        use crate::semantics::cost::CostMetric;
+
+        let target = vec![
+            X86Instruction::MovImm {
+                rd: X86Register::RAX,
+                imm: 0,
+            },
+            X86Instruction::AddReg {
+                rd: X86Register::RAX,
+                rs: X86Register::RBX,
+            },
+        ];
+        let live_out = X86LiveOut::from_registers(vec![X86Register::RAX]);
+        let config = SearchConfig::default()
+            .with_x86_registers(vec![X86Register::RAX, X86Register::RBX, X86Register::R8])
+            .with_immediates(vec![0])
+            .with_cost_metric(CostMetric::CodeSize)
+            .with_x86_width(32)
+            .with_timeout_option(Some(Duration::from_secs(5)));
+
+        let mut search = EnumerativeSearch::<X86_32>::new();
+        let result = search.search(&target, &live_out, &config);
+
+        assert!(result.found_optimization);
+        assert_eq!(
+            result.optimized_sequence,
+            Some(vec![X86Instruction::MovReg {
+                rd: X86Register::RAX,
+                rs: X86Register::RBX,
+            }])
         );
     }
 }

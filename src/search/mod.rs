@@ -7,7 +7,6 @@
 //! - Hybrid: parallel execution combining symbolic + multiple stochastic workers
 
 pub mod candidate;
-pub mod candidate_x86;
 pub mod config;
 pub mod enumerative;
 pub mod llm;
@@ -75,6 +74,8 @@ mod tests {
         assert_impl::<crate::isa::AArch64, llm::LlmSearch>();
         // x86_64 and x86_32 instantiations land via this PR (issue #73).
         // A future drop of either backend impl trips this at compile time.
+        assert_impl::<crate::isa::X86_64, enumerative::EnumerativeSearch<crate::isa::X86_64>>();
+        assert_impl::<crate::isa::X86_32, enumerative::EnumerativeSearch<crate::isa::X86_32>>();
         assert_impl::<crate::isa::X86_64, stochastic::StochasticSearch<crate::isa::X86_64>>();
         assert_impl::<crate::isa::X86_64, symbolic::SymbolicSearch<crate::isa::X86_64>>();
         assert_impl::<crate::isa::X86_32, stochastic::StochasticSearch<crate::isa::X86_32>>();

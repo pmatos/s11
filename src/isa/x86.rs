@@ -513,10 +513,9 @@ fn x86_modifies_flags(instr: &X86Instruction) -> bool {
 }
 
 /// CMOV and Jcc read EFLAGS; every other variant in the current set
-/// is flag-agnostic on the read side. Crate-visible so external
-/// callers (e.g. `find_shorter_equivalent_x86`) can route through one
-/// authoritative match arm — adding a future flag-reader like SETcc
-/// then updates exactly one place.
+/// is flag-agnostic on the read side. Crate-visible so search and
+/// equivalence callers can route through one authoritative match arm —
+/// adding a future flag-reader like SETcc then updates exactly one place.
 pub fn x86_reads_flags(instr: &X86Instruction) -> bool {
     matches!(
         instr,
@@ -640,22 +639,22 @@ impl crate::isa::traits::SymbolicExecutor<X86Instruction> for X86_32 {
 }
 
 impl crate::isa::traits::CostModel<X86Instruction> for X86_64 {
-    fn instruction_cost(&self, instruction: &X86Instruction) -> u64 {
-        crate::semantics::cost_x86::instruction_cost(
-            instruction,
-            &crate::semantics::cost::CostMetric::InstructionCount,
-            64,
-        )
+    fn instruction_cost(
+        &self,
+        instruction: &X86Instruction,
+        metric: &crate::semantics::cost::CostMetric,
+    ) -> u64 {
+        crate::semantics::cost_x86::instruction_cost(instruction, metric, 64)
     }
 }
 
 impl crate::isa::traits::CostModel<X86Instruction> for X86_32 {
-    fn instruction_cost(&self, instruction: &X86Instruction) -> u64 {
-        crate::semantics::cost_x86::instruction_cost(
-            instruction,
-            &crate::semantics::cost::CostMetric::InstructionCount,
-            32,
-        )
+    fn instruction_cost(
+        &self,
+        instruction: &X86Instruction,
+        metric: &crate::semantics::cost::CostMetric,
+    ) -> u64 {
+        crate::semantics::cost_x86::instruction_cost(instruction, metric, 32)
     }
 }
 
@@ -990,6 +989,31 @@ pub struct X86InstructionGenerator;
 // it across all 16 `X86Condition::ALL` variants per register pair.
 const X86_REWRITABLE_OPCODE_COUNT: u8 = 15;
 
+/// Default register pool for x86 stochastic / symbolic search.
+///
+/// Mirrors the AArch64 baseline of a small GPR subset. RSP and RBP are
+/// deliberately excluded so search never touches the stack frame.
+pub fn default_x86_registers() -> Vec<X86Register> {
+    vec![
+        X86Register::RAX,
+        X86Register::RCX,
+        X86Register::RDX,
+        X86Register::RBX,
+        X86Register::RSI,
+        X86Register::RDI,
+        X86Register::R8,
+        X86Register::R9,
+    ]
+}
+
+/// Default immediate pool for x86 search. Same constants as the AArch64
+/// search baseline so the two backends use comparable candidate spaces.
+pub fn default_x86_immediates() -> Vec<i64> {
+    vec![
+        0, 1, 2, 3, 4, 5, 7, 8, 10, 15, 16, 31, 32, 63, 64, 100, 255, 256, 1000, 4095,
+    ]
+}
+
 impl InstructionGenerator<X86Instruction> for X86InstructionGenerator {
     fn generate_all(&self, registers: &[X86Register], immediates: &[i64]) -> Vec<X86Instruction> {
         let mut out = Vec::new();
@@ -1244,6 +1268,20 @@ mod tests {
         }
 
         assert!(saw_cmov, "random trait generator never emitted CMOVcc");
+    }
+
+    #[test]
+    fn x86_32_generic_encodability_rejects_extended_registers() {
+        let seq = [X86Instruction::MovReg {
+            rd: X86Register::R8,
+            rs: X86Register::RAX,
+        }];
+        assert!(!crate::search::candidate::is_sequence_encodable_for(
+            &seq, &X86_32
+        ));
+        assert!(crate::search::candidate::is_sequence_encodable_for(
+            &seq, &X86_64
+        ));
     }
 
     #[test]
@@ -1645,12 +1683,67 @@ mod tests {
         assert!(X86Register::from_index(255).is_none());
     }
 
+    #[test]
+    fn x86_cost_model_preserves_width_sensitive_code_size() {
+        use crate::isa::traits::CostModel;
+        use crate::semantics::cost::CostMetric;
+
+        let cmov = X86Instruction::Cmov {
+            rd: X86Register::RAX,
+            rs: X86Register::RBX,
+            cond: X86Condition::E,
+        };
+        assert_eq!(
+            <X86_64 as CostModel<X86Instruction>>::instruction_cost(
+                &X86_64,
+                &cmov,
+                &CostMetric::CodeSize,
+            ),
+            4
+        );
+        assert_eq!(
+            <X86_32 as CostModel<X86Instruction>>::instruction_cost(
+                &X86_32,
+                &cmov,
+                &CostMetric::CodeSize,
+            ),
+            3
+        );
+
+        let seq = [
+            X86Instruction::MovReg {
+                rd: X86Register::RAX,
+                rs: X86Register::RBX,
+            },
+            X86Instruction::AddReg {
+                rd: X86Register::RAX,
+                rs: X86Register::RCX,
+            },
+        ];
+        assert_eq!(
+            <X86_64 as CostModel<X86Instruction>>::sequence_cost(
+                &X86_64,
+                &seq,
+                &CostMetric::CodeSize,
+            ),
+            6
+        );
+        assert_eq!(
+            <X86_32 as CostModel<X86Instruction>>::sequence_cost(
+                &X86_32,
+                &seq,
+                &CostMetric::CodeSize,
+            ),
+            4
+        );
+    }
+
     // ---- X86Mutator (issue #73 Phase B) ----
 
     #[test]
     fn x86_mutator_eventually_changes_the_sequence() {
+        use super::{default_x86_immediates, default_x86_registers};
         use crate::isa::traits::ISAMutator;
-        use crate::search::candidate_x86::{default_x86_immediates, default_x86_registers};
         use crate::search::config::MutationWeights;
         use rand::SeedableRng;
         use rand_chacha::ChaCha8Rng;
@@ -1756,8 +1849,8 @@ mod tests {
 
     #[test]
     fn x86_mutator_preserves_sequence_length() {
+        use super::{default_x86_immediates, default_x86_registers};
         use crate::isa::traits::ISAMutator;
-        use crate::search::candidate_x86::{default_x86_immediates, default_x86_registers};
         use crate::search::config::MutationWeights;
         use rand::SeedableRng;
         use rand_chacha::ChaCha8Rng;
@@ -1847,8 +1940,8 @@ mod tests {
         // For every destructive variant (non-MOV, non-CMP that writes
         // rd), `rd` must appear in `source_registers()` per
         // src/isa/x86.rs:228-245. The mutator must preserve that.
+        use super::{default_x86_immediates, default_x86_registers};
         use crate::isa::traits::ISAMutator;
-        use crate::search::candidate_x86::{default_x86_immediates, default_x86_registers};
         use crate::search::config::MutationWeights;
         use rand::SeedableRng;
         use rand_chacha::ChaCha8Rng;

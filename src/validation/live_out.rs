@@ -244,11 +244,10 @@ pub fn compute_live_in_registers(instructions: &[Instruction]) -> RegisterSet<Re
 /// **Asymmetry:** CMOV and Jcc READ EFLAGS but report
 /// `has_side_effects=false` (they don't write flags), so a CMOV-only or
 /// Jcc-only target gets `flags_live=false` from this helper.
-/// `find_shorter_equivalent_x86` (`src/main.rs`) compensates by
-/// dropping `.fast_only()` when the target contains any flag-reader,
-/// forcing the SMT path to fully account for incoming EFLAGS. Direct
-/// callers that bypass that helper must apply their own equivalent
-/// guard if their downstream code reads flags.
+/// x86 equivalence compensates for a fixed trailing Jcc by forcing flags into
+/// the effective live-out contract before comparing prefixes. Direct callers
+/// that bypass the generic equivalence entry point must apply their own
+/// equivalent guard if their downstream code reads flags.
 pub fn x86_live_out_from_target(
     target: &[crate::isa::x86::X86Instruction],
 ) -> crate::semantics::live_out::X86LiveOut {

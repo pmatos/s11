@@ -8,7 +8,7 @@
 //! Both AArch64 and x86 implement this trait by delegating to the
 //! existing free helpers and the generic equivalence checker.
 
-use crate::isa::ISA;
+use crate::isa::{CostModel, ISA, InstructionGenerator};
 use crate::search::config::SearchConfig;
 use crate::semantics::cost::CostMetric;
 use crate::semantics::{EquivalenceMetrics, EquivalenceResult};
@@ -72,7 +72,11 @@ impl SymbolicBackend<crate::isa::AArch64> for crate::isa::AArch64 {
     }
 
     fn sequence_cost(seq: &[crate::ir::Instruction], metric: &CostMetric, _width: u32) -> u64 {
-        crate::semantics::cost::sequence_cost(seq, metric)
+        <crate::isa::AArch64 as CostModel<crate::ir::Instruction>>::sequence_cost(
+            &crate::isa::AArch64,
+            seq,
+            metric,
+        )
     }
 
     fn check_equivalence(
@@ -117,7 +121,7 @@ impl SymbolicBackend<crate::isa::X86_64> for crate::isa::X86_64 {
         regs: &[crate::isa::x86::X86Register],
         imms: &[i64],
     ) -> Vec<crate::isa::x86::X86Instruction> {
-        crate::search::candidate_x86::generate_all_x86_instructions(regs, imms)
+        crate::isa::x86::X86InstructionGenerator.generate_all(regs, imms)
     }
 
     fn target_terminator(
@@ -131,9 +135,13 @@ impl SymbolicBackend<crate::isa::X86_64> for crate::isa::X86_64 {
     fn sequence_cost(
         seq: &[crate::isa::x86::X86Instruction],
         metric: &CostMetric,
-        width: u32,
+        _width: u32,
     ) -> u64 {
-        crate::semantics::cost_x86::sequence_cost(seq, metric, width)
+        <crate::isa::X86_64 as CostModel<crate::isa::x86::X86Instruction>>::sequence_cost(
+            &crate::isa::X86_64,
+            seq,
+            metric,
+        )
     }
 
     fn check_equivalence(
@@ -183,7 +191,7 @@ impl SymbolicBackend<crate::isa::X86_32> for crate::isa::X86_32 {
         regs: &[crate::isa::x86::X86Register],
         imms: &[i64],
     ) -> Vec<crate::isa::x86::X86Instruction> {
-        crate::search::candidate_x86::generate_all_x86_instructions(regs, imms)
+        crate::isa::x86::X86InstructionGenerator.generate_all(regs, imms)
     }
 
     fn target_terminator(
@@ -197,9 +205,13 @@ impl SymbolicBackend<crate::isa::X86_32> for crate::isa::X86_32 {
     fn sequence_cost(
         seq: &[crate::isa::x86::X86Instruction],
         metric: &CostMetric,
-        width: u32,
+        _width: u32,
     ) -> u64 {
-        crate::semantics::cost_x86::sequence_cost(seq, metric, width)
+        <crate::isa::X86_32 as CostModel<crate::isa::x86::X86Instruction>>::sequence_cost(
+            &crate::isa::X86_32,
+            seq,
+            metric,
+        )
     }
 
     fn check_equivalence(

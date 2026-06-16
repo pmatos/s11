@@ -9,11 +9,10 @@
 //! into `StochasticBackend<I>`.
 //!
 //! Both AArch64 and x86 implement this trait by delegating to the
-//! existing free helpers (`apply_sequence_concrete`, `sequence_cost`,
-//! `check_equivalence_for`, etc. for AArch64;
-//! `apply_sequence_concrete_x86` and `cost_x86::sequence_cost` for x86).
+//! existing free helpers (`apply_sequence_concrete`, `check_equivalence_for`,
+//! etc. for AArch64; `apply_sequence_concrete_x86` for x86).
 
-use crate::isa::ISA;
+use crate::isa::{CostModel, ISA, InstructionGenerator};
 use crate::search::config::SearchConfig;
 use crate::semantics::cost::CostMetric;
 use crate::semantics::{EquivalenceMetrics, EquivalenceResult};
@@ -162,7 +161,11 @@ impl StochasticBackend<crate::isa::AArch64> for crate::isa::AArch64 {
     }
 
     fn sequence_cost(seq: &[crate::ir::Instruction], metric: &CostMetric, _width: u32) -> u64 {
-        crate::semantics::cost::sequence_cost(seq, metric)
+        <crate::isa::AArch64 as CostModel<crate::ir::Instruction>>::sequence_cost(
+            &crate::isa::AArch64,
+            seq,
+            metric,
+        )
     }
 
     fn is_encodable(seq: &[crate::ir::Instruction]) -> bool {
@@ -241,7 +244,26 @@ fn x86_random_sequence<R: RngExt>(
     imms: &[i64],
     mode: crate::assembler::x86::X86Mode,
 ) -> Vec<crate::isa::x86::X86Instruction> {
-    crate::search::candidate_x86::generate_random_x86_sequence(rng, len, regs, imms, mode)
+    let regs: Vec<_> = regs
+        .iter()
+        .copied()
+        .filter(|r| {
+            mode != crate::assembler::x86::X86Mode::Mode32 || matches!(r.index(), Some(i) if i < 8)
+        })
+        .collect();
+    let regs = if regs.is_empty() {
+        vec![crate::isa::x86::X86Register::RAX]
+    } else {
+        regs
+    };
+    let imms = if imms.is_empty() {
+        vec![0]
+    } else {
+        imms.to_vec()
+    };
+    (0..len)
+        .map(|_| crate::isa::x86::X86InstructionGenerator.generate_random(rng, &regs, &imms))
+        .collect()
 }
 
 impl StochasticBackend<crate::isa::X86_64> for crate::isa::X86_64 {
@@ -283,16 +305,17 @@ impl StochasticBackend<crate::isa::X86_64> for crate::isa::X86_64 {
     fn sequence_cost(
         seq: &[crate::isa::x86::X86Instruction],
         metric: &CostMetric,
-        width: u32,
+        _width: u32,
     ) -> u64 {
-        crate::semantics::cost_x86::sequence_cost(seq, metric, width)
+        <crate::isa::X86_64 as CostModel<crate::isa::x86::X86Instruction>>::sequence_cost(
+            &crate::isa::X86_64,
+            seq,
+            metric,
+        )
     }
 
     fn is_encodable(seq: &[crate::isa::x86::X86Instruction]) -> bool {
-        crate::search::candidate_x86::is_x86_sequence_encodable(
-            seq,
-            crate::assembler::x86::X86Mode::Mode64,
-        )
+        crate::search::candidate::is_sequence_encodable_for(seq, &crate::isa::X86_64)
     }
 
     fn check_equivalence(
@@ -373,16 +396,17 @@ impl StochasticBackend<crate::isa::X86_32> for crate::isa::X86_32 {
     fn sequence_cost(
         seq: &[crate::isa::x86::X86Instruction],
         metric: &CostMetric,
-        width: u32,
+        _width: u32,
     ) -> u64 {
-        crate::semantics::cost_x86::sequence_cost(seq, metric, width)
+        <crate::isa::X86_32 as CostModel<crate::isa::x86::X86Instruction>>::sequence_cost(
+            &crate::isa::X86_32,
+            seq,
+            metric,
+        )
     }
 
     fn is_encodable(seq: &[crate::isa::x86::X86Instruction]) -> bool {
-        crate::search::candidate_x86::is_x86_sequence_encodable(
-            seq,
-            crate::assembler::x86::X86Mode::Mode32,
-        )
+        crate::search::candidate::is_sequence_encodable_for(seq, &crate::isa::X86_32)
     }
 
     fn check_equivalence(
