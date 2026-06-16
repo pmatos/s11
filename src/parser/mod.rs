@@ -2288,8 +2288,10 @@ mod tests {
         for text in [
             "add w0, w1, w2",
             "add w0, w1, #1",
+            "add w0, w1, w2, lsl #3",
             "sub w3, w4, w5",
             "sub w3, w4, #7",
+            "sub w3, w4, w5, lsl #2",
             "mov w6, w7",
         ] {
             let instr = parse_one(text);
@@ -2302,6 +2304,7 @@ mod tests {
         for text in [
             "add w0, x1, w2",
             "add w0, w1, x2",
+            "add w0, w1, x2, lsl #3",
             "sub x0, w1, x2",
             "mov w0, x1",
             "mov x0, w1",
