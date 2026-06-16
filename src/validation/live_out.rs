@@ -81,6 +81,34 @@ impl FromStr for RegisterSet<Register> {
     }
 }
 
+fn is_live_out_flag_token(s: &str) -> bool {
+    s.eq_ignore_ascii_case("nzcv")
+        || s.eq_ignore_ascii_case("n")
+        || s.eq_ignore_ascii_case("z")
+        || s.eq_ignore_ascii_case("c")
+        || s.eq_ignore_ascii_case("v")
+}
+
+fn misplaced_flag_token_in_register_list(s: &str) -> Option<&str> {
+    s.split(|c: char| c == ',' || c.is_ascii_whitespace())
+        .find(|part| is_live_out_flag_token(part))
+}
+
+fn misplaced_flag_token_error(token: &str, input: &str) -> ParseRegisterSetError {
+    let message = if token.eq_ignore_ascii_case("nzcv") {
+        format!(
+            "flag token '{}' must follow the register list after ';' (for example ';nzcv'); got '{}'",
+            token, input
+        )
+    } else {
+        format!(
+            "per-flag token '{}' is reserved for a future extension and cannot appear in the register list; use ';nzcv' for all flags; got '{}'",
+            token, input
+        )
+    };
+    ParseRegisterSetError { message }
+}
+
 /// Parse the CLI `--live-out` contract string.
 ///
 /// Grammar: `<regs>` or `<regs>;<flags>`. The register half follows
@@ -111,10 +139,16 @@ pub fn parse_live_out_contract(s: &str) -> Result<LiveOut, ParseLiveOutError> {
                 ),
             });
         }
+        if let Some(token) = misplaced_flag_token_in_register_list(trimmed) {
+            return Err(misplaced_flag_token_error(token, s));
+        }
         let regs = RegisterSet::<Register>::from_str(trimmed)?;
         return Ok(regs);
     }
     let (regs_part, flags_part) = trimmed.split_once(';').unwrap();
+    if let Some(token) = misplaced_flag_token_in_register_list(regs_part.trim()) {
+        return Err(misplaced_flag_token_error(token, s));
+    }
     let regs = RegisterSet::<Register>::from_str(regs_part.trim())?;
     let flags_tok = flags_part.trim().to_ascii_lowercase();
     let flags_live = match flags_tok.as_str() {
@@ -698,9 +732,70 @@ mod tests {
     }
 
     #[test]
+    fn test_parse_live_out_contract_nzcv_in_register_list_hints_semicolon() {
+        for input in [
+            "nzcv,x0",
+            "x0,nzcv",
+            "x0 nzcv",
+            "nzcv,x0;nzcv",
+            "x0,nzcv;nzcv",
+        ] {
+            let err = parse_live_out_contract(input).unwrap_err();
+            assert!(
+                err.message.contains("'nzcv'"),
+                "expected error to name misplaced flag token in '{}', got: {}",
+                input,
+                err.message
+            );
+            assert!(
+                err.message.contains(";nzcv"),
+                "expected error to hint at ';nzcv' syntax for '{}', got: {}",
+                input,
+                err.message
+            );
+            assert!(
+                !err.message.contains("invalid register name"),
+                "expected live-out grammar diagnostic for '{}', got: {}",
+                input,
+                err.message
+            );
+        }
+    }
+
+    #[test]
+    fn test_parse_live_out_contract_per_flag_tokens_in_register_list_hint_semicolon() {
+        for tok in ["n", "z", "c", "v"] {
+            for input in [format!("{},x0", tok), format!("{} x0", tok)] {
+                let err = parse_live_out_contract(&input).unwrap_err();
+                assert!(
+                    err.message.contains(&format!("'{}'", tok)),
+                    "expected error to name misplaced flag token in '{}', got: {}",
+                    input,
+                    err.message
+                );
+                assert!(
+                    err.message.contains("reserved") || err.message.contains(";nzcv"),
+                    "expected error to hint at reserved flag syntax for '{}', got: {}",
+                    input,
+                    err.message
+                );
+                assert!(
+                    !err.message.contains("invalid register name"),
+                    "expected live-out grammar diagnostic for '{}', got: {}",
+                    input,
+                    err.message
+                );
+            }
+        }
+    }
+
+    #[test]
     fn test_parse_live_out_contract_reversed_order_nzcv_x0_error() {
         let err = parse_live_out_contract("nzcv;x0").unwrap_err();
-        assert_eq!(err.to_string(), "invalid register name: 'nzcv'");
+        assert_eq!(
+            err.to_string(),
+            "flag token 'nzcv' must follow the register list after ';' (for example ';nzcv'); got 'nzcv;x0'"
+        );
     }
 
     #[test]
