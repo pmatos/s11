@@ -55,8 +55,8 @@ Known gaps:
 
 ## x86-64 / x86-32
 
-Status: supported through a parallel x86 pipeline for ELF optimization and
-width-parameterised SMT equivalence.
+Status: supported through the shared ISA trait-backed ELF optimization path,
+with width-parameterised SMT equivalence.
 
 Rewritable straight-line mnemonic families:
 

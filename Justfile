@@ -96,6 +96,10 @@ bench-phase1: build
     @mkdir -p benches/results
     cargo bench --bench hackers_delight
 
+# Direct SMT CLZ/CLS formula timing for issue #112; does not write JSONL.
+bench-smt-clz: build
+    cargo bench --bench smt_clz
+
 # Wipe criterion HTML reports and the JSONL accumulator.
 bench-clean:
     rm -rf target/criterion benches/results
@@ -123,6 +127,7 @@ help:
     @echo "  test          - Run tests"
     @echo "  build-tests   - Build AArch64 test binaries"
     @echo "  test-all      - Run complete test suite"
+    @echo "  bench-smt-clz - Time direct CLZ/CLS SMT equivalence queries"
     @echo "  mutants       - Run cargo-mutants locally (slow; informational)"
     @echo "  coverage      - Generate HTML coverage report via cargo-llvm-cov"
     @echo "  coverage-lcov - Generate LCOV coverage report (CI format)"

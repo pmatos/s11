@@ -41,7 +41,7 @@ fn should_stop(config: &SearchConfig, start_time: Instant) -> bool {
 /// Routes through `SymbolicBackend<I>` for every ISA-specific operation:
 /// candidate enumeration, sequence-cost summation, equivalence check.
 /// AArch64 routes to `check_equivalence_with_config`; x86 routes to
-/// `check_equivalence_x86`.
+/// x86's generic equivalence backend.
 pub struct SymbolicSearch<I = crate::isa::AArch64> {
     statistics: SearchStatistics,
     _marker: PhantomData<I>,
@@ -418,12 +418,15 @@ mod tests {
 
     impl Drop for TestStopFlagGuard {
         fn drop(&mut self) {
-            *TEST_STOP_FLAG.lock().expect("test stop flag lock poisoned") = None;
+            if let Ok(mut slot) = TEST_STOP_FLAG.lock() {
+                *slot = None;
+            }
         }
     }
 
-    fn stop_after_first_test_equivalence_check(flag: &Arc<AtomicBool>) -> TestStopFlagGuard {
-        *TEST_STOP_FLAG.lock().expect("test stop flag lock poisoned") = Some(Arc::clone(flag));
+    fn install_test_stop_flag(flag: Arc<AtomicBool>) -> TestStopFlagGuard {
+        let mut slot = TEST_STOP_FLAG.lock().expect("test stop flag lock poisoned");
+        *slot = Some(flag);
         TestStopFlagGuard
     }
 
@@ -595,14 +598,12 @@ mod tests {
             _width: u32,
             _timeout: Duration,
         ) -> (EquivalenceResult, EquivalenceMetrics) {
-            let checks = TEST_EQUIVALENCE_CHECKS.fetch_add(1, Ordering::SeqCst) + 1;
-            if checks == 1
-                && let Some(flag) = TEST_STOP_FLAG
-                    .lock()
-                    .expect("test stop flag lock poisoned")
-                    .as_ref()
-            {
-                flag.store(true, Ordering::SeqCst);
+            let check_number = TEST_EQUIVALENCE_CHECKS.fetch_add(1, Ordering::SeqCst) + 1;
+            if check_number == 1 {
+                let slot = TEST_STOP_FLAG.lock().expect("test stop flag lock poisoned");
+                if let Some(flag) = slot.as_ref() {
+                    flag.store(true, Ordering::SeqCst);
+                }
             }
             std::thread::sleep(Duration::from_millis(1));
             (
@@ -802,7 +803,7 @@ mod tests {
         TEST_EQUIVALENCE_CHECKS.store(0, Ordering::SeqCst);
 
         let flag = Arc::new(AtomicBool::new(false));
-        let _stop_guard = stop_after_first_test_equivalence_check(&flag);
+        let _stop_guard = install_test_stop_flag(Arc::clone(&flag));
 
         let mut search: SymbolicSearch<TestIsa> = SymbolicSearch::new();
         let config = SearchConfig::default()
@@ -844,7 +845,7 @@ mod tests {
         TEST_EQUIVALENCE_CHECKS.store(0, Ordering::SeqCst);
 
         let flag = Arc::new(AtomicBool::new(false));
-        let _stop_guard = stop_after_first_test_equivalence_check(&flag);
+        let _stop_guard = install_test_stop_flag(Arc::clone(&flag));
 
         let mut search: SymbolicSearch<TestIsa> = SymbolicSearch::new();
         let config = SearchConfig::default()
@@ -926,7 +927,7 @@ mod tests {
     fn x86_symbolic_runs_end_to_end() {
         use crate::isa::X86_64;
         use crate::isa::x86::{X86Instruction, X86Register};
-        use crate::semantics::state::X86LiveOutMask;
+        use crate::semantics::live_out::X86LiveOut;
         use std::time::Duration;
 
         let mut search: SymbolicSearch<X86_64> = SymbolicSearch::new();
@@ -936,7 +937,7 @@ mod tests {
             .with_x86_width(64)
             .with_timeout_option(Some(Duration::from_secs(30)));
 
-        let live_out = X86LiveOutMask::from_registers(vec![X86Register::RAX]).with_flags(false);
+        let live_out = X86LiveOut::from_registers(vec![X86Register::RAX]).with_flags(false);
 
         // Target: `mov rax, 0; add rax, rbx` — equivalent to a single
         // `mov rax, rbx` when flags aren't live (live_out.flags_live = false)
@@ -967,7 +968,7 @@ mod tests {
     fn x86_symbolic_mode32_runs_end_to_end() {
         use crate::isa::X86_32;
         use crate::isa::x86::{X86Instruction, X86Register};
-        use crate::semantics::state::X86LiveOutMask;
+        use crate::semantics::live_out::X86LiveOut;
         use std::time::Duration;
 
         let mut search: SymbolicSearch<X86_32> = SymbolicSearch::new();
@@ -977,7 +978,7 @@ mod tests {
             .with_x86_width(32)
             .with_timeout_option(Some(Duration::from_secs(5)));
 
-        let live_out = X86LiveOutMask::from_registers(vec![X86Register::RAX]).with_flags(false);
+        let live_out = X86LiveOut::from_registers(vec![X86Register::RAX]).with_flags(false);
         let target = vec![
             X86Instruction::MovImm {
                 rd: X86Register::RAX,

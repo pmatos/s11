@@ -244,7 +244,7 @@ pub fn run_bench(spec: &BenchSpec) -> BenchRecord {
 
     let (statistics, optimized) = match spec.algorithm {
         Algorithm::Enumerative => {
-            let mut search = crate::search::EnumerativeSearch::new();
+            let mut search = crate::search::EnumerativeSearch::<crate::isa::AArch64>::new();
             let result = search.search(&target, &live_out, &config);
             (result.statistics, result.optimized_sequence)
         }

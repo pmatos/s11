@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-s11 is a superoptimizer written in Rust. It finds shorter or faster equivalent instruction sequences using multiple search strategies and SMT-based equivalence checking. Primary target is AArch64; x86-64 and x86-32 are supported through a parallel pipeline; RISC-V is scaffold-only with no supported RISC-V opt path because machine-code emission is not yet implemented.
+s11 is a superoptimizer written in Rust. It finds shorter or faster equivalent instruction sequences using multiple search strategies and SMT-based equivalence checking. Primary target is AArch64; x86-64 and x86-32 are supported through the shared ISA trait-backed optimization path; RISC-V is scaffold-only with no supported RISC-V opt path because machine-code emission is not yet implemented.
 
 See [docs/capability.md](docs/capability.md) for the canonical instruction and ISA support matrix.
 
@@ -119,14 +119,14 @@ The project requires:
 
 ```
 src/
-├── main.rs              # CLI; AArch64 + x86 optimization pipelines
+├── main.rs              # CLI; shared AArch64 + x86 opt driver with per-arch hooks
 ├── ir/                  # AArch64 IR (Register, Operand, Condition, Instruction)
 │   ├── types.rs
 │   └── instructions.rs
 ├── isa/                 # ISA Abstraction Layer
-│   ├── traits.rs        # ISA trait definitions (aspirational; not all backends use)
+│   ├── traits.rs        # ISA trait definitions used by AArch64/x86 consumers
 │   ├── aarch64.rs       # AArch64 backend
-│   ├── riscv.rs         # RISC-V backend (trait scaffolding only, not wired through)
+│   ├── riscv.rs         # RISC-V backend (trait scaffolding only, no opt path)
 │   └── x86.rs           # x86 backend (X86_64 + X86_32; full vertical slice)
 ├── semantics/           # Execution semantics
 │   ├── concrete.rs      # AArch64 concrete interpreter
@@ -135,18 +135,17 @@ src/
 │   ├── smt_x86.rs       # x86 SMT lowering (width-parameterised BVs)
 │   ├── cost.rs          # AArch64 cost model
 │   ├── cost_x86.rs      # x86 cost model (variable-length CodeSize)
-│   ├── equivalence.rs   # check_equivalence (AArch64) + check_equivalence_x86 (EFLAGS fast-path)
-│   └── state.rs         # Machine state: ConditionFlags (NZCV), Eflags, *MachineState, X86LiveOutMask. RegisterSet<R> lives in live_out.rs.
-├── search/              # Search algorithms (AArch64-typed in v1)
-│   ├── candidate.rs     # AArch64 candidate generation
-│   ├── candidate_x86.rs # x86 candidate generation
-│   ├── enumerative/     # Exhaustive search up to target.len()-1 (rayon-parallel; AArch64)
-│   ├── stochastic/      # MCMC-style search with Metropolis acceptance (AArch64)
-│   ├── symbolic/        # SMT-based synthesis (AArch64)
+│   ├── equivalence.rs   # Generic equivalence entry points (AArch64 + x86)
+│   └── state.rs         # Machine state: ConditionFlags (NZCV), Eflags, concrete/symbolic states. RegisterSet<R> lives in live_out.rs.
+├── search/              # Search algorithms generic over ISA where supported
+│   ├── candidate.rs     # Candidate and encodability helpers
+│   ├── enumerative/     # Exhaustive search up to target.len()-1 (AArch64 + x86)
+│   ├── stochastic/      # MCMC with Metropolis-Hastings (AArch64 + x86)
+│   ├── symbolic/        # SMT-based synthesis (AArch64 + x86)
 │   ├── parallel/        # Multi-threaded coordination (AArch64)
 │   └── llm/             # LLM-assisted search via Codex CLI (AArch64)
 ├── validation/          # Input validation
-│   ├── live_out.rs      # Live-out register tracking (AArch64)
+│   ├── live_out.rs      # Live-out register tracking (AArch64 + x86)
 │   └── random.rs        # Random input generation (AArch64)
 ├── assembler/           # Machine code generation (dynasm)
 │   ├── mod.rs           # AArch64Assembler
