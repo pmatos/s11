@@ -173,9 +173,9 @@ pub fn apply_instruction_concrete(
         Instruction::Smulh { rd, rn, rm } => {
             let a = state.get_register(*rn).as_i64() as i128;
             let b = state.get_register(*rm).as_i64() as i128;
-            // wrapping_mul for i128 is sufficient: a×b fits in 128 bits when
-            // |a|,|b| ≤ i64::MAX, except for i64::MIN×i64::MIN which still
-            // fits in i128 since i64::MIN as i128 is -2^63.
+            // wrapping_mul for i128 cannot wrap here: the signed product of
+            // two 64-bit values has max magnitude 2^63 * 2^63 = 2^126,
+            // which is less than i128::MAX.
             let result = (a.wrapping_mul(b) >> 64) as i64;
             state.set_register(*rd, ConcreteValue::from_i64(result));
         }
