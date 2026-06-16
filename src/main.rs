@@ -2069,7 +2069,6 @@ mod cli_helper_tests {
     fn convert_capstone_op_handles_all_supported_aarch64_mnemonics() {
         let cases = [
             ("mov", "x0, x1"),
-            ("mov", "w0, w1"),
             ("mov", "x0, #5"),
             ("mov", "w0, #0xff"),
             ("mov", "wsp, #0xff"),
@@ -2081,11 +2080,8 @@ mod cli_helper_tests {
             ("movk", "x1, #0x1234, lsl #16"),
             ("add", "x0, x1, x2"),
             ("add", "x0, x1, #4"),
-            ("add", "w0, w1, w2"),
-            ("add", "w0, w1, #4"),
             ("add", "x0, x1, x2, lsl #3"),
             ("sub", "x0, x1, #3"),
-            ("sub", "w3, w4, w5"),
             ("adds", "x0, x1, #1"),
             ("subs", "x0, x1, x2"),
             ("and", "x0, x1, x2"),
@@ -2113,7 +2109,6 @@ mod cli_helper_tests {
             ("sdiv", "x0, x1, x2"),
             ("udiv", "x0, x1, x2"),
             ("cmp", "x1, #5"),
-            ("cmp", "w1, w2"),
             ("cmp", "x1, x2, lsl #4"),
             ("cmn", "x1, x2"),
             ("tst", "x1, x2"),
@@ -2121,14 +2116,12 @@ mod cli_helper_tests {
             ("ccmp", "x1, x2, #5, eq"),
             ("ccmn", "x1, #15, #3, ne"),
             ("csel", "x0, x1, x2, eq"),
-            ("csel", "w0, w1, w2, eq"),
             ("csinc", "x0, x1, x2, ne"),
             ("csinv", "x0, x1, x2, lt"),
             ("csneg", "x0, x1, x2, ge"),
             ("cset", "x0, eq"),
             ("csetm", "x3, ne"),
             ("clz", "x0, x1"),
-            ("clz", "w0, w1"),
             ("cls", "x0, x1"),
             ("rbit", "x0, x1"),
             ("rev", "x0, x1"),
@@ -2164,9 +2157,7 @@ mod cli_helper_tests {
             ("b.eq", "#0x1000"),
             ("b.ne", "#0x1000"),
             ("cbz", "x0, #0x1000"),
-            ("cbz", "w0, #0x1000"),
             ("cbnz", "x5, #0x1000"),
-            ("cbnz", "w5, #0x1000"),
             ("tbz", "w3, #5, #0x1000"),
             ("tbnz", "x3, #40, #0x1000"),
             // Issue #68: memory ops. 9 single-register mnemonics × 5
@@ -2245,7 +2236,7 @@ mod cli_helper_tests {
         // Tripwire: bump in lockstep when adding/removing rows. Catches
         // accidental row deletion and forces a re-read when adding a parser
         // mnemonic without a matching test row.
-        assert_eq!(cases.len(), 148);
+        assert_eq!(cases.len(), 139);
 
         fn docs_mnemonic(mnemonic: &'static str) -> &'static str {
             if mnemonic.starts_with("b.") {

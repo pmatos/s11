@@ -112,7 +112,7 @@ impl std::error::Error for ParseLineError {}
 pub fn parse_register(s: &str) -> Result<Register, String> {
     let lower = s.to_lowercase();
 
-    if let Some(raw_index) = lower.strip_prefix('x').or_else(|| lower.strip_prefix('w'))
+    if let Some(raw_index) = lower.strip_prefix('x')
         && !raw_index.is_empty()
         && raw_index.bytes().all(|b| b.is_ascii_digit())
         && (raw_index == "0" || !raw_index.starts_with('0'))
@@ -139,7 +139,19 @@ pub fn parse_w_or_x_register(s: &str) -> Result<Register, String> {
     if let Ok(reg) = parse_register(s) {
         return Ok(reg);
     }
-    match s.to_lowercase().as_str() {
+
+    let lower = s.to_lowercase();
+    if let Some(raw_index) = lower.strip_prefix('w')
+        && !raw_index.is_empty()
+        && raw_index.bytes().all(|b| b.is_ascii_digit())
+        && (raw_index == "0" || !raw_index.starts_with('0'))
+        && let Ok(index) = raw_index.parse::<u8>()
+        && index <= 30
+    {
+        return Ok(Register::from_index(index).expect("valid AArch64 register index"));
+    }
+
+    match lower.as_str() {
         "wsp" => Ok(Register::SP),
         _ => Err(format!("unknown register: {}", s)),
     }
@@ -322,13 +334,10 @@ fn parse_mov(operands: &[&str]) -> Result<Instruction, String> {
                 rm: Operand::Immediate(imm),
                 width: RegisterWidth::W32,
             }),
-            Operand::Register(rn) => {
-                if matches!(rd, Register::SP | Register::XZR) {
-                    Err("mov W-register alias requires a numbered destination".to_string())
-                } else {
-                    Ok(Instruction::MovReg { rd, rn })
-                }
-            }
+            Operand::Register(_) => Err(
+                "mov W-register source is unsupported until the IR models register width"
+                    .to_string(),
+            ),
             Operand::ShiftedRegister { .. } | Operand::ExtendedRegister { .. } => {
                 Err("mov second operand must be a register or immediate".to_string())
             }
@@ -1958,10 +1967,6 @@ mod tests {
         assert_eq!(parse_register("x0").unwrap(), Register::X0);
         assert_eq!(parse_register("X0").unwrap(), Register::X0);
         assert_eq!(parse_register("x30").unwrap(), Register::X30);
-        assert_eq!(parse_register("w0").unwrap(), Register::X0);
-        assert_eq!(parse_register("W0").unwrap(), Register::X0);
-        assert_eq!(parse_register("w29").unwrap(), Register::X29);
-        assert_eq!(parse_register("w30").unwrap(), Register::X30);
         assert_eq!(parse_register("xzr").unwrap(), Register::XZR);
         assert_eq!(parse_register("XZR").unwrap(), Register::XZR);
         assert_eq!(parse_register("wzr").unwrap(), Register::XZR);
@@ -2086,6 +2091,10 @@ mod tests {
 
     #[test]
     fn test_parse_register_invalid() {
+        assert!(parse_register("w0").is_err());
+        assert!(parse_register("W0").is_err());
+        assert!(parse_register("w29").is_err());
+        assert!(parse_register("w30").is_err());
         assert!(parse_register("x32").is_err());
         assert!(parse_register("w31").is_err());
         assert!(parse_register("w32").is_err());
@@ -2156,15 +2165,9 @@ mod tests {
             _ => panic!("expected MovImm"),
         }
 
-        let instr = match parse_line("mov w0, w1").unwrap() {
-            LineResult::Instruction(Instruction::MovReg { rd, rn }) => {
-                assert_eq!(rd, Register::X0);
-                assert_eq!(rn, Register::X1);
-                Instruction::MovReg { rd, rn }
-            }
-            _ => panic!("expected MovReg"),
-        };
-        assert_eq!(format!("{}", instr), "mov x0, x1");
+        assert!(parse_line("mov w0, w1").is_err());
+        assert!(parse_line("mov W0, W1").is_err());
+        assert!(parse_line("mov w0, x1").is_err());
     }
 
     #[test]
@@ -2439,10 +2442,19 @@ mod tests {
             let w_name = format!("w{}", idx);
             let expected = Register::from_index(idx).unwrap();
             assert_eq!(parse_register(&x_name).unwrap(), expected);
+            assert!(
+                parse_register(&w_name).is_err(),
+                "{w_name} should not parse through the generic register parser"
+            );
             assert_eq!(
-                parse_register(&w_name).unwrap(),
+                parse_w_or_x_register(&w_name).unwrap(),
                 expected,
-                "{w_name} should alias {x_name}"
+                "{w_name} should alias {x_name} in scoped W/X parser paths"
+            );
+            assert_eq!(
+                parse_sized_register(&w_name).unwrap(),
+                (expected, RegisterWidth::W32),
+                "{w_name} should carry W32 width in sized parser paths"
             );
         }
         assert_eq!(parse_register("wzr").unwrap(), Register::XZR);
@@ -2741,23 +2753,18 @@ mod tests {
     }
 
     #[test]
-    fn parse_w_form_widthless_register_aliases_canonicalize_to_x_form() {
-        // These IR variants do not carry register width, so accepted W-form
-        // spellings canonicalize to the existing X-form representation.
-        for (w_text, x_text) in [
-            ("add w0, w1, w2", "add x0, x1, x2"),
-            ("add w0, w1, #4", "add x0, x1, #4"),
-            ("sub w3, w4, w5", "sub x3, x4, x5"),
-            ("cmp w1, w2", "cmp x1, x2"),
-            ("csel w0, w1, w2, eq", "csel x0, x1, x2, eq"),
-            ("clz w0, w1", "clz x0, x1"),
+    fn parse_w_form_widthless_registers_rejected() {
+        // These IR variants do not carry register width, so W-form spellings
+        // must not be accepted as aliases for the existing X-form semantics.
+        for text in [
+            "add w0, w1, w2",
+            "add w0, w1, #4",
+            "sub w3, w4, w5",
+            "cmp w1, w2",
+            "csel w0, w1, w2, eq",
+            "clz w0, w1",
         ] {
-            let w_instr = parse_one(w_text);
-            let x_instr = parse_one(x_text);
-            assert_eq!(w_instr, x_instr, "{w_text} should alias {x_text}");
-            let printed = format!("{}", w_instr);
-            assert_eq!(printed, x_text);
-            assert_eq!(parse_one(&printed), w_instr);
+            assert!(parse_line(text).is_err(), "{text} should be rejected");
         }
 
         // The extended-register inner register accepts W-form.
@@ -3043,6 +3050,7 @@ mod tests {
                 target: LabelId(0x1000),
             }
         );
+        assert!(parse_line("cbz w0, 0x1000").is_err());
     }
 
     #[test]
@@ -3054,6 +3062,7 @@ mod tests {
                 target: LabelId(0x1000),
             }
         );
+        assert!(parse_line("cbnz w5, 0x1000").is_err());
     }
 
     #[test]
