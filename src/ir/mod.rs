@@ -1,5 +1,6 @@
 //! Intermediate Representation (IR) for AArch64 instructions
 
+pub(crate) mod aarch64_encoding;
 pub mod instructions;
 pub mod types;
 

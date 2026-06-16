@@ -6,7 +6,7 @@ use crate::ir::{Instruction, Register};
 use crate::semantics::live_out::{LiveOut, RegisterSet};
 use std::str::FromStr;
 
-/// Error type for parsing live-out register sets.
+/// Error type for parsing live-out register sets and live-out contracts.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ParseRegisterSetError {
     pub message: String,
@@ -19,6 +19,9 @@ impl std::fmt::Display for ParseRegisterSetError {
 }
 
 impl std::error::Error for ParseRegisterSetError {}
+
+/// Contract-facing error type for parsing CLI `--live-out` strings.
+pub type ParseLiveOutError = ParseRegisterSetError;
 
 /// Parse a register name like "x0", "X1", "sp", "SP". Accepts the standard
 /// AArch64 aliases `fp` (x29) and `lr` (x30) to match the assembly parser at
@@ -119,7 +122,7 @@ fn misplaced_flag_token_error(token: &str, input: &str) -> ParseRegisterSetError
 /// `;nzcv` suffix (ADR-0006). The mask is consumed directly by
 /// `EquivalenceConfig::with_live_out(...)`; callers no longer need to thread
 /// a separate `flags_live` boolean.
-pub fn parse_live_out_contract(s: &str) -> Result<LiveOut, ParseRegisterSetError> {
+pub fn parse_live_out_contract(s: &str) -> Result<LiveOut, ParseLiveOutError> {
     let trimmed = s.trim();
     let semicolon_count = trimmed.matches(';').count();
     if semicolon_count > 1 {
@@ -299,10 +302,11 @@ mod tests {
 
     #[test]
     fn display_renders_message_without_type_prefix() {
-        let err = ParseRegisterSetError {
-            message: "invalid register name: 'foo'".to_string(),
-        };
-        assert_eq!(err.to_string(), "invalid register name: 'foo'");
+        let err: ParseLiveOutError = parse_live_out_contract("x0;bogus").unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            "unknown flag token 'bogus'; expected 'nzcv'"
+        );
     }
 
     #[test]
@@ -778,6 +782,15 @@ mod tests {
     }
 
     #[test]
+    fn test_parse_live_out_contract_reversed_order_nzcv_x0_error() {
+        let err = parse_live_out_contract("nzcv;x0").unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            "flag token 'nzcv' must follow the register list after ';' (for example ';nzcv'); got 'nzcv;x0'"
+        );
+    }
+
+    #[test]
     fn test_parse_live_out_contract_multi_section_rejected() {
         assert!(parse_live_out_contract("x0;nzcv;extra").is_err());
         assert!(parse_live_out_contract(";nzcv;").is_err());
@@ -785,7 +798,7 @@ mod tests {
 
     #[test]
     fn test_parse_live_out_contract_unknown_flag_rejected() {
-        let err = parse_live_out_contract("x0;bogus").unwrap_err();
+        let err: ParseLiveOutError = parse_live_out_contract("x0;bogus").unwrap_err();
         assert!(
             err.message.contains("unknown flag token"),
             "got: {}",
