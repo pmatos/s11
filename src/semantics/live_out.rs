@@ -8,9 +8,8 @@
 //! split).
 //!
 //! `LiveOut` is the AArch64 alias `RegisterSet<crate::ir::Register>` and is
-//! the boundary type the search and equivalence layers use. ADR-0004 decision
-//! 5 documents the consolidation; x86 (`X86LiveOutMask`) follows in #77 stage
-//! 2 step 16.
+//! the boundary type the search and equivalence layers use. `X86LiveOut` is
+//! the same carrier specialised to x86 registers.
 
 use crate::ir::Register;
 use crate::isa::RegisterType;
@@ -21,9 +20,7 @@ use std::fmt;
 ///
 /// Carries a `flags_live: bool` field so condition-state live-out is part of
 /// the same contract object. Stage 1 step 9 migrates `EquivalenceConfig` to
-/// `EquivalenceConfig<I>` and threads this type through every consumer; stage
-/// 2 step 16 replaces the parallel `X86LiveOutMask` with
-/// `RegisterSet<X86Register>` and drops the duplicate type.
+/// `EquivalenceConfig<I>` and threads this type through every consumer.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RegisterSet<R: RegisterType> {
     regs: HashSet<R>,
@@ -94,7 +91,7 @@ impl<R: RegisterType> RegisterSet<R> {
         self.flags_live = live;
     }
 
-    /// Builder form of `set_flags_live`. Mirrors `X86LiveOutMask::with_flags`.
+    /// Builder form of `set_flags_live`.
     pub fn with_flags(mut self, flags_live: bool) -> Self {
         self.flags_live = flags_live;
         self
@@ -143,6 +140,12 @@ impl fmt::Display for RegisterSet<Register> {
 /// previous separate `LiveOut` wrapper struct and `LiveOutRegisters`
 /// register-only set were collapsed onto this alias (closes #85).
 pub type LiveOut = RegisterSet<Register>;
+
+/// x86 live-out / live-in carrier.
+///
+/// Type alias for `RegisterSet<X86Register>` per ADR-0004 decision 5. x86
+/// flags liveness represents EFLAGS observability.
+pub type X86LiveOut = RegisterSet<crate::isa::x86::X86Register>;
 
 #[cfg(test)]
 mod tests {
@@ -254,6 +257,19 @@ mod tests {
             RegisterSet::from_registers(vec![Register::X0]).with_flags(false);
         assert!(!mask.flags_live());
         assert!(mask.contains(Register::X0));
+    }
+
+    #[test]
+    fn test_x86_live_out_uses_generic_register_set() {
+        use crate::isa::x86::X86Register;
+
+        let mask: X86LiveOut =
+            RegisterSet::from_registers(vec![X86Register::RAX, X86Register::RBX]).with_flags(true);
+
+        assert!(mask.contains(X86Register::RAX));
+        assert!(mask.contains(X86Register::RBX));
+        assert!(!mask.contains(X86Register::RCX));
+        assert!(mask.flags_live());
     }
 
     #[test]

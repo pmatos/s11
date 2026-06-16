@@ -92,11 +92,12 @@ impl crate::isa::traits::SymbolicExecutor<Instruction> for AArch64 {
 }
 
 impl crate::isa::traits::CostModel<Instruction> for AArch64 {
-    fn instruction_cost(&self, instruction: &Instruction) -> u64 {
-        crate::semantics::cost::instruction_cost(
-            instruction,
-            &crate::semantics::cost::CostMetric::InstructionCount,
-        )
+    fn instruction_cost(
+        &self,
+        instruction: &Instruction,
+        metric: &crate::semantics::cost::CostMetric,
+    ) -> u64 {
+        crate::semantics::cost::instruction_cost(instruction, metric)
     }
 }
 

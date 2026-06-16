@@ -4,7 +4,7 @@
 
 use crate::ir::Register;
 use crate::ir::types::{AccessWidth, Condition};
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap};
 use std::fmt;
 
 /// NZCV condition flags (Negative, Zero, Carry, oVerflow)
@@ -479,52 +479,6 @@ impl X86ConcreteMachineState {
 
     pub fn registers(&self) -> &HashMap<crate::isa::x86::X86Register, ConcreteValue> {
         &self.registers
-    }
-}
-
-/// Live-out mask for the x86 backend. Keyed on `X86Register` and carries
-/// a `flags_live` flag indicating whether the equivalence check must
-/// also compare EFLAGS.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct X86LiveOutMask {
-    registers: HashSet<crate::isa::x86::X86Register>,
-    flags_live: bool,
-}
-
-impl X86LiveOutMask {
-    pub fn empty() -> Self {
-        Self {
-            registers: HashSet::new(),
-            flags_live: false,
-        }
-    }
-
-    pub fn from_registers(regs: Vec<crate::isa::x86::X86Register>) -> Self {
-        Self {
-            registers: regs.into_iter().collect(),
-            flags_live: false,
-        }
-    }
-
-    pub fn with_flags(mut self, flags_live: bool) -> Self {
-        self.flags_live = flags_live;
-        self
-    }
-
-    pub fn contains(&self, reg: crate::isa::x86::X86Register) -> bool {
-        self.registers.contains(&reg)
-    }
-
-    pub fn flags_live(&self) -> bool {
-        self.flags_live
-    }
-
-    pub fn iter(&self) -> impl Iterator<Item = &crate::isa::x86::X86Register> {
-        self.registers.iter()
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.registers.is_empty()
     }
 }
 
