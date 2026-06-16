@@ -596,14 +596,13 @@ mod tests {
             _timeout: Duration,
         ) -> (EquivalenceResult, EquivalenceMetrics) {
             let checks = TEST_EQUIVALENCE_CHECKS.fetch_add(1, Ordering::SeqCst) + 1;
-            if checks == 1 {
-                if let Some(flag) = TEST_STOP_FLAG
+            if checks == 1
+                && let Some(flag) = TEST_STOP_FLAG
                     .lock()
                     .expect("test stop flag lock poisoned")
                     .as_ref()
-                {
-                    flag.store(true, Ordering::SeqCst);
-                }
+            {
+                flag.store(true, Ordering::SeqCst);
             }
             std::thread::sleep(Duration::from_millis(1));
             (
