@@ -474,8 +474,16 @@ impl Mutator {
                 }
             }
             Instruction::MovRegW { rd, rn } => {
+                // Stay within the W family (PLAN.md: opcode mutation must choose
+                // compatible W/X families). There is no `MovImmW`, so mirror the
+                // `MovReg -> MovImm` step by mutating to a W-form `AddW` with a
+                // freshly generated (clamped) rm, or keeping `MovRegW`.
                 if rng.random_bool(0.5) {
-                    Instruction::MovReg { rd, rn }
+                    Instruction::AddW {
+                        rd,
+                        rn,
+                        rm: Self::clamp_imm12(self.random_operand_3op(rng, false)),
+                    }
                 } else {
                     Instruction::MovRegW { rd, rn }
                 }
