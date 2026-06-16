@@ -10,7 +10,7 @@ use std::time::Duration;
 mod test_utils;
 
 use s11::assembler::AArch64Assembler;
-use s11::elf_patcher::{AddressWindow, DetectedArch, ElfPatcher, parse_hex_address};
+use s11::elf_patcher::{AddressWindow, DetectedArch, ElfPatcher, TextSection, parse_hex_address};
 use s11::ir::instructions::split_terminator;
 use s11::ir::{Instruction, Register};
 use s11::search::config::{
@@ -417,6 +417,19 @@ enum OptimizedWindowBytes {
     LeaveInputUnchanged,
 }
 
+#[derive(Clone, Copy)]
+struct OptimizationContext {
+    downstream_flags_live: bool,
+}
+
+impl Default for OptimizationContext {
+    fn default() -> Self {
+        Self {
+            downstream_flags_live: true,
+        }
+    }
+}
+
 trait ElfOptimizationBackend {
     type Instruction: std::fmt::Display;
 
@@ -443,6 +456,7 @@ trait ElfOptimizationBackend {
         &self,
         ir: &[Self::Instruction],
         options: &OptimizationOptions,
+        context: OptimizationContext,
     ) -> Result<Option<Vec<Self::Instruction>>, Box<dyn std::error::Error>>;
 
     fn no_optimization_message(&self) -> &'static str;
@@ -490,8 +504,9 @@ impl ElfOptimizationBackend for AArch64OptimizationBackend {
         &self,
         ir: &[Self::Instruction],
         options: &OptimizationOptions,
+        context: OptimizationContext,
     ) -> Result<Option<Vec<Self::Instruction>>, Box<dyn std::error::Error>> {
-        run_optimization(ir, options)
+        run_optimization(ir, options, context.downstream_flags_live)
     }
 
     fn no_optimization_message(&self) -> &'static str {
@@ -573,6 +588,7 @@ impl ElfOptimizationBackend for X86OptimizationBackend {
         &self,
         ir: &[Self::Instruction],
         options: &OptimizationOptions,
+        _context: OptimizationContext,
     ) -> Result<Option<Vec<Self::Instruction>>, Box<dyn std::error::Error>> {
         let optimized = match options.algorithm {
             Algorithm::Enumerative => run_x86_enumerative(ir, self.width, options),
@@ -762,8 +778,12 @@ fn optimize_elf_binary_with_backend<B: ElfOptimizationBackend>(
 
     backend.validate_window_ir(&ir_instructions)?;
 
+    let optimization_context =
+        optimization_context_for_backend(backend.arch(), patcher, &section, end_addr, &cs);
+
     // Run optimization based on selected algorithm
-    let optimized_instructions = backend.run_search(&ir_instructions, options)?;
+    let optimized_instructions =
+        backend.run_search(&ir_instructions, options, optimization_context)?;
 
     // Use optimized instructions if found, otherwise use original
     let final_instructions = optimized_instructions
@@ -806,6 +826,7 @@ fn optimize_elf_binary_with_backend<B: ElfOptimizationBackend>(
 fn live_out_for_optimization_prefix(
     prefix: &[Instruction],
     terminator: Option<&Instruction>,
+    downstream_flags_live: bool,
 ) -> LiveOut {
     let mut live_registers: Vec<Register> = prefix
         .iter()
@@ -816,7 +837,13 @@ fn live_out_for_optimization_prefix(
         live_registers.extend(terminator.source_registers());
     }
 
-    LiveOut::from_registers(live_registers)
+    let flags_live = if terminator.is_some() {
+        true
+    } else {
+        downstream_flags_live
+    };
+
+    LiveOut::from_registers(live_registers).with_flags(flags_live)
 }
 
 fn build_stochastic_search_config(
@@ -900,6 +927,7 @@ fn build_x86_stochastic_search_config(width: u32, options: &OptimizationOptions)
 fn run_optimization(
     target: &[Instruction],
     options: &OptimizationOptions,
+    downstream_flags_live: bool,
 ) -> Result<Option<Vec<Instruction>>, Box<dyn std::error::Error>> {
     if target.is_empty() {
         return Ok(None);
@@ -931,8 +959,9 @@ fn run_optimization(
 
     // Create live-out contract over the prefix (assume all modified registers
     // are live-out), plus any registers the fixed terminator reads after the
-    // optimized prefix runs.
-    let live_out = live_out_for_optimization_prefix(prefix, terminator);
+    // optimized prefix runs. NZCV liveness comes from the fixed terminator or
+    // the known downstream fall-through context.
+    let live_out = live_out_for_optimization_prefix(prefix, terminator, downstream_flags_live);
 
     // Reattach the terminator (if any) to a successfully optimized prefix.
     let reattach = |opt: Option<Vec<Instruction>>| -> Option<Vec<Instruction>> {
@@ -1292,6 +1321,91 @@ fn convert_to_ir(instructions: &capstone::Instructions) -> Result<Vec<Instructio
     }
 
     Ok(ir_instructions)
+}
+
+fn aarch64_downstream_flags_live_from_bytes(cs: &Capstone, bytes: &[u8], start_addr: u64) -> bool {
+    if bytes.is_empty() {
+        return true;
+    }
+
+    let mut remaining = bytes;
+    let mut address = start_addr;
+
+    while !remaining.is_empty() {
+        let Ok(instructions) = cs.disasm_count(remaining, address, 1) else {
+            return true;
+        };
+        let Some(instruction) = instructions.iter().next() else {
+            return true;
+        };
+        let instruction_len = instruction.bytes().len();
+        if instruction_len == 0 || instruction_len > remaining.len() {
+            return true;
+        }
+
+        let mnemonic = instruction.mnemonic().unwrap_or("");
+        let op_str = instruction.op_str().unwrap_or("");
+        match convert_capstone_op(mnemonic, op_str) {
+            ConvertOutcome::Instruction(instr) => {
+                if validation::live_out::flags_read_before_overwrite_after_window(&[instr]) {
+                    return true;
+                }
+                if instr.modifies_flags() {
+                    return false;
+                }
+                if instr.is_terminator() {
+                    return true;
+                }
+            }
+            ConvertOutcome::Skip => {}
+            ConvertOutcome::Unsupported(_) => return true,
+        }
+
+        remaining = &remaining[instruction_len..];
+        address += instruction_len as u64;
+    }
+
+    false
+}
+
+fn aarch64_downstream_flags_live_from_section(
+    patcher: &ElfPatcher,
+    section: &TextSection,
+    end_addr: u64,
+    cs: &Capstone,
+) -> bool {
+    let section_end = section.virtual_addr + section.size;
+    if end_addr >= section_end {
+        return true;
+    }
+
+    let suffix_window = AddressWindow {
+        start: end_addr,
+        end: section_end,
+    };
+    let Ok(bytes) = patcher.get_instructions_in_window(&suffix_window) else {
+        return true;
+    };
+
+    aarch64_downstream_flags_live_from_bytes(cs, &bytes, end_addr)
+}
+
+fn optimization_context_for_backend(
+    arch: DetectedArch,
+    patcher: &ElfPatcher,
+    section: &TextSection,
+    end_addr: u64,
+    cs: &Capstone,
+) -> OptimizationContext {
+    if arch == DetectedArch::Aarch64 {
+        return OptimizationContext {
+            downstream_flags_live: aarch64_downstream_flags_live_from_section(
+                patcher, section, end_addr, cs,
+            ),
+        };
+    }
+
+    OptimizationContext::default()
 }
 
 /// Validate that an IR sequence forms a single basic block: at most one
@@ -2317,6 +2431,102 @@ mod cli_helper_tests {
         }
     }
 
+    fn assemble_aarch64_test_bytes(instructions: &[Instruction]) -> Vec<u8> {
+        AArch64Assembler::new()
+            .assemble_instructions(instructions, 0x1000)
+            .expect("test instruction should assemble")
+    }
+
+    fn aarch64_test_capstone() -> Capstone {
+        Capstone::new()
+            .arm64()
+            .mode(capstone::arch::arm64::ArchMode::Arm)
+            .detail(true)
+            .build()
+            .expect("test capstone should build")
+    }
+
+    #[test]
+    fn downstream_flags_live_scan_marks_dead_when_first_flag_event_writes() {
+        let bytes = assemble_aarch64_test_bytes(&[
+            Instruction::Cmp {
+                rn: Register::X0,
+                rm: Operand::Immediate(0),
+            },
+            Instruction::Csel {
+                rd: Register::X1,
+                rn: Register::X2,
+                rm: Register::X3,
+                cond: s11::ir::Condition::EQ,
+            },
+        ]);
+        let cs = aarch64_test_capstone();
+
+        assert!(!aarch64_downstream_flags_live_from_bytes(
+            &cs, &bytes, 0x1000
+        ));
+    }
+
+    #[test]
+    fn downstream_flags_live_scan_marks_live_when_first_flag_event_reads() {
+        let bytes = assemble_aarch64_test_bytes(&[Instruction::Csel {
+            rd: Register::X1,
+            rn: Register::X2,
+            rm: Register::X3,
+            cond: s11::ir::Condition::EQ,
+        }]);
+        let cs = aarch64_test_capstone();
+
+        assert!(aarch64_downstream_flags_live_from_bytes(
+            &cs, &bytes, 0x1000
+        ));
+    }
+
+    #[test]
+    fn downstream_flags_live_scan_marks_dead_for_known_non_flag_suffix() {
+        let bytes = assemble_aarch64_test_bytes(&[Instruction::Add {
+            rd: Register::X1,
+            rn: Register::X2,
+            rm: Operand::Immediate(1),
+        }]);
+        let cs = aarch64_test_capstone();
+
+        assert!(!aarch64_downstream_flags_live_from_bytes(
+            &cs, &bytes, 0x1000
+        ));
+    }
+
+    #[test]
+    fn downstream_flags_live_scan_is_conservative_for_unknown_context() {
+        let cs = aarch64_test_capstone();
+
+        assert!(aarch64_downstream_flags_live_from_bytes(&cs, &[], 0x1000));
+        assert!(aarch64_downstream_flags_live_from_bytes(
+            &cs,
+            &[0xff],
+            0x1000
+        ));
+        // LDR literal decodes in Capstone but is intentionally unsupported by
+        // the AArch64 optimization IR parser.
+        assert!(aarch64_downstream_flags_live_from_bytes(
+            &cs,
+            &[0x00, 0x00, 0x00, 0x58],
+            0x1000
+        ));
+    }
+
+    #[test]
+    fn downstream_flags_live_scan_is_conservative_for_unanalysed_branch() {
+        let bytes = assemble_aarch64_test_bytes(&[Instruction::B {
+            target: s11::ir::LabelId(0x1000),
+        }]);
+        let cs = aarch64_test_capstone();
+
+        assert!(aarch64_downstream_flags_live_from_bytes(
+            &cs, &bytes, 0x1000
+        ));
+    }
+
     #[test]
     fn convert_capstone_op_for_optimization_rejects_unsupported_instruction() {
         let err = convert_capstone_op_for_optimization("fadd", "v0.4s, v1.4s, v2.4s", 0x1234)
@@ -2760,12 +2970,39 @@ mod cli_helper_tests {
             Algorithm::Llm,
         ] {
             let options = options_for(algorithm);
-            let _ = run_optimization(&target, &options).unwrap();
+            let _ = run_optimization(&target, &options, true).unwrap();
         }
         assert!(
-            run_optimization(&[], &options_for(Algorithm::Enumerative))
+            run_optimization(&[], &options_for(Algorithm::Enumerative), true)
                 .unwrap()
                 .is_none()
+        );
+    }
+
+    #[test]
+    fn run_optimization_uses_downstream_flags_dead_context() {
+        let target = [
+            Instruction::Cmp {
+                rn: Register::X0,
+                rm: Operand::Immediate(0),
+            },
+            Instruction::MovImm {
+                rd: Register::X1,
+                imm: 7,
+            },
+        ];
+        let mut options = options_for(Algorithm::Symbolic);
+        options.timeout = Some(Duration::from_secs(10));
+        options.solver_timeout = Duration::from_secs(10);
+
+        let flags_dead = run_optimization(&target, &options, false)
+            .expect("symbolic search should run with flags dead")
+            .expect("flags-dead window should drop redundant cmp");
+        assert_eq!(flags_dead.len(), 1);
+        assert!(
+            !flags_dead.iter().any(Instruction::modifies_flags),
+            "optimized sequence should not need to preserve NZCV when downstream flags are dead: {:?}",
+            flags_dead
         );
     }
 
@@ -2872,7 +3109,7 @@ mod cli_helper_tests {
         ];
 
         for (terminator, source) in cases {
-            let live_out = live_out_for_optimization_prefix(&prefix, Some(&terminator));
+            let live_out = live_out_for_optimization_prefix(&prefix, Some(&terminator), false);
             assert!(live_out.contains_register(Register::X1));
             assert!(
                 live_out.contains_register(source),
@@ -2881,6 +3118,39 @@ mod cli_helper_tests {
                 source
             );
         }
+    }
+
+    #[test]
+    fn live_out_for_optimization_prefix_uses_downstream_flags_without_terminator() {
+        let prefix = [Instruction::MovImm {
+            rd: Register::X1,
+            imm: 1,
+        }];
+
+        let flags_dead = live_out_for_optimization_prefix(&prefix, None, false);
+        assert!(!flags_dead.flags_live());
+
+        let flags_live = live_out_for_optimization_prefix(&prefix, None, true);
+        assert!(flags_live.flags_live());
+    }
+
+    #[test]
+    fn live_out_for_optimization_prefix_keeps_flags_live_for_terminators() {
+        let prefix = [Instruction::MovImm {
+            rd: Register::X1,
+            imm: 1,
+        }];
+
+        let b_cond = Instruction::BCond {
+            target: s11::ir::LabelId(0x1000),
+            cond: s11::ir::Condition::EQ,
+        };
+        let live_out = live_out_for_optimization_prefix(&prefix, Some(&b_cond), false);
+        assert!(live_out.flags_live());
+
+        let ret = Instruction::Ret { rn: Register::X30 };
+        let live_out = live_out_for_optimization_prefix(&prefix, Some(&ret), false);
+        assert!(live_out.flags_live());
     }
 
     // (The standalone `find_shorter_equivalent_preserves_terminator_bit_identical`
@@ -2955,7 +3225,7 @@ mod cli_helper_tests {
         let (prefix, term) = split_terminator(&seq);
         assert_eq!(term, Some(&terminator), "split must recognize ret");
 
-        let live_out = live_out_for_optimization_prefix(prefix, term);
+        let live_out = live_out_for_optimization_prefix(prefix, term, true);
         let config = SearchConfig::default()
             .with_registers(vec![Register::X0, Register::X1])
             .with_immediates(vec![0, 1]);
@@ -3019,7 +3289,7 @@ mod cli_helper_tests {
         ];
 
         let (prefix, term) = split_terminator(&target);
-        let live_out = live_out_for_optimization_prefix(prefix, term);
+        let live_out = live_out_for_optimization_prefix(prefix, term, true);
         assert!(
             live_out.contains_register(Register::X0),
             "live_out_for_optimization_prefix must mark x0 live when the \

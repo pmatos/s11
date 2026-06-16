@@ -131,7 +131,7 @@ impl EnumerativeBackend<AArch64> for AArch64 {
         let equiv_config = EquivalenceConfig::with_live_out(live_out.clone())
             .random_tests(5)
             .timeout(smt_timeout)
-            .with_flags(true)
+            .with_flags(live_out.flags_live())
             .with_memory(true);
 
         check_equivalence_with_config_metrics(target, candidate, &equiv_config)
@@ -585,6 +585,43 @@ mod tests {
             .with_registers(vec![Register::X0, Register::X1])
             .with_immediates(vec![0, 1])
             .with_timeout(std::time::Duration::from_secs(10))
+    }
+
+    #[test]
+    fn aarch64_backend_honors_flags_dead_live_out_mask() {
+        let target = vec![
+            Instruction::Cmp {
+                rn: Register::X0,
+                rm: Operand::Immediate(0),
+            },
+            Instruction::MovImm {
+                rd: Register::X1,
+                imm: 7,
+            },
+        ];
+        let candidate = vec![Instruction::MovImm {
+            rd: Register::X1,
+            imm: 7,
+        }];
+        let live_out = LiveOut::from_registers(vec![Register::X1]);
+
+        let result = <AArch64 as EnumerativeBackend<AArch64>>::check_equivalence(
+            &target,
+            &candidate,
+            &live_out,
+            &SearchConfig::default(),
+        );
+
+        assert_eq!(result.0, EquivalenceResult::Equivalent);
+
+        let flags_live_result = <AArch64 as EnumerativeBackend<AArch64>>::check_equivalence(
+            &target,
+            &candidate,
+            &live_out.with_flags(true),
+            &SearchConfig::default(),
+        );
+
+        assert_ne!(flags_live_result.0, EquivalenceResult::Equivalent);
     }
 
     #[test]

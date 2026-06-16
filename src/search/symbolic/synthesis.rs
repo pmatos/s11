@@ -694,6 +694,44 @@ mod tests {
     }
 
     #[test]
+    fn symbolic_search_drops_flag_writer_only_when_flags_are_dead() {
+        let config = SearchConfig::default()
+            .with_symbolic(SymbolicConfig::default().with_timeout(Duration::from_secs(5)))
+            .with_registers(vec![Register::X0, Register::X1])
+            .with_immediates(vec![0, 7]);
+        let target = vec![
+            Instruction::Cmp {
+                rn: Register::X0,
+                rm: Operand::Immediate(0),
+            },
+            Instruction::MovImm {
+                rd: Register::X1,
+                imm: 7,
+            },
+        ];
+        let live_out = LiveOut::from_registers(vec![Register::X1]);
+
+        let mut search = SymbolicSearch::<AArch64>::new();
+        let flags_dead = search.search(&target, &live_out, &config);
+        assert!(
+            flags_dead.found_optimization,
+            "flags-dead search should drop the unobserved CMP"
+        );
+        let optimized = flags_dead
+            .optimized_sequence
+            .expect("optimization should be present");
+        assert_eq!(optimized.len(), 1);
+        assert!(!optimized.iter().any(Instruction::modifies_flags));
+
+        search.reset();
+        let flags_live = search.search(&target, &live_out.with_flags(true), &config);
+        assert!(
+            !flags_live.found_optimization,
+            "flags-live search must keep the CMP because NZCV is observable"
+        );
+    }
+
+    #[test]
     fn test_symbolic_statistics() {
         let mut search: SymbolicSearch<AArch64> = SymbolicSearch::new();
 
