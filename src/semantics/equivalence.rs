@@ -1476,6 +1476,35 @@ mod tests {
     }
 
     #[test]
+    fn preserved_cset_after_dead_mov_is_equivalent() {
+        // Regression for issue #99: dropping a dead `MOV X1, #0` that writes an
+        // unobserved register before a `CSET X0, NE` must not change the result.
+        // `MOV` leaves NZCV untouched, so both sequences read the same incoming
+        // flags into the CSET and stay equivalent with only X0 live.
+        let target = vec![
+            Instruction::MovImm {
+                rd: Register::X1,
+                imm: 0,
+            },
+            Instruction::Cset {
+                rd: Register::X0,
+                cond: crate::ir::types::Condition::NE,
+            },
+        ];
+        let candidate = vec![Instruction::Cset {
+            rd: Register::X0,
+            cond: crate::ir::types::Condition::NE,
+        }];
+        let cfg =
+            EquivalenceConfig::default().live_out(LiveOut::from_registers(vec![Register::X0]));
+        assert_eq!(
+            check_equivalence_with_config(&target, &candidate, &cfg),
+            EquivalenceResult::Equivalent,
+            "removing a dead MOV before CSET must not change the result: both sequences read the same incoming flags"
+        );
+    }
+
+    #[test]
     fn csinc_wraps_on_max_input() {
         // CSINC x0, x1, x2, EQ with EQ=false sets x0 = x2 + 1 (wrapping).
         // Pin x1 = 0 and x2 = u64::MAX, then CMP x1, #1 leaves Z=0 so the
