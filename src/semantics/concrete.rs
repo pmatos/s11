@@ -45,6 +45,27 @@ fn mask_for_register_width(width: RegisterWidth) -> u64 {
     }
 }
 
+fn set_w_register(state: &mut ConcreteMachineState, reg: Register, value: u64) {
+    state.set_register(reg, ConcreteValue::new(value & u32::MAX as u64));
+}
+
+fn eval_w_operand(state: &ConcreteMachineState, operand: &Operand) -> u64 {
+    match operand {
+        Operand::Register(reg) => state.get_register(*reg).as_u64() & u32::MAX as u64,
+        Operand::Immediate(imm) => *imm as u64 & u32::MAX as u64,
+        Operand::ShiftedRegister { reg, kind, amount } => {
+            let value = state.get_register(*reg).as_u64() as u32;
+            match kind {
+                ShiftKind::Lsl => value.wrapping_shl(u32::from(*amount)) as u64,
+                ShiftKind::Lsr => value.wrapping_shr(u32::from(*amount)) as u64,
+                ShiftKind::Asr => ((value as i32) >> amount) as u32 as u64,
+                ShiftKind::Ror => value.rotate_right(u32::from(*amount)) as u64,
+            }
+        }
+        Operand::ExtendedRegister { .. } => eval_operand(state, operand).as_u64() & u32::MAX as u64,
+    }
+}
+
 fn eval_logical_operand(
     state: &ConcreteMachineState,
     operand: &Operand,
@@ -76,6 +97,10 @@ pub fn apply_instruction_concrete(
             let value = state.get_register(*rn);
             state.set_register(*rd, value);
         }
+        Instruction::MovRegW { rd, rn } => {
+            let value = state.get_register(*rn).as_u64();
+            set_w_register(&mut state, *rd, value);
+        }
         Instruction::MovImm { rd, imm } => {
             let value = ConcreteValue::from_i64(*imm);
             state.set_register(*rd, value);
@@ -86,11 +111,21 @@ pub fn apply_instruction_concrete(
             let result = lhs.wrapping_add(rhs);
             state.set_register(*rd, ConcreteValue::new(result));
         }
+        Instruction::AddW { rd, rn, rm } => {
+            let lhs = state.get_register(*rn).as_u64() & u32::MAX as u64;
+            let rhs = eval_w_operand(&state, rm);
+            set_w_register(&mut state, *rd, lhs.wrapping_add(rhs));
+        }
         Instruction::Sub { rd, rn, rm } => {
             let lhs = state.get_register(*rn).as_u64();
             let rhs = eval_operand(&state, rm).as_u64();
             let result = lhs.wrapping_sub(rhs);
             state.set_register(*rd, ConcreteValue::new(result));
+        }
+        Instruction::SubW { rd, rn, rm } => {
+            let lhs = state.get_register(*rn).as_u64() & u32::MAX as u64;
+            let rhs = eval_w_operand(&state, rm);
+            set_w_register(&mut state, *rd, lhs.wrapping_sub(rhs));
         }
         Instruction::And { rd, rn, rm, width } => {
             let lhs = state.get_register(*rn).as_u64() & mask_for_register_width(*width);
@@ -173,9 +208,9 @@ pub fn apply_instruction_concrete(
         Instruction::Smulh { rd, rn, rm } => {
             let a = state.get_register(*rn).as_i64() as i128;
             let b = state.get_register(*rm).as_i64() as i128;
-            // wrapping_mul for i128 is sufficient: a×b fits in 128 bits when
-            // |a|,|b| ≤ i64::MAX, except for i64::MIN×i64::MIN which still
-            // fits in i128 since i64::MIN as i128 is -2^63.
+            // wrapping_mul for i128 cannot wrap here: the signed product of
+            // two 64-bit values has max magnitude 2^63 * 2^63 = 2^126,
+            // which is less than i128::MAX.
             let result = (a.wrapping_mul(b) >> 64) as i64;
             state.set_register(*rd, ConcreteValue::from_i64(result));
         }
@@ -875,6 +910,25 @@ mod tests {
         };
         let new_state = apply_instruction_concrete(state, &instr);
         assert_eq!(new_state.get_register(Register::X0).as_u64(), 15);
+    }
+
+    #[test]
+    fn add_w_wraps_at_32_bits_and_zero_extends() {
+        let state = state_with(vec![
+            (Register::X1, 0xffff_ffff),
+            (Register::X2, 0xaaaa_bbbb_cccc_dddd),
+        ]);
+        let instr = Instruction::AddW {
+            rd: Register::X0,
+            rn: Register::X1,
+            rm: Operand::Immediate(1),
+        };
+        let new_state = apply_instruction_concrete(state, &instr);
+        assert_eq!(new_state.get_register(Register::X0).as_u64(), 0);
+        assert_eq!(
+            new_state.get_register(Register::X2).as_u64(),
+            0xaaaa_bbbb_cccc_dddd
+        );
     }
 
     #[test]

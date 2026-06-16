@@ -20,13 +20,22 @@ optimization reject the selected window.
 Algorithms:
 - Enumerative, stochastic, symbolic, hybrid, and LLM-assisted search are
   available for AArch64.
+- Enumerative search scales with the generated instruction families in its
+  candidate pool. At the default AArch64 8-register CLI scope, `madd`/`msub`
+  contribute `2 * 8^4` and `mneg`/`smulh`/`umulh` contribute `3 * 8^3`, or
+  9,728 extra candidates per length bucket; use `--timeout` or smaller
+  optimization windows to bound runtime.
 - Hybrid and LLM remain AArch64-only.
 
 Rewritable straight-line mnemonics accepted by the parser and Capstone bridge:
 
 - Data movement and aliases: `mov`, `mvn`, `neg`, `negs`, `movn`, `movz`,
   `movk`
+  - Register `mov` supports both 64-bit `X` and 32-bit `W` forms.
 - Arithmetic and flag-setting arithmetic: `add`, `sub`, `adds`, `subs`
+  - Non-flag-setting `add` and `sub` support both 64-bit `X` and 32-bit `W`
+    register/immediate/shifted-register forms. W extended-register arithmetic
+    remains out of scope for now.
 - Logical and inverted-logical forms: `and`, `ands`, `orr`, `eor`, `bic`,
   `bics`, `orn`, `eon`
   - Logical-immediate forms for `and`, `ands`, `orr`, `eor`, and `tst`
