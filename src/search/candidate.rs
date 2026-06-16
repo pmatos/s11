@@ -1422,7 +1422,15 @@ mod tests {
         let mut rng = ChaCha8Rng::seed_from_u64(0x153);
         let mut bitfield_count = 0u32;
         let mut madd_count = 0u32;
-        const DRAWS: u32 = 76_000;
+
+        // Both families occupy exactly one top-level slot in the
+        // `rng.random_range(0..SLOTS)` dispatch, so "equal sampling weight" means
+        // equal probability of *entering* the slot (~1/SLOTS), not equal per-variant
+        // weight: slot 33 makes a secondary 0..6 draw (plus SP-rejection retries) and
+        // slot 34 a 0..5 draw. DRAWS is sized so each family is expected EXPECTED_PER_FAMILY times.
+        const SLOTS: u32 = 38;
+        const EXPECTED_PER_FAMILY: u32 = 2_000;
+        const DRAWS: u32 = SLOTS * EXPECTED_PER_FAMILY;
 
         for _ in 0..DRAWS {
             let instr = generate_random_instruction(&mut rng, &regs, &imms);
@@ -1442,12 +1450,29 @@ mod tests {
             }
         }
 
+        // Each count is ~Binomial(DRAWS, 1/SLOTS); the std-dev of their difference is
+        // sqrt(2 * DRAWS * (1/38) * (37/38)) ≈ 63, so a tolerance of 250 is ≈ 4σ
+        // (p_fail ≈ 1e-5) — tight enough to catch a slot-weight regression, loose
+        // enough not to flake.
         let delta = bitfield_count.abs_diff(madd_count);
         assert!(
             delta <= 250,
             "bit-field and multiply-accumulate should have equal top-level sampling weight \
              over {DRAWS} draws, got bitfield={bitfield_count}, madd={madd_count}, delta={delta}",
         );
+
+        // Delta alone would still pass if both families collapsed to the same wrong
+        // rate (e.g. ~500 each), so bound each absolute count near the expected value
+        // to also catch a degenerate dispatch.
+        for (name, count) in [
+            ("bit-field", bitfield_count),
+            ("multiply-accumulate", madd_count),
+        ] {
+            assert!(
+                (1_500..=2_500).contains(&count),
+                "{name} family count {count} is far from the expected {EXPECTED_PER_FAMILY} over {DRAWS} draws",
+            );
+        }
     }
 
     #[test]
