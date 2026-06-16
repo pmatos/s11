@@ -863,7 +863,14 @@ impl X86Mutator {
 
     /// Swap the variant of a randomly-chosen instruction while keeping
     /// its operand shape (reg-reg → reg-reg, reg-imm → reg-imm). CMP
-    /// has no rd so CMP variants stay within CMP.
+    /// has no rd, so it only swaps between register and immediate CMP
+    /// forms.
+    ///
+    /// Note the deliberate asymmetry: the reg-reg and reg-imm groups
+    /// sample from a range that includes the current variant, so they may
+    /// produce an identity mutation. CMP, by contrast, always bridges
+    /// `CmpReg` ↔ `CmpImm`, so a CMP opcode mutation is guaranteed to
+    /// change the form. This is intentional, not an oversight.
     fn mutate_opcode<R: rand::RngExt>(&self, rng: &mut R, sequence: &mut [X86Instruction]) {
         if sequence.is_empty() {
             return;
@@ -897,7 +904,14 @@ impl X86Mutator {
                 4 => X86Instruction::OrImm { rd, imm },
                 _ => X86Instruction::XorImm { rd, imm },
             },
-            X86Instruction::CmpReg { .. } | X86Instruction::CmpImm { .. } => current,
+            X86Instruction::CmpReg { rn, .. } => X86Instruction::CmpImm {
+                rn,
+                imm: self.pick_immediate(rng),
+            },
+            X86Instruction::CmpImm { rn, .. } => X86Instruction::CmpReg {
+                rn,
+                rs: self.pick_register(rng),
+            },
             // Cmov has a unique shape (rd, rs, cond) with no opcode-shape
             // siblings; keep it unchanged in the opcode-bridge mutator.
             X86Instruction::Cmov { .. } => current,
@@ -1663,6 +1677,80 @@ mod tests {
         assert!(
             changed,
             "200 mutations produced no change \u{2014} stub still wired?"
+        );
+    }
+
+    #[test]
+    fn x86_mutator_opcode_mutates_cmp_reg_to_cmp_imm() {
+        use crate::isa::traits::ISAMutator;
+        use crate::search::config::MutationWeights;
+        use rand::SeedableRng;
+        use rand_chacha::ChaCha8Rng;
+
+        let mutator = X86Mutator::new(
+            vec![X86Register::RBX],
+            vec![7],
+            MutationWeights {
+                operand: 0.0,
+                opcode: 1.0,
+                swap: 0.0,
+                instruction: 0.0,
+            },
+            crate::assembler::x86::X86Mode::Mode64,
+        );
+        let target = vec![X86Instruction::CmpReg {
+            rn: X86Register::RAX,
+            rs: X86Register::RBX,
+        }];
+        let mut rng = ChaCha8Rng::seed_from_u64(7);
+
+        let mutated = mutator.mutate(&mut rng, &target);
+
+        assert_eq!(
+            mutated,
+            vec![X86Instruction::CmpImm {
+                rn: X86Register::RAX,
+                imm: 7,
+            }]
+        );
+    }
+
+    #[test]
+    fn x86_mutator_opcode_mutates_cmp_imm_to_cmp_reg() {
+        use crate::isa::traits::ISAMutator;
+        use crate::search::config::MutationWeights;
+        use rand::SeedableRng;
+        use rand_chacha::ChaCha8Rng;
+
+        let mutator = X86Mutator::new(
+            vec![X86Register::RBX],
+            // Unused by CmpImm → CmpReg (which calls pick_register, not
+            // pick_immediate); a value absent from the target makes that clear.
+            vec![0],
+            MutationWeights {
+                operand: 0.0,
+                opcode: 1.0,
+                swap: 0.0,
+                instruction: 0.0,
+            },
+            crate::assembler::x86::X86Mode::Mode64,
+        );
+        // rn is a non-RAX register so the "rn is preserved" assertion can't be
+        // satisfied coincidentally by the pick_register RAX fallback default.
+        let target = vec![X86Instruction::CmpImm {
+            rn: X86Register::RCX,
+            imm: 5,
+        }];
+        let mut rng = ChaCha8Rng::seed_from_u64(7);
+
+        let mutated = mutator.mutate(&mut rng, &target);
+
+        assert_eq!(
+            mutated,
+            vec![X86Instruction::CmpReg {
+                rn: X86Register::RCX,
+                rs: X86Register::RBX,
+            }]
         );
     }
 
