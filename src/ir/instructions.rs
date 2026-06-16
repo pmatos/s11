@@ -812,15 +812,25 @@ impl Instruction {
                 Operand::ExtendedRegister { .. } => false,
             },
 
-            // MUL/SDIV/UDIV: always register operands, always encodable
-            Instruction::Mul { .. } | Instruction::Sdiv { .. } | Instruction::Udiv { .. } => true,
+            // Three-register multiply/divide forms use plain Xn register
+            // slots, so reg31 is XZR and SP must be rejected.
+            Instruction::Mul { rd, rn, rm }
+            | Instruction::Sdiv { rd, rn, rm }
+            | Instruction::Udiv { rd, rn, rm }
+            | Instruction::Mneg { rd, rn, rm }
+            | Instruction::Smulh { rd, rn, rm }
+            | Instruction::Umulh { rd, rn, rm } => {
+                *rd != Register::SP && *rn != Register::SP && *rm != Register::SP
+            }
 
-            // Multiply-accumulate family: always register operands, always encodable
-            Instruction::Madd { .. }
-            | Instruction::Msub { .. }
-            | Instruction::Mneg { .. }
-            | Instruction::Smulh { .. }
-            | Instruction::Umulh { .. } => true,
+            // Multiply-accumulate family: plain Xn register slots, so reg31
+            // is XZR and SP must be rejected.
+            Instruction::Madd { rd, rn, rm, ra } | Instruction::Msub { rd, rn, rm, ra } => {
+                *rd != Register::SP
+                    && *rn != Register::SP
+                    && *rm != Register::SP
+                    && *ra != Register::SP
+            }
 
             // CMP/CMN: register, immediate (12-bit unsigned), or shifted-register
             // (LSL/LSR/ASR only — ROR not encodable for arithmetic shifted-register form).
@@ -2694,6 +2704,207 @@ mod tests {
             }
             .is_encodable_aarch64()
         );
+    }
+
+    #[test]
+    fn test_is_encodable_multiply_family_rejects_sp_all_slots() {
+        for instr in [
+            Instruction::Mul {
+                rd: Register::SP,
+                rn: Register::X1,
+                rm: Register::X2,
+            },
+            Instruction::Mul {
+                rd: Register::X0,
+                rn: Register::SP,
+                rm: Register::X2,
+            },
+            Instruction::Mul {
+                rd: Register::X0,
+                rn: Register::X1,
+                rm: Register::SP,
+            },
+            Instruction::Sdiv {
+                rd: Register::SP,
+                rn: Register::X1,
+                rm: Register::X2,
+            },
+            Instruction::Sdiv {
+                rd: Register::X0,
+                rn: Register::SP,
+                rm: Register::X2,
+            },
+            Instruction::Sdiv {
+                rd: Register::X0,
+                rn: Register::X1,
+                rm: Register::SP,
+            },
+            Instruction::Udiv {
+                rd: Register::SP,
+                rn: Register::X1,
+                rm: Register::X2,
+            },
+            Instruction::Udiv {
+                rd: Register::X0,
+                rn: Register::SP,
+                rm: Register::X2,
+            },
+            Instruction::Udiv {
+                rd: Register::X0,
+                rn: Register::X1,
+                rm: Register::SP,
+            },
+            Instruction::Madd {
+                rd: Register::SP,
+                rn: Register::X1,
+                rm: Register::X2,
+                ra: Register::X3,
+            },
+            Instruction::Madd {
+                rd: Register::X0,
+                rn: Register::SP,
+                rm: Register::X2,
+                ra: Register::X3,
+            },
+            Instruction::Madd {
+                rd: Register::X0,
+                rn: Register::X1,
+                rm: Register::SP,
+                ra: Register::X3,
+            },
+            Instruction::Madd {
+                rd: Register::X0,
+                rn: Register::X1,
+                rm: Register::X2,
+                ra: Register::SP,
+            },
+            Instruction::Msub {
+                rd: Register::SP,
+                rn: Register::X1,
+                rm: Register::X2,
+                ra: Register::X3,
+            },
+            Instruction::Msub {
+                rd: Register::X0,
+                rn: Register::SP,
+                rm: Register::X2,
+                ra: Register::X3,
+            },
+            Instruction::Msub {
+                rd: Register::X0,
+                rn: Register::X1,
+                rm: Register::SP,
+                ra: Register::X3,
+            },
+            Instruction::Msub {
+                rd: Register::X0,
+                rn: Register::X1,
+                rm: Register::X2,
+                ra: Register::SP,
+            },
+            Instruction::Mneg {
+                rd: Register::SP,
+                rn: Register::X1,
+                rm: Register::X2,
+            },
+            Instruction::Mneg {
+                rd: Register::X0,
+                rn: Register::SP,
+                rm: Register::X2,
+            },
+            Instruction::Mneg {
+                rd: Register::X0,
+                rn: Register::X1,
+                rm: Register::SP,
+            },
+            Instruction::Smulh {
+                rd: Register::SP,
+                rn: Register::X1,
+                rm: Register::X2,
+            },
+            Instruction::Smulh {
+                rd: Register::X0,
+                rn: Register::SP,
+                rm: Register::X2,
+            },
+            Instruction::Smulh {
+                rd: Register::X0,
+                rn: Register::X1,
+                rm: Register::SP,
+            },
+            Instruction::Umulh {
+                rd: Register::SP,
+                rn: Register::X1,
+                rm: Register::X2,
+            },
+            Instruction::Umulh {
+                rd: Register::X0,
+                rn: Register::SP,
+                rm: Register::X2,
+            },
+            Instruction::Umulh {
+                rd: Register::X0,
+                rn: Register::X1,
+                rm: Register::SP,
+            },
+        ] {
+            assert!(
+                !instr.is_encodable_aarch64(),
+                "SP must be rejected: {}",
+                instr
+            );
+        }
+
+        for instr in [
+            Instruction::Mul {
+                rd: Register::XZR,
+                rn: Register::XZR,
+                rm: Register::XZR,
+            },
+            Instruction::Sdiv {
+                rd: Register::XZR,
+                rn: Register::XZR,
+                rm: Register::XZR,
+            },
+            Instruction::Udiv {
+                rd: Register::XZR,
+                rn: Register::XZR,
+                rm: Register::XZR,
+            },
+            Instruction::Madd {
+                rd: Register::XZR,
+                rn: Register::XZR,
+                rm: Register::XZR,
+                ra: Register::XZR,
+            },
+            Instruction::Msub {
+                rd: Register::XZR,
+                rn: Register::XZR,
+                rm: Register::XZR,
+                ra: Register::XZR,
+            },
+            Instruction::Mneg {
+                rd: Register::XZR,
+                rn: Register::XZR,
+                rm: Register::XZR,
+            },
+            Instruction::Smulh {
+                rd: Register::XZR,
+                rn: Register::XZR,
+                rm: Register::XZR,
+            },
+            Instruction::Umulh {
+                rd: Register::XZR,
+                rn: Register::XZR,
+                rm: Register::XZR,
+            },
+        ] {
+            assert!(
+                instr.is_encodable_aarch64(),
+                "XZR must remain encodable: {}",
+                instr
+            );
+        }
     }
 
     #[test]

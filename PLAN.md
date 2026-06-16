@@ -1,46 +1,54 @@
-# Plan - issue #181: Pin reversed-order `--live-out` error
+# Plan - issue #124: reject SP for AArch64 multiply-family encodability
 
 ## 1. Problem Restated
 
-Issue #181 asks for a narrow regression test documenting the current malformed-order behavior for `--live-out "nzcv;x0"`. The accepted grammar is `<regs>` or `<regs>;<flags>` with `nzcv` valid only in the flags half, so the reversed input currently splits into register half `nzcv` and flag half `x0`, then fails through the register parser with `invalid register name: 'nzcv'`. The PR should pin that exact diagnostic so future parser-message changes fail with an actionable test failure, without changing parser behavior.
+`Instruction::is_encodable_aarch64()` currently returns `true` for the AArch64 multiply/divide and multiply-accumulate register-only family, so IR values and parsed assembly such as `madd sp, x1, x2, x3` pass the parser/search encodability boundary and fail only later when the dynasm register lowering rejects `Register::SP`. The implementation should make the IR encodability gate match the architectural register class for all eight affected variants: `mul`, `sdiv`, `udiv`, `madd`, `msub`, `mneg`, `smulh`, and `umulh` reject `SP` in every register operand slot while still accepting `XZR`, because register number 31 in these slots denotes the zero register, not the stack pointer.
 
 ## 2. Files To Touch
 
-- `src/validation/live_out.rs` - add one unit test in the existing `#[cfg(test)] mod tests`, near the `parse_live_out_contract` malformed-input tests around lines 677-727.
+- `src/ir/instructions.rs` - production change in `Instruction::is_encodable_aarch64()` around lines 815-823; add table-driven unit coverage in the existing `#[cfg(test)] mod tests` near `test_is_encodable_bit_manip_rejects_sp` around lines 2647-2697 and the existing multiply-family positive assertions around lines 3160-3226.
+- `src/parser/mod.rs` - add a parser-boundary regression near `test_parse_line_encoding_validation` around lines 2264-2286 or `parse_line_covers_all_core_mnemonics` around lines 2560-2602, proving parser rejection flows through the tightened IR gate.
 
-No production files should change. There are no `crates/` or `compiler/` directories in this repository, so this is not a Rust-stage/self-hosted compiler cross-cutting change. There is no `docs/spec/` tree in this checkout; the relevant accepted design source is `docs/adr/0006-live-out-cli-grammar.md`, and no ADR/spec update is needed because the grammar and behavior stay unchanged.
+No `crates/` or `compiler/` directories exist in this repository, so there is no Rust-stage/self-hosted compiler mirror to update. `docs/spec/` is absent. `docs/capability.md` lists supported mnemonics, not per-slot operand legality, so no documentation update is required unless the implementation chooses to add operand-level notes elsewhere.
 
 ## 3. TDD Slices
 
-1. Add a focused regression test in `src/validation/live_out.rs`, immediately after `test_parse_live_out_contract_bareword_nzcv_rejected` or before `test_parse_live_out_contract_unknown_flag_rejected`. Name it `test_parse_live_out_contract_reversed_order_nzcv_x0_error`.
+1. Add the red IR regression in `src/ir/instructions.rs`. Name it `test_is_encodable_multiply_family_rejects_sp_all_slots`. Cover all eight variants, with one assertion for every register slot that can contain `SP`: `rd/rn/rm` for `Mul`, `Sdiv`, `Udiv`, `Mneg`, `Smulh`, `Umulh`; `rd/rn/rm/ra` for `Madd` and `Msub`. In the same test, assert that the corresponding XZR forms remain encodable, preferably with all operand slots set to `Register::XZR` for each variant.
 
-2. In that test, call `let err = parse_live_out_contract("nzcv;x0").unwrap_err();` and assert the exact rendered message:
-   ```rust
-   assert_eq!(err.to_string(), "invalid register name: 'nzcv'");
-   ```
-   Prefer `err.to_string()` over substring matching so the test pins the user-visible `Display` body already covered by `display_renders_message_without_type_prefix` at `src/validation/live_out.rs:267-271`.
+2. Add a parser-boundary red test in `src/parser/mod.rs`. Name it `parse_line_rejects_sp_in_multiply_family`. Use representative text forms that exercise every affected mnemonic and every distinct slot shape, for example `mul sp, x1, x2`, `sdiv x0, sp, x2`, `udiv x0, x1, sp`, `madd x0, x1, x2, sp`, plus `msub`, `mneg`, `smulh`, and `umulh`. Assert `parse_line(text).is_err()` rather than pinning the exact error string, because the contract is rejection at the parser boundary. Add XZR accept cases for the eight mnemonics, such as `madd xzr, xzr, xzr, xzr`.
 
-3. Red-check the guard without committing sabotage: temporarily change the expected string in the new test, or temporarily mutate the local parser diagnostic at `src/validation/live_out.rs:49-50`, then run:
+3. Green the IR gate in `src/ir/instructions.rs`. Replace the unconditional arms at lines 815-823 with explicit `Register::SP` checks:
+   - `Mul | Sdiv | Udiv | Mneg | Smulh | Umulh`: return `rd != SP && rn != SP && rm != SP`.
+   - `Madd | Msub`: return `rd != SP && rn != SP && rm != SP && ra != SP`.
+   Keep `Register::XZR` accepted; do not use `Register::index()` as the predicate, because `XZR.index() == Some(31)` is exactly the valid architectural encoding for this family.
+
+4. Run the focused red/green tests:
    ```bash
-   cargo test validation::live_out::tests::test_parse_live_out_contract_reversed_order_nzcv_x0_error -- --exact
+   cargo test ir::instructions::tests::test_is_encodable_multiply_family_rejects_sp_all_slots -- --exact
+   cargo test parser::tests::parse_line_rejects_sp_in_multiply_family -- --exact
    ```
-   Confirm the test fails on the message mismatch, then immediately revert the temporary mutation.
 
-4. Green-check against the real code. The production path that should satisfy the test already exists: `parse_live_out_contract` counts one semicolon at `src/validation/live_out.rs:94-115`, parses `regs_part` via `RegisterSet::<Register>::from_str`, and `parse_register` emits `invalid register name: 'nzcv'` at `src/validation/live_out.rs:49-50`. No production code should be edited.
+5. Run the local impact tests for search/filter behavior without adding new production paths:
+   ```bash
+   cargo test search::candidate::tests::test_generate_all_instructions_contains_mul_div_family -- --exact
+   cargo test search::candidate::tests::test_generate_random_reaches_mul_div_family -- --exact
+   cargo test search::candidate::tests::test_generate_random_reaches_madd_family -- --exact
+   cargo test isa::aarch64::tests::random_generator_handles_sp_only_register_pool -- --exact
+   ```
+   If any random-generator test exposes a stale assumption that multiply can fall back with `SP`, keep the fix minimal: adjust only the affected sampler/fallback to choose a non-SP register or a different always-encodable fallback, and add/adjust the smallest test needed to pin finite termination.
 
-5. Refactor only if formatting requires it. Keep the test local and explicit; do not introduce helper functions or convert the surrounding parse-live-out tests to table-driven form for this small coverage addition.
+6. Refactor only for clarity after green. If the two match arms become noisy, a tiny private helper such as `fn no_sp(regs: &[Register]) -> bool` can be introduced inside `src/ir/instructions.rs`, but prefer direct slot checks unless duplication starts obscuring the rule.
 
 ## 4. Verification Surface
 
-- No ESBMC proof work is needed. This change does not touch contracts, codegen, the C model, SMT lowering, concrete semantics, assembler output, or binary patching.
-- No fixtures under `tests/run/`, `tests/asm/`, `tests/integration/`, `examples/`, or benchmark directories should grow.
-- Minimum verification:
+- No ESBMC proof work is needed. This Rust repository has no Vow contracts, C model, `tests/run/`, `examples/`, or self-hosted compiler/codegen mirror involved in this operand-legality change.
+- No SMT or concrete-semantics property changes are required; invalid SP-bearing multiply-family instructions should now be refused before semantics, equivalence, and assembly.
+- No test fixtures under `tests/asm/`, `tests/integration/`, `benches/`, or docs examples need to grow.
+- Minimum verification after implementation:
   ```bash
-  cargo test validation::live_out::tests::test_parse_live_out_contract_reversed_order_nzcv_x0_error -- --exact
-  ```
-- Broader local verification before PR/commit:
-  ```bash
-  cargo test validation::live_out
+  cargo test ir::instructions::tests::test_is_encodable_multiply_family_rejects_sp_all_slots -- --exact
+  cargo test parser::tests::parse_line_rejects_sp_in_multiply_family -- --exact
+  cargo test search::candidate
   cargo fmt -- --check
   ```
 - Full pre-push verification remains the repository gate from `CLAUDE.md`:
@@ -50,17 +58,17 @@ No production files should change. There are no `crates/` or `compiler/` directo
 
 ## 5. Risk Areas
 
-- Error-message coupling is intentional here: use an exact assertion because the issue specifically asks to pin the diagnostic text for `nzcv;x0`.
-- Test placement should stay in the parser/error-test cluster so future maintainers understand this as CLI grammar coverage, not live-in/live-out dataflow coverage.
-- Do not change `parse_live_out_contract` to special-case reversed order unless a separate issue asks for a friendlier diagnostic; that would widen the behavioral scope and may require ADR/help-text updates.
-- `parse -> print -> parse` idempotency is unaffected because this is a CLI live-out contract parser test, not assembly IR parsing or formatting.
-- Binary fixed-point risks are absent: no `compiler/` tree exists here, and the plan does not touch codegen ordering, map iteration, stack-slot layout, assembler encoding, or `vow-clif-shim`-style components.
-- The `cargo clippy --all -- -D warnings` gate should be unaffected; the added test must avoid unused imports or dead helper functions.
+- `SP` and `XZR` both correspond to architectural register number 31 in different register classes. The multiply family uses the plain X register class, so reject only `Register::SP`; rejecting `Register::XZR` would be a behavioral regression.
+- `parse_line` calls `instruction.is_encodable_aarch64()` at `src/parser/mod.rs:1939-1945`; no separate parser-level operand filter should be introduced unless needed for better diagnostics.
+- `search::candidate::generate_all_encodable_instructions()` filters via `is_encodable_aarch64()` at `src/search/candidate.rs:36-39`; avoid changing broad enumeration loops just to pre-filter SP, because the existing architecture intentionally centralizes legality in the encodability gate.
+- `src/isa/aarch64.rs` and `src/search/candidate.rs` random generators have comments/fallbacks that may assume multiply tolerates any register. If tests fail, update only those assumptions and preserve bounded behavior for degenerate pools such as `[SP]`.
+- `parse -> print -> parse` idempotency should stay intact for valid XZR and normal-register multiply-family forms; the parser test should assert valid XZR forms still parse.
+- `cargo clippy --all -- -D warnings` should be unaffected if new tests avoid unused helper closures/imports and keep table types simple enough for inference.
 
 ## 6. Out Of Scope
 
-- Changing the grammar for reversed-order input or adding a bespoke "wrong order" diagnostic.
-- Changing any `run_equiv` or `run_llm_opt` error-prefix behavior in `src/main.rs`.
-- Adding docs/spec/ADR updates; this PR documents existing behavior through a regression test only.
-- Refactoring `ParseRegisterSetError`, `parse_register`, or the surrounding `parse_live_out_contract` tests.
-- Running benchmarks, mutation tests, x86/RISC-V flows, LLM search, assembler tests, or integration fixtures for this unit-test-only issue.
+- Refactoring the broader AArch64 register-class model or adding a general operand-slot type system.
+- Changing assembler lowering in `src/assembler/mod.rs`; its `register_to_dynasm()` failure remains useful defense in depth for callers that bypass `is_encodable_aarch64()`.
+- Changing Capstone bridge tests in `src/main.rs`; no new mnemonic is being added and valid canonical multiply-family operands already exist there.
+- Changing semantics, SMT lowering, cost model, live-out analysis, candidate opcode IDs, docs/capability mnemonic lists, benchmarks, or x86/RISC-V code.
+- Bundling unrelated SP/XZR legality fixes for conditional select, unary arithmetic, inverted logical, or other register-only families; this PR is only the multiply/divide and multiply-accumulate family named in issue #124.

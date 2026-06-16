@@ -2286,6 +2286,35 @@ mod tests {
     }
 
     #[test]
+    fn parse_line_rejects_sp_in_multiply_family() {
+        for text in [
+            "mul sp, x1, x2",
+            "sdiv x0, sp, x2",
+            "udiv x0, x1, sp",
+            "madd x0, x1, x2, sp",
+            "msub sp, x1, x2, x3",
+            "mneg x0, sp, x2",
+            "smulh x0, x1, sp",
+            "umulh sp, x1, x2",
+        ] {
+            assert!(parse_line(text).is_err(), "SP must be rejected: {text}");
+        }
+
+        for text in [
+            "mul xzr, xzr, xzr",
+            "sdiv xzr, xzr, xzr",
+            "udiv xzr, xzr, xzr",
+            "madd xzr, xzr, xzr, xzr",
+            "msub xzr, xzr, xzr, xzr",
+            "mneg xzr, xzr, xzr",
+            "smulh xzr, xzr, xzr",
+            "umulh xzr, xzr, xzr",
+        ] {
+            assert!(parse_line(text).is_ok(), "XZR must remain valid: {text}");
+        }
+    }
+
+    #[test]
     fn test_parse_w_logical_immediates_roundtrip() {
         for text in [
             "and w0, w1, #255",
