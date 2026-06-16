@@ -1099,8 +1099,8 @@ fn find_shorter_equivalent_x86(
     use isa::x86::X86Register;
     use search::candidate_x86::generate_all_x86_instructions;
     use semantics::cost_x86;
-    use semantics::equivalence::{X86EquivalenceConfig, check_equivalence_x86};
-    use semantics::state::X86LiveOutMask;
+    use semantics::equivalence::{EquivalenceConfigFor, check_equivalence_for};
+    use semantics::live_out::X86LiveOut;
 
     if target.len() < 2 {
         // Already length 1 (or empty); nothing strictly shorter exists.
@@ -1111,7 +1111,7 @@ fn find_shorter_equivalent_x86(
 
     // Peel any trailing Jcc terminator. Candidates never include Jcc, so
     // a non-Jcc proposal against a Jcc-terminated target would otherwise
-    // be immediately rejected by `check_equivalence_x86`'s terminator-
+    // be immediately rejected by the equivalence check's terminator-
     // equality precheck. We append the original terminator to each
     // proposal so the equivalence check sees matching terminators and
     // its flag-observability guard fires correctly.
@@ -1126,7 +1126,7 @@ fn find_shorter_equivalent_x86(
     // → `mov rax, rbx` could be silently accepted, dropping the EFLAGS
     // write the surrounding code may consume via Jcc.
     let flags_live = target.iter().any(InstructionType::has_side_effects);
-    let live_out = X86LiveOutMask::from_registers(live_regs.clone()).with_flags(flags_live);
+    let live_out = X86LiveOut::from_registers(live_regs.clone()).with_flags(flags_live);
 
     // Build a register pool from the registers actually used in the
     // target. The candidate enumeration over this pool is bounded by the
@@ -1153,10 +1153,14 @@ fn find_shorter_equivalent_x86(
     let reads_flags =
         |seq: &[isa::x86::X86Instruction]| -> bool { seq.iter().any(isa::x86::x86_reads_flags) };
     let target_reads_flags = reads_flags(target);
-    let cfg_fast = X86EquivalenceConfig::new(width)
+    let cfg_fast64 = EquivalenceConfigFor::<isa::X86_64>::default()
         .live_out(live_out.clone())
-        .fast_only();
-    let cfg_smt = X86EquivalenceConfig::new(width).live_out(live_out.clone());
+        .set_fast_only(true);
+    let cfg_smt64 = EquivalenceConfigFor::<isa::X86_64>::default().live_out(live_out.clone());
+    let cfg_fast32 = EquivalenceConfigFor::<isa::X86_32>::default()
+        .live_out(live_out.clone())
+        .set_fast_only(true);
+    let cfg_smt32 = EquivalenceConfigFor::<isa::X86_32>::default().live_out(live_out.clone());
     for cand in candidates {
         // Build the proposal as [candidate] + original_terminator so
         // both sides share the same trailing Jcc (if any). The
@@ -1172,12 +1176,15 @@ fn find_shorter_equivalent_x86(
         if cand_cost >= target_cost {
             continue;
         }
-        let cfg = if target_reads_flags || reads_flags(&seq) {
-            &cfg_smt
+        let use_smt = target_reads_flags || reads_flags(&seq);
+        let result = if width == 32 {
+            let cfg = if use_smt { &cfg_smt32 } else { &cfg_fast32 };
+            check_equivalence_for::<isa::X86_32>(target, &seq, cfg)
         } else {
-            &cfg_fast
+            let cfg = if use_smt { &cfg_smt64 } else { &cfg_fast64 };
+            check_equivalence_for::<isa::X86_64>(target, &seq, cfg)
         };
-        match check_equivalence_x86(target, &seq, cfg) {
+        match result {
             semantics::equivalence::EquivalenceResult::Equivalent => return Some(seq),
             _ => continue,
         }
@@ -2944,9 +2951,9 @@ mod cli_helper_tests {
     fn issue_74_cmp_cmov_pipeline_distinguishes_different_cmov_sources_when_flags_live() {
         use isa::x86::{X86Condition, X86Instruction, X86Register};
         use semantics::equivalence::{
-            EquivalenceResult, X86EquivalenceConfig, check_equivalence_x86,
+            EquivalenceConfigFor, EquivalenceResult, check_equivalence_for,
         };
-        use semantics::state::X86LiveOutMask;
+        use semantics::live_out::X86LiveOut;
 
         let target = vec![
             X86Instruction::CmpReg {
@@ -2970,10 +2977,10 @@ mod cli_helper_tests {
                 cond: X86Condition::E,
             },
         ];
-        let cfg = X86EquivalenceConfig::new(64)
-            .live_out(X86LiveOutMask::from_registers(vec![X86Register::RAX]).with_flags(true));
+        let cfg = EquivalenceConfigFor::<isa::X86_64>::default()
+            .live_out(X86LiveOut::from_registers(vec![X86Register::RAX]).with_flags(true));
         assert!(matches!(
-            check_equivalence_x86(&target, &proposal, &cfg),
+            check_equivalence_for::<isa::X86_64>(&target, &proposal, &cfg),
             EquivalenceResult::NotEquivalent
         ));
     }
@@ -2982,9 +2989,9 @@ mod cli_helper_tests {
     fn issue_74_cmp_cmov_pipeline_self_equivalent_under_flags_live() {
         use isa::x86::{X86Condition, X86Instruction, X86Register};
         use semantics::equivalence::{
-            EquivalenceResult, X86EquivalenceConfig, check_equivalence_x86,
+            EquivalenceConfigFor, EquivalenceResult, check_equivalence_for,
         };
-        use semantics::state::X86LiveOutMask;
+        use semantics::live_out::X86LiveOut;
 
         let seq = vec![
             X86Instruction::CmpReg {
@@ -2997,10 +3004,10 @@ mod cli_helper_tests {
                 cond: X86Condition::NE,
             },
         ];
-        let cfg = X86EquivalenceConfig::new(64)
-            .live_out(X86LiveOutMask::from_registers(vec![X86Register::RAX]).with_flags(true));
+        let cfg = EquivalenceConfigFor::<isa::X86_64>::default()
+            .live_out(X86LiveOut::from_registers(vec![X86Register::RAX]).with_flags(true));
         assert_eq!(
-            check_equivalence_x86(&seq.clone(), &seq, &cfg),
+            check_equivalence_for::<isa::X86_64>(&seq.clone(), &seq, &cfg),
             EquivalenceResult::Equivalent
         );
     }

@@ -850,7 +850,7 @@ mod tests {
     fn x86_stochastic_runs_end_to_end() {
         use crate::isa::X86_64;
         use crate::isa::x86::{X86Instruction, X86Register};
-        use crate::semantics::state::X86LiveOutMask;
+        use crate::semantics::live_out::X86LiveOut;
 
         let mut search: StochasticSearch<X86_64> = StochasticSearch::new();
         let config = SearchConfig::default()
@@ -863,7 +863,7 @@ mod tests {
             .with_immediates(vec![0, 1])
             .with_x86_width(64);
 
-        let live_out = X86LiveOutMask::from_registers(vec![X86Register::RAX]).with_flags(false);
+        let live_out = X86LiveOut::from_registers(vec![X86Register::RAX]).with_flags(false);
 
         let target = vec![
             X86Instruction::MovImm {
@@ -895,7 +895,7 @@ mod tests {
     fn x86_stochastic_mode32_runs_end_to_end() {
         use crate::isa::X86_32;
         use crate::isa::x86::{X86Instruction, X86Register};
-        use crate::semantics::state::X86LiveOutMask;
+        use crate::semantics::live_out::X86LiveOut;
 
         let mut search: StochasticSearch<X86_32> = StochasticSearch::new();
         let config = SearchConfig::default()
@@ -909,7 +909,7 @@ mod tests {
             .with_immediates(vec![0, 1])
             .with_x86_width(32);
 
-        let live_out = X86LiveOutMask::from_registers(vec![X86Register::RAX]).with_flags(false);
+        let live_out = X86LiveOut::from_registers(vec![X86Register::RAX]).with_flags(false);
         let target = vec![
             X86Instruction::MovImm {
                 rd: X86Register::RAX,

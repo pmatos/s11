@@ -6,8 +6,7 @@
 //! width getter. No mutator or random-input helpers.
 //!
 //! Both AArch64 and x86 implement this trait by delegating to the
-//! existing free helpers. When `EquivalenceConfig<I>` is generified in
-//! #77 stage 2 step 16, the `check_equivalence` method can be dropped.
+//! existing free helpers and the generic equivalence checker.
 
 use crate::isa::ISA;
 use crate::search::config::SearchConfig;
@@ -41,8 +40,7 @@ pub trait SymbolicBackend<I: ISA>: Sized {
     /// Sum the cost of every instruction in the sequence.
     fn sequence_cost(seq: &[I::Instruction], metric: &CostMetric, width: u32) -> u64;
 
-    /// Run the full equivalence check. AArch64 returns populated
-    /// metrics (smt_elapsed, smt_called); x86 returns defaults.
+    /// Run the full equivalence check.
     fn check_equivalence(
         target: &[I::Instruction],
         proposal: &[I::Instruction],
@@ -105,7 +103,7 @@ impl SymbolicBackend<crate::isa::AArch64> for crate::isa::AArch64 {
 // ---- x86 backends ----
 
 impl SymbolicBackend<crate::isa::X86_64> for crate::isa::X86_64 {
-    type LiveOut = crate::semantics::state::X86LiveOutMask;
+    type LiveOut = crate::semantics::live_out::X86LiveOut;
 
     fn registers_from_config(config: &SearchConfig) -> Vec<crate::isa::x86::X86Register> {
         config.x86_available_registers.clone()
@@ -142,13 +140,16 @@ impl SymbolicBackend<crate::isa::X86_64> for crate::isa::X86_64 {
         target: &[crate::isa::x86::X86Instruction],
         proposal: &[crate::isa::x86::X86Instruction],
         live_out: &Self::LiveOut,
-        width: u32,
+        _width: u32,
         timeout: Duration,
     ) -> (EquivalenceResult, EquivalenceMetrics) {
-        let result = crate::semantics::equivalence::check_equivalence_x86_for_search(
-            target, proposal, live_out, width, timeout,
-        );
-        (result, EquivalenceMetrics::default())
+        let cfg =
+            crate::semantics::equivalence::EquivalenceConfigFor::<crate::isa::X86_64>::default()
+                .live_out(live_out.clone())
+                .timeout(timeout);
+        crate::semantics::equivalence::check_equivalence_for_metrics::<crate::isa::X86_64>(
+            target, proposal, &cfg,
+        )
     }
 
     fn width(_config: &SearchConfig) -> u32 {
@@ -157,7 +158,7 @@ impl SymbolicBackend<crate::isa::X86_64> for crate::isa::X86_64 {
 }
 
 impl SymbolicBackend<crate::isa::X86_32> for crate::isa::X86_32 {
-    type LiveOut = crate::semantics::state::X86LiveOutMask;
+    type LiveOut = crate::semantics::live_out::X86LiveOut;
 
     fn registers_from_config(config: &SearchConfig) -> Vec<crate::isa::x86::X86Register> {
         // Mode32 assembly rejects R8-R15 (`src/assembler/x86.rs:68-74`).
@@ -205,13 +206,16 @@ impl SymbolicBackend<crate::isa::X86_32> for crate::isa::X86_32 {
         target: &[crate::isa::x86::X86Instruction],
         proposal: &[crate::isa::x86::X86Instruction],
         live_out: &Self::LiveOut,
-        width: u32,
+        _width: u32,
         timeout: Duration,
     ) -> (EquivalenceResult, EquivalenceMetrics) {
-        let result = crate::semantics::equivalence::check_equivalence_x86_for_search(
-            target, proposal, live_out, width, timeout,
-        );
-        (result, EquivalenceMetrics::default())
+        let cfg =
+            crate::semantics::equivalence::EquivalenceConfigFor::<crate::isa::X86_32>::default()
+                .live_out(live_out.clone())
+                .timeout(timeout);
+        crate::semantics::equivalence::check_equivalence_for_metrics::<crate::isa::X86_32>(
+            target, proposal, &cfg,
+        )
     }
 
     fn width(config: &SearchConfig) -> u32 {
