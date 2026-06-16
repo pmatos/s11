@@ -268,7 +268,7 @@ impl Mutator {
                             // CCMP/CCMN reject shifted-register or extended-
                             // register operands; collapse to a plain register
                             // (consistent with candidate::generate_random_-
-                            // instruction case 27).
+                            // instruction's conditional-compare arm).
                             Operand::ShiftedRegister { reg, .. }
                             | Operand::ExtendedRegister { reg, .. } => Operand::Register(reg),
                         };
@@ -1285,6 +1285,8 @@ mod tests {
     use proptest::prelude::*;
     use rand::SeedableRng;
     use rand::rngs::StdRng;
+    use rand_chacha::ChaCha8Rng;
+    use std::collections::BTreeMap;
 
     fn default_mutator() -> Mutator {
         Mutator::new(
@@ -1292,6 +1294,74 @@ mod tests {
             vec![-1, 0, 1, 2],
             MutationWeights::default(),
         )
+    }
+
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+    enum MoveWideOpcode {
+        MovImm,
+        MovK,
+        MovN,
+        MovZ,
+    }
+
+    fn classify_move_wide_opcode(instr: Instruction) -> MoveWideOpcode {
+        match instr {
+            Instruction::MovImm { .. } => MoveWideOpcode::MovImm,
+            Instruction::MovK { .. } => MoveWideOpcode::MovK,
+            Instruction::MovN { .. } => MoveWideOpcode::MovN,
+            Instruction::MovZ { .. } => MoveWideOpcode::MovZ,
+            other => panic!("unexpected move-wide opcode mutation output: {other:?}"),
+        }
+    }
+
+    fn move_wide_opcode_mutation_counts(
+        start: Instruction,
+        expected_mov_imm_payload: Option<(Register, i64)>,
+    ) -> BTreeMap<MoveWideOpcode, usize> {
+        let mutator = default_mutator();
+        let mut rng = ChaCha8Rng::seed_from_u64(0x114);
+        let mut counts = BTreeMap::new();
+
+        for _ in 0..5000 {
+            let mut seq = vec![start];
+            mutator.mutate_opcode(&mut rng, &mut seq);
+
+            if let Instruction::MovImm { rd, imm } = seq[0]
+                && let Some((expected_rd, expected_imm)) = expected_mov_imm_payload
+            {
+                assert_eq!(rd, expected_rd, "MovZ -> MovImm must preserve rd");
+                assert_eq!(
+                    imm, expected_imm,
+                    "MovZ -> MovImm must use the raw u16 immediate"
+                );
+            }
+
+            *counts.entry(classify_move_wide_opcode(seq[0])).or_insert(0) += 1;
+        }
+
+        counts
+    }
+
+    fn assert_move_wide_opcode_peers(
+        start: Instruction,
+        expected: &[MoveWideOpcode],
+        expected_mov_imm_payload: Option<(Register, i64)>,
+    ) {
+        let counts = move_wide_opcode_mutation_counts(start, expected_mov_imm_payload);
+
+        for observed in counts.keys() {
+            assert!(
+                expected.contains(observed),
+                "unexpected move-wide opcode {observed:?} from {start:?}; counts: {counts:?}"
+            );
+        }
+
+        for expected_opcode in expected {
+            assert!(
+                counts.get(expected_opcode).copied().unwrap_or(0) > 0,
+                "missing move-wide opcode {expected_opcode:?} from {start:?}; counts: {counts:?}"
+            );
+        }
     }
 
     #[test]
@@ -1513,6 +1583,39 @@ mod tests {
         assert!(
             saw_arith_after_bridge,
             "expected the bridge to occasionally produce Add/Sub from And"
+        );
+    }
+
+    #[test]
+    fn test_move_wide_opcode_mutation_reaches_declared_peers() {
+        use MoveWideOpcode::{MovImm, MovK, MovN, MovZ};
+
+        assert_move_wide_opcode_peers(
+            Instruction::MovN {
+                rd: Register::X0,
+                imm: 0x1234,
+                shift: 16,
+            },
+            &[MovN, MovZ, MovK],
+            None,
+        );
+        assert_move_wide_opcode_peers(
+            Instruction::MovZ {
+                rd: Register::X0,
+                imm: 0x1234,
+                shift: 16,
+            },
+            &[MovZ, MovN, MovK, MovImm],
+            Some((Register::X0, 0x1234)),
+        );
+        assert_move_wide_opcode_peers(
+            Instruction::MovK {
+                rd: Register::X0,
+                imm: 0x1234,
+                shift: 16,
+            },
+            &[MovK, MovN, MovZ],
+            None,
         );
     }
 
