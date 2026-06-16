@@ -16,7 +16,7 @@
 
 use crate::ir::instructions::MOVW_LEGAL_SHIFTS;
 use crate::ir::types::Condition;
-use crate::ir::{Instruction, Operand, Register, RegisterWidth};
+use crate::ir::{ExtendKind, Instruction, Operand, Register, RegisterWidth};
 use crate::search::candidate::generate_random_instruction;
 use crate::search::config::MutationWeights;
 use rand::RngExt;
@@ -37,6 +37,34 @@ fn strip_ror_for_arith(rm: Operand) -> Operand {
         Operand::Register(reg)
     } else {
         rm
+    }
+}
+
+/// Drop the extended-register modifier when bridging from arithmetic
+/// opcodes (ADD/SUB/CMP/CMN — extended form allowed) to logical opcodes
+/// (AND/ORR/EOR/TST — extended form rejected). Other operand shapes pass
+/// through unchanged.
+fn strip_extended_for_logical(rm: Operand) -> Operand {
+    if let Operand::ExtendedRegister { reg, .. } = rm {
+        Operand::Register(reg)
+    } else {
+        rm
+    }
+}
+
+fn single_source_opcode_peer<R: RngExt>(rng: &mut R, rd: Register, rn: Register) -> Instruction {
+    match rng.random_range(0..11) {
+        0 => Instruction::Clz { rd, rn },
+        1 => Instruction::Cls { rd, rn },
+        2 => Instruction::Rbit { rd, rn },
+        3 => Instruction::Rev { rd, rn },
+        4 => Instruction::Rev32 { rd, rn },
+        5 => Instruction::Rev16 { rd, rn },
+        6 => Instruction::Sxtb { rd, rn },
+        7 => Instruction::Sxth { rd, rn },
+        8 => Instruction::Sxtw { rd, rn },
+        9 => Instruction::Uxtb { rd, rn },
+        _ => Instruction::Uxth { rd, rn },
     }
 }
 
@@ -518,19 +546,19 @@ impl Mutator {
                 1 => Instruction::And {
                     rd,
                     rn,
-                    rm,
+                    rm: strip_extended_for_logical(rm),
                     width: RegisterWidth::X64,
                 },
                 2 => Instruction::Orr {
                     rd,
                     rn,
-                    rm,
+                    rm: strip_extended_for_logical(rm),
                     width: RegisterWidth::X64,
                 },
                 3 => Instruction::Eor {
                     rd,
                     rn,
-                    rm,
+                    rm: strip_extended_for_logical(rm),
                     width: RegisterWidth::X64,
                 },
                 _ => Instruction::Add { rd, rn, rm },
@@ -544,19 +572,19 @@ impl Mutator {
                 1 => Instruction::And {
                     rd,
                     rn,
-                    rm,
+                    rm: strip_extended_for_logical(rm),
                     width: RegisterWidth::X64,
                 },
                 2 => Instruction::Orr {
                     rd,
                     rn,
-                    rm,
+                    rm: strip_extended_for_logical(rm),
                     width: RegisterWidth::X64,
                 },
                 3 => Instruction::Eor {
                     rd,
                     rn,
-                    rm,
+                    rm: strip_extended_for_logical(rm),
                     width: RegisterWidth::X64,
                 },
                 _ => Instruction::Sub { rd, rn, rm },
@@ -647,7 +675,7 @@ impl Mutator {
                 0 => Instruction::Cmn { rn, rm },
                 1 => Instruction::Tst {
                     rn,
-                    rm,
+                    rm: strip_extended_for_logical(rm),
                     width: RegisterWidth::X64,
                 },
                 _ => Instruction::Cmp { rn, rm },
@@ -656,7 +684,7 @@ impl Mutator {
                 0 => Instruction::Cmp { rn, rm },
                 1 => Instruction::Tst {
                     rn,
-                    rm,
+                    rm: strip_extended_for_logical(rm),
                     width: RegisterWidth::X64,
                 },
                 _ => Instruction::Cmn { rn, rm },
@@ -717,62 +745,19 @@ impl Mutator {
                 1 => Instruction::Neg { rd, rm },
                 _ => Instruction::Negs { rd, rm },
             },
-            // Single-source bit-manipulation: 6-way peer cluster.
-            Instruction::Clz { rd, rn } => match rng.random_range(0..6) {
-                0 => Instruction::Cls { rd, rn },
-                1 => Instruction::Rbit { rd, rn },
-                2 => Instruction::Rev { rd, rn },
-                3 => Instruction::Rev32 { rd, rn },
-                4 => Instruction::Rev16 { rd, rn },
-                _ => Instruction::Clz { rd, rn },
-            },
-            Instruction::Cls { rd, rn } => match rng.random_range(0..6) {
-                0 => Instruction::Clz { rd, rn },
-                1 => Instruction::Rbit { rd, rn },
-                2 => Instruction::Rev { rd, rn },
-                3 => Instruction::Rev32 { rd, rn },
-                4 => Instruction::Rev16 { rd, rn },
-                _ => Instruction::Cls { rd, rn },
-            },
-            Instruction::Rbit { rd, rn } => match rng.random_range(0..6) {
-                0 => Instruction::Clz { rd, rn },
-                1 => Instruction::Cls { rd, rn },
-                2 => Instruction::Rev { rd, rn },
-                3 => Instruction::Rev32 { rd, rn },
-                4 => Instruction::Rev16 { rd, rn },
-                _ => Instruction::Rbit { rd, rn },
-            },
-            Instruction::Rev { rd, rn } => match rng.random_range(0..6) {
-                0 => Instruction::Clz { rd, rn },
-                1 => Instruction::Cls { rd, rn },
-                2 => Instruction::Rbit { rd, rn },
-                3 => Instruction::Rev32 { rd, rn },
-                4 => Instruction::Rev16 { rd, rn },
-                _ => Instruction::Rev { rd, rn },
-            },
-            Instruction::Rev32 { rd, rn } => match rng.random_range(0..6) {
-                0 => Instruction::Clz { rd, rn },
-                1 => Instruction::Cls { rd, rn },
-                2 => Instruction::Rbit { rd, rn },
-                3 => Instruction::Rev { rd, rn },
-                4 => Instruction::Rev16 { rd, rn },
-                _ => Instruction::Rev32 { rd, rn },
-            },
-            Instruction::Rev16 { rd, rn } => match rng.random_range(0..6) {
-                0 => Instruction::Clz { rd, rn },
-                1 => Instruction::Cls { rd, rn },
-                2 => Instruction::Rbit { rd, rn },
-                3 => Instruction::Rev { rd, rn },
-                4 => Instruction::Rev32 { rd, rn },
-                _ => Instruction::Rev16 { rd, rn },
-            },
-            // SXTB/SXTH/SXTW/UXTB/UXTH: bridging chains land in a later slice.
-            // Issue #60.
-            Instruction::Sxtb { rd, rn } => Instruction::Sxtb { rd, rn },
-            Instruction::Sxth { rd, rn } => Instruction::Sxth { rd, rn },
-            Instruction::Sxtw { rd, rn } => Instruction::Sxtw { rd, rn },
-            Instruction::Uxtb { rd, rn } => Instruction::Uxtb { rd, rn },
-            Instruction::Uxth { rd, rn } => Instruction::Uxth { rd, rn },
+            // Single-source bit-manipulation and standalone extends share an
+            // 11-way peer cluster.
+            Instruction::Clz { rd, rn }
+            | Instruction::Cls { rd, rn }
+            | Instruction::Rbit { rd, rn }
+            | Instruction::Rev { rd, rn }
+            | Instruction::Rev32 { rd, rn }
+            | Instruction::Rev16 { rd, rn }
+            | Instruction::Sxtb { rd, rn }
+            | Instruction::Sxth { rd, rn }
+            | Instruction::Sxtw { rd, rn }
+            | Instruction::Uxtb { rd, rn }
+            | Instruction::Uxth { rd, rn } => single_source_opcode_peer(rng, rd, rn),
             // Move-wide cluster: MOVN ↔ MOVZ ↔ MOVK (all share rd/imm/shift),
             // plus a single MovImm bridge anchored at MOVZ.
             //
@@ -1167,13 +1152,17 @@ impl Mutator {
     }
 
     /// Random rm operand for the in-scope arithmetic/logical/comparison
-    /// shifted-register opcodes (issue #59). With low probability returns a
-    /// `ShiftedRegister`; otherwise falls back to the plain register/immediate
-    /// distribution. `allow_ror` toggles whether ROR is in the kind pool —
-    /// callers in arith bridges must pass false.
+    /// shifted/extended-register opcodes (issues #59, #151). With low
+    /// probability returns a `ShiftedRegister` or `ExtendedRegister`;
+    /// otherwise falls back to the plain register/immediate distribution.
+    /// `allow_ror` toggles whether ROR is in the shifted kind pool — callers
+    /// in arith bridges must pass false.
     fn random_operand_3op<R: RngExt>(&self, rng: &mut R, allow_ror: bool) -> Operand {
-        if rng.random_bool(0.15) && !self.registers.is_empty() {
+        let choice: f64 = rng.random();
+        if choice < 0.15 && !self.registers.is_empty() {
             self.random_shifted_register(rng, allow_ror)
+        } else if choice < 0.30 && self.has_extended_register_source() {
+            self.random_extended_register(rng)
         } else {
             self.random_operand(rng)
         }
@@ -1199,6 +1188,43 @@ impl Mutator {
         let amounts = [1u8, 2, 3, 4, 8, 16, 32];
         let amount = amounts[rng.random_range(0..amounts.len())];
         Operand::ShiftedRegister { reg, kind, amount }
+    }
+
+    fn has_extended_register_source(&self) -> bool {
+        self.registers
+            .iter()
+            .any(|reg| !matches!(reg, Register::SP | Register::XZR))
+    }
+
+    fn random_extended_register<R: RngExt>(&self, rng: &mut R) -> Operand {
+        let eligible_count = self
+            .registers
+            .iter()
+            .filter(|reg| !matches!(reg, Register::SP | Register::XZR))
+            .count();
+        debug_assert!(eligible_count > 0);
+        let selected = rng.random_range(0..eligible_count);
+        let reg = self
+            .registers
+            .iter()
+            .copied()
+            .filter(|reg| !matches!(reg, Register::SP | Register::XZR))
+            .nth(selected)
+            .expect("random_extended_register requires at least one non-SP/non-XZR register");
+        let kinds = [
+            ExtendKind::Uxtb,
+            ExtendKind::Uxth,
+            ExtendKind::Uxtw,
+            ExtendKind::Uxtx,
+            ExtendKind::Sxtb,
+            ExtendKind::Sxth,
+            ExtendKind::Sxtw,
+            ExtendKind::Sxtx,
+        ];
+        let kind = kinds[rng.random_range(0..kinds.len())];
+        let shift = rng.random_range(0..5);
+
+        Operand::ExtendedRegister { reg, kind, shift }
     }
 
     fn random_shift_operand<R: RngExt>(&self, rng: &mut R) -> Operand {
@@ -1343,6 +1369,35 @@ mod tests {
         MovZ,
     }
 
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+    enum SingleSourceOpcode {
+        Cls,
+        Clz,
+        Rbit,
+        Rev,
+        Rev16,
+        Rev32,
+        Sxtb,
+        Sxth,
+        Sxtw,
+        Uxtb,
+        Uxth,
+    }
+
+    const SINGLE_SOURCE_OPCODE_CLUSTER: [SingleSourceOpcode; 11] = [
+        SingleSourceOpcode::Clz,
+        SingleSourceOpcode::Cls,
+        SingleSourceOpcode::Rbit,
+        SingleSourceOpcode::Rev,
+        SingleSourceOpcode::Rev32,
+        SingleSourceOpcode::Rev16,
+        SingleSourceOpcode::Sxtb,
+        SingleSourceOpcode::Sxth,
+        SingleSourceOpcode::Sxtw,
+        SingleSourceOpcode::Uxtb,
+        SingleSourceOpcode::Uxth,
+    ];
+
     fn classify_move_wide_opcode(instr: Instruction) -> MoveWideOpcode {
         match instr {
             Instruction::MovImm { .. } => MoveWideOpcode::MovImm,
@@ -1351,6 +1406,65 @@ mod tests {
             Instruction::MovZ { .. } => MoveWideOpcode::MovZ,
             other => panic!("unexpected move-wide opcode mutation output: {other:?}"),
         }
+    }
+
+    fn single_source_instruction(
+        opcode: SingleSourceOpcode,
+        rd: Register,
+        rn: Register,
+    ) -> Instruction {
+        match opcode {
+            SingleSourceOpcode::Clz => Instruction::Clz { rd, rn },
+            SingleSourceOpcode::Cls => Instruction::Cls { rd, rn },
+            SingleSourceOpcode::Rbit => Instruction::Rbit { rd, rn },
+            SingleSourceOpcode::Rev => Instruction::Rev { rd, rn },
+            SingleSourceOpcode::Rev32 => Instruction::Rev32 { rd, rn },
+            SingleSourceOpcode::Rev16 => Instruction::Rev16 { rd, rn },
+            SingleSourceOpcode::Sxtb => Instruction::Sxtb { rd, rn },
+            SingleSourceOpcode::Sxth => Instruction::Sxth { rd, rn },
+            SingleSourceOpcode::Sxtw => Instruction::Sxtw { rd, rn },
+            SingleSourceOpcode::Uxtb => Instruction::Uxtb { rd, rn },
+            SingleSourceOpcode::Uxth => Instruction::Uxth { rd, rn },
+        }
+    }
+
+    fn classify_single_source_opcode(
+        instr: Instruction,
+    ) -> (SingleSourceOpcode, Register, Register) {
+        match instr {
+            Instruction::Clz { rd, rn } => (SingleSourceOpcode::Clz, rd, rn),
+            Instruction::Cls { rd, rn } => (SingleSourceOpcode::Cls, rd, rn),
+            Instruction::Rbit { rd, rn } => (SingleSourceOpcode::Rbit, rd, rn),
+            Instruction::Rev { rd, rn } => (SingleSourceOpcode::Rev, rd, rn),
+            Instruction::Rev32 { rd, rn } => (SingleSourceOpcode::Rev32, rd, rn),
+            Instruction::Rev16 { rd, rn } => (SingleSourceOpcode::Rev16, rd, rn),
+            Instruction::Sxtb { rd, rn } => (SingleSourceOpcode::Sxtb, rd, rn),
+            Instruction::Sxth { rd, rn } => (SingleSourceOpcode::Sxth, rd, rn),
+            Instruction::Sxtw { rd, rn } => (SingleSourceOpcode::Sxtw, rd, rn),
+            Instruction::Uxtb { rd, rn } => (SingleSourceOpcode::Uxtb, rd, rn),
+            Instruction::Uxth { rd, rn } => (SingleSourceOpcode::Uxth, rd, rn),
+            other => panic!("unexpected single-source opcode mutation output: {other:?}"),
+        }
+    }
+
+    fn single_source_opcode_mutation_counts(
+        start: SingleSourceOpcode,
+        seed: u64,
+    ) -> BTreeMap<SingleSourceOpcode, usize> {
+        let mutator = default_mutator();
+        let mut rng = ChaCha8Rng::seed_from_u64(seed);
+        let mut counts = BTreeMap::new();
+
+        for _ in 0..5000 {
+            let mut seq = vec![single_source_instruction(start, Register::X0, Register::X1)];
+            mutator.mutate_opcode(&mut rng, &mut seq);
+            let (opcode, rd, rn) = classify_single_source_opcode(seq[0]);
+            assert_eq!(rd, Register::X0, "{start:?} bridge must preserve rd");
+            assert_eq!(rn, Register::X1, "{start:?} bridge must preserve rn");
+            *counts.entry(opcode).or_insert(0) += 1;
+        }
+
+        counts
     }
 
     fn move_wide_opcode_mutation_counts(
@@ -1456,6 +1570,146 @@ mod tests {
         assert!(
             produced_shifted,
             "mutate_operand on Add must occasionally produce ShiftedRegister rm"
+        );
+    }
+
+    #[test]
+    fn mutate_operand_can_produce_extended_register_for_add() {
+        let mutator = default_mutator();
+        let mut rng = ChaCha8Rng::seed_from_u64(0x151);
+
+        for _ in 0..5000 {
+            let mut seq = vec![Instruction::Add {
+                rd: Register::X0,
+                rn: Register::X1,
+                rm: Operand::Register(Register::X2),
+            }];
+            mutator.mutate_operand(&mut rng, &mut seq);
+
+            if let Instruction::Add {
+                rm: Operand::ExtendedRegister { reg, shift, .. },
+                ..
+            } = seq[0]
+            {
+                assert_ne!(reg, Register::SP);
+                assert_ne!(reg, Register::XZR);
+                assert!(shift <= 4);
+                assert!(
+                    seq[0].is_encodable_aarch64(),
+                    "mutated ADD must remain encodable: {}",
+                    seq[0]
+                );
+                return;
+            }
+        }
+
+        panic!("mutate_operand on ADD did not produce ExtendedRegister rm");
+    }
+
+    #[test]
+    fn mutate_operand_can_produce_extended_register_for_sub_cmp_and_cmn() {
+        let mutator = default_mutator();
+        let starts = [
+            (
+                "SUB",
+                Instruction::Sub {
+                    rd: Register::X0,
+                    rn: Register::X1,
+                    rm: Operand::Register(Register::X2),
+                },
+            ),
+            (
+                "CMP",
+                Instruction::Cmp {
+                    rn: Register::X1,
+                    rm: Operand::Register(Register::X2),
+                },
+            ),
+            (
+                "CMN",
+                Instruction::Cmn {
+                    rn: Register::X1,
+                    rm: Operand::Register(Register::X2),
+                },
+            ),
+        ];
+
+        for (idx, (name, start)) in starts.into_iter().enumerate() {
+            let mut rng = ChaCha8Rng::seed_from_u64(0x1510 + idx as u64);
+            let mut saw_extended = false;
+
+            for _ in 0..5000 {
+                let mut seq = vec![start];
+                mutator.mutate_operand(&mut rng, &mut seq);
+
+                let rm = match seq[0] {
+                    Instruction::Sub { rm, .. }
+                    | Instruction::Cmp { rm, .. }
+                    | Instruction::Cmn { rm, .. } => rm,
+                    other => panic!("mutate_operand changed {name} opcode: {other:?}"),
+                };
+
+                if let Operand::ExtendedRegister { reg, shift, .. } = rm {
+                    assert_ne!(reg, Register::SP);
+                    assert_ne!(reg, Register::XZR);
+                    assert!(shift <= 4);
+                    assert!(
+                        seq[0].is_encodable_aarch64(),
+                        "mutated {name} must remain encodable: {}",
+                        seq[0]
+                    );
+                    saw_extended = true;
+                    break;
+                }
+            }
+
+            assert!(
+                saw_extended,
+                "mutate_operand on {name} did not produce ExtendedRegister rm"
+            );
+        }
+    }
+
+    #[test]
+    fn mutate_operand_extended_register_excludes_sp_and_xzr_sources() {
+        let mutator = Mutator::new(
+            vec![Register::SP, Register::XZR, Register::X2],
+            vec![0, 1],
+            MutationWeights::default(),
+        );
+        let mut rng = ChaCha8Rng::seed_from_u64(0x1515);
+        let mut observed = 0;
+
+        for _ in 0..5000 {
+            let mut seq = vec![Instruction::Add {
+                rd: Register::X0,
+                rn: Register::X1,
+                rm: Operand::Register(Register::X2),
+            }];
+            mutator.mutate_operand(&mut rng, &mut seq);
+
+            if let Instruction::Add {
+                rm: Operand::ExtendedRegister { reg, .. },
+                ..
+            } = seq[0]
+            {
+                observed += 1;
+                assert_eq!(
+                    reg,
+                    Register::X2,
+                    "extended-register mutation must ignore SP/XZR source registers"
+                );
+                assert!(
+                    seq[0].is_encodable_aarch64(),
+                    "mutated ADD must remain encodable: {}",
+                    seq[0]
+                );
+            }
+        }
+
+        assert!(
+            observed > 0,
+            "test did not observe any ExtendedRegister mutations"
         );
     }
 
@@ -1623,6 +1877,104 @@ mod tests {
             saw_arith_after_bridge,
             "expected the bridge to occasionally produce Add/Sub from And"
         );
+    }
+
+    #[test]
+    fn mutate_opcode_bridge_strips_extended_register_for_logical_ops() {
+        let mutator = default_mutator();
+        let extended = Operand::ExtendedRegister {
+            reg: Register::X2,
+            kind: ExtendKind::Sxtw,
+            shift: 1,
+        };
+        let starts = [
+            (
+                "ADD",
+                Instruction::Add {
+                    rd: Register::X0,
+                    rn: Register::X1,
+                    rm: extended,
+                },
+            ),
+            (
+                "SUB",
+                Instruction::Sub {
+                    rd: Register::X0,
+                    rn: Register::X1,
+                    rm: extended,
+                },
+            ),
+            (
+                "CMP",
+                Instruction::Cmp {
+                    rn: Register::X1,
+                    rm: extended,
+                },
+            ),
+            (
+                "CMN",
+                Instruction::Cmn {
+                    rn: Register::X1,
+                    rm: extended,
+                },
+            ),
+        ];
+
+        for (idx, (name, start)) in starts.into_iter().enumerate() {
+            let mut rng = ChaCha8Rng::seed_from_u64(0x15100 + idx as u64);
+            let mut saw_logical = false;
+
+            for _ in 0..5000 {
+                let mut seq = vec![start];
+                mutator.mutate_opcode(&mut rng, &mut seq);
+
+                match seq[0] {
+                    Instruction::And { rm, .. }
+                    | Instruction::Orr { rm, .. }
+                    | Instruction::Eor { rm, .. }
+                    | Instruction::Tst { rm, .. } => {
+                        saw_logical = true;
+                        assert_eq!(
+                            rm,
+                            Operand::Register(Register::X2),
+                            "{name} logical bridge must strip ExtendedRegister to plain register"
+                        );
+                        assert!(
+                            seq[0].is_encodable_aarch64(),
+                            "{name} logical bridge must remain encodable: {}",
+                            seq[0]
+                        );
+                    }
+                    _ => {}
+                }
+            }
+
+            assert!(
+                saw_logical,
+                "expected {name} opcode mutation to reach a logical/TST peer"
+            );
+        }
+    }
+
+    #[test]
+    fn test_single_source_opcode_mutation_reaches_extend_and_bitmanip_peers() {
+        for (idx, start) in SINGLE_SOURCE_OPCODE_CLUSTER.into_iter().enumerate() {
+            let counts = single_source_opcode_mutation_counts(start, 0x15160 + idx as u64);
+
+            for observed in counts.keys() {
+                assert!(
+                    SINGLE_SOURCE_OPCODE_CLUSTER.contains(observed),
+                    "unexpected single-source opcode {observed:?} from {start:?}; counts: {counts:?}"
+                );
+            }
+
+            for expected in SINGLE_SOURCE_OPCODE_CLUSTER {
+                assert!(
+                    counts.get(&expected).copied().unwrap_or(0) > 0,
+                    "missing single-source opcode {expected:?} from {start:?}; counts: {counts:?}"
+                );
+            }
+        }
     }
 
     #[test]

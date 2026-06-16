@@ -2572,6 +2572,26 @@ mod tests {
                 rn: Register::X1,
                 shift: Operand::Register(Register::X2),
             },
+            Instruction::Uxtb {
+                rd: Register::X0,
+                rn: Register::X1,
+            },
+            Instruction::Uxth {
+                rd: Register::X0,
+                rn: Register::X1,
+            },
+            Instruction::Sxtb {
+                rd: Register::X0,
+                rn: Register::X1,
+            },
+            Instruction::Sxth {
+                rd: Register::X0,
+                rn: Register::X1,
+            },
+            Instruction::Sxtw {
+                rd: Register::X0,
+                rn: Register::X1,
+            },
         ];
         for instr in cases {
             let printed = format!("{}", instr);
@@ -2641,6 +2661,28 @@ mod tests {
         let line = "ccmp x1, #32, #0, eq";
         let result = parse_line(line);
         assert!(result.is_err(), "imm5 > 31 must be rejected");
+    }
+
+    #[test]
+    fn parse_ccmp_and_ccmn_reject_al_nv_at_encodability_boundary() {
+        // AL/NV are valid condition tokens, but CCMP/CCMN reserve those
+        // encodings. `parse_line` rejects them at the final encodability gate.
+        for line in [
+            "ccmp x1, x2, #0, al",
+            "ccmp x1, x2, #0, nv",
+            "ccmn x1, x2, #0, al",
+            "ccmn x1, x2, #0, nv",
+        ] {
+            let result = parse_line(line);
+            assert!(
+                matches!(
+                    result,
+                    Err(ParseLineError::Other(ref msg))
+                        if msg.contains("instruction cannot be encoded in AArch64")
+                ),
+                "{line} should be rejected only after parsing reaches encodability validation"
+            );
+        }
     }
 
     #[test]
@@ -2957,8 +2999,8 @@ mod tests {
             };
             assert_eq!(parsed, expected, "round-trip failed for {}", line);
         }
-        // The legacy X-form spelling we use internally for Display still
-        // parses correctly (e.g. `uxtb x0, x1` from older tests).
+        // Legacy X-form input remains accepted for compatibility even though
+        // Display now canonicalizes these aliases to architectural widths.
         assert!(parse_line("uxtb x0, x1").is_ok());
         assert!(parse_line("sxtw x0, x1").is_ok());
     }
@@ -3009,7 +3051,7 @@ mod tests {
                 rn: Register::X1,
             }
         );
-        assert_eq!(format!("{}", parsed), "sxtw x0, x1");
+        assert_eq!(format!("{}", parsed), "sxtw x0, w1");
     }
 
     #[test]
@@ -3025,7 +3067,7 @@ mod tests {
                 rn: Register::X1,
             }
         );
-        assert_eq!(format!("{}", parsed), "sxth x0, x1");
+        assert_eq!(format!("{}", parsed), "sxth x0, w1");
     }
 
     #[test]
@@ -3041,7 +3083,7 @@ mod tests {
                 rn: Register::X1,
             }
         );
-        assert_eq!(format!("{}", parsed), "uxth x0, x1");
+        assert_eq!(format!("{}", parsed), "uxth w0, w1");
     }
 
     #[test]
@@ -3057,7 +3099,7 @@ mod tests {
                 rn: Register::X1,
             }
         );
-        assert_eq!(format!("{}", parsed), "sxtb x0, x1");
+        assert_eq!(format!("{}", parsed), "sxtb x0, w1");
     }
 
     #[test]
@@ -3074,7 +3116,7 @@ mod tests {
                 rn: Register::X1,
             }
         );
-        assert_eq!(format!("{}", parsed), "uxtb x0, x1");
+        assert_eq!(format!("{}", parsed), "uxtb w0, w1");
     }
 
     // ===== Issue #69: branch / control-flow parsing =====

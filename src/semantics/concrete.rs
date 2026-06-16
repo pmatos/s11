@@ -1329,6 +1329,34 @@ mod tests {
     }
 
     #[test]
+    fn test_find_first_difference_reports_live_flag_difference_with_xzr_sentinel() {
+        let mut state1 = state_with(vec![(Register::X0, 42)]);
+        let mut state2 = state_with(vec![(Register::X0, 42)]);
+        state1.set_flags(ConditionFlags {
+            n: true,
+            z: false,
+            c: false,
+            v: false,
+        });
+        state2.set_flags(ConditionFlags {
+            n: false,
+            z: true,
+            c: false,
+            v: false,
+        });
+
+        let live_out = RegisterSet::<Register>::from_registers(vec![Register::X0]);
+        assert_eq!(
+            find_first_difference(&state1, &state2, &live_out, true),
+            Some((Register::XZR, ConcreteValue(8), ConcreteValue(4)))
+        );
+        assert_eq!(
+            find_first_difference(&state1, &state2, &live_out, false),
+            None
+        );
+    }
+
+    #[test]
     fn test_mov_zero_eor_equivalence() {
         let state = state_with(vec![(Register::X0, 12345)]);
 

@@ -1503,11 +1503,36 @@ impl fmt::Display for Instruction {
             Instruction::Rev { rd, rn } => write!(f, "rev {}, {}", rd, rn),
             Instruction::Rev32 { rd, rn } => write!(f, "rev32 {}, {}", rd, rn),
             Instruction::Rev16 { rd, rn } => write!(f, "rev16 {}, {}", rd, rn),
-            Instruction::Sxtb { rd, rn } => write!(f, "sxtb {}, {}", rd, rn),
-            Instruction::Sxth { rd, rn } => write!(f, "sxth {}, {}", rd, rn),
-            Instruction::Sxtw { rd, rn } => write!(f, "sxtw {}, {}", rd, rn),
-            Instruction::Uxtb { rd, rn } => write!(f, "uxtb {}, {}", rd, rn),
-            Instruction::Uxth { rd, rn } => write!(f, "uxth {}, {}", rd, rn),
+            Instruction::Sxtb { rd, rn } => write!(
+                f,
+                "sxtb {}, {}",
+                RegisterWidth::X64.register_name(*rd),
+                RegisterWidth::W32.register_name(*rn)
+            ),
+            Instruction::Sxth { rd, rn } => write!(
+                f,
+                "sxth {}, {}",
+                RegisterWidth::X64.register_name(*rd),
+                RegisterWidth::W32.register_name(*rn)
+            ),
+            Instruction::Sxtw { rd, rn } => write!(
+                f,
+                "sxtw {}, {}",
+                RegisterWidth::X64.register_name(*rd),
+                RegisterWidth::W32.register_name(*rn)
+            ),
+            Instruction::Uxtb { rd, rn } => write!(
+                f,
+                "uxtb {}, {}",
+                RegisterWidth::W32.register_name(*rd),
+                RegisterWidth::W32.register_name(*rn)
+            ),
+            Instruction::Uxth { rd, rn } => write!(
+                f,
+                "uxth {}, {}",
+                RegisterWidth::W32.register_name(*rd),
+                RegisterWidth::W32.register_name(*rn)
+            ),
             Instruction::Ubfx { rd, rn, lsb, width } => {
                 write!(f, "ubfx {}, {}, #{}, #{}", rd, rn, lsb, width)
             }
@@ -3738,7 +3763,7 @@ mod tests {
             rd: Register::X0,
             rn: Register::X1,
         };
-        assert_eq!(ok.to_string(), "sxtw x0, x1");
+        assert_eq!(ok.to_string(), "sxtw x0, w1");
         assert_eq!(ok.destination(), Some(Register::X0));
         assert_eq!(ok.source_registers(), vec![Register::X1]);
         assert!(!ok.modifies_flags());
@@ -3765,7 +3790,7 @@ mod tests {
             rd: Register::X0,
             rn: Register::X1,
         };
-        assert_eq!(ok.to_string(), "sxth x0, x1");
+        assert_eq!(ok.to_string(), "sxth x0, w1");
         assert_eq!(ok.destination(), Some(Register::X0));
         assert_eq!(ok.source_registers(), vec![Register::X1]);
         assert!(!ok.modifies_flags());
@@ -3792,7 +3817,7 @@ mod tests {
             rd: Register::X0,
             rn: Register::X1,
         };
-        assert_eq!(ok.to_string(), "uxth x0, x1");
+        assert_eq!(ok.to_string(), "uxth w0, w1");
         assert_eq!(ok.destination(), Some(Register::X0));
         assert_eq!(ok.source_registers(), vec![Register::X1]);
         assert!(!ok.modifies_flags());
@@ -3821,7 +3846,7 @@ mod tests {
             rd: Register::X0,
             rn: Register::X1,
         };
-        assert_eq!(ok.to_string(), "sxtb x0, x1");
+        assert_eq!(ok.to_string(), "sxtb x0, w1");
         assert_eq!(ok.destination(), Some(Register::X0));
         assert_eq!(ok.source_registers(), vec![Register::X1]);
         assert!(!ok.modifies_flags());
@@ -3850,7 +3875,7 @@ mod tests {
             rd: Register::X0,
             rn: Register::X1,
         };
-        assert_eq!(ok.to_string(), "uxtb x0, x1");
+        assert_eq!(ok.to_string(), "uxtb w0, w1");
         assert_eq!(ok.destination(), Some(Register::X0));
         assert_eq!(ok.source_registers(), vec![Register::X1]);
         assert!(!ok.modifies_flags());
