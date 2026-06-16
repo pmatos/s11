@@ -534,7 +534,7 @@ impl InstructionGenerator<Instruction> for AArch64InstructionGenerator {
         // (mirrors candidate.rs::generate_all_instructions); is_encodable_aarch64
         // filters SP at the encoder boundary, so we emit unconstrained `rn`
         // and `rm`-register entries here.
-        const CCMP_NZCV_SAMPLES: [u8; 4] = [0, 1, 7, 15];
+        const CCMP_NZCV_SAMPLES: [u8; 5] = [0, 1, 7, 8, 15];
         const CCMP_IMM5_SAMPLES: [i64; 4] = [0, 1, 16, 31];
         for &rn in registers {
             for &rm_reg in registers {

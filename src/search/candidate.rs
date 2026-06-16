@@ -365,7 +365,7 @@ pub fn generate_all_instructions(registers: &[Register], immediates: &[i64]) -> 
     // a representative nzcv subset × {register, imm5} for `rm`. Keep the
     // nzcv and imm5 samples bounded so the combined space stays around
     // ~120k candidates total — already inside the enumerative budget.
-    const CCMP_NZCV_SAMPLES: [u8; 4] = [0, 1, 7, 15];
+    const CCMP_NZCV_SAMPLES: [u8; 5] = [0, 1, 7, 8, 15];
     const CCMP_IMM5_SAMPLES: [i64; 4] = [0, 1, 16, 31];
     for &rn in registers {
         if rn == Register::SP {
@@ -1473,6 +1473,29 @@ mod tests {
             Instruction::Tst {
                 rm: Operand::Register(_),
                 ..
+            }
+        )));
+    }
+
+    #[test]
+    fn test_generate_all_instructions_includes_n_only_conditional_compare_nzcv_sample() {
+        let instrs = generate_all_instructions(&[Register::X0, Register::X1], &[0]);
+        assert!(instrs.iter().any(|i| matches!(
+            i,
+            Instruction::Ccmp {
+                rn: Register::X0,
+                rm: Operand::Register(Register::X1),
+                nzcv: 8,
+                cond: crate::ir::types::Condition::MI
+            }
+        )));
+        assert!(instrs.iter().any(|i| matches!(
+            i,
+            Instruction::Ccmn {
+                rn: Register::X0,
+                rm: Operand::Immediate(0),
+                nzcv: 8,
+                cond: crate::ir::types::Condition::PL
             }
         )));
     }
