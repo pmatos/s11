@@ -621,6 +621,9 @@ pub fn generate_random_instruction<R: rand::RngExt>(
     let rd = registers[rng.random_range(0..registers.len())];
     let pick_reg = |rng: &mut R| registers[rng.random_range(0..registers.len())];
 
+    // See also `src/isa/aarch64.rs::AArch64InstructionGenerator::generate_random`:
+    // this is a parallel 38-slot sampler, but its slot numbers differ
+    // (notably, ROR is slot 37 there and slot 23 here).
     match rng.random_range(0..38) {
         0 => {
             let imm = if immediates.is_empty() {

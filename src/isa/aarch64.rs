@@ -701,6 +701,9 @@ impl InstructionGenerator<Instruction> for AArch64InstructionGenerator {
         // for CCMP/CCMN), 34 = bit-field aliases (issue #61: 6-way
         // sub-multiplexer for UBFX/SBFX/BFI/BFXIL/UBFIZ/SBFIZ), 35 = CSET,
         // 36 = CSETM, 37 = ROR.
+        // See also `src/search/candidate.rs::generate_random_instruction`:
+        // it is a parallel 38-slot sampler, but its slot numbers differ
+        // (notably, ROR is slot 23 there and slot 37 here).
         let opcode = rng.random_range(0..38);
         let rd = registers[rng.random_range(0..registers.len())];
         let rn = registers[rng.random_range(0..registers.len())];
