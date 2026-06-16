@@ -1,65 +1,57 @@
-# Plan: Consolidate AArch64 opcode IDs
+# Plan - issue #115: Re-balance AArch64 MCMC bit-manipulation sampling
 
 ## 1. Problem Restated
 
-`src/search/candidate.rs` defines a free `opcode_id(&Instruction) -> u8` match table that mirrors the canonical `InstructionType::opcode_id` implementation for `Instruction` in `src/isa/aarch64.rs`. This hand-synchronised duplicate makes each new AArch64 IR variant a two-site update and required an extra drift test. The implementation should remove the search-layer copy and route every `candidate.rs` opcode-ID use through the existing `InstructionType` trait method.
+The current AArch64 random candidate tables still route `CLZ`, `CLS`, `RBIT`, `REV`, `REV32`, and `REV16` through one shared random-generation slot in both `AArch64InstructionGenerator::generate_random` and `search::candidate::generate_random_instruction`. In the current 33-slot tree each bit-manipulation opcode is sampled at roughly `1 / (33 * 6)`, while singleton top-level opcodes are sampled at `1 / 33`; this preserves the original issue's 6x starvation even though later issues grew the table. The minimal fix is to give each of the six single-source bit-manipulation ops its own top-level slot in both samplers, without changing opcode IDs, semantics, parsing, assembler output, or `opcode_count()`.
 
 ## 2. Files To Touch
 
-- `src/search/candidate.rs`: update same-file test/helper call sites from the free `opcode_id` function to `InstructionType::opcode_id` or `.opcode_id()`, remove the free function at lines 999-1081, and remove or rewrite the now-obsolete drift test at lines 1690-1742.
-- `src/isa/aarch64.rs`: no production change expected; this remains the canonical opcode-ID table in `impl InstructionType for Instruction` at lines 182-270. Use existing tests here as the backend safety net.
-- `src/isa/traits.rs`: no change expected; `InstructionType::opcode_id` already exists at lines 112-113.
-- No `crates/` or `compiler/` paths exist in this repository, so there is no cross-compiler update.
-- No `docs/spec/*.md` updates are required because this is an internal Rust refactor with no syntax, semantics, builtin, operator, effect, or CLI behavior change. This repository also has no `docs/spec/` directory.
+- `src/isa/aarch64.rs` - add a distribution regression test near `slot_23_sub_multiplexer_removed_for_issue_93`, promote the bit-manipulation arm in `AArch64InstructionGenerator::generate_random`, update the random-slot comments, and update the `opcode_count()` doc comment that currently says the bit ops are folded behind slot 26.
+- `src/search/candidate.rs` - add the matching distribution regression test in the existing candidate-generator tests, promote the bit-manipulation arm in `generate_random_instruction`, and update the random-slot comments.
+- `src/search/stochastic/mutation.rs` - update the stale comment that points at `candidate.rs::generate_random_instruction` "case 27" for `CCMP`/`CCMN` after candidate slots shift.
+
+There are no `crates/`, `compiler/`, or `docs/spec/` directories in this repository, so this is not a cross-compiler or Vow-spec change. `docs/capability.md` does not need an update because the supported mnemonic set is unchanged; this PR changes only stochastic sampling weights.
 
 ## 3. TDD Slices
 
-1. **Compile-fail consumer audit**
-   - Test/location: `src/search/candidate.rs` unit tests that currently call the free function, especially `test_generate_all_instructions_covers_issue_66_opcodes` at lines 1201-1221, `random_opcode_ids` at lines 1223-1232, `test_opcode_id_unique` at lines 1630-1688, and `test_bitfield_opcode_id_matches_isa_backend` at lines 1690-1742.
-   - Red: remove or temporarily hide `candidate::opcode_id`; `cargo test candidate::` should fail at every remaining free-function call.
-   - Green: update those call sites to use `InstructionType::opcode_id` or `.opcode_id()`. Keep stable literal checks such as `10u8..=19`; only change the source of the ID value.
-   - Production code: no behavior change yet beyond call-site routing.
+1. Add a red distribution test for the stochastic search candidate generator in `src/search/candidate.rs::tests`, near the existing random reachability tests around `random_opcode_ids`. Use `ChaCha8Rng`, `default_registers()`, `default_immediates()`, and `opcode_id` to count 30,000 calls to `generate_random_instruction`. Assert each representative `Instruction::{Clz, Cls, Rbit, Rev, Rev32, Rev16}` opcode ID appears at least 500 times. The current code should fail because each opcode is expected near 152 hits; the promoted 38-slot table should put each near 789 hits.
 
-2. **Remove the duplicated table**
-   - Test/location: same `src/search/candidate.rs` unit test module plus repository search.
-   - Red: after deleting the free function at lines 999-1081, `rg -n "map\\(opcode_id\\)|opcode_id\\(&|candidate::opcode_id|fn opcode_id" src/search` should show no AArch64 candidate helper references.
-   - Green: rely on `InstructionType::opcode_id` from the existing import at `src/search/candidate.rs:5`; add a local `use crate::isa::InstructionType;` inside the test module only if method resolution stops being obvious after edits.
-   - Production code: delete `pub fn opcode_id` entirely, including `#[allow(dead_code)]` and comments that say the table mirrors `src/isa/aarch64.rs`.
+2. Make the candidate-generator test pass by changing `src/search/candidate.rs::generate_random_instruction`: grow `rng.random_range(0..33)` to `0..38`, replace the slot-26 six-way sub-multiplexer with slots `26` through `31` for `Clz`, `Cls`, `Rbit`, `Rev`, `Rev32`, and `Rev16`, then shift the existing later arms to `32` through `37` while preserving their internal sub-multiplexers.
 
-3. **Retire the drift test without losing useful coverage**
-   - Test/location: `src/search/candidate.rs::test_bitfield_opcode_id_matches_isa_backend` at lines 1690-1742.
-   - Red: once the free function is gone, the old assertion would become `instr.opcode_id() == instr.opcode_id()` and no longer catches anything.
-   - Green: either delete this sync test as redundant, or convert it into a stable-value guard for the bitfield aliases using literal expected IDs `49..=54`. Prefer deletion if `src/isa/aarch64.rs::all_instruction_families_cover_trait_methods` and candidate bitfield generation tests already give enough coverage.
-   - Production code: none.
+3. Add the analogous red distribution test in `src/isa/aarch64.rs::tests`, near `slot_23_sub_multiplexer_removed_for_issue_93`. Use `AArch64InstructionGenerator::generate_random`, the same 30,000 fixed-seed draw count, and the same `>= 500` threshold for the six bit-manipulation opcode IDs. The current generator should fail for the same 6x-starvation reason.
 
-4. **Regression and formatting pass**
-   - Test/location: affected unit tests in `src/search/candidate.rs` and `src/isa/aarch64.rs`.
-   - Red: run the narrow tests before and after cleanup to catch accidental ID or import changes.
-   - Green: run `cargo test candidate::`, `cargo test isa::aarch64::tests::all_instruction_families_cover_trait_methods`, and `cargo fmt -- --check`. If time permits in implementation, run `just check` or the full `./ci_check.sh` before opening the PR.
-   - Production code: only formatting required by Rustfmt.
+4. Make the trait-generator test pass by changing `src/isa/aarch64.rs::AArch64InstructionGenerator::generate_random`: grow `rng.random_range(0..33)` to `0..38`, replace the slot-26 six-way sub-multiplexer with slots `26` through `31`, and shift `MADD` family, `CCMP`/`CCMN`, bit-field aliases, `CSET`, `CSETM`, and `ROR` to slots `32` through `37`. Keep `opcode_count()` at `55`; it counts stable opcode IDs, not random slots.
+
+5. Refactor only the comments needed to keep contracts honest. In `src/isa/aarch64.rs`, update the top-of-table comment and the `opcode_count()` doc comment so they say the random table has 38 slots and no longer name the bit-manipulation ops as a folded family. In `src/search/stochastic/mutation.rs`, change the `candidate.rs` case-number comment to either the new slot number or a case-number-free phrase.
+
+6. Run the focused green checks, then the normal repository gate:
+   ```bash
+   cargo test generate_random_instruction_promotes_single_source_bit_ops_to_top_level_slots
+   cargo test aarch64_random_generation_promotes_single_source_bit_ops_to_top_level_slots
+   cargo test slot_23_sub_multiplexer_removed_for_issue_93
+   cargo fmt -- --check
+   cargo test
+   ./ci_check.sh
+   ```
 
 ## 4. Verification Surface
 
-- Contracts, codegen, the C model, and ESBMC properties are not touched. No Vow `.vow` contracts or ESBMC proofs apply to this s11 Rust refactor.
-- No `tests/run/` or `examples/` fixtures need to grow; this does not affect parse, print, assembly, disassembly, equivalence, or CLI output.
-- Verification should focus on Rust compile/test coverage and static search:
-  - `rg -n "opcode_id" src/search/` should show only legitimate trait test method calls or comments, not a search-layer helper table.
-  - `cargo test candidate::` should keep candidate generator behavior intact.
-  - `cargo test isa::aarch64::tests::all_instruction_families_cover_trait_methods` should keep the canonical opcode-count invariant intact.
+- No ESBMC work is needed. This change does not touch contracts, codegen, the C model, SMT lowering, concrete semantics, parser grammar, assembler encoding, ELF patching, or binary output.
+- No fixtures under `tests/run/` or `examples/` need to grow; neither directory exists in this checkout. No `tests/asm/`, `tests/integration/`, or benchmark fixture is required because the observable change is the random sampler distribution, not accepted syntax or end-to-end optimization behavior.
+- The key proof-by-test is statistical but deterministic: fixed-seed 30,000-draw tests distinguish the current `~152` hits per bit opcode from the promoted `~789` hits per bit opcode with a wide threshold.
 
 ## 5. Risk Areas
 
-- Method-call trait resolution: `.opcode_id()` requires `InstructionType` in scope; `candidate.rs` already imports it at line 5, but tests should be checked after deleting the helper.
-- Test tautology: the old drift test must not survive as a self-comparison after the free function is removed.
-- Stable opcode ID expectations: tests around issue #66 intentionally use literal range `10..=19`; do not rewrite these to derive the values from representatives, because that would hide renumbering.
-- Search comments: remove or update comments that claim `candidate.rs` owns or mirrors an opcode table so future contributors do not reintroduce the duplicate.
-- `cargo clippy --all -- -D warnings`: deleting the free function should remove one `#[allow(dead_code)]`, but new imports must not be unused.
-- Binary fixed point, parse-print-parse idempotency, codegen ordering, map ordering, and stack-slot layout are not involved.
+- `opcode_count()` must not be bumped as part of this change. In the current tree it is explicitly the upper bound for `Instruction::opcode_id()`, not the random slot count; changing it would break the stable opcode-family contract and the existing `all_instruction_families_cover_trait_methods` test.
+- The two random tables are parallel but not numerically identical today. Do not copy one table wholesale into the other; promote only the six bit-manipulation opcodes and shift each table's existing later arms in place.
+- Distribution tests can become flaky if thresholds are too tight. Keep the fixed seed and a deliberately loose threshold that fails the current clustered table but sits far below the promoted table's expected count.
+- Slot shifts can leave stale comments, especially the `CCMP`/`CCMN` case-number comment in `src/search/stochastic/mutation.rs`; use `rg "slot 26|slot 27|0\\.\\.33|6-way sub-multiplexer|case 27"` after the edit.
+- The change slightly reduces every former top-level opcode's absolute probability from `1/33` to `1/38`; that is the intentional tradeoff for making the six bit ops first-class slots. Existing sub-multiplexed families such as multiply-accumulate and bit-field aliases remain out of scope.
+- `parse -> print -> parse` idempotency and binary fixed-point concerns are absent because parsing, formatting, assembler/codegen ordering, map iteration, stack-slot layout, and `vow-clif-shim`-style components are not touched. The `cargo clippy --all -- -D warnings` gate should only be at risk from unused imports in the new tests.
 
 ## 6. Out Of Scope
 
-- Renumbering opcode IDs or changing `AArch64InstructionGenerator::opcode_count`.
-- Consolidating `generate_all_instructions` with `AArch64InstructionGenerator::generate_all`; those are broader duplicated candidate-generation paths.
-- Refactoring x86, RISC-V, symbolic sketch opcode constants, or stochastic mutation opcode-selection tables.
-- Changing instruction semantics, parser behavior, assembler encodability, CLI flags, docs capability tables, or benchmark fixtures.
-- Running `sudo`, modifying `symphony/` if present, or editing anything under gitignored `build/`.
+- Adding or tuning a full Criterion stochastic-convergence benchmark for a CLZ-shaped target. The existing bench harness is not CI-gated and fixture sweeps are costly; this PR should close the sampler-policy issue with deterministic distribution regressions.
+- Rebalancing other shared random slots such as multiply-accumulate, conditional compare, bit-field aliases, compare, multiply/divide, or conditional-select families.
+- Refactoring the duplicated AArch64 random tables into a shared abstraction or introducing a global random-slot constant.
+- Changing opcode IDs, `opcode_count()`, instruction semantics, encodability rules, parser support, docs/capability mnemonic inventories, CLI flags, or benchmark JSON schema.
