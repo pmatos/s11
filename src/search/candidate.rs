@@ -1129,6 +1129,9 @@ mod tests {
 
     #[test]
     fn test_generate_all_instructions_covers_issue_66_opcodes() {
+        // Candidate generation intentionally uses `InstructionType::opcode_id`
+        // from `src/isa/aarch64.rs`; add a sync guard beside any future
+        // candidate-local table instead of letting the two drift silently.
         // Regression guard: every IR opcode family enumerated by issue #66
         // (Mul/Sdiv/Udiv/Cmp/Cmn/Tst/Csel/Csinc/Csinv/Csneg, opcode_ids
         // 10..=19) must appear in the exhaustive enumeration. Narrower scope

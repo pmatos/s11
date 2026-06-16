@@ -180,6 +180,10 @@ impl InstructionType for Instruction {
         Instruction::source_registers(self)
     }
 
+    // Canonical AArch64 opcode-id table. Candidate generation calls this through
+    // `InstructionType::opcode_id`; drift is guarded by this module's
+    // `all_instruction_families_cover_trait_methods` test and candidate coverage
+    // tests in `src/search/candidate.rs`.
     fn opcode_id(&self) -> u8 {
         match self {
             Instruction::MovReg { .. } => 0,
