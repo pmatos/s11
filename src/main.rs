@@ -255,13 +255,8 @@ enum Commands {
 
 // --- ELF Binary Analysis ---
 
-/// Read an ELF's `e_machine` and map it to the matching `CliArch` variant.
-/// Returns an error if the binary can't be read or the architecture isn't
-/// one we support.
-fn detect_cli_arch_from_elf(path: &Path) -> Result<CliArch, Box<dyn std::error::Error>> {
-    let data = fs::read(path)?;
-    let elf = ElfBytes::<AnyEndian>::minimal_parse(&data)?;
-    match elf.ehdr.e_machine {
+fn cli_arch_from_e_machine(machine: u16) -> Result<CliArch, Box<dyn std::error::Error>> {
+    match machine {
         elf::abi::EM_AARCH64 => Ok(CliArch::Aarch64),
         elf::abi::EM_X86_64 => Ok(CliArch::X86_64),
         elf::abi::EM_386 => Ok(CliArch::X86_32),
@@ -269,7 +264,11 @@ fn detect_cli_arch_from_elf(path: &Path) -> Result<CliArch, Box<dyn std::error::
     }
 }
 
-fn analyze_elf_binary(path: &PathBuf, disasm_mode: bool) -> Result<(), Box<dyn std::error::Error>> {
+fn analyze_elf_binary(
+    path: &Path,
+    disasm_mode: bool,
+    expected_arch: Option<CliArch>,
+) -> Result<(), Box<dyn std::error::Error>> {
     if !disasm_mode {
         println!("Analyzing ELF binary: {}", path.display());
     }
@@ -281,11 +280,23 @@ fn analyze_elf_binary(path: &PathBuf, disasm_mode: bool) -> Result<(), Box<dyn s
     let elf = ElfBytes::<AnyEndian>::minimal_parse(&file_data)?;
 
     // Detect architecture; reject anything outside the supported set.
-    let arch = match elf.ehdr.e_machine {
-        elf::abi::EM_AARCH64 => "AArch64",
-        elf::abi::EM_X86_64 => "x86-64",
-        elf::abi::EM_386 => "x86-32",
-        m => return Err(format!("Unsupported architecture (e_machine: {})", m).into()),
+    let detected_arch = cli_arch_from_e_machine(elf.ehdr.e_machine)?;
+    if let Some(expected_arch) = expected_arch
+        && expected_arch != detected_arch
+    {
+        return Err(format!(
+            "Architecture mismatch: --arch {:?} but ELF reports {:?}",
+            expected_arch, detected_arch
+        )
+        .into());
+    }
+    let arch = match detected_arch {
+        CliArch::Aarch64 => "AArch64",
+        CliArch::X86_64 => "x86-64",
+        CliArch::X86_32 => "x86-32",
+        CliArch::Riscv32 | CliArch::Riscv64 => {
+            unreachable!("RISC-V is not produced by cli_arch_from_e_machine")
+        }
     };
 
     if !disasm_mode {
@@ -304,25 +315,27 @@ fn analyze_elf_binary(path: &PathBuf, disasm_mode: bool) -> Result<(), Box<dyn s
     }
 
     // Initialize Capstone disassembler per architecture.
-    let cs = match elf.ehdr.e_machine {
-        elf::abi::EM_AARCH64 => Capstone::new()
+    let cs = match detected_arch {
+        CliArch::Aarch64 => Capstone::new()
             .arm64()
             .mode(capstone::arch::arm64::ArchMode::Arm)
             .detail(true)
             .build()?,
-        elf::abi::EM_X86_64 => Capstone::new()
+        CliArch::X86_64 => Capstone::new()
             .x86()
             .mode(capstone::arch::x86::ArchMode::Mode64)
             .syntax(capstone::arch::x86::ArchSyntax::Intel)
             .detail(true)
             .build()?,
-        elf::abi::EM_386 => Capstone::new()
+        CliArch::X86_32 => Capstone::new()
             .x86()
             .mode(capstone::arch::x86::ArchMode::Mode32)
             .syntax(capstone::arch::x86::ArchSyntax::Intel)
             .detail(true)
             .build()?,
-        _ => unreachable!("e_machine already validated above"),
+        CliArch::Riscv32 | CliArch::Riscv64 => {
+            unreachable!("RISC-V is not produced by cli_arch_from_e_machine")
+        }
     };
 
     // Find and disassemble .text sections
@@ -2091,38 +2104,22 @@ fn main() {
         Commands::Disasm { binary, arch } => {
             // Disassemble mode. `analyze_elf_binary` auto-detects the
             // architecture from e_machine and picks the right Capstone
-            // backend. The optional `--arch` is used to (a) early-reject
-            // RISC-V (still unsupported) and (b) cross-check against the
-            // ELF so a stale or wrong `--arch` value fails fast instead of
-            // silently producing disassembly for a different architecture.
-            if let Some(a) = arch {
-                match a {
-                    CliArch::Riscv32 | CliArch::Riscv64 => {
-                        eprintln!("RISC-V disassembly is not yet supported");
-                        std::process::exit(1);
-                    }
-                    CliArch::Aarch64 | CliArch::X86_64 | CliArch::X86_32 => {
-                        match detect_cli_arch_from_elf(&binary) {
-                            Ok(detected) if detected == a => {}
-                            Ok(detected) => {
-                                eprintln!(
-                                    "Architecture mismatch: --arch {:?} but ELF reports {:?}",
-                                    a, detected
-                                );
-                                std::process::exit(1);
-                            }
-                            Err(e) => {
-                                eprintln!("Error reading ELF: {}", e);
-                                std::process::exit(1);
-                            }
-                        }
-                    }
-                }
+            // backend. The optional `--arch` still early-rejects RISC-V, but
+            // supported hints are cross-checked inside the analyzer after its
+            // single ELF read/parse.
+            if let Some(CliArch::Riscv32 | CliArch::Riscv64) = arch {
+                eprintln!("RISC-V disassembly is not yet supported");
+                std::process::exit(1);
             }
-            match analyze_elf_binary(&binary, true) {
+            match analyze_elf_binary(&binary, true, arch) {
                 Ok(()) => {}
                 Err(e) => {
-                    eprintln!("Error analyzing binary: {}", e);
+                    let message = e.to_string();
+                    if message.starts_with("Architecture mismatch:") {
+                        eprintln!("{}", message);
+                    } else {
+                        eprintln!("Error analyzing binary: {}", message);
+                    }
                     std::process::exit(1);
                 }
             }
@@ -2288,6 +2285,105 @@ mod cli_helper_tests {
             llm_max_calls: 0,
             llm_model: "test-model".to_string(),
         }
+    }
+
+    fn build_minimal_elf64(text_bytes: &[u8], text_vaddr: u64, machine: u16) -> Vec<u8> {
+        let elf_header_size = 64usize;
+        let shentsize = 64usize;
+        let shnum = 3usize;
+        let shstrtab: &[u8] = b"\0.text\0.shstrtab\0";
+        let text_offset = elf_header_size;
+        let shstrtab_offset = text_offset + text_bytes.len();
+        let shoff = shstrtab_offset + shstrtab.len();
+        let total_size = shoff + shentsize * shnum;
+
+        let mut buf = vec![0u8; total_size];
+
+        buf[0..4].copy_from_slice(b"\x7fELF");
+        buf[4] = elf::abi::ELFCLASS64;
+        buf[5] = elf::abi::ELFDATA2LSB;
+        buf[6] = elf::abi::EV_CURRENT;
+        buf[16..18].copy_from_slice(&elf::abi::ET_EXEC.to_le_bytes());
+        buf[18..20].copy_from_slice(&machine.to_le_bytes());
+        buf[20..24].copy_from_slice(&(elf::abi::EV_CURRENT as u32).to_le_bytes());
+        buf[40..48].copy_from_slice(&(shoff as u64).to_le_bytes());
+        buf[52..54].copy_from_slice(&(elf_header_size as u16).to_le_bytes());
+        buf[58..60].copy_from_slice(&(shentsize as u16).to_le_bytes());
+        buf[60..62].copy_from_slice(&(shnum as u16).to_le_bytes());
+        buf[62..64].copy_from_slice(&2u16.to_le_bytes());
+
+        buf[text_offset..text_offset + text_bytes.len()].copy_from_slice(text_bytes);
+        buf[shstrtab_offset..shstrtab_offset + shstrtab.len()].copy_from_slice(shstrtab);
+
+        let mut write_shdr = |index: usize, fields: [u64; 10]| {
+            let base = shoff + index * shentsize;
+            buf[base..base + 4].copy_from_slice(&(fields[0] as u32).to_le_bytes());
+            buf[base + 4..base + 8].copy_from_slice(&(fields[1] as u32).to_le_bytes());
+            buf[base + 8..base + 16].copy_from_slice(&fields[2].to_le_bytes());
+            buf[base + 16..base + 24].copy_from_slice(&fields[3].to_le_bytes());
+            buf[base + 24..base + 32].copy_from_slice(&fields[4].to_le_bytes());
+            buf[base + 32..base + 40].copy_from_slice(&fields[5].to_le_bytes());
+            buf[base + 40..base + 44].copy_from_slice(&(fields[6] as u32).to_le_bytes());
+            buf[base + 44..base + 48].copy_from_slice(&(fields[7] as u32).to_le_bytes());
+            buf[base + 48..base + 56].copy_from_slice(&fields[8].to_le_bytes());
+            buf[base + 56..base + 64].copy_from_slice(&fields[9].to_le_bytes());
+        };
+        write_shdr(0, [0; 10]);
+        write_shdr(
+            1,
+            [
+                1,
+                elf::abi::SHT_PROGBITS as u64,
+                (elf::abi::SHF_ALLOC | elf::abi::SHF_EXECINSTR) as u64,
+                text_vaddr,
+                text_offset as u64,
+                text_bytes.len() as u64,
+                0,
+                0,
+                1,
+                0,
+            ],
+        );
+        write_shdr(
+            2,
+            [
+                7,
+                elf::abi::SHT_STRTAB as u64,
+                0,
+                0,
+                shstrtab_offset as u64,
+                shstrtab.len() as u64,
+                0,
+                0,
+                1,
+                0,
+            ],
+        );
+
+        buf
+    }
+
+    #[test]
+    fn analyze_elf_binary_rejects_expected_arch_mismatch() {
+        let elf_bytes = build_minimal_elf64(&[0xc3], 0x1000, elf::abi::EM_X86_64);
+        let input = TempFile::new_bytes("s11-disasm-mismatch", "elf", &elf_bytes);
+
+        let err = analyze_elf_binary(input.path(), true, Some(CliArch::Aarch64))
+            .expect_err("mismatched expected architecture should fail");
+
+        assert!(
+            err.to_string().contains("Architecture mismatch"),
+            "diagnostic should report architecture mismatch: {err}"
+        );
+    }
+
+    #[test]
+    fn analyze_elf_binary_accepts_matching_expected_arch() {
+        let elf_bytes = build_minimal_elf64(&[0xc3], 0x1000, elf::abi::EM_X86_64);
+        let input = TempFile::new_bytes("s11-disasm-match", "elf", &elf_bytes);
+
+        analyze_elf_binary(input.path(), true, Some(CliArch::X86_64))
+            .expect("matching expected architecture should disassemble");
     }
 
     #[test]
