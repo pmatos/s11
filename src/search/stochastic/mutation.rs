@@ -32,7 +32,7 @@ const LOGICAL_IMM32_POOL: &[i64] = &[
     0x8000_0000,
     0x5555_5555,
     0xaaaa_aaaa,
-    -256,
+    -256, // i64 -256 = 0xFFFF_FF00 as W32: a 24-bit high run, a valid logical bitmask immediate
 ];
 const LOGICAL_IMM64_POOL: &[i64] = &[
     0x1,
@@ -46,7 +46,7 @@ const LOGICAL_IMM64_POOL: &[i64] = &[
     0xaaaa_aaaa_aaaa_aaaa_u64 as i64,
     0xf0f0_f0f0_f0f0_f0f0_u64 as i64,
     0x8000_0000_0000_0000_u64 as i64,
-    -256,
+    -256, // i64 -256 = 0xFFFF_FFFF_FFFF_FF00 as X64: a 56-bit high run, a valid logical bitmask immediate
 ];
 
 /// Drop ROR from a shifted-register operand when bridging from a logical
@@ -1121,6 +1121,9 @@ impl Mutator {
         width: RegisterWidth,
         allow_shifted: bool,
     ) -> Operand {
+        // W32-always-immediate policy: W32 logical operands are sampled as
+        // bitmask immediates only (no register/shifted operands), unlike the
+        // X64 path below which also samples registers and shifted registers.
         if width == RegisterWidth::W32 {
             return Operand::Immediate(self.random_logical_immediate(rng, width));
         }
@@ -1155,6 +1158,10 @@ impl Mutator {
             Operand::ExtendedRegister { reg, .. } if width == RegisterWidth::X64 => {
                 Operand::Register(reg)
             }
+            // W32-always-immediate policy (see `random_logical_operand`): the
+            // X64 arms above preserve register/shifted/extended forms, so this
+            // catch-all only ever sees W32 operands. They are deliberately
+            // resampled as bitmask immediates rather than kept as registers.
             Operand::Register(_)
             | Operand::ShiftedRegister { .. }
             | Operand::ExtendedRegister { .. } => {
