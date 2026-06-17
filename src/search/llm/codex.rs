@@ -139,6 +139,7 @@ pub fn invoke_codex(
         .arg("-o")
         .arg(answer_path.as_path())
         .arg(prompt)
+        .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::from(stderr_file))
         .spawn()
