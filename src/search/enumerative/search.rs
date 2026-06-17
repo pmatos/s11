@@ -825,6 +825,36 @@ mod tests {
     }
 
     #[test]
+    fn regenerates_candidate_pool_when_registers_change() {
+        // Covers the register branch of the invalidation condition. The mock
+        // ISA's register set is constant, so this exercises it on AArch64,
+        // where registers_from_config varies with the config. Re-querying the
+        // same warmed search with a larger register pool must regenerate; a
+        // stale pool (register change ignored) would compare equal.
+        let one_reg = SearchConfig::default()
+            .with_registers(vec![Register::X0])
+            .with_immediates(vec![0, 1])
+            .with_timeout_option(None);
+        let two_regs = SearchConfig::default()
+            .with_registers(vec![Register::X0, Register::X1])
+            .with_immediates(vec![0, 1])
+            .with_timeout_option(None);
+
+        let mut search = EnumerativeSearch::<crate::isa::AArch64>::new();
+        let pool_one = search.candidate_pool_for_config(&one_reg).to_vec();
+        let pool_two = search.candidate_pool_for_config(&two_regs).to_vec();
+
+        assert_ne!(
+            pool_one, pool_two,
+            "changing the register pool must regenerate the candidate pool"
+        );
+        assert!(
+            pool_two.len() > pool_one.len(),
+            "a larger register pool should enumerate strictly more candidates"
+        );
+    }
+
+    #[test]
     fn reset_preserves_candidate_pool() {
         let _guard = reset_cache_probe_counter();
         let config = cache_probe_config(vec![0]);
@@ -902,10 +932,16 @@ mod tests {
 
     fn small_config() -> SearchConfig {
         // Tight register/immediate pool so unit tests run fast.
+        //
+        // No wall-clock deadline: every search built on this config is a
+        // bounded enumeration over a tiny pool that terminates on its own. A
+        // finite timeout is nondeterministic under coverage instrumentation —
+        // the slow instrumented suite can exceed it and spuriously report no
+        // optimization (the x86 sibling tests use the same workaround).
         SearchConfig::default()
             .with_registers(vec![Register::X0, Register::X1])
             .with_immediates(vec![0, 1])
-            .with_timeout(std::time::Duration::from_secs(10))
+            .with_timeout_option(None)
     }
 
     #[test]
