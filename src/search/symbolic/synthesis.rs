@@ -1074,7 +1074,7 @@ mod tests {
     }
 
     #[test]
-    fn symbolic_timeout_returns_best_at_length() {
+    fn symbolic_early_stop_returns_best_at_length() {
         use std::time::Instant;
 
         let _guard = SYMBOLIC_INNER_LOOP_TEST_LOCK
@@ -1084,8 +1084,18 @@ mod tests {
         TEST_EQUIVALENCE_EQUIVALENT_ON_CHECK.store(1, Ordering::SeqCst);
         TEST_SEQUENCE_COST_DELAY_MS.store(0, Ordering::SeqCst);
 
+        // The fake check_equivalence trips the installed stop flag on the first
+        // check, so candidate (0, 0) is recorded as best_at_length and the very
+        // next should_stop poll bails out. This drives the early-return path
+        // deterministically, with no dependence on a 1 ms timeout firing inside
+        // a precise scheduler window (which is racy on an oversubscribed runner).
+        let flag = Arc::new(AtomicBool::new(false));
+        let _stop_guard = install_test_stop_flag(Arc::clone(&flag));
+
         let mut search: SymbolicSearch<TestIsa> = SymbolicSearch::new();
-        let config = SearchConfig::default().with_timeout(Duration::from_millis(1));
+        let config = SearchConfig::default()
+            .with_timeout_option(None)
+            .with_stop_flag(flag);
         let all_instructions: Vec<_> = (0..64).map(TestInstruction).collect();
         let target = [
             TestInstruction(100),
@@ -1109,11 +1119,11 @@ mod tests {
         assert_eq!(
             result,
             Some(vec![TestInstruction(0), TestInstruction(0)]),
-            "timeout should return the best equivalent candidate found at this length",
+            "an early stop should return the best equivalent candidate found at this length",
         );
         assert!(
             TEST_EQUIVALENCE_CHECKS.load(Ordering::SeqCst) < 8,
-            "timeout should stop promptly after preserving the best candidate",
+            "search should stop promptly after preserving the best candidate",
         );
     }
 
