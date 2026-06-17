@@ -255,6 +255,10 @@ enum Commands {
 
 // --- ELF Binary Analysis ---
 
+/// Prefix shared by every "architecture mismatch" diagnostic so the disasm
+/// caller can recognise the error without coupling to the full message text.
+const ARCH_MISMATCH_PREFIX: &str = "Architecture mismatch:";
+
 fn cli_arch_from_e_machine(machine: u16) -> Result<CliArch, Box<dyn std::error::Error>> {
     match machine {
         elf::abi::EM_AARCH64 => Ok(CliArch::Aarch64),
@@ -285,8 +289,7 @@ fn analyze_elf_binary(
         && expected_arch != detected_arch
     {
         return Err(format!(
-            "Architecture mismatch: --arch {:?} but ELF reports {:?}",
-            expected_arch, detected_arch
+            "{ARCH_MISMATCH_PREFIX} --arch {expected_arch:?} but ELF reports {detected_arch:?}"
         )
         .into());
     }
@@ -2115,7 +2118,7 @@ fn main() {
                 Ok(()) => {}
                 Err(e) => {
                     let message = e.to_string();
-                    if message.starts_with("Architecture mismatch:") {
+                    if message.starts_with(ARCH_MISMATCH_PREFIX) {
                         eprintln!("{}", message);
                     } else {
                         eprintln!("Error analyzing binary: {}", message);
@@ -2157,8 +2160,7 @@ fn main() {
                 Some(a) if a == detected_arch => a,
                 Some(a) => {
                     eprintln!(
-                        "Architecture mismatch: --arch {:?} but ELF reports {:?}",
-                        a, detected_arch
+                        "{ARCH_MISMATCH_PREFIX} --arch {a:?} but ELF reports {detected_arch:?}"
                     );
                     std::process::exit(1);
                 }
@@ -2372,7 +2374,7 @@ mod cli_helper_tests {
             .expect_err("mismatched expected architecture should fail");
 
         assert!(
-            err.to_string().contains("Architecture mismatch"),
+            err.to_string().starts_with(ARCH_MISMATCH_PREFIX),
             "diagnostic should report architecture mismatch: {err}"
         );
     }
