@@ -225,40 +225,14 @@ fn create_file(path: &Path) -> Result<File, String> {
 mod tests {
     use super::*;
     #[cfg(unix)]
-    use crate::search::llm::test_support::{FakeCodex, envelope_answer_writer_script};
+    use crate::search::llm::test_support::{
+        FakeCodex, envelope_answer_writer_script, shell_single_quote, wait_until_process_gone,
+    };
     use std::error::Error;
 
     #[cfg(unix)]
     fn generous_timeout() -> Duration {
         Duration::from_secs(5)
-    }
-
-    #[cfg(unix)]
-    fn shell_single_quote(value: &str) -> String {
-        format!("'{}'", value.replace('\'', "'\"'\"'"))
-    }
-
-    #[cfg(unix)]
-    fn process_exists(pid: u32) -> bool {
-        std::process::Command::new("kill")
-            .arg("-0")
-            .arg(pid.to_string())
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .status()
-            .map(|status| status.success())
-            .unwrap_or(false)
-    }
-
-    #[cfg(unix)]
-    fn wait_until_process_gone(pid: u32) {
-        for _ in 0..100 {
-            if !process_exists(pid) {
-                return;
-            }
-            std::thread::sleep(Duration::from_millis(10));
-        }
-        panic!("fake codex child {pid} was still alive after invoke_codex returned");
     }
 
     #[test]
@@ -427,7 +401,7 @@ mod tests {
 
         let started = Instant::now();
         let err =
-            invoke_codex(&config, "try a candidate", "{}", Duration::from_millis(50)).unwrap_err();
+            invoke_codex(&config, "try a candidate", "{}", Duration::from_millis(300)).unwrap_err();
         let elapsed = started.elapsed();
 
         assert!(

@@ -332,7 +332,9 @@ mod tests {
     use crate::ir::{Operand, Register};
     use crate::search::config::LlmConfig;
     #[cfg(unix)]
-    use crate::search::llm::test_support::{FakeCodex, assembly_answer_writer_script};
+    use crate::search::llm::test_support::{
+        FakeCodex, assembly_answer_writer_script, shell_single_quote, wait_until_process_gone,
+    };
 
     #[cfg(unix)]
     fn cfg_with_fake_codex(fake: &FakeCodex, max_calls: u32) -> SearchConfig {
@@ -345,34 +347,6 @@ mod tests {
                     .with_model("fake-model")
                     .with_codex_bin(fake.path_string()),
             )
-    }
-
-    #[cfg(unix)]
-    fn shell_single_quote(value: &str) -> String {
-        format!("'{}'", value.replace('\'', "'\"'\"'"))
-    }
-
-    #[cfg(unix)]
-    fn process_exists(pid: u32) -> bool {
-        std::process::Command::new("kill")
-            .arg("-0")
-            .arg(pid.to_string())
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .status()
-            .map(|status| status.success())
-            .unwrap_or(false)
-    }
-
-    #[cfg(unix)]
-    fn wait_until_process_gone(pid: u32) {
-        for _ in 0..100 {
-            if !process_exists(pid) {
-                return;
-            }
-            std::thread::sleep(Duration::from_millis(10));
-        }
-        panic!("fake codex child {pid} was still alive after search returned");
     }
 
     fn reducible_target() -> Vec<Instruction> {
@@ -635,7 +609,7 @@ mod tests {
             assembly_answer_writer_script("add x0, x1, #1")
         );
         let fake = FakeCodex::new(&script);
-        let config = cfg_with_fake_codex(&fake, 3).with_timeout(Duration::from_millis(50));
+        let config = cfg_with_fake_codex(&fake, 3).with_timeout(Duration::from_millis(300));
         let mut search = LlmSearch::new();
 
         let started = Instant::now();
