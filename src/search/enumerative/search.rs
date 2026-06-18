@@ -30,6 +30,7 @@ struct SharedState<I: ISA> {
     best_cost: AtomicU64,
     stop: AtomicBool,
     candidates_evaluated: AtomicU64,
+    candidates_pruned_by_cost: AtomicU64,
     smt_queries: AtomicU64,
     smt_equivalent: AtomicU64,
     smt_elapsed_nanos: AtomicU64,
@@ -50,6 +51,7 @@ impl<I: ISA> SharedState<I> {
             best_cost: AtomicU64::new(initial_best_cost),
             stop: AtomicBool::new(false),
             candidates_evaluated: AtomicU64::new(0),
+            candidates_pruned_by_cost: AtomicU64::new(0),
             smt_queries: AtomicU64::new(0),
             smt_equivalent: AtomicU64::new(0),
             smt_elapsed_nanos: AtomicU64::new(0),
@@ -449,10 +451,13 @@ fn run_length_one<I>(
             candidate.push(t);
         }
         let candidate_cost = <I as EnumerativeBackend<I>>::sequence_cost(&candidate, config);
+        shared.candidates_evaluated.fetch_add(1, Ordering::Relaxed);
         if candidate_cost >= shared.best_cost.load(Ordering::Acquire) {
+            shared
+                .candidates_pruned_by_cost
+                .fetch_add(1, Ordering::Relaxed);
             return;
         }
-        shared.candidates_evaluated.fetch_add(1, Ordering::Relaxed);
         if verify_candidate::<I>(target, &candidate, live_out, config, shared, start) {
             shared.record_improvement(candidate, candidate_cost);
         }
@@ -495,10 +500,13 @@ fn run_length_two<I>(
                 candidate.push(t);
             }
             let candidate_cost = <I as EnumerativeBackend<I>>::sequence_cost(&candidate, config);
+            shared.candidates_evaluated.fetch_add(1, Ordering::Relaxed);
             if candidate_cost >= shared.best_cost.load(Ordering::Acquire) {
+                shared
+                    .candidates_pruned_by_cost
+                    .fetch_add(1, Ordering::Relaxed);
                 continue;
             }
-            shared.candidates_evaluated.fetch_add(1, Ordering::Relaxed);
             if verify_candidate::<I>(target, &candidate, live_out, config, shared, start) {
                 shared.record_improvement(candidate, candidate_cost);
             }
@@ -604,6 +612,8 @@ where
 
         // Drain shared atomics into self.statistics.
         self.statistics.candidates_evaluated = shared.candidates_evaluated.load(Ordering::Relaxed);
+        self.statistics.candidates_pruned_by_cost =
+            shared.candidates_pruned_by_cost.load(Ordering::Relaxed);
         self.statistics.smt_queries = shared.smt_queries.load(Ordering::Relaxed);
         self.statistics.smt_equivalent = shared.smt_equivalent.load(Ordering::Relaxed);
         self.statistics.smt_elapsed =
@@ -1123,15 +1133,19 @@ mod tests {
     const VERIFY_STATS_EQUIVALENT: usize = 1;
 
     static VERIFY_STATS_TEST_LOCK: TestMutex<()> = TestMutex::new(());
+    static VERIFY_STATS_CHECKS: AtomicUsize = AtomicUsize::new(0);
     static VERIFY_STATS_VERDICT: AtomicUsize = AtomicUsize::new(VERIFY_STATS_NOT_EQUIVALENT);
     static VERIFY_STATS_SMT_CALLED: AtomicBool = AtomicBool::new(false);
+    static VERIFY_STATS_CONSTANT_ZERO_COST: AtomicBool = AtomicBool::new(false);
 
     fn set_verify_stats_result(verdict: usize, smt_called: bool) -> MutexGuard<'static, ()> {
         let guard = VERIFY_STATS_TEST_LOCK
             .lock()
             .expect("verify stats test lock poisoned");
+        VERIFY_STATS_CHECKS.store(0, AtomicOrdering::SeqCst);
         VERIFY_STATS_VERDICT.store(verdict, AtomicOrdering::SeqCst);
         VERIFY_STATS_SMT_CALLED.store(smt_called, AtomicOrdering::SeqCst);
+        VERIFY_STATS_CONSTANT_ZERO_COST.store(false, AtomicOrdering::SeqCst);
         guard
     }
 
@@ -1151,7 +1165,11 @@ mod tests {
         }
 
         fn sequence_cost(seq: &[VerifyStatsInstruction], _config: &SearchConfig) -> u64 {
-            seq.len() as u64
+            if VERIFY_STATS_CONSTANT_ZERO_COST.load(AtomicOrdering::SeqCst) {
+                0
+            } else {
+                seq.len() as u64
+            }
         }
 
         fn check_equivalence(
@@ -1160,6 +1178,7 @@ mod tests {
             _live_out: &Self::LiveOut,
             _smt_timeout: Duration,
         ) -> (EquivalenceResult, EquivalenceMetrics) {
+            VERIFY_STATS_CHECKS.fetch_add(1, AtomicOrdering::SeqCst);
             let metrics = EquivalenceMetrics {
                 smt_called: VERIFY_STATS_SMT_CALLED.load(AtomicOrdering::SeqCst),
                 ..EquivalenceMetrics::default()
@@ -1221,6 +1240,89 @@ mod tests {
         assert_eq!(shared.smt_queries.load(Ordering::Relaxed), 0);
         assert_eq!(shared.candidates_passed_fast.load(Ordering::Relaxed), 0);
         assert_eq!(shared.smt_equivalent.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn run_length_one_counts_cost_pruned_candidate() {
+        let _guard = set_verify_stats_result(VERIFY_STATS_NOT_EQUIVALENT, true);
+        let target = [VerifyStatsInstruction(1), VerifyStatsInstruction(2)];
+        let all_instructions = [VerifyStatsInstruction(0)];
+        let config = SearchConfig::default().with_timeout_option(None);
+        let shared = SharedState::<VerifyStatsIsa>::new(0);
+
+        run_length_one::<VerifyStatsIsa>(
+            &target,
+            &(),
+            &config,
+            &all_instructions,
+            None,
+            &shared,
+            Instant::now(),
+        );
+
+        assert_eq!(shared.candidates_evaluated.load(Ordering::Relaxed), 1);
+        assert_eq!(
+            shared.candidates_pruned_by_cost.load(Ordering::Relaxed),
+            1
+        );
+        assert_eq!(VERIFY_STATS_CHECKS.load(AtomicOrdering::SeqCst), 0);
+        assert_eq!(shared.smt_queries.load(Ordering::Relaxed), 0);
+        assert_eq!(shared.candidates_passed_fast.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn run_length_two_counts_cost_pruned_candidate() {
+        let _guard = set_verify_stats_result(VERIFY_STATS_NOT_EQUIVALENT, true);
+        let target = [
+            VerifyStatsInstruction(1),
+            VerifyStatsInstruction(2),
+            VerifyStatsInstruction(3),
+        ];
+        let all_instructions = [VerifyStatsInstruction(0)];
+        let config = SearchConfig::default().with_timeout_option(None);
+        let shared = SharedState::<VerifyStatsIsa>::new(0);
+
+        run_length_two::<VerifyStatsIsa>(
+            &target,
+            &(),
+            &config,
+            &all_instructions,
+            None,
+            &shared,
+            Instant::now(),
+        );
+
+        assert_eq!(shared.candidates_evaluated.load(Ordering::Relaxed), 1);
+        assert_eq!(
+            shared.candidates_pruned_by_cost.load(Ordering::Relaxed),
+            1
+        );
+        assert_eq!(VERIFY_STATS_CHECKS.load(AtomicOrdering::SeqCst), 0);
+        assert_eq!(shared.smt_queries.load(Ordering::Relaxed), 0);
+        assert_eq!(shared.candidates_passed_fast.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn search_drains_cost_pruned_candidate_count() {
+        let _guard = set_verify_stats_result(VERIFY_STATS_NOT_EQUIVALENT, true);
+        VERIFY_STATS_CONSTANT_ZERO_COST.store(true, AtomicOrdering::SeqCst);
+        let target = vec![
+            VerifyStatsInstruction(1),
+            VerifyStatsInstruction(2),
+            VerifyStatsInstruction(3),
+        ];
+        let config = SearchConfig::default()
+            .with_timeout_option(None)
+            .with_cores(Some(1));
+
+        let mut search = EnumerativeSearch::<VerifyStatsIsa>::new();
+        let result = search.search(&target, &(), &config);
+
+        assert_eq!(result.statistics.candidates_evaluated, 2);
+        assert_eq!(result.statistics.candidates_pruned_by_cost, 2);
+        assert_eq!(VERIFY_STATS_CHECKS.load(AtomicOrdering::SeqCst), 0);
+        assert_eq!(result.statistics.smt_queries, 0);
+        assert_eq!(result.statistics.candidates_passed_fast, 0);
     }
 
     fn small_config() -> SearchConfig {
