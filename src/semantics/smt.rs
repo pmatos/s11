@@ -1234,9 +1234,8 @@ pub fn states_not_equal(state1: &MachineState, state2: &MachineState) -> z3::ast
 /// registers, optionally including the NZCV flag bits and the whole memory
 /// image (see ADR-0007).
 ///
-/// TODO(#282): The explicit `flags_live` parameter duplicates
-/// `live_out.flags_live()` for every non-stochastic caller. Tracked for
-/// cleanup in issue #282.
+/// TODO(#282): Production equivalence callers pass `live_out.flags_live()`
+/// here; the explicit parameter remains for direct tests and future cleanup.
 pub fn states_not_equal_for_live_out(
     state1: &MachineState,
     state2: &MachineState,
