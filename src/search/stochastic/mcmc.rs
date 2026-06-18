@@ -159,10 +159,7 @@ where
         // tail, so length-change proposals only vary the prefix length.
         let min_length = 1 + terminator_len;
         let max_length = target.len();
-        let smt_timeout = config
-            .symbolic
-            .solver_timeout
-            .unwrap_or(Duration::from_secs(5));
+        let smt_timeout = config.solver_timeout.unwrap_or(Duration::from_secs(5));
 
         for iteration in 0..config.stochastic.iterations {
             self.statistics.iterations = iteration + 1;
@@ -336,7 +333,7 @@ mod tests {
     use super::*;
     use crate::ir::{Operand, Register};
     use crate::isa::{AArch64, ISA, ISAMutator, InstructionType, OperandType, RegisterType, U64};
-    use crate::search::config::{StochasticConfig, SymbolicConfig};
+    use crate::search::config::StochasticConfig;
     use crate::semantics::cost::CostMetric;
     use crate::semantics::live_out::LiveOut;
 
@@ -603,18 +600,10 @@ mod tests {
         }
     }
 
-    fn run_timeout_probe_search(symbolic_config: SymbolicConfig) -> Option<u64> {
+    fn run_timeout_probe_search(config: SearchConfig) -> Option<u64> {
         RECORDED_SMT_TIMEOUT_MS.with(|recorded| recorded.set(None));
 
         let mut search: StochasticSearch<TimeoutProbeIsa> = StochasticSearch::new();
-        let config = SearchConfig::default()
-            .with_stochastic(
-                StochasticConfig::default()
-                    .with_iterations(1)
-                    .with_test_count(0)
-                    .with_seed(1),
-            )
-            .with_symbolic(symbolic_config);
         let target = [TimeoutProbeInstruction(1), TimeoutProbeInstruction(2)];
         let result = search.search(&target, &(), &config);
         assert_eq!(result.statistics.smt_queries, 1);
@@ -623,9 +612,16 @@ mod tests {
     }
 
     #[test]
-    fn stochastic_search_uses_symbolic_solver_timeout_for_smt() {
+    fn stochastic_search_uses_top_level_solver_timeout_for_smt() {
         let recorded_timeout = run_timeout_probe_search(
-            SymbolicConfig::default().with_timeout(Duration::from_millis(17)),
+            SearchConfig::default()
+                .with_stochastic(
+                    StochasticConfig::default()
+                        .with_iterations(1)
+                        .with_test_count(0)
+                        .with_seed(1),
+                )
+                .with_solver_timeout(Duration::from_millis(17)),
         );
 
         assert_eq!(recorded_timeout, Some(17));
@@ -633,12 +629,16 @@ mod tests {
 
     #[test]
     fn stochastic_search_falls_back_to_five_seconds_when_solver_timeout_unset() {
-        let symbolic_config = SymbolicConfig {
-            solver_timeout: None,
-            ..SymbolicConfig::default()
-        };
-
-        let recorded_timeout = run_timeout_probe_search(symbolic_config);
+        let recorded_timeout = run_timeout_probe_search(
+            SearchConfig::default()
+                .with_stochastic(
+                    StochasticConfig::default()
+                        .with_iterations(1)
+                        .with_test_count(0)
+                        .with_seed(1),
+                )
+                .with_solver_timeout_option(None),
+        );
 
         assert_eq!(recorded_timeout, Some(5000));
     }
