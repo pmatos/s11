@@ -442,6 +442,12 @@ mod tests {
         buf[text_offset..text_offset + text_bytes.len()].copy_from_slice(text_bytes);
         buf[shstrtab_offset..shstrtab_offset + shstrtab.len()].copy_from_slice(shstrtab);
 
+        // `fields` follows the Elf64_Shdr layout:
+        // fields[0] => sh_name (u32), fields[1] => sh_type (u32),
+        // fields[2] => sh_flags (u64), fields[3] => sh_addr (u64),
+        // fields[4] => sh_offset (u64), fields[5] => sh_size (u64),
+        // fields[6] => sh_link (u32), fields[7] => sh_info (u32),
+        // fields[8] => sh_addralign (u64), fields[9] => sh_entsize (u64).
         let mut write_shdr = |index: usize, fields: [u64; 10]| {
             let base = shoff + index * shentsize;
             buf[base..base + 4].copy_from_slice(&(fields[0] as u32).to_le_bytes());
