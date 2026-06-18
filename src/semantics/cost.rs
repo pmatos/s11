@@ -66,6 +66,11 @@ fn instruction_latency(instr: &Instruction) -> u64 {
         | Instruction::Eon { .. } => 1,
         // Flag-setting arith / logical
         Instruction::Adds { .. } | Instruction::Subs { .. } | Instruction::Ands { .. } => 1,
+        // Add/subtract with carry
+        Instruction::Adc { .. }
+        | Instruction::Adcs { .. }
+        | Instruction::Sbc { .. }
+        | Instruction::Sbcs { .. } => 1,
         // Conditional set aliases
         Instruction::Cset { .. } | Instruction::Csetm { .. } => 1,
         // Rotate right

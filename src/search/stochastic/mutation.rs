@@ -395,6 +395,15 @@ impl Mutator {
                     _ => *rm = Self::clamp_imm12(self.random_operand(rng)),
                 }
             }
+            // ADC/ADCS/SBC/SBCS are register-only (rd, rn, rm all registers).
+            Instruction::Adc { rd, rn, rm }
+            | Instruction::Adcs { rd, rn, rm }
+            | Instruction::Sbc { rd, rn, rm }
+            | Instruction::Sbcs { rd, rn, rm } => match rng.random_range(0..3) {
+                0 => *rd = self.random_register(rng),
+                1 => *rn = self.random_register(rng),
+                _ => *rm = self.random_register(rng),
+            },
             Instruction::Ands { rd, rn, rm, width } => {
                 let choice = rng.random_range(0..3);
                 match choice {
@@ -927,6 +936,23 @@ impl Mutator {
                     width: RegisterWidth::X64,
                 },
                 _ => Instruction::Subs { rd, rn, rm },
+            },
+            // ADC/ADCS/SBC/SBCS toggle within the carry family (register-only).
+            Instruction::Adc { rd, rn, rm } => match rng.random_range(0..2) {
+                0 => Instruction::Adcs { rd, rn, rm },
+                _ => Instruction::Adc { rd, rn, rm },
+            },
+            Instruction::Adcs { rd, rn, rm } => match rng.random_range(0..2) {
+                0 => Instruction::Adc { rd, rn, rm },
+                _ => Instruction::Adcs { rd, rn, rm },
+            },
+            Instruction::Sbc { rd, rn, rm } => match rng.random_range(0..2) {
+                0 => Instruction::Sbcs { rd, rn, rm },
+                _ => Instruction::Sbc { rd, rn, rm },
+            },
+            Instruction::Sbcs { rd, rn, rm } => match rng.random_range(0..2) {
+                0 => Instruction::Sbc { rd, rn, rm },
+                _ => Instruction::Sbcs { rd, rn, rm },
             },
             Instruction::Ands { rd, rn, rm, width } => match rng.random_range(0..4) {
                 0 => Instruction::And { rd, rn, rm, width },

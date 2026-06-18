@@ -385,6 +385,40 @@ pub fn apply_instruction_concrete(
             state.set_register(*rd, ConcreteValue::new(result));
             state.set_flags(ConditionFlags::from_sub(lhs, rhs, result));
         }
+        // Add with carry: rd = rn + rm + C. Adc leaves flags untouched;
+        // Adcs writes NZCV.
+        Instruction::Adc { rd, rn, rm } => {
+            let lhs = state.get_register(*rn).as_u64();
+            let rhs = state.get_register(*rm).as_u64();
+            let carry = state.get_flags().c as u64;
+            let result = lhs.wrapping_add(rhs).wrapping_add(carry);
+            state.set_register(*rd, ConcreteValue::new(result));
+        }
+        Instruction::Adcs { rd, rn, rm } => {
+            let lhs = state.get_register(*rn).as_u64();
+            let rhs = state.get_register(*rm).as_u64();
+            let carry = state.get_flags().c as u64;
+            let result = lhs.wrapping_add(rhs).wrapping_add(carry);
+            state.set_register(*rd, ConcreteValue::new(result));
+            state.set_flags(ConditionFlags::from_adc(lhs, rhs, carry));
+        }
+        // Subtract with carry: rd = rn + NOT(rm) + C = rn - rm - (1 - C).
+        // Sbc leaves flags untouched; Sbcs writes NZCV.
+        Instruction::Sbc { rd, rn, rm } => {
+            let lhs = state.get_register(*rn).as_u64();
+            let rhs = state.get_register(*rm).as_u64();
+            let carry = state.get_flags().c as u64;
+            let result = lhs.wrapping_add(!rhs).wrapping_add(carry);
+            state.set_register(*rd, ConcreteValue::new(result));
+        }
+        Instruction::Sbcs { rd, rn, rm } => {
+            let lhs = state.get_register(*rn).as_u64();
+            let rhs = state.get_register(*rm).as_u64();
+            let carry = state.get_flags().c as u64;
+            let result = lhs.wrapping_add(!rhs).wrapping_add(carry);
+            state.set_register(*rd, ConcreteValue::new(result));
+            state.set_flags(ConditionFlags::from_sbc(lhs, rhs, carry));
+        }
         Instruction::Ands { rd, rn, rm, width } => {
             let lhs = state.get_register(*rn).as_u64() & mask_for_register_width(*width);
             let rhs = eval_logical_operand(&state, rm, *width);
@@ -1745,6 +1779,113 @@ mod tests {
         let new_state = apply_instruction_concrete(state, &instr);
         let f = new_state.get_flags();
         assert!(!f.c, "SUBS(3, 5): C=0 (borrow)");
+    }
+
+    #[test]
+    fn test_adc_threads_carry_in() {
+        // ADC: rd = rn + rm + C. With C=1: 5 + 7 + 1 = 13.
+        let mut state = state_with(vec![(Register::X1, 5), (Register::X2, 7)]);
+        state.set_flags(ConditionFlags {
+            n: false,
+            z: false,
+            c: true,
+            v: false,
+        });
+        let instr = Instruction::Adc {
+            rd: Register::X0,
+            rn: Register::X1,
+            rm: Register::X2,
+        };
+        let new_state = apply_instruction_concrete(state, &instr);
+        assert_eq!(new_state.get_register(Register::X0).as_u64(), 13);
+        // ADC must NOT modify flags.
+        assert!(new_state.get_flags().c, "ADC leaves C untouched");
+
+        // With C=0: 5 + 7 + 0 = 12.
+        let state = state_with(vec![(Register::X1, 5), (Register::X2, 7)]);
+        let new_state = apply_instruction_concrete(state, &instr);
+        assert_eq!(new_state.get_register(Register::X0).as_u64(), 12);
+    }
+
+    #[test]
+    fn test_adcs_sets_carry_out_flag() {
+        // ADCS(u64::MAX, 0) with C=1 → wraps to 0, carry-out C=1, Z=1.
+        let mut state = state_with(vec![(Register::X1, u64::MAX), (Register::X2, 0)]);
+        state.set_flags(ConditionFlags {
+            c: true,
+            ..Default::default()
+        });
+        let instr = Instruction::Adcs {
+            rd: Register::X0,
+            rn: Register::X1,
+            rm: Register::X2,
+        };
+        let new_state = apply_instruction_concrete(state, &instr);
+        assert_eq!(new_state.get_register(Register::X0).as_u64(), 0);
+        let f = new_state.get_flags();
+        assert_eq!((f.n, f.z, f.c, f.v), (false, true, true, false));
+    }
+
+    #[test]
+    fn test_sbc_threads_borrow() {
+        // SBC = rn - rm - (1 - C). With C=1 (no borrow): 10 - 3 = 7.
+        let mut state = state_with(vec![(Register::X1, 10), (Register::X2, 3)]);
+        state.set_flags(ConditionFlags {
+            c: true,
+            ..Default::default()
+        });
+        let instr = Instruction::Sbc {
+            rd: Register::X0,
+            rn: Register::X1,
+            rm: Register::X2,
+        };
+        let new_state = apply_instruction_concrete(state, &instr);
+        assert_eq!(new_state.get_register(Register::X0).as_u64(), 7);
+
+        // With C=0 (borrow asserted): 10 - 3 - 1 = 6.
+        let state = state_with(vec![(Register::X1, 10), (Register::X2, 3)]);
+        let new_state = apply_instruction_concrete(state, &instr);
+        assert_eq!(new_state.get_register(Register::X0).as_u64(), 6);
+    }
+
+    #[test]
+    fn test_sbcs_carry_is_no_borrow() {
+        // SBCS(10, 3) with C=1 → 7, C=1 (no borrow).
+        let mut state = state_with(vec![(Register::X1, 10), (Register::X2, 3)]);
+        state.set_flags(ConditionFlags {
+            c: true,
+            ..Default::default()
+        });
+        let s = apply_instruction_concrete(
+            state,
+            &Instruction::Sbcs {
+                rd: Register::X0,
+                rn: Register::X1,
+                rm: Register::X2,
+            },
+        );
+        assert_eq!(s.get_register(Register::X0).as_u64(), 7);
+        let f = s.get_flags();
+        assert!(f.c, "SBCS(10,3): no borrow → C=1");
+        assert!(!f.z && !f.n);
+
+        // SBCS(3, 10) with C=1 → -7, C=0 (borrow), N=1.
+        let mut state = state_with(vec![(Register::X1, 3), (Register::X2, 10)]);
+        state.set_flags(ConditionFlags {
+            c: true,
+            ..Default::default()
+        });
+        let s = apply_instruction_concrete(
+            state,
+            &Instruction::Sbcs {
+                rd: Register::X0,
+                rn: Register::X1,
+                rm: Register::X2,
+            },
+        );
+        let f = s.get_flags();
+        assert!(!f.c, "SBCS(3,10): borrow → C=0");
+        assert!(f.n, "negative result → N=1");
     }
 
     #[test]
