@@ -183,7 +183,7 @@ impl InstructionType for Instruction {
     // Canonical AArch64 opcode-id table. Candidate generation calls this through
     // `InstructionType::opcode_id`; drift is guarded by this module's
     // `all_instruction_families_cover_trait_methods` test and
-    // `test_generate_all_instructions_covers_issue_66_opcodes` in
+    // `test_generate_all_instructions_covers_opcode_count` in
     // `src/search/candidate.rs`.
     fn opcode_id(&self) -> u8 {
         match self {
@@ -236,45 +236,43 @@ impl InstructionType for Instruction {
             Instruction::Umulh { .. } => 46,
             Instruction::Ccmp { .. } => 47,
             Instruction::Ccmn { .. } => 48,
-            // TODO(#173): opcode_id 49..=53 is shared by Sxt*/Uxt*
-            // and Ubfx/Sbfx/Bfi/Bfxil/Ubfiz; do not rely on uniqueness yet.
             Instruction::Sxtb { .. } => 49,
             Instruction::Sxth { .. } => 50,
             Instruction::Sxtw { .. } => 51,
             Instruction::Uxtb { .. } => 52,
             Instruction::Uxth { .. } => 53,
-            Instruction::Ubfx { .. } => 49,
-            Instruction::Sbfx { .. } => 50,
-            Instruction::Bfi { .. } => 51,
-            Instruction::Bfxil { .. } => 52,
-            Instruction::Ubfiz { .. } => 53,
-            Instruction::Sbfiz { .. } => 54,
+            Instruction::Ubfx { .. } => 54,
+            Instruction::Sbfx { .. } => 55,
+            Instruction::Bfi { .. } => 56,
+            Instruction::Bfxil { .. } => 57,
+            Instruction::Ubfiz { .. } => 58,
+            Instruction::Sbfiz { .. } => 59,
             // Branches / terminators (issue #69). Branches are not in the
             // random-generation pool, so these IDs fall above `opcode_count`;
             // the `id < opcode_count` invariant only applies to enumerated
             // families.
-            Instruction::B { .. } => 55,
-            Instruction::BCond { .. } => 56,
-            Instruction::Ret { .. } => 57,
-            Instruction::Cbz { .. } => 58,
-            Instruction::Cbnz { .. } => 59,
-            Instruction::Tbz { .. } => 60,
-            Instruction::Tbnz { .. } => 61,
-            Instruction::Bl { .. } => 62,
-            Instruction::Br { .. } => 63,
+            Instruction::B { .. } => 60,
+            Instruction::BCond { .. } => 61,
+            Instruction::Ret { .. } => 62,
+            Instruction::Cbz { .. } => 63,
+            Instruction::Cbnz { .. } => 64,
+            Instruction::Tbz { .. } => 65,
+            Instruction::Tbnz { .. } => 66,
+            Instruction::Bl { .. } => 67,
+            Instruction::Br { .. } => 68,
 
-            // Memory ops (issue #68). LDR/LDRB/LDRH share id 64 — the
+            // Memory ops (issue #68). LDR/LDRB/LDRH share id 69 — the
             // mnemonic table differentiates by `AccessWidth`; this id
             // bucket is used only for coarse equality checks.
-            Instruction::Ldr { .. } => 64,
+            Instruction::Ldr { .. } => 69,
             // Sign-extending loads (LDRSB / LDRSH / LDRSW).
-            Instruction::Ldrs { .. } => 65,
+            Instruction::Ldrs { .. } => 70,
             // Stores (STR / STRB / STRH).
-            Instruction::Str { .. } => 66,
+            Instruction::Str { .. } => 71,
             // Pair loads (LDP, LDPSW).
-            Instruction::Ldp { .. } => 67,
+            Instruction::Ldp { .. } => 72,
             // Pair store (STP).
-            Instruction::Stp { .. } => 68,
+            Instruction::Stp { .. } => 73,
         }
     }
 
@@ -638,7 +636,7 @@ impl InstructionGenerator<Instruction> for AArch64InstructionGenerator {
                 instructions.push(Instruction::Negs { rd, rm });
             }
 
-            // Single-source bit-manipulation: CLZ / CLS / RBIT / REV / REV32 / REV16.
+            // Single-source bit-manipulation and standalone extends.
             for &rn in registers {
                 instructions.push(Instruction::Clz { rd, rn });
                 instructions.push(Instruction::Cls { rd, rn });
@@ -646,6 +644,11 @@ impl InstructionGenerator<Instruction> for AArch64InstructionGenerator {
                 instructions.push(Instruction::Rev { rd, rn });
                 instructions.push(Instruction::Rev32 { rd, rn });
                 instructions.push(Instruction::Rev16 { rd, rn });
+                instructions.push(Instruction::Sxtb { rd, rn });
+                instructions.push(Instruction::Sxth { rd, rn });
+                instructions.push(Instruction::Sxtw { rd, rn });
+                instructions.push(Instruction::Uxtb { rd, rn });
+                instructions.push(Instruction::Uxth { rd, rn });
             }
 
             // MOVN / MOVZ / MOVK: small representative imm × {0,16,32,48}
@@ -1712,17 +1715,19 @@ impl InstructionGenerator<Instruction> for AArch64InstructionGenerator {
     /// `opcode_id()`). Not the same as `generate_random`'s slot count —
     /// `generate_random` samples 38 top-level slots and still folds several
     /// families into sub-multiplexers (e.g. the five multiply-accumulate ops,
-    /// the two conditional-compare ops, and the six bit-field aliases). So
-    /// `opcode_id < opcode_count` always holds, but the random-generation
-    /// distribution is not uniform across all 55 IDs.
+    /// the two conditional-compare ops, the five standalone extend aliases,
+    /// and the six bit-field aliases). So `opcode_id < opcode_count` always
+    /// holds for generated arithmetic/logical families, but the
+    /// random-generation distribution is not uniform across all 60 IDs.
     fn opcode_count(&self) -> u8 {
-        55 // 20 original + 14 Tier 1 (MVN, NEG, NEGS, MovN, BIC, BICS, ORN,
+        60 // 20 original + 14 Tier 1 (MVN, NEG, NEGS, MovN, BIC, BICS, ORN,
         //  EON, ADDS, SUBS, ANDS, CSET, CSETM, ROR) + 2 MOVK/MOVZ (issue
         //  #55) + 6 single-source bit-manipulation (CLZ, CLS, RBIT, REV,
         //  REV32, REV16) + 5 multiply-accumulate family (issue #56:
         //  MADD, MSUB, MNEG, SMULH, UMULH) + 2 conditional-compare family
-        //  (issue #57: CCMP, CCMN) + 6 bit-field aliases (UBFX, SBFX, BFI,
-        //  BFXIL, UBFIZ, SBFIZ, issue #61).
+        //  (issue #57: CCMP, CCMN) + 5 standalone extend aliases
+        //  (SXTB, SXTH, SXTW, UXTB, UXTH) + 6 bit-field aliases (UBFX, SBFX,
+        //  BFI, BFXIL, UBFIZ, SBFIZ, issue #61).
     }
 }
 
@@ -2039,6 +2044,26 @@ mod tests {
                 nzcv: 0,
                 cond: Condition::EQ,
             },
+            Instruction::Sxtb {
+                rd: Register::X0,
+                rn: Register::X1,
+            },
+            Instruction::Sxth {
+                rd: Register::X0,
+                rn: Register::X1,
+            },
+            Instruction::Sxtw {
+                rd: Register::X0,
+                rn: Register::X1,
+            },
+            Instruction::Uxtb {
+                rd: Register::X0,
+                rn: Register::X1,
+            },
+            Instruction::Uxth {
+                rd: Register::X0,
+                rn: Register::X1,
+            },
             Instruction::Ubfx {
                 rd: Register::X0,
                 rn: Register::X1,
@@ -2352,6 +2377,7 @@ mod tests {
                 id
             })
             .collect();
+        assert_eq!(seen.len(), all_instruction_families().len());
         assert_eq!(seen.len(), generator.opcode_count() as usize);
     }
 
@@ -2424,6 +2450,26 @@ mod tests {
                 rm: Operand::Immediate(1),
                 nzcv: 0,
                 cond: Condition::EQ,
+            },
+            Instruction::Sxtb {
+                rd: Register::X0,
+                rn: Register::X1,
+            },
+            Instruction::Sxth {
+                rd: Register::X0,
+                rn: Register::X1,
+            },
+            Instruction::Sxtw {
+                rd: Register::X0,
+                rn: Register::X1,
+            },
+            Instruction::Uxtb {
+                rd: Register::X0,
+                rn: Register::X1,
+            },
+            Instruction::Uxth {
+                rd: Register::X0,
+                rn: Register::X1,
             },
         ] {
             assert!(ids.contains(&required.opcode_id()), "missing {}", required);
