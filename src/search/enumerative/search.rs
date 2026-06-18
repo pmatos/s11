@@ -38,6 +38,12 @@ struct SharedState<I: ISA> {
     best: Mutex<Option<Vec<I::Instruction>>>,
 }
 
+struct CandidatePool<I: ISA> {
+    registers: Vec<I::Register>,
+    immediates: Vec<i64>,
+    instructions: Vec<I::Instruction>,
+}
+
 impl<I: ISA> SharedState<I> {
     fn new(initial_best_cost: u64) -> Self {
         Self {
@@ -298,6 +304,7 @@ struct CachedThreadPool {
 
 pub struct EnumerativeSearch<I: ISA = AArch64> {
     statistics: SearchStatistics,
+    candidate_pool: Option<CandidatePool<I>>,
     private_pool: Option<CachedThreadPool>,
     #[cfg(test)]
     private_pool_builds: u64,
@@ -308,6 +315,7 @@ impl<I: ISA> EnumerativeSearch<I> {
     pub fn new() -> Self {
         Self {
             statistics: SearchStatistics::new(Algorithm::Enumerative),
+            candidate_pool: None,
             private_pool: None,
             #[cfg(test)]
             private_pool_builds: 0,
@@ -359,6 +367,43 @@ impl<I: ISA> EnumerativeSearch<I> {
         self.private_pool
             .as_ref()
             .map(|cached| cached.effective_cores)
+    }
+}
+
+impl<I> EnumerativeSearch<I>
+where
+    I: ISA + EnumerativeBackend<I>,
+{
+    /// Construct an enumerative searcher with the candidate pool for `config`
+    /// generated up front.
+    pub fn with_config(config: &SearchConfig) -> Self {
+        let mut search = Self::new();
+        let _ = search.candidate_pool_for_config(config);
+        search
+    }
+
+    fn candidate_pool_for_config(&mut self, config: &SearchConfig) -> &[I::Instruction] {
+        let registers = <I as EnumerativeBackend<I>>::registers_from_config(config);
+        let immediates = <I as EnumerativeBackend<I>>::immediates_from_config(config);
+        let regenerate = match &self.candidate_pool {
+            Some(pool) => pool.registers != registers || pool.immediates != immediates,
+            None => true,
+        };
+
+        if regenerate {
+            let instructions = <I as EnumerativeBackend<I>>::enumerate_all(&registers, &immediates);
+            self.candidate_pool = Some(CandidatePool {
+                registers,
+                immediates,
+                instructions,
+            });
+        }
+
+        &self
+            .candidate_pool
+            .as_ref()
+            .expect("candidate pool must be populated")
+            .instructions
     }
 }
 
@@ -474,9 +519,11 @@ where
             return SearchResultFor::no_optimization(target.to_vec(), self.statistics.clone());
         }
 
-        let registers = <I as EnumerativeBackend<I>>::registers_from_config(config);
-        let immediates = <I as EnumerativeBackend<I>>::immediates_from_config(config);
-        let all_instructions = <I as EnumerativeBackend<I>>::enumerate_all(&registers, &immediates);
+        // Own the cached candidate pool so the borrow on `self` is released
+        // before `cached_private_pool` takes `&mut self` below. The cache still
+        // avoids the expensive `enumerate_all`; only a cheap Vec copy remains.
+        let all_instructions_owned = self.candidate_pool_for_config(config).to_vec();
+        let all_instructions: &[I::Instruction] = &all_instructions_owned;
         let terminator = <I as EnumerativeBackend<I>>::target_terminator(target);
         let shared = SharedState::new(original_cost);
 
@@ -494,7 +541,7 @@ where
                         target,
                         live_out,
                         config,
-                        &all_instructions,
+                        all_instructions,
                         terminator,
                         s,
                         start,
@@ -503,7 +550,7 @@ where
                         target,
                         live_out,
                         config,
-                        &all_instructions,
+                        all_instructions,
                         terminator,
                         s,
                         start,
@@ -572,11 +619,316 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::atomic::AtomicUsize;
+    use std::fmt;
+    use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
+    use std::sync::{Mutex as TestMutex, MutexGuard};
 
     use crate::ir::{Instruction, Operand, Register};
-    use crate::isa::{ISAMutator, InstructionType, U64};
+    use crate::isa::{ISA, ISAMutator, InstructionType, OperandType, RegisterType, U64};
     use crate::search::config::SymbolicConfig;
+
+    static CACHE_PROBE_TEST_LOCK: TestMutex<()> = TestMutex::new(());
+    static CACHE_PROBE_ENUMERATE_CALLS: AtomicUsize = AtomicUsize::new(0);
+
+    fn reset_cache_probe_counter() -> MutexGuard<'static, ()> {
+        let guard = CACHE_PROBE_TEST_LOCK
+            .lock()
+            .expect("cache probe test lock poisoned");
+        CACHE_PROBE_ENUMERATE_CALLS.store(0, AtomicOrdering::SeqCst);
+        guard
+    }
+
+    #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+    struct CacheProbeRegister(u8);
+
+    impl fmt::Display for CacheProbeRegister {
+        fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+            write!(f, "r{}", self.0)
+        }
+    }
+
+    impl RegisterType for CacheProbeRegister {
+        fn index(&self) -> Option<u8> {
+            Some(self.0)
+        }
+
+        fn from_index(idx: u8) -> Option<Self> {
+            Some(Self(idx))
+        }
+
+        fn is_zero_register(&self) -> bool {
+            false
+        }
+
+        fn is_special(&self) -> bool {
+            false
+        }
+    }
+
+    #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+    enum CacheProbeOperand {
+        Reg(CacheProbeRegister),
+        Imm(i64),
+    }
+
+    impl fmt::Display for CacheProbeOperand {
+        fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+            match self {
+                Self::Reg(reg) => write!(f, "{reg}"),
+                Self::Imm(imm) => write!(f, "#{imm}"),
+            }
+        }
+    }
+
+    impl OperandType for CacheProbeOperand {
+        type Register = CacheProbeRegister;
+
+        fn as_register(&self) -> Option<Self::Register> {
+            match self {
+                Self::Reg(reg) => Some(*reg),
+                Self::Imm(_) => None,
+            }
+        }
+
+        fn as_immediate(&self) -> Option<i64> {
+            match self {
+                Self::Reg(_) => None,
+                Self::Imm(imm) => Some(*imm),
+            }
+        }
+
+        fn from_register(reg: Self::Register) -> Self {
+            Self::Reg(reg)
+        }
+
+        fn from_immediate(imm: i64) -> Self {
+            Self::Imm(imm)
+        }
+    }
+
+    #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+    struct CacheProbeInstruction(u8);
+
+    impl fmt::Display for CacheProbeInstruction {
+        fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+            write!(f, "probe{}", self.0)
+        }
+    }
+
+    impl InstructionType for CacheProbeInstruction {
+        type Register = CacheProbeRegister;
+        type Operand = CacheProbeOperand;
+
+        fn destination(&self) -> Option<Self::Register> {
+            None
+        }
+
+        fn source_registers(&self) -> Vec<Self::Register> {
+            Vec::new()
+        }
+
+        fn opcode_id(&self) -> u8 {
+            self.0
+        }
+
+        fn mnemonic(&self) -> &'static str {
+            "probe"
+        }
+    }
+
+    struct CacheProbeMutator;
+
+    impl ISAMutator<CacheProbeInstruction> for CacheProbeMutator {
+        fn mutate<R: rand::RngExt>(
+            &self,
+            _rng: &mut R,
+            sequence: &[CacheProbeInstruction],
+        ) -> Vec<CacheProbeInstruction> {
+            sequence.to_vec()
+        }
+    }
+
+    #[derive(Clone)]
+    struct CacheProbeIsa;
+
+    impl ISA for CacheProbeIsa {
+        type Register = CacheProbeRegister;
+        type Operand = CacheProbeOperand;
+        type Instruction = CacheProbeInstruction;
+        type Width = U64;
+        type Flags = ();
+        type Mutator = CacheProbeMutator;
+
+        fn name(&self) -> &'static str {
+            "CacheProbe"
+        }
+
+        fn register_count(&self) -> usize {
+            1
+        }
+
+        fn instruction_size(&self) -> Option<usize> {
+            Some(1)
+        }
+
+        fn general_registers(&self) -> Vec<Self::Register> {
+            vec![CacheProbeRegister(0)]
+        }
+
+        fn zero_register(&self) -> Option<Self::Register> {
+            None
+        }
+    }
+
+    impl EnumerativeBackend<CacheProbeIsa> for CacheProbeIsa {
+        type LiveOut = ();
+
+        fn registers_from_config(_config: &SearchConfig) -> Vec<CacheProbeRegister> {
+            vec![CacheProbeRegister(0)]
+        }
+
+        fn immediates_from_config(config: &SearchConfig) -> Vec<i64> {
+            config.available_immediates.clone()
+        }
+
+        fn enumerate_all(
+            _regs: &[CacheProbeRegister],
+            _imms: &[i64],
+        ) -> Vec<CacheProbeInstruction> {
+            CACHE_PROBE_ENUMERATE_CALLS.fetch_add(1, AtomicOrdering::SeqCst);
+            vec![CacheProbeInstruction(0)]
+        }
+
+        fn sequence_cost(seq: &[CacheProbeInstruction], _config: &SearchConfig) -> u64 {
+            seq.len() as u64
+        }
+
+        fn check_equivalence(
+            _target: &[CacheProbeInstruction],
+            _candidate: &[CacheProbeInstruction],
+            _live_out: &Self::LiveOut,
+            _config: &SearchConfig,
+        ) -> (EquivalenceResult, EquivalenceMetrics) {
+            (
+                EquivalenceResult::NotEquivalent,
+                EquivalenceMetrics::default(),
+            )
+        }
+    }
+
+    fn cache_probe_config(immediates: Vec<i64>) -> SearchConfig {
+        SearchConfig::default()
+            .with_immediates(immediates)
+            .with_timeout_option(None)
+    }
+
+    fn cache_probe_target() -> Vec<CacheProbeInstruction> {
+        vec![CacheProbeInstruction(1), CacheProbeInstruction(2)]
+    }
+
+    #[test]
+    fn reuses_candidate_pool_across_same_config_search_calls() {
+        let _guard = reset_cache_probe_counter();
+        let config = cache_probe_config(vec![0]);
+        let target = cache_probe_target();
+        let mut search = EnumerativeSearch::<CacheProbeIsa>::new();
+
+        let _ = search.search(&target, &(), &config);
+        let _ = search.search(&target, &(), &config);
+
+        assert_eq!(
+            CACHE_PROBE_ENUMERATE_CALLS.load(AtomicOrdering::SeqCst),
+            1,
+            "candidate pool should be generated once for repeated same-config searches"
+        );
+    }
+
+    #[test]
+    fn with_config_pre_generates_candidate_pool() {
+        let _guard = reset_cache_probe_counter();
+        let config = cache_probe_config(vec![0]);
+        let target = cache_probe_target();
+
+        let mut search = EnumerativeSearch::<CacheProbeIsa>::with_config(&config);
+
+        assert_eq!(
+            CACHE_PROBE_ENUMERATE_CALLS.load(AtomicOrdering::SeqCst),
+            1,
+            "with_config should eagerly generate the candidate pool"
+        );
+
+        let _ = search.search(&target, &(), &config);
+
+        assert_eq!(
+            CACHE_PROBE_ENUMERATE_CALLS.load(AtomicOrdering::SeqCst),
+            1,
+            "same-config search should reuse the eagerly generated pool"
+        );
+    }
+
+    #[test]
+    fn regenerates_candidate_pool_when_effective_immediates_change() {
+        let _guard = reset_cache_probe_counter();
+        let target = cache_probe_target();
+        let mut search = EnumerativeSearch::<CacheProbeIsa>::new();
+
+        let _ = search.search(&target, &(), &cache_probe_config(vec![0, 1]));
+        let _ = search.search(&target, &(), &cache_probe_config(vec![1, 0]));
+
+        assert_eq!(
+            CACHE_PROBE_ENUMERATE_CALLS.load(AtomicOrdering::SeqCst),
+            2,
+            "candidate pool should regenerate when the ordered effective immediate pool changes"
+        );
+    }
+
+    #[test]
+    fn regenerates_candidate_pool_when_registers_change() {
+        // Covers the register branch of the invalidation condition. The mock
+        // ISA's register set is constant, so this exercises it on AArch64,
+        // where registers_from_config varies with the config. Re-querying the
+        // same warmed search with a larger register pool must regenerate; a
+        // stale pool (register change ignored) would compare equal.
+        let one_reg = SearchConfig::default()
+            .with_registers(vec![Register::X0])
+            .with_immediates(vec![0, 1])
+            .with_timeout_option(None);
+        let two_regs = SearchConfig::default()
+            .with_registers(vec![Register::X0, Register::X1])
+            .with_immediates(vec![0, 1])
+            .with_timeout_option(None);
+
+        let mut search = EnumerativeSearch::<crate::isa::AArch64>::new();
+        let pool_one = search.candidate_pool_for_config(&one_reg).to_vec();
+        let pool_two = search.candidate_pool_for_config(&two_regs).to_vec();
+
+        assert_ne!(
+            pool_one, pool_two,
+            "changing the register pool must regenerate the candidate pool"
+        );
+        assert!(
+            pool_two.len() > pool_one.len(),
+            "a larger register pool should enumerate strictly more candidates"
+        );
+    }
+
+    #[test]
+    fn reset_preserves_candidate_pool() {
+        let _guard = reset_cache_probe_counter();
+        let config = cache_probe_config(vec![0]);
+        let target = cache_probe_target();
+        let mut search = EnumerativeSearch::<CacheProbeIsa>::new();
+
+        let _ = search.search(&target, &(), &config);
+        search.reset();
+        let _ = search.search(&target, &(), &config);
+
+        assert_eq!(
+            CACHE_PROBE_ENUMERATE_CALLS.load(AtomicOrdering::SeqCst),
+            1,
+            "reset should clear statistics without clearing the candidate pool"
+        );
+    }
 
     #[test]
     fn empty_target_returns_no_optimization() {
@@ -638,10 +990,16 @@ mod tests {
 
     fn small_config() -> SearchConfig {
         // Tight register/immediate pool so unit tests run fast.
+        //
+        // No wall-clock deadline: every search built on this config is a
+        // bounded enumeration over a tiny pool that terminates on its own. A
+        // finite timeout is nondeterministic under coverage instrumentation —
+        // the slow instrumented suite can exceed it and spuriously report no
+        // optimization (the x86 sibling tests use the same workaround).
         SearchConfig::default()
             .with_registers(vec![Register::X0, Register::X1])
             .with_immediates(vec![0, 1])
-            .with_timeout(std::time::Duration::from_secs(10))
+            .with_timeout_option(None)
     }
 
     #[derive(Clone)]
@@ -1255,6 +1613,32 @@ mod tests {
             1,
             "should collapse to a single instruction"
         );
+    }
+
+    #[test]
+    fn with_config_preserves_aarch64_single_add_collapse() {
+        let target = vec![
+            Instruction::MovReg {
+                rd: Register::X0,
+                rn: Register::X1,
+            },
+            Instruction::Add {
+                rd: Register::X0,
+                rn: Register::X0,
+                rm: Operand::Immediate(1),
+            },
+        ];
+        let live_out = LiveOut::from_registers(vec![Register::X0]);
+        let config = small_config();
+
+        let mut search = EnumerativeSearch::<crate::isa::AArch64>::with_config(&config);
+        let result = search.search(&target, &live_out, &config);
+
+        assert!(
+            result.found_optimization,
+            "expected length-1 rewrite to be found"
+        );
+        assert_eq!(result.optimized_sequence.as_ref().map(Vec::len), Some(1));
     }
 
     #[test]
