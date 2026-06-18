@@ -273,6 +273,9 @@ where
                     EquivalenceResult::NotEquivalent | EquivalenceResult::NotEquivalentFast(_) => {
                         smt_refuted = true;
                     }
+                    // SMT timeout / inconclusive: we cannot prove the proposal
+                    // incorrect, so leave the Metropolis decision below intact
+                    // rather than vetoing exploration.
                     EquivalenceResult::Unknown(_) => {}
                 }
             }
