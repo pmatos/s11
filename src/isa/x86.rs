@@ -523,6 +523,10 @@ pub fn x86_reads_flags(instr: &X86Instruction) -> bool {
     )
 }
 
+fn x86_imm32_ok(imm: i64) -> bool {
+    i32::try_from(imm).is_ok()
+}
+
 impl crate::isa::traits::FlagsAnalysis<X86Instruction> for X86_64 {
     fn modifies_flags(instr: &X86Instruction) -> bool {
         x86_modifies_flags(instr)
@@ -661,9 +665,25 @@ impl crate::isa::traits::Assembler<X86Instruction> for X86_64 {
         crate::assembler::x86::X86Assembler::new_64().assemble_instructions(instructions)
     }
 
-    fn can_assemble(&self, _instruction: &X86Instruction) -> bool {
-        // Every x86 variant in this enum is encodable in 64-bit mode.
-        true
+    fn can_assemble(&self, instruction: &X86Instruction) -> bool {
+        match instruction {
+            X86Instruction::AddImm { imm, .. }
+            | X86Instruction::SubImm { imm, .. }
+            | X86Instruction::AndImm { imm, .. }
+            | X86Instruction::OrImm { imm, .. }
+            | X86Instruction::XorImm { imm, .. }
+            | X86Instruction::CmpImm { imm, .. } => x86_imm32_ok(*imm),
+            X86Instruction::MovReg { .. }
+            | X86Instruction::MovImm { .. }
+            | X86Instruction::AddReg { .. }
+            | X86Instruction::SubReg { .. }
+            | X86Instruction::AndReg { .. }
+            | X86Instruction::OrReg { .. }
+            | X86Instruction::XorReg { .. }
+            | X86Instruction::CmpReg { .. }
+            | X86Instruction::Cmov { .. }
+            | X86Instruction::Jcc { .. } => true,
+        }
     }
 }
 
@@ -686,14 +706,14 @@ impl crate::isa::traits::Assembler<X86Instruction> for X86_32 {
             | X86Instruction::AndReg { rd, rs }
             | X86Instruction::OrReg { rd, rs }
             | X86Instruction::XorReg { rd, rs } => reg_ok_32(*rd) && reg_ok_32(*rs),
-            X86Instruction::MovImm { rd, .. }
-            | X86Instruction::AddImm { rd, .. }
-            | X86Instruction::SubImm { rd, .. }
-            | X86Instruction::AndImm { rd, .. }
-            | X86Instruction::OrImm { rd, .. }
-            | X86Instruction::XorImm { rd, .. } => reg_ok_32(*rd),
+            X86Instruction::MovImm { rd, imm }
+            | X86Instruction::AddImm { rd, imm }
+            | X86Instruction::SubImm { rd, imm }
+            | X86Instruction::AndImm { rd, imm }
+            | X86Instruction::OrImm { rd, imm }
+            | X86Instruction::XorImm { rd, imm } => reg_ok_32(*rd) && x86_imm32_ok(*imm),
             X86Instruction::CmpReg { rn, rs } => reg_ok_32(*rn) && reg_ok_32(*rs),
-            X86Instruction::CmpImm { rn, .. } => reg_ok_32(*rn),
+            X86Instruction::CmpImm { rn, imm } => reg_ok_32(*rn) && x86_imm32_ok(*imm),
             X86Instruction::Cmov { rd, rs, .. } => reg_ok_32(*rd) && reg_ok_32(*rs),
             X86Instruction::Jcc { .. } => true,
         }
@@ -1375,6 +1395,135 @@ mod tests {
         assert!(crate::search::candidate::is_sequence_encodable_for(
             &seq, &X86_64
         ));
+    }
+
+    #[test]
+    fn x86_generic_encodability_rejects_out_of_range_immediates() {
+        let add_imm64 = [X86Instruction::AddImm {
+            rd: X86Register::RAX,
+            imm: i64::MAX,
+        }];
+        assert!(!crate::search::candidate::is_sequence_encodable_for(
+            &add_imm64, &X86_64
+        ));
+        assert!(!crate::search::candidate::is_sequence_encodable_for(
+            &add_imm64, &X86_32
+        ));
+
+        let mov_imm64 = [X86Instruction::MovImm {
+            rd: X86Register::RAX,
+            imm: i64::MAX,
+        }];
+        assert!(crate::search::candidate::is_sequence_encodable_for(
+            &mov_imm64, &X86_64
+        ));
+        assert!(!crate::search::candidate::is_sequence_encodable_for(
+            &mov_imm64, &X86_32
+        ));
+    }
+
+    #[test]
+    fn x86_64_can_assemble_rejects_non_mov_immediates_outside_imm32() {
+        fn can_assemble(instruction: X86Instruction) -> bool {
+            <X86_64 as crate::isa::traits::Assembler<X86Instruction>>::can_assemble(
+                &X86_64,
+                &instruction,
+            )
+        }
+
+        let immediate_forms: [(&str, fn(i64) -> X86Instruction); 6] = [
+            ("add", |imm| X86Instruction::AddImm {
+                rd: X86Register::RAX,
+                imm,
+            }),
+            ("sub", |imm| X86Instruction::SubImm {
+                rd: X86Register::RAX,
+                imm,
+            }),
+            ("and", |imm| X86Instruction::AndImm {
+                rd: X86Register::RAX,
+                imm,
+            }),
+            ("or", |imm| X86Instruction::OrImm {
+                rd: X86Register::RAX,
+                imm,
+            }),
+            ("xor", |imm| X86Instruction::XorImm {
+                rd: X86Register::RAX,
+                imm,
+            }),
+            ("cmp", |imm| X86Instruction::CmpImm {
+                rn: X86Register::RAX,
+                imm,
+            }),
+        ];
+
+        for (name, form) in immediate_forms {
+            assert!(
+                can_assemble(form(i64::from(i32::MIN))),
+                "{name} should accept i32::MIN"
+            );
+            assert!(
+                can_assemble(form(i64::from(i32::MAX))),
+                "{name} should accept i32::MAX"
+            );
+            assert!(
+                !can_assemble(form(i64::from(i32::MIN) - 1)),
+                "{name} should reject values below signed imm32"
+            );
+            assert!(
+                !can_assemble(form(i64::from(i32::MAX) + 1)),
+                "{name} should reject values above signed imm32"
+            );
+        }
+
+        assert!(can_assemble(X86Instruction::MovImm {
+            rd: X86Register::RAX,
+            imm: i64::MAX,
+        }));
+    }
+
+    #[test]
+    fn x86_32_can_assemble_rejects_extended_registers_and_out_of_range_immediates() {
+        fn can_assemble(instruction: X86Instruction) -> bool {
+            <X86_32 as crate::isa::traits::Assembler<X86Instruction>>::can_assemble(
+                &X86_32,
+                &instruction,
+            )
+        }
+
+        let immediate_forms: [(&str, fn(X86Register, i64) -> X86Instruction); 7] = [
+            ("mov", |rd, imm| X86Instruction::MovImm { rd, imm }),
+            ("add", |rd, imm| X86Instruction::AddImm { rd, imm }),
+            ("sub", |rd, imm| X86Instruction::SubImm { rd, imm }),
+            ("and", |rd, imm| X86Instruction::AndImm { rd, imm }),
+            ("or", |rd, imm| X86Instruction::OrImm { rd, imm }),
+            ("xor", |rd, imm| X86Instruction::XorImm { rd, imm }),
+            ("cmp", |rn, imm| X86Instruction::CmpImm { rn, imm }),
+        ];
+
+        for (name, form) in immediate_forms {
+            assert!(
+                can_assemble(form(X86Register::RAX, i64::from(i32::MIN))),
+                "{name} should accept low registers with i32::MIN"
+            );
+            assert!(
+                can_assemble(form(X86Register::RAX, i64::from(i32::MAX))),
+                "{name} should accept low registers with i32::MAX"
+            );
+            assert!(
+                !can_assemble(form(X86Register::RAX, i64::from(i32::MIN) - 1)),
+                "{name} should reject values below signed imm32"
+            );
+            assert!(
+                !can_assemble(form(X86Register::RAX, i64::from(i32::MAX) + 1)),
+                "{name} should reject values above signed imm32"
+            );
+            assert!(
+                !can_assemble(form(X86Register::R8, 0)),
+                "{name} should reject extended registers"
+            );
+        }
     }
 
     #[test]
