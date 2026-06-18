@@ -594,9 +594,53 @@ impl crate::isa::traits::ISAMutator<RiscVInstruction> for RiscVMutator {
     }
 }
 
+const RV32_SHIFT_AMOUNTS: &[u8] = &[0, 1, 2, 4, 8, 16, 31];
+const RV64_SHIFT_AMOUNTS: &[u8] = &[0, 1, 2, 4, 8, 16, 31, 32, 63];
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum RiscVGeneratorWidth {
+    Rv32,
+    Rv64,
+}
+
+impl RiscVGeneratorWidth {
+    fn shift_amounts(self) -> &'static [u8] {
+        match self {
+            RiscVGeneratorWidth::Rv32 => RV32_SHIFT_AMOUNTS,
+            RiscVGeneratorWidth::Rv64 => RV64_SHIFT_AMOUNTS,
+        }
+    }
+}
+
 /// RISC-V instruction generator
-#[derive(Clone, Debug, Default)]
-pub struct RiscVInstructionGenerator;
+#[derive(Clone, Debug)]
+pub struct RiscVInstructionGenerator {
+    width: RiscVGeneratorWidth,
+}
+
+impl RiscVInstructionGenerator {
+    pub fn rv32() -> Self {
+        Self {
+            width: RiscVGeneratorWidth::Rv32,
+        }
+    }
+
+    pub fn rv64() -> Self {
+        Self {
+            width: RiscVGeneratorWidth::Rv64,
+        }
+    }
+
+    fn shift_amounts(&self) -> &'static [u8] {
+        self.width.shift_amounts()
+    }
+}
+
+impl Default for RiscVInstructionGenerator {
+    fn default() -> Self {
+        Self::rv32()
+    }
+}
 
 impl InstructionGenerator<RiscVInstruction> for RiscVInstructionGenerator {
     fn generate_all(
@@ -635,10 +679,10 @@ impl InstructionGenerator<RiscVInstruction> for RiscVInstructionGenerator {
         }
 
         // Shift immediate operations (shamt is 0-31 for RV32, 0-63 for RV64)
-        let shift_amounts: Vec<u8> = vec![0, 1, 2, 4, 8, 16, 31];
+        let shift_amounts = self.shift_amounts();
         for &rd in registers {
             for &rs1 in registers {
-                for &shamt in &shift_amounts {
+                for &shamt in shift_amounts {
                     instructions.push(RiscVInstruction::Slli { rd, rs1, shamt });
                     instructions.push(RiscVInstruction::Srli { rd, rs1, shamt });
                     instructions.push(RiscVInstruction::Srai { rd, rs1, shamt });
@@ -667,7 +711,7 @@ impl InstructionGenerator<RiscVInstruction> for RiscVInstructionGenerator {
         let rs1 = registers[rng.random_range(0..registers.len())];
         let rs2 = registers[rng.random_range(0..registers.len())];
         let imm = immediates[rng.random_range(0..immediates.len())];
-        let shift_amounts: [u8; 7] = [0, 1, 2, 4, 8, 16, 31];
+        let shift_amounts = self.shift_amounts();
         let shamt = shift_amounts[rng.random_range(0..shift_amounts.len())];
 
         match opcode {
@@ -792,7 +836,7 @@ impl InstructionGenerator<RiscVInstruction> for RiscVInstructionGenerator {
                 let new_rs1 = registers[rng.random_range(0..registers.len())];
                 let new_rs2 = registers[rng.random_range(0..registers.len())];
                 let new_imm = immediates[rng.random_range(0..immediates.len())];
-                let shift_amounts: [u8; 7] = [0, 1, 2, 4, 8, 16, 31];
+                let shift_amounts = self.shift_amounts();
                 let new_shamt = shift_amounts[rng.random_range(0..shift_amounts.len())];
 
                 match *instruction {
@@ -981,6 +1025,15 @@ mod tests {
         ]
     }
 
+    fn shift_immediate_amount(instr: &RiscVInstruction) -> Option<u8> {
+        match instr {
+            RiscVInstruction::Slli { shamt, .. }
+            | RiscVInstruction::Srli { shamt, .. }
+            | RiscVInstruction::Srai { shamt, .. } => Some(*shamt),
+            _ => None,
+        }
+    }
+
     #[test]
     fn test_riscv32_isa_metadata() {
         let isa = RiscV32;
@@ -1105,7 +1158,7 @@ mod tests {
 
     #[test]
     fn test_instruction_generator() {
-        let generator = RiscVInstructionGenerator;
+        let generator = RiscVInstructionGenerator::rv32();
         let regs = vec![RiscVRegister::X10, RiscVRegister::X11];
         let imms = vec![0, 1];
 
@@ -1131,7 +1184,7 @@ mod tests {
 
     #[test]
     fn test_random_instruction_generation() {
-        let generator = RiscVInstructionGenerator;
+        let generator = RiscVInstructionGenerator::rv32();
         let regs = vec![RiscVRegister::X10, RiscVRegister::X11, RiscVRegister::X12];
         let imms = vec![-1, 0, 1, 2];
 
@@ -1145,7 +1198,7 @@ mod tests {
 
     #[test]
     fn test_instruction_mutation() {
-        let generator = RiscVInstructionGenerator;
+        let generator = RiscVInstructionGenerator::rv32();
         let regs = vec![RiscVRegister::X10, RiscVRegister::X11, RiscVRegister::X12];
         let imms = vec![-1, 0, 1, 2];
 
@@ -1191,7 +1244,7 @@ mod tests {
 
     #[test]
     fn all_instruction_families_cover_traits_and_display() {
-        let generator = RiscVInstructionGenerator;
+        let generator = RiscVInstructionGenerator::rv32();
         let ids: BTreeSet<u8> = all_instruction_families()
             .iter()
             .map(|instr| {
@@ -1208,7 +1261,7 @@ mod tests {
 
     #[test]
     fn generate_all_covers_every_riscv_family() {
-        let generator = RiscVInstructionGenerator;
+        let generator = RiscVInstructionGenerator::rv32();
         let regs = vec![RiscVRegister::X1, RiscVRegister::X2];
         let imms = vec![0, 1];
         let ids: BTreeSet<u8> = generator
@@ -1220,8 +1273,45 @@ mod tests {
     }
 
     #[test]
+    fn generate_all_uses_width_specific_shift_immediate_domains() {
+        let regs = vec![RiscVRegister::X1];
+        let imms = vec![0];
+
+        let rv32_instructions = RiscVInstructionGenerator::rv32().generate_all(&regs, &imms);
+        assert!(rv32_instructions.iter().all(|instr| match instr {
+            RiscVInstruction::Slli { shamt, .. }
+            | RiscVInstruction::Srli { shamt, .. }
+            | RiscVInstruction::Srai { shamt, .. } => *shamt <= 31,
+            _ => true,
+        }));
+
+        let rv64_instructions = RiscVInstructionGenerator::rv64().generate_all(&regs, &imms);
+        assert!(
+            rv64_instructions
+                .iter()
+                .any(|instr| matches!(instr, RiscVInstruction::Slli { shamt: 63, .. }))
+        );
+        assert!(
+            rv64_instructions
+                .iter()
+                .any(|instr| matches!(instr, RiscVInstruction::Srli { shamt: 63, .. }))
+        );
+        assert!(
+            rv64_instructions
+                .iter()
+                .any(|instr| matches!(instr, RiscVInstruction::Srai { shamt: 63, .. }))
+        );
+        assert!(rv64_instructions.iter().any(|instr| match instr {
+            RiscVInstruction::Slli { shamt, .. }
+            | RiscVInstruction::Srli { shamt, .. }
+            | RiscVInstruction::Srai { shamt, .. } => *shamt > 31,
+            _ => false,
+        }));
+    }
+
+    #[test]
     fn random_generation_reaches_every_riscv_family() {
-        let generator = RiscVInstructionGenerator;
+        let generator = RiscVInstructionGenerator::rv32();
         let regs = vec![RiscVRegister::X1, RiscVRegister::X2, RiscVRegister::X3];
         let imms = vec![-1, 0, 1, 2];
         let mut rng = ChaCha8Rng::seed_from_u64(0x515c);
@@ -1239,8 +1329,33 @@ mod tests {
     }
 
     #[test]
+    fn random_generation_uses_width_specific_shift_immediate_domains() {
+        let regs = vec![RiscVRegister::X1, RiscVRegister::X2, RiscVRegister::X3];
+        let imms = vec![-1, 0, 1, 2];
+
+        let mut rv32_rng = ChaCha8Rng::seed_from_u64(0x3232);
+        let rv32_generator = RiscVInstructionGenerator::rv32();
+        for _ in 0..20_000 {
+            let instr = rv32_generator.generate_random(&mut rv32_rng, &regs, &imms);
+            if let Some(shamt) = shift_immediate_amount(&instr) {
+                assert!(shamt <= 31);
+            }
+        }
+
+        let mut rv64_rng = ChaCha8Rng::seed_from_u64(0x6464);
+        let rv64_generator = RiscVInstructionGenerator::rv64();
+        let mut saw_63 = false;
+        for _ in 0..20_000 {
+            let instr = rv64_generator.generate_random(&mut rv64_rng, &regs, &imms);
+            saw_63 |= shift_immediate_amount(&instr) == Some(63);
+        }
+
+        assert!(saw_63);
+    }
+
+    #[test]
     fn mutation_exercises_every_riscv_instruction_shape() {
-        let generator = RiscVInstructionGenerator;
+        let generator = RiscVInstructionGenerator::rv32();
         let regs = vec![
             RiscVRegister::X1,
             RiscVRegister::X2,
@@ -1256,5 +1371,35 @@ mod tests {
                 assert!(mutated.opcode_id() < generator.opcode_count());
             }
         }
+    }
+
+    #[test]
+    fn mutation_uses_width_specific_shift_immediate_domains() {
+        let regs = vec![RiscVRegister::X1, RiscVRegister::X2, RiscVRegister::X3];
+        let imms = vec![-1, 0, 1, 2];
+        let original = RiscVInstruction::Slli {
+            rd: RiscVRegister::X1,
+            rs1: RiscVRegister::X2,
+            shamt: 0,
+        };
+
+        let mut rv32_rng = ChaCha8Rng::seed_from_u64(0x3232_3232);
+        let rv32_generator = RiscVInstructionGenerator::rv32();
+        for _ in 0..20_000 {
+            let mutated = rv32_generator.mutate(&mut rv32_rng, &original, &regs, &imms);
+            if let Some(shamt) = shift_immediate_amount(&mutated) {
+                assert!(shamt <= 31);
+            }
+        }
+
+        let mut rv64_rng = ChaCha8Rng::seed_from_u64(0x6464_6464);
+        let rv64_generator = RiscVInstructionGenerator::rv64();
+        let mut saw_63 = false;
+        for _ in 0..20_000 {
+            let mutated = rv64_generator.mutate(&mut rv64_rng, &original, &regs, &imms);
+            saw_63 |= shift_immediate_amount(&mutated) == Some(63);
+        }
+
+        assert!(saw_63);
     }
 }
