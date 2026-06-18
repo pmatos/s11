@@ -817,6 +817,7 @@ fn parse_memory_operand(
 
     // Parse the inner pieces.
     let inner_parts: Vec<&str> = inner.split(',').map(|s| s.trim()).collect();
+    let bracketed_form_is_bare_base = inner_parts.len() == 1;
     let base = parse_register(inner_parts[0])
         .map_err(|e| format!("invalid base register in memory operand: {}", e))?;
 
@@ -909,11 +910,12 @@ fn parse_memory_operand(
     if tokens.len() >= 2 {
         let second = tokens[1].trim();
         if let Ok(imm) = parse_immediate(second) {
-            if let AddressOperand::Imm {
-                base,
-                offset: 0,
-                mode: IndexMode::Offset,
-            } = addr
+            if bracketed_form_is_bare_base
+                && let AddressOperand::Imm {
+                    base,
+                    offset: 0,
+                    mode: IndexMode::Offset,
+                } = addr
             {
                 addr = AddressOperand::Imm {
                     base,
@@ -3572,6 +3574,39 @@ mod tests {
                 width: AccessWidth::Extended,
             }
         );
+    }
+
+    #[test]
+    fn parse_post_index_rejects_explicit_zero_bracket_offset() {
+        for text in ["ldr x0, [x1, #0], #8", "ldp x0, x1, [sp, #0], #16"] {
+            let err = parse_line(text).expect_err("post-index requires bare base");
+
+            assert!(
+                err.to_string()
+                    .contains("post-index requires bare `[Xn]` base form"),
+                "{text}: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn parse_ldr_zero_post_index_remains_valid() {
+        use crate::ir::types::{AccessWidth, AddressOperand, IndexMode};
+        let instr = parse_one("ldr x0, [x1], #0");
+
+        assert_eq!(
+            instr,
+            Instruction::Ldr {
+                rt: Register::X0,
+                addr: AddressOperand::Imm {
+                    base: Register::X1,
+                    offset: 0,
+                    mode: IndexMode::PostIndex,
+                },
+                width: AccessWidth::Extended,
+            }
+        );
+        assert_eq!(format!("{}", instr), "ldr x0, [x1], #0");
     }
 
     #[test]
