@@ -210,6 +210,7 @@ impl SearchAlgorithm<crate::isa::AArch64> for LlmSearch {
                 timings.verify_time += verify_elapsed;
                 if m.smt_called {
                     timings.smt_calls += 1;
+                    stats.smt_queries += 1;
                     if let Some(bytes) = m.smt_formula_bytes {
                         timings.smt_formula_bytes_total += bytes;
                         if bytes > timings.smt_formula_bytes_max {
@@ -228,7 +229,6 @@ impl SearchAlgorithm<crate::isa::AArch64> for LlmSearch {
                             seq.len()
                         );
                     }
-                    stats.smt_queries += 1;
                     stats.smt_equivalent += 1;
                     stats.candidates_passed_fast += 1;
                     stats.improvements_found += 1;
@@ -272,13 +272,11 @@ impl SearchAlgorithm<crate::isa::AArch64> for LlmSearch {
                     }
                 }
                 IterationOutcome::EquivFail => {
-                    stats.smt_queries += 1;
                     if config.verbose {
                         eprintln!("llm-search: equiv-fail on call {}", call_idx);
                     }
                 }
                 IterationOutcome::EquivUnknown => {
-                    stats.smt_queries += 1;
                     if config.verbose {
                         eprintln!("llm-search: equiv-unknown on call {}", call_idx);
                     }
@@ -479,6 +477,8 @@ mod tests {
 
         let stats = search.statistics();
         assert_eq!(stats.candidates_evaluated, 1);
+        assert_eq!(stats.smt_queries, 1);
+        assert_eq!(stats.smt_equivalent, 1);
         assert_eq!(stats.improvements_found, 1);
         assert_eq!(stats.best_cost_found, 1);
 
@@ -564,7 +564,7 @@ mod tests {
         assert_eq!(search.timings().codex_calls, 1);
         assert_eq!(search.timings().verifications, 1);
         assert_eq!(search.timings().smt_calls, 0);
-        assert_eq!(search.statistics().smt_queries, 1);
+        assert_eq!(search.statistics().smt_queries, 0);
     }
 
     #[cfg(unix)]
