@@ -744,11 +744,11 @@ impl X86Mutator {
         }
     }
 
-    fn pick_register<R: rand::RngExt>(&self, rng: &mut R) -> X86Register {
+    fn pick_register<R: rand::RngExt>(&self, rng: &mut R) -> Option<X86Register> {
         if self.registers.is_empty() {
-            X86Register::RAX
+            None
         } else {
-            self.registers[rng.random_range(0..self.registers.len())]
+            Some(self.registers[rng.random_range(0..self.registers.len())])
         }
     }
 
@@ -760,14 +760,14 @@ impl X86Mutator {
         }
     }
 
-    fn random_instruction<R: rand::RngExt>(&self, rng: &mut R) -> X86Instruction {
+    fn random_instruction<R: rand::RngExt>(&self, rng: &mut R) -> Option<X86Instruction> {
         // Rewritable variants only: 7 reg-reg + 7 reg-imm + CMOVcc.
         let opcode = rng.random_range(0..u32::from(X86_REWRITABLE_OPCODE_COUNT));
-        let rd = self.pick_register(rng);
-        let rs = self.pick_register(rng);
+        let rd = self.pick_register(rng)?;
+        let rs = self.pick_register(rng)?;
         let imm = self.pick_immediate(rng);
         let cond = X86Condition::ALL[rng.random_range(0..X86Condition::ALL.len())];
-        match opcode {
+        Some(match opcode {
             0 => X86Instruction::MovReg { rd, rs },
             1 => X86Instruction::MovImm { rd, imm },
             2 => X86Instruction::AddReg { rd, rs },
@@ -783,7 +783,7 @@ impl X86Mutator {
             12 => X86Instruction::CmpReg { rn: rd, rs },
             13 => X86Instruction::CmpImm { rn: rd, imm },
             _ => X86Instruction::Cmov { rd, rs, cond },
-        }
+        })
     }
 
     fn mutate_operand<R: rand::RngExt>(&self, rng: &mut R, sequence: &mut [X86Instruction]) {
@@ -791,17 +791,38 @@ impl X86Mutator {
             return;
         }
         let idx = rng.random_range(0..sequence.len());
+        if self.registers.is_empty() {
+            match &mut sequence[idx] {
+                X86Instruction::MovImm { imm, .. }
+                | X86Instruction::AddImm { imm, .. }
+                | X86Instruction::SubImm { imm, .. }
+                | X86Instruction::AndImm { imm, .. }
+                | X86Instruction::OrImm { imm, .. }
+                | X86Instruction::XorImm { imm, .. }
+                | X86Instruction::CmpImm { imm, .. } => *imm = self.pick_immediate(rng),
+                X86Instruction::MovReg { .. }
+                | X86Instruction::AddReg { .. }
+                | X86Instruction::SubReg { .. }
+                | X86Instruction::AndReg { .. }
+                | X86Instruction::OrReg { .. }
+                | X86Instruction::XorReg { .. }
+                | X86Instruction::CmpReg { .. }
+                | X86Instruction::Cmov { .. }
+                | X86Instruction::Jcc { .. } => {}
+            }
+            return;
+        }
         match &mut sequence[idx] {
             X86Instruction::MovReg { rd, rs } => {
                 if rng.random_bool(0.5) {
-                    *rd = self.pick_register(rng);
+                    *rd = self.pick_register(rng).expect("register pool is non-empty");
                 } else {
-                    *rs = self.pick_register(rng);
+                    *rs = self.pick_register(rng).expect("register pool is non-empty");
                 }
             }
             X86Instruction::MovImm { rd, imm } => {
                 if rng.random_bool(0.5) {
-                    *rd = self.pick_register(rng);
+                    *rd = self.pick_register(rng).expect("register pool is non-empty");
                 } else {
                     *imm = self.pick_immediate(rng);
                 }
@@ -812,9 +833,9 @@ impl X86Mutator {
             | X86Instruction::OrReg { rd, rs }
             | X86Instruction::XorReg { rd, rs } => {
                 if rng.random_bool(0.5) {
-                    *rd = self.pick_register(rng);
+                    *rd = self.pick_register(rng).expect("register pool is non-empty");
                 } else {
-                    *rs = self.pick_register(rng);
+                    *rs = self.pick_register(rng).expect("register pool is non-empty");
                 }
             }
             X86Instruction::AddImm { rd, imm }
@@ -823,21 +844,21 @@ impl X86Mutator {
             | X86Instruction::OrImm { rd, imm }
             | X86Instruction::XorImm { rd, imm } => {
                 if rng.random_bool(0.5) {
-                    *rd = self.pick_register(rng);
+                    *rd = self.pick_register(rng).expect("register pool is non-empty");
                 } else {
                     *imm = self.pick_immediate(rng);
                 }
             }
             X86Instruction::CmpReg { rn, rs } => {
                 if rng.random_bool(0.5) {
-                    *rn = self.pick_register(rng);
+                    *rn = self.pick_register(rng).expect("register pool is non-empty");
                 } else {
-                    *rs = self.pick_register(rng);
+                    *rs = self.pick_register(rng).expect("register pool is non-empty");
                 }
             }
             X86Instruction::CmpImm { rn, imm } => {
                 if rng.random_bool(0.5) {
-                    *rn = self.pick_register(rng);
+                    *rn = self.pick_register(rng).expect("register pool is non-empty");
                 } else {
                     *imm = self.pick_immediate(rng);
                 }
@@ -846,9 +867,9 @@ impl X86Mutator {
                 // Cond stays fixed — stochastic mutation only swaps registers
                 // for now; cycle 16+ may add condition-bridging.
                 if rng.random_bool(0.5) {
-                    *rd = self.pick_register(rng);
+                    *rd = self.pick_register(rng).expect("register pool is non-empty");
                 } else {
-                    *rs = self.pick_register(rng);
+                    *rs = self.pick_register(rng).expect("register pool is non-empty");
                 }
             }
             // Jcc is a terminator; mutation never reaches it because the
@@ -905,9 +926,9 @@ impl X86Mutator {
                 rn,
                 imm: self.pick_immediate(rng),
             },
-            X86Instruction::CmpImm { rn, .. } => X86Instruction::CmpReg {
-                rn,
-                rs: self.pick_register(rng),
+            X86Instruction::CmpImm { rn, .. } => match self.pick_register(rng) {
+                Some(rs) => X86Instruction::CmpReg { rn, rs },
+                None => current,
             },
             // Cmov has a unique shape (rd, rs, cond) with no opcode-shape
             // siblings; keep it unchanged in the opcode-bridge mutator.
@@ -934,7 +955,9 @@ impl X86Mutator {
             return;
         }
         let idx = rng.random_range(0..sequence.len());
-        sequence[idx] = self.random_instruction(rng);
+        if let Some(instr) = self.random_instruction(rng) {
+            sequence[idx] = instr;
+        }
     }
 }
 
@@ -1040,9 +1063,13 @@ impl InstructionGenerator<X86Instruction> for X86InstructionGenerator {
             }
         }
         // CMOVcc is rewritable and reads flags, so enumerate every
-        // condition for each register pair. Jcc remains excluded.
+        // condition for each non-identical register pair. Jcc remains
+        // excluded.
         for &rd in registers {
             for &rs in registers {
+                if rd == rs {
+                    continue;
+                }
                 for &cond in &X86Condition::ALL {
                     out.push(X86Instruction::Cmov { rd, rs, cond });
                 }
@@ -1203,6 +1230,15 @@ mod tests {
         let imms = [0i64, 1, -1];
         let all = X86InstructionGenerator.generate_all(&regs, &imms);
 
+        let n = regs.len();
+        let m = imms.len();
+        let expected_len = 7 * n * n + 7 * n * m + n * (n - 1) * X86Condition::ALL.len();
+        assert_eq!(
+            all.len(),
+            expected_len,
+            "generate_all should only prune CMOV self-pairs from the full pool"
+        );
+
         // For each opcode_id, at least one variant must appear.
         let opcode_count = X86InstructionGenerator.opcode_count();
         let mut seen = vec![false; opcode_count as usize];
@@ -1244,6 +1280,41 @@ mod tests {
             all.iter()
                 .all(|instr| !matches!(instr, X86Instruction::Jcc { .. })),
             "trait generator must not enumerate fixed Jcc terminators"
+        );
+    }
+
+    #[test]
+    fn x86_generator_filters_self_cmov_candidates() {
+        use crate::isa::traits::InstructionGenerator;
+        let regs = [X86Register::RAX, X86Register::RBX];
+        let imms = [0i64];
+        let all = X86InstructionGenerator.generate_all(&regs, &imms);
+
+        for &cond in &X86Condition::ALL {
+            assert!(
+                all.contains(&X86Instruction::Cmov {
+                    rd: X86Register::RAX,
+                    rs: X86Register::RBX,
+                    cond,
+                }),
+                "generator must keep cross-register cmov{} rax, rbx",
+                cond
+            );
+            assert!(
+                all.contains(&X86Instruction::Cmov {
+                    rd: X86Register::RBX,
+                    rs: X86Register::RAX,
+                    cond,
+                }),
+                "generator must keep cross-register cmov{} rbx, rax",
+                cond
+            );
+        }
+
+        assert!(
+            !all.iter()
+                .any(|instr| matches!(instr, X86Instruction::Cmov { rd, rs, .. } if rd == rs)),
+            "generate_all must skip no-op CMOV candidates where rd == rs"
         );
     }
 
@@ -1867,6 +1938,33 @@ mod tests {
                 rs: X86Register::RBX,
             }]
         );
+    }
+
+    #[test]
+    fn x86_mutator_empty_register_pool_does_not_invent_writable_registers() {
+        use crate::isa::traits::ISAMutator;
+        use crate::search::config::MutationWeights;
+        use rand::SeedableRng;
+        use rand_chacha::ChaCha8Rng;
+
+        let mutator = X86Mutator::new(
+            Vec::new(),
+            vec![0],
+            MutationWeights {
+                operand: 0.0,
+                opcode: 0.0,
+                swap: 0.0,
+                instruction: 1.0,
+            },
+            crate::assembler::x86::X86Mode::Mode64,
+        );
+        let target = vec![X86Instruction::CmpImm {
+            rn: X86Register::R10,
+            imm: 1,
+        }];
+        let mut rng = ChaCha8Rng::seed_from_u64(7);
+
+        assert_eq!(mutator.mutate(&mut rng, &target), target);
     }
 
     #[test]

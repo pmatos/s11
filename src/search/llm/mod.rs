@@ -24,6 +24,8 @@ use self::ledger::UnsupportedMnemonicLedger;
 use self::outcome::{IterationOutcome, classify};
 use self::prompt::{OUTPUT_SCHEMA, build_prompt};
 
+const MIN_SMT_TIMEOUT: Duration = Duration::from_millis(1);
+
 /// LLM-assisted search using the Codex CLI.
 ///
 /// Each call to `search` invokes `codex exec` up to `LlmConfig.max_codex_calls`
@@ -132,17 +134,18 @@ impl SearchAlgorithm<crate::isa::AArch64> for LlmSearch {
         let live_in = compute_live_in_registers(target);
         let prompt = build_prompt(target, &live_in, live_out);
         let timeout = config.timeout.unwrap_or(Duration::from_secs(60));
+        let deadline = started.checked_add(timeout);
         let max_calls = config.llm.max_codex_calls;
 
         let mut found: Option<Vec<Instruction>> = None;
 
         for call_idx in 0..max_calls {
-            if started.elapsed() >= timeout {
+            let Some(remaining) = remaining_until(started, timeout, deadline) else {
                 if config.verbose {
                     eprintln!("llm-search: timeout after {} calls", call_idx);
                 }
                 break;
-            }
+            };
 
             if config.verbose {
                 eprintln!(
@@ -153,7 +156,7 @@ impl SearchAlgorithm<crate::isa::AArch64> for LlmSearch {
                 );
             }
             let call_start = Instant::now();
-            let codex_result = invoke_codex(&config.llm, &prompt, OUTPUT_SCHEMA);
+            let codex_result = invoke_codex(&config.llm, &prompt, OUTPUT_SCHEMA, remaining);
             let codex_elapsed = call_start.elapsed();
             timings.codex_calls += 1;
             timings.codex_time += codex_elapsed;
@@ -186,8 +189,19 @@ impl SearchAlgorithm<crate::isa::AArch64> for LlmSearch {
                 }
             };
 
+            let Some(verify_remaining) =
+                remaining_until(started, timeout, deadline).filter(|d| *d >= MIN_SMT_TIMEOUT)
+            else {
+                if config.verbose {
+                    eprintln!(
+                        "llm-search: timeout before verifying candidate on call {}",
+                        call_idx
+                    );
+                }
+                break;
+            };
             let verify_start = Instant::now();
-            let (outcome, metrics) = classify(target, &raw, live_out);
+            let (outcome, metrics) = classify(target, &raw, live_out, verify_remaining);
             let verify_elapsed = verify_start.elapsed();
             // Only count as a "verification" when the verifier actually ran.
             // Parse-fail and not-shorter short-circuit before the verifier.
@@ -294,6 +308,18 @@ impl SearchAlgorithm<crate::isa::AArch64> for LlmSearch {
     }
 }
 
+fn remaining_until(
+    started: Instant,
+    timeout: Duration,
+    deadline: Option<Instant>,
+) -> Option<Duration> {
+    let remaining = match deadline {
+        Some(deadline) => deadline.saturating_duration_since(Instant::now()),
+        None => timeout.saturating_sub(started.elapsed()),
+    };
+    (!remaining.is_zero()).then_some(remaining)
+}
+
 #[cfg(test)]
 mod tests {
     //! No-Codex unit tests of `LlmSearch::search` flow gates.
@@ -306,7 +332,9 @@ mod tests {
     use crate::ir::{Operand, Register};
     use crate::search::config::LlmConfig;
     #[cfg(unix)]
-    use crate::search::llm::test_support::{FakeCodex, assembly_answer_writer_script};
+    use crate::search::llm::test_support::{
+        FakeCodex, assembly_answer_writer_script, shell_single_quote, wait_until_process_gone,
+    };
 
     #[cfg(unix)]
     fn cfg_with_fake_codex(fake: &FakeCodex, max_calls: u32) -> SearchConfig {
@@ -568,5 +596,40 @@ mod tests {
         assert!(!result.found_optimization);
         assert_eq!(search.timings().codex_calls, 0);
         assert_eq!(search.statistics().candidates_evaluated, 0);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn search_timeout_kills_slow_codex_child() {
+        let pid_file = tempfile::NamedTempFile::new().expect("create pid file");
+        let pid_path = pid_file.path().to_path_buf();
+        let script = format!(
+            "printf '%s\\n' \"$$\" > {}\nsleep 2\n{}",
+            shell_single_quote(&pid_path.to_string_lossy()),
+            assembly_answer_writer_script("add x0, x1, #1")
+        );
+        let fake = FakeCodex::new(&script);
+        let config = cfg_with_fake_codex(&fake, 3).with_timeout(Duration::from_millis(300));
+        let mut search = LlmSearch::new();
+
+        let started = Instant::now();
+        let result = search.search(&reducible_target(), &live_out_x0(), &config);
+        let elapsed = started.elapsed();
+
+        assert!(
+            elapsed < Duration::from_millis(900),
+            "search should return near its timeout instead of waiting for fake codex sleep; elapsed {elapsed:?}"
+        );
+        assert!(!result.found_optimization);
+        assert_eq!(search.timings().codex_calls, 1);
+        assert_eq!(search.timings().verifications, 0);
+        assert_eq!(search.statistics().candidates_evaluated, 0);
+
+        let pid = std::fs::read_to_string(&pid_path)
+            .expect("fake codex should record its pid")
+            .trim()
+            .parse::<u32>()
+            .expect("fake codex pid should be numeric");
+        wait_until_process_gone(pid);
     }
 }
