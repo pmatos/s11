@@ -313,6 +313,37 @@ fn is_label(line: &str) -> bool {
     trimmed.ends_with(':') && !trimmed.is_empty()
 }
 
+/// Strip leading label definitions from a line, if present.
+///
+/// A leading label is a single whitespace-free token followed by `:`, with
+/// optional whitespace around the colon. GAS accepts `foo: add`, `foo : add`,
+/// and dotted/numeric local labels such as `.L1 : add` or `1: add`, and stacked
+/// labels (`outer: inner: add`) are stripped in turn. The token itself is not
+/// validated, so any `<token>:` prefix (e.g. `0x1234:`) is stripped — acceptable
+/// here because the only goal is to reach the instruction mnemonic.
+fn strip_leading_labels(mut line: &str) -> &str {
+    loop {
+        let Some(colon_pos) = line.find(':') else {
+            return line;
+        };
+        // A leading colon is never a label terminator; leave the line unchanged.
+        if colon_pos == 0 {
+            return line;
+        }
+        // The text before the colon must be a single label token. Interior
+        // whitespace means the colon belongs to operands, not a label, so stop.
+        let label = line[..colon_pos].trim();
+        if label.is_empty() || label.contains(char::is_whitespace) {
+            return line;
+        }
+
+        line = line[colon_pos + 1..].trim_start();
+        if line.is_empty() {
+            return line;
+        }
+    }
+}
+
 /// Check if a line is a directive
 fn is_directive(line: &str) -> bool {
     line.trim().starts_with('.')
@@ -1825,6 +1856,11 @@ pub fn parse_line(line: &str) -> Result<LineResult, ParseLineError> {
         return Ok(LineResult::Skip);
     }
 
+    let trimmed = strip_leading_labels(trimmed);
+    if trimmed.is_empty() {
+        return Ok(LineResult::Skip);
+    }
+
     // Skip directives
     if is_directive(trimmed) {
         return Ok(LineResult::Skip);
@@ -2332,6 +2368,77 @@ mod tests {
     }
 
     #[test]
+    fn parse_line_accepts_inline_label_before_instruction() {
+        match parse_line("_start: add x0, x1, x2").unwrap() {
+            LineResult::Instruction(Instruction::Add { rd, rn, rm }) => {
+                assert_eq!(rd, Register::X0);
+                assert_eq!(rn, Register::X1);
+                assert_eq!(rm, Operand::Register(Register::X2));
+            }
+            _ => panic!("expected Add"),
+        }
+    }
+
+    #[test]
+    fn parse_line_accepts_multiple_inline_labels_before_instruction() {
+        assert!(matches!(
+            parse_line("outer: inner:").unwrap(),
+            LineResult::Skip
+        ));
+
+        match parse_line("outer: inner: add x0, x1, x2").unwrap() {
+            LineResult::Instruction(Instruction::Add { rd, rn, rm }) => {
+                assert_eq!(rd, Register::X0);
+                assert_eq!(rn, Register::X1);
+                assert_eq!(rm, Operand::Register(Register::X2));
+            }
+            _ => panic!("expected Add"),
+        }
+    }
+
+    #[test]
+    fn parse_line_accepts_dotted_local_label_before_instruction() {
+        match parse_line(".Lfoo: add x0, x1, x2").unwrap() {
+            LineResult::Instruction(Instruction::Add { rd, rn, rm }) => {
+                assert_eq!(rd, Register::X0);
+                assert_eq!(rn, Register::X1);
+                assert_eq!(rm, Operand::Register(Register::X2));
+            }
+            _ => panic!("expected Add"),
+        }
+    }
+
+    #[test]
+    fn parse_line_accepts_numeric_local_label_before_instruction() {
+        match parse_line("1: add x0, x1, x2").unwrap() {
+            LineResult::Instruction(Instruction::Add { rd, rn, rm }) => {
+                assert_eq!(rd, Register::X0);
+                assert_eq!(rn, Register::X1);
+                assert_eq!(rm, Operand::Register(Register::X2));
+            }
+            _ => panic!("expected Add"),
+        }
+    }
+
+    #[test]
+    fn parse_line_accepts_inline_label_with_space_before_colon() {
+        for text in [
+            "foo : add x0, x1, x2",
+            ".L1 : add x0, x1, x2",
+            "a : b : add x0, x1, x2",
+        ] {
+            match parse_line(text).unwrap() {
+                LineResult::Instruction(Instruction::Add { rd, rn, rm }) => {
+                    assert_eq!(rd, Register::X0, "rd for {text:?}");
+                    assert_eq!(rn, Register::X1, "rn for {text:?}");
+                    assert_eq!(rm, Operand::Register(Register::X2), "rm for {text:?}");
+                }
+                other => panic!("expected Add for {text:?}, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
     fn test_parse_line_adc_register_only() {
         match parse_line("adc x0, x1, x2").unwrap() {
             LineResult::Instruction(Instruction::Adc { rd, rn, rm }) => {
@@ -2567,6 +2674,47 @@ mod tests {
         assert_eq!(instructions.len(), 2);
         assert!(matches!(instructions[0], Instruction::MovReg { .. }));
         assert!(matches!(instructions[1], Instruction::Add { .. }));
+    }
+
+    #[test]
+    fn parse_assembly_string_accepts_inline_label_before_instruction() {
+        let instructions = parse_assembly_string(
+            ".text\n_start: add x0, x1, x2\n",
+            "inline-label.s".to_string(),
+        )
+        .unwrap();
+        assert_eq!(
+            instructions,
+            vec![Instruction::Add {
+                rd: Register::X0,
+                rn: Register::X1,
+                rm: Operand::Register(Register::X2),
+            }]
+        );
+    }
+
+    #[test]
+    fn parse_assembly_string_accepts_spaced_and_stacked_inline_labels() {
+        let instructions = parse_assembly_string(
+            ".text\n.L1 : add x0, x1, x2\nouter : inner : add x3, x4, x5\n",
+            "spaced-label.s".to_string(),
+        )
+        .unwrap();
+        assert_eq!(
+            instructions,
+            vec![
+                Instruction::Add {
+                    rd: Register::X0,
+                    rn: Register::X1,
+                    rm: Operand::Register(Register::X2),
+                },
+                Instruction::Add {
+                    rd: Register::X3,
+                    rn: Register::X4,
+                    rm: Operand::Register(Register::X5),
+                },
+            ]
+        );
     }
 
     #[test]
