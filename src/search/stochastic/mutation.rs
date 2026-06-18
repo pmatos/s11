@@ -23,6 +23,12 @@ use rand::RngExt;
 
 const ADDRESS_OFFSET_POOL: [i64; 8] = [0, 8, 16, 24, 32, 64, -8, -256];
 const SHIFTED_REGISTER_OPERAND_PROBABILITY: f64 = 0.30;
+/// Additional probability budget reserved for extended-register proposals,
+/// stacked on top of `SHIFTED_REGISTER_OPERAND_PROBABILITY` in
+/// `random_operand_3op` (issue #151). Kept as a separate constant so retuning
+/// the shifted-register heat does not silently shift the extended-register
+/// ceiling.
+const EXTENDED_REGISTER_OPERAND_DELTA: f64 = 0.15;
 
 /// Drop ROR from a shifted-register operand when bridging from a logical
 /// opcode (AND/ORR/EOR/TST — ROR allowed) to an arithmetic opcode
@@ -1165,7 +1171,7 @@ impl Mutator {
         let choice: f64 = rng.random();
         if choice < SHIFTED_REGISTER_OPERAND_PROBABILITY && !self.registers.is_empty() {
             self.random_shifted_register(rng, allow_ror)
-        } else if choice < SHIFTED_REGISTER_OPERAND_PROBABILITY + 0.15
+        } else if choice < SHIFTED_REGISTER_OPERAND_PROBABILITY + EXTENDED_REGISTER_OPERAND_DELTA
             && self.has_extended_register_source()
         {
             self.random_extended_register(rng)
