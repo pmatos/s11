@@ -1238,6 +1238,9 @@ impl Mutator {
     /// returns an `ExtendedRegister`; otherwise falls back to the plain
     /// register/immediate distribution. `allow_ror` toggles whether ROR is in
     /// the shifted kind pool — callers in arith bridges must pass false.
+    /// `width` selects the shift-amount pool (`RegisterWidth::W32` caps amounts
+    /// at 31, `RegisterWidth::X64` allows 32) and is forwarded to
+    /// `random_shifted_register`.
     fn random_operand_3op<R: RngExt>(
         &self,
         rng: &mut R,
