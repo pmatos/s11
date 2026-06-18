@@ -3556,6 +3556,29 @@ mod tests {
         disassemble_and_verify(&bytes, "subs", &["x0", "sp", "#8"]);
     }
 
+    /// Round-trip for the "both special registers" ADDS immediate form:
+    /// `rd=XZR` (plain Xd|XZR slot, 31 decodes as XZR) combined with `rn=SP`
+    /// (Xn|SP slot, 31 decodes as SP) — the corner the register-class gate
+    /// now admits. The other XSP round-trips use `rd=X0`, so this guards the
+    /// `rd=XZR + rn=SP` combination specifically. Capstone canonicalises
+    /// `ADDS XZR, SP, #imm` to its `CMN SP, #imm` alias (result discarded,
+    /// flags only), so the disassembly comes back as `cmn`.
+    #[test]
+    fn test_adds_imm_xzr_rd_sp_rn_roundtrip() {
+        let mut assembler = AArch64Assembler::new();
+        let bytes = assembler
+            .assemble_instructions(
+                &[Instruction::Adds {
+                    rd: Register::XZR,
+                    rn: Register::SP,
+                    rm: Operand::Immediate(1),
+                }],
+                0,
+            )
+            .expect("ADDS XZR, SP, #1 should encode");
+        disassemble_and_verify(&bytes, "cmn", &["sp", "#1"]);
+    }
+
     /// Defense-in-depth: SP as `rd` for ADDS/SUBS is rejected. Architecturally,
     /// the `rd` slot is `Xd|XZR` (decodes 31 as XZR), so dynasm's `X(31)`
     /// maps to XZR — but `Register::SP` has `index() == None`, so

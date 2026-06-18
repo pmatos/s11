@@ -939,7 +939,7 @@ impl Instruction {
             },
 
             // ADDS/SUBS: imm 0..=0xFFF (same as ADD/SUB). ShiftedRegister form is
-            // out of scope for issue #59 (flag-setting peers will be a follow-up).
+            // out of scope for issue #59.
             Instruction::Adds { rd, rn, rm } | Instruction::Subs { rd, rn, rm } => match rm {
                 Operand::Register(reg) => is_x_or_xzr(*rd) && is_x_or_xzr(*rn) && is_x_or_xzr(*reg),
                 Operand::Immediate(imm) => {
