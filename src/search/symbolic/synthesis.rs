@@ -153,6 +153,9 @@ where
                     &config.cost_metric,
                     width,
                 );
+                if should_stop(config, start_time) {
+                    return best_at_length;
+                }
 
                 if candidate_cost >= *best_cost {
                     continue;
@@ -189,6 +192,9 @@ where
                         &config.cost_metric,
                         width,
                     );
+                    if should_stop(config, start_time) {
+                        return best_at_length;
+                    }
 
                     if candidate_cost >= *best_cost {
                         continue;
@@ -256,6 +262,9 @@ where
                             &config.cost_metric,
                             width,
                         );
+                        if should_stop(config, start_time) {
+                            return best_at_length;
+                        }
 
                         if candidate_cost >= *best_cost {
                             count += 1;
@@ -406,11 +415,13 @@ mod tests {
     use crate::semantics::EquivalenceMetrics;
     use crate::semantics::cost::CostMetric;
     use crate::semantics::live_out::LiveOut;
-    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
     use std::sync::{Arc, Mutex};
     use std::time::Duration;
 
     static TEST_EQUIVALENCE_CHECKS: AtomicUsize = AtomicUsize::new(0);
+    static TEST_EQUIVALENCE_EQUIVALENT_ON_CHECK: AtomicUsize = AtomicUsize::new(0);
+    static TEST_SEQUENCE_COST_DELAY_MS: AtomicU64 = AtomicU64::new(0);
     static TEST_STOP_FLAG: Mutex<Option<Arc<AtomicBool>>> = Mutex::new(None);
     static SYMBOLIC_INNER_LOOP_TEST_LOCK: Mutex<()> = Mutex::new(());
 
@@ -428,6 +439,14 @@ mod tests {
         let mut slot = TEST_STOP_FLAG.lock().expect("test stop flag lock poisoned");
         *slot = Some(flag);
         TestStopFlagGuard
+    }
+
+    fn reset_symbolic_inner_loop_test_state() {
+        TEST_EQUIVALENCE_CHECKS.store(0, Ordering::SeqCst);
+        TEST_EQUIVALENCE_EQUIVALENT_ON_CHECK.store(0, Ordering::SeqCst);
+        TEST_SEQUENCE_COST_DELAY_MS.store(0, Ordering::SeqCst);
+        let mut slot = TEST_STOP_FLAG.lock().expect("test stop flag lock poisoned");
+        *slot = None;
     }
 
     #[derive(Clone)]
@@ -588,6 +607,10 @@ mod tests {
         }
 
         fn sequence_cost(seq: &[TestInstruction], _metric: &CostMetric, _width: u32) -> u64 {
+            let delay_ms = TEST_SEQUENCE_COST_DELAY_MS.load(Ordering::SeqCst);
+            if delay_ms > 0 {
+                std::thread::sleep(Duration::from_millis(delay_ms));
+            }
             seq.len() as u64
         }
 
@@ -606,6 +629,9 @@ mod tests {
                 }
             }
             std::thread::sleep(Duration::from_millis(1));
+            if check_number == TEST_EQUIVALENCE_EQUIVALENT_ON_CHECK.load(Ordering::SeqCst) {
+                return (EquivalenceResult::Equivalent, EquivalenceMetrics::default());
+            }
             (
                 EquivalenceResult::NotEquivalent,
                 EquivalenceMetrics::default(),
@@ -838,7 +864,7 @@ mod tests {
         let _guard = SYMBOLIC_INNER_LOOP_TEST_LOCK
             .lock()
             .expect("symbolic inner-loop test lock poisoned");
-        TEST_EQUIVALENCE_CHECKS.store(0, Ordering::SeqCst);
+        reset_symbolic_inner_loop_test_state();
 
         let flag = Arc::new(AtomicBool::new(false));
         let _stop_guard = install_test_stop_flag(Arc::clone(&flag));
@@ -867,9 +893,59 @@ mod tests {
 
         let checks = TEST_EQUIVALENCE_CHECKS.load(Ordering::SeqCst);
         assert_eq!(result, None);
-        assert!(
-            checks < 8,
-            "length-2 search should poll cancellation inside the instr2 loop; ran {checks} checks",
+        assert_eq!(
+            checks, 1,
+            "length-2 search should poll cancellation before continuing the instr2 loop",
+        );
+        assert_eq!(
+            search.statistics().candidates_evaluated,
+            1,
+            "length-2 search should stop counting after the first cancelled candidate",
+        );
+    }
+
+    #[test]
+    fn symbolic_length_two_inner_loop_respects_overall_timeout() {
+        use std::time::Instant;
+
+        let _guard = SYMBOLIC_INNER_LOOP_TEST_LOCK
+            .lock()
+            .expect("symbolic inner-loop test lock poisoned");
+        reset_symbolic_inner_loop_test_state();
+        TEST_SEQUENCE_COST_DELAY_MS.store(2, Ordering::SeqCst);
+
+        let mut search: SymbolicSearch<TestIsa> = SymbolicSearch::new();
+        let config = SearchConfig::default().with_timeout(Duration::from_millis(1));
+        let all_instructions: Vec<_> = (0..64).map(TestInstruction).collect();
+        let target = [
+            TestInstruction(100),
+            TestInstruction(101),
+            TestInstruction(102),
+        ];
+        let mut best_cost = u64::MAX;
+
+        let result = search.search_at_length(
+            &target,
+            &(),
+            &config,
+            &all_instructions,
+            2,
+            &mut best_cost,
+            Instant::now(),
+        );
+
+        TEST_SEQUENCE_COST_DELAY_MS.store(0, Ordering::SeqCst);
+
+        assert_eq!(result, None);
+        assert_eq!(
+            TEST_EQUIVALENCE_CHECKS.load(Ordering::SeqCst),
+            0,
+            "length-2 search should poll timeout before verifying a timed-out candidate",
+        );
+        assert_eq!(
+            search.statistics().candidates_evaluated,
+            0,
+            "length-2 search should not count candidates after the timeout expires",
         );
     }
 
@@ -880,7 +956,7 @@ mod tests {
         let _guard = SYMBOLIC_INNER_LOOP_TEST_LOCK
             .lock()
             .expect("symbolic inner-loop test lock poisoned");
-        TEST_EQUIVALENCE_CHECKS.store(0, Ordering::SeqCst);
+        reset_symbolic_inner_loop_test_state();
 
         let flag = Arc::new(AtomicBool::new(false));
         let _stop_guard = install_test_stop_flag(Arc::clone(&flag));
@@ -910,9 +986,117 @@ mod tests {
 
         let checks = TEST_EQUIVALENCE_CHECKS.load(Ordering::SeqCst);
         assert_eq!(result, None);
-        assert!(
-            checks < 8,
-            "length-3 search should poll cancellation inside the instr2/instr3 loops; ran {checks} checks",
+        assert_eq!(
+            checks, 1,
+            "length-3 search should poll cancellation before continuing the nested loops",
+        );
+        assert_eq!(
+            search.statistics().candidates_evaluated,
+            1,
+            "length-3 search should stop counting after the first cancelled candidate",
+        );
+    }
+
+    #[test]
+    fn symbolic_length_three_inner_loops_respect_overall_timeout() {
+        use std::time::Instant;
+
+        let _guard = SYMBOLIC_INNER_LOOP_TEST_LOCK
+            .lock()
+            .expect("symbolic inner-loop test lock poisoned");
+        reset_symbolic_inner_loop_test_state();
+        TEST_SEQUENCE_COST_DELAY_MS.store(2, Ordering::SeqCst);
+
+        let mut search: SymbolicSearch<TestIsa> = SymbolicSearch::new();
+        let config = SearchConfig::default().with_timeout(Duration::from_millis(1));
+        let all_instructions: Vec<_> = (0..8).map(TestInstruction).collect();
+        let target = [
+            TestInstruction(100),
+            TestInstruction(101),
+            TestInstruction(102),
+            TestInstruction(103),
+        ];
+        let mut best_cost = u64::MAX;
+
+        let result = search.search_at_length(
+            &target,
+            &(),
+            &config,
+            &all_instructions,
+            3,
+            &mut best_cost,
+            Instant::now(),
+        );
+
+        TEST_SEQUENCE_COST_DELAY_MS.store(0, Ordering::SeqCst);
+
+        assert_eq!(result, None);
+        assert_eq!(
+            TEST_EQUIVALENCE_CHECKS.load(Ordering::SeqCst),
+            0,
+            "length-3 search should poll timeout before verifying a timed-out candidate",
+        );
+        assert_eq!(
+            search.statistics().candidates_evaluated,
+            0,
+            "length-3 search should not count candidates after the timeout expires",
+        );
+    }
+
+    #[test]
+    fn symbolic_early_stop_returns_best_at_length() {
+        use std::time::Instant;
+
+        let _guard = SYMBOLIC_INNER_LOOP_TEST_LOCK
+            .lock()
+            .expect("symbolic inner-loop test lock poisoned");
+        reset_symbolic_inner_loop_test_state();
+        TEST_EQUIVALENCE_EQUIVALENT_ON_CHECK.store(1, Ordering::SeqCst);
+
+        // The fake check_equivalence trips the installed stop flag on the first
+        // check, so candidate (0, 0) is recorded as best_at_length and the very
+        // next should_stop poll bails out. This drives the early-return path
+        // deterministically, with no dependence on a 1 ms timeout firing inside
+        // a precise scheduler window (which is racy on an oversubscribed runner).
+        let flag = Arc::new(AtomicBool::new(false));
+        let _stop_guard = install_test_stop_flag(Arc::clone(&flag));
+
+        let mut search: SymbolicSearch<TestIsa> = SymbolicSearch::new();
+        let config = SearchConfig::default()
+            .with_timeout_option(None)
+            .with_stop_flag(flag);
+        let all_instructions: Vec<_> = (0..64).map(TestInstruction).collect();
+        let target = [
+            TestInstruction(100),
+            TestInstruction(101),
+            TestInstruction(102),
+        ];
+        let mut best_cost = u64::MAX;
+
+        let result = search.search_at_length(
+            &target,
+            &(),
+            &config,
+            &all_instructions,
+            2,
+            &mut best_cost,
+            Instant::now(),
+        );
+
+        assert_eq!(
+            result,
+            Some(vec![TestInstruction(0), TestInstruction(0)]),
+            "an early stop should return the best equivalent candidate found at this length",
+        );
+        assert_eq!(
+            TEST_EQUIVALENCE_CHECKS.load(Ordering::SeqCst),
+            1,
+            "should_stop should stop promptly after preserving the best candidate",
+        );
+        assert_eq!(
+            search.statistics().candidates_evaluated,
+            1,
+            "should_stop should stop counting after preserving the best candidate",
         );
     }
 
