@@ -9,6 +9,7 @@ shared JSON-Lines report.
 just bench           # all three phases
 just bench-phase1    # Hacker's Delight only
 cargo bench --bench hackers_delight -- max --quick   # one fixture, fast smoke run
+cargo bench --bench smt_clz -- --quick   # direct CLZ/CLS SMT formula timing
 ```
 
 Output:
@@ -21,6 +22,11 @@ Output:
 The harness is **not wired into CI**. Full sweeps are tens of minutes,
 which would burn through GitHub Actions budget.
 
+`smt_clz` is a narrow direct-SMT benchmark for comparing CLZ/CLS formula
+encodings. It calls the equivalence checker on equivalent CLZ/CLS-heavy
+sequences and consumes the SMT metrics, but it is intentionally separate
+from the phase 1/2/3 fixture harness and does not append JSON Lines.
+
 ## Layout
 
 ```
@@ -31,6 +37,7 @@ benches/
 ├── llvm_codegen/          # Phase 2 fixtures — populated by the harvester
 ├── algebraic_fusion.rs    # Phase 3 driver
 ├── algebraic_fusion/*.s   # Phase 3 fixtures (~15, textbook identities)
+├── smt_clz.rs             # Direct CLZ/CLS SMT formula timing
 ├── results/results.jsonl  # JSONL accumulator (gitignored)
 └── README.md              # you are here
 ```

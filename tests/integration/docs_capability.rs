@@ -78,6 +78,76 @@ fn docs_capability_documents_w_logical_immediates() {
 }
 
 #[test]
+fn docs_capability_documents_capstone_aarch64_alias_normalization() {
+    let matrix = normalized_doc("docs/capability.md");
+    assert!(
+        matrix.contains(
+            "capstone `mov xd, #imm` move-wide aliases are normalized to single-instruction `movz`/`movn` forms"
+        ),
+        "docs/capability.md must document Capstone move-wide alias normalization"
+    );
+    assert!(
+        matrix.contains(
+            "capstone `cinc`/`cinv`/`cneg` aliases are normalized to `csinc`/`csinv`/`csneg`"
+        ),
+        "docs/capability.md must document Capstone conditional-select alias normalization"
+    );
+
+    for mnemonic in ["cinc", "cinv", "cneg"] {
+        assert!(
+            !AARCH64_REWRITABLE_MNEMONICS.contains(&mnemonic),
+            "`{mnemonic}` must remain a Capstone bridge alias, not a parser mnemonic"
+        );
+
+        let line = format!("{mnemonic} x0, x1, eq");
+        assert!(
+            matches!(
+                s11::parser::parse_line(&line),
+                Err(s11::parser::ParseLineError::UnknownInstruction(ref unsupported))
+                    if unsupported == mnemonic
+            ),
+            "parser must reject Capstone-only alias `{line}`"
+        );
+    }
+}
+
+#[test]
+fn docs_capability_documents_w_mov_add_sub_forms() {
+    let matrix = normalized_doc("docs/capability.md");
+    assert!(
+        matrix.contains("register `mov` supports both 64-bit `x` and 32-bit `w` forms"),
+        "docs/capability.md must document W-register MOV register support"
+    );
+    assert!(
+        matrix.contains(
+            "non-flag-setting `add` and `sub` support both 64-bit `x` and 32-bit `w` register/immediate/shifted-register forms"
+        ),
+        "docs/capability.md must document W-register ADD/SUB support"
+    );
+}
+
+#[test]
+fn enumerative_candidate_growth_visible_in_public_docs() {
+    for doc in ["README.md", "TUTORIAL.md", "docs/capability.md"] {
+        let body = normalized_doc(doc);
+        assert!(
+            body.contains("enumerative search scales with the generated instruction families"),
+            "{doc} must document enumerative candidate-pool growth"
+        );
+        assert!(
+            body.contains("candidate pool") && body.contains("length bucket"),
+            "{doc} must use candidate-pool and length-bucket wording"
+        );
+    }
+
+    let matrix = read_doc("docs/capability.md");
+    assert!(
+        matrix.contains("9,728") && matrix.contains("8^4") && matrix.contains("8^3"),
+        "docs/capability.md must keep the default AArch64 multiply-candidate budget visible"
+    );
+}
+
+#[test]
 fn memory_operations_are_consistently_documented_with_known_gaps() {
     let matrix = normalized_doc("docs/capability.md");
     assert!(
@@ -182,6 +252,14 @@ fn stale_aarch64_count_and_branch_unsupported_claims_are_removed() {
 #[test]
 fn x86_support_is_visible_in_public_docs() {
     let matrix = read_doc("docs/capability.md").to_ascii_lowercase();
+    assert!(
+        matrix.contains("trait-backed"),
+        "docs/capability.md must describe x86 as using the shared trait-backed path"
+    );
+    assert!(
+        !matrix.contains("parallel x86 pipeline"),
+        "docs/capability.md must not describe x86 as a parallel pipeline"
+    );
     for mnemonic in X86_SUPPORTED_MNEMONICS {
         assert!(
             matrix.contains(&format!("`{mnemonic}`")),

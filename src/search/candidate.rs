@@ -57,6 +57,7 @@ pub fn generate_all_instructions(registers: &[Register], immediates: &[i64]) -> 
         // MovReg: mov rd, rn
         for &rn in registers {
             instrs.push(Instruction::MovReg { rd, rn });
+            instrs.push(Instruction::MovRegW { rd, rn });
         }
 
         // Binary operations with register second operand
@@ -65,7 +66,9 @@ pub fn generate_all_instructions(registers: &[Register], immediates: &[i64]) -> 
                 let rm_op = Operand::Register(rm);
 
                 instrs.push(Instruction::Add { rd, rn, rm: rm_op });
+                instrs.push(Instruction::AddW { rd, rn, rm: rm_op });
                 instrs.push(Instruction::Sub { rd, rn, rm: rm_op });
+                instrs.push(Instruction::SubW { rd, rn, rm: rm_op });
                 instrs.push(Instruction::And {
                     rd,
                     rn,
@@ -106,7 +109,9 @@ pub fn generate_all_instructions(registers: &[Register], immediates: &[i64]) -> 
                 let imm_op = Operand::Immediate(imm);
 
                 instrs.push(Instruction::Add { rd, rn, rm: imm_op });
+                instrs.push(Instruction::AddW { rd, rn, rm: imm_op });
                 instrs.push(Instruction::Sub { rd, rn, rm: imm_op });
+                instrs.push(Instruction::SubW { rd, rn, rm: imm_op });
                 instrs.push(Instruction::And {
                     rd,
                     rn,
@@ -130,62 +135,71 @@ pub fn generate_all_instructions(registers: &[Register], immediates: &[i64]) -> 
             // Shifted-register form (issue #59):
             //   Add/Sub: LSL/LSR/ASR (no ROR)
             //   And/Orr/Eor: LSL/LSR/ASR/ROR
-            // SP is filtered later by is_encodable_aarch64; we keep enumeration
-            // simple here.
+            // AArch64 shifted-register encodings cannot use SP in rd/rn/rm, so
+            // pre-filter those tuples instead of allocating candidates that the
+            // later encodability pass will discard.
             use crate::ir::ShiftKind;
             for &rm in registers {
-                for &amount in SHIFTED_OP_AMOUNTS {
-                    for kind in [ShiftKind::Lsl, ShiftKind::Lsr, ShiftKind::Asr] {
-                        let sr = Operand::ShiftedRegister {
+                if rd != Register::SP && rn != Register::SP && rm != Register::SP {
+                    for &amount in SHIFTED_OP_AMOUNTS {
+                        for kind in [ShiftKind::Lsl, ShiftKind::Lsr, ShiftKind::Asr] {
+                            let sr = Operand::ShiftedRegister {
+                                reg: rm,
+                                kind,
+                                amount,
+                            };
+                            instrs.push(Instruction::Add { rd, rn, rm: sr });
+                            if amount <= 31 {
+                                instrs.push(Instruction::AddW { rd, rn, rm: sr });
+                            }
+                            instrs.push(Instruction::Sub { rd, rn, rm: sr });
+                            if amount <= 31 {
+                                instrs.push(Instruction::SubW { rd, rn, rm: sr });
+                            }
+                            instrs.push(Instruction::And {
+                                rd,
+                                rn,
+                                rm: sr,
+                                width: RegisterWidth::X64,
+                            });
+                            instrs.push(Instruction::Orr {
+                                rd,
+                                rn,
+                                rm: sr,
+                                width: RegisterWidth::X64,
+                            });
+                            instrs.push(Instruction::Eor {
+                                rd,
+                                rn,
+                                rm: sr,
+                                width: RegisterWidth::X64,
+                            });
+                        }
+                        // ROR — logical only.
+                        let sr_ror = Operand::ShiftedRegister {
                             reg: rm,
-                            kind,
+                            kind: ShiftKind::Ror,
                             amount,
                         };
-                        instrs.push(Instruction::Add { rd, rn, rm: sr });
-                        instrs.push(Instruction::Sub { rd, rn, rm: sr });
                         instrs.push(Instruction::And {
                             rd,
                             rn,
-                            rm: sr,
+                            rm: sr_ror,
                             width: RegisterWidth::X64,
                         });
                         instrs.push(Instruction::Orr {
                             rd,
                             rn,
-                            rm: sr,
+                            rm: sr_ror,
                             width: RegisterWidth::X64,
                         });
                         instrs.push(Instruction::Eor {
                             rd,
                             rn,
-                            rm: sr,
+                            rm: sr_ror,
                             width: RegisterWidth::X64,
                         });
                     }
-                    // ROR — logical only.
-                    let sr_ror = Operand::ShiftedRegister {
-                        reg: rm,
-                        kind: ShiftKind::Ror,
-                        amount,
-                    };
-                    instrs.push(Instruction::And {
-                        rd,
-                        rn,
-                        rm: sr_ror,
-                        width: RegisterWidth::X64,
-                    });
-                    instrs.push(Instruction::Orr {
-                        rd,
-                        rn,
-                        rm: sr_ror,
-                        width: RegisterWidth::X64,
-                    });
-                    instrs.push(Instruction::Eor {
-                        rd,
-                        rn,
-                        rm: sr_ror,
-                        width: RegisterWidth::X64,
-                    });
                 }
                 // Issue #60: extended-register form for ADD/SUB. Cmp/Cmn
                 // are produced once-per-(rn,rm,kind,shift) further below
@@ -313,6 +327,10 @@ pub fn generate_all_instructions(registers: &[Register], immediates: &[i64]) -> 
 
         // Multiply-accumulate family. MADD/MSUB take a 4th register slot
         // (`ra`); MNEG/SMULH/UMULH are 3-operand register-only.
+        // At the default 8-register scope this block emits
+        // `2 * 8^4 + 3 * 8^3` = 9,728 candidates per length bucket; keep
+        // docs/capability.md (and the README/TUTORIAL notes) in sync if the
+        // instruction mix here changes.
         for &rn in registers {
             for &rm in registers {
                 instrs.push(Instruction::Mneg { rd, rn, rm });
@@ -365,7 +383,7 @@ pub fn generate_all_instructions(registers: &[Register], immediates: &[i64]) -> 
     // a representative nzcv subset × {register, imm5} for `rm`. Keep the
     // nzcv and imm5 samples bounded so the combined space stays around
     // ~120k candidates total — already inside the enumerative budget.
-    const CCMP_NZCV_SAMPLES: [u8; 4] = [0, 1, 7, 15];
+    const CCMP_NZCV_SAMPLES: [u8; 5] = [0, 1, 7, 8, 15];
     const CCMP_IMM5_SAMPLES: [i64; 4] = [0, 1, 16, 31];
     for &rn in registers {
         if rn == Register::SP {
@@ -617,7 +635,10 @@ pub fn generate_random_instruction<R: rand::RngExt>(
     let rd = registers[rng.random_range(0..registers.len())];
     let pick_reg = |rng: &mut R| registers[rng.random_range(0..registers.len())];
 
-    match rng.random_range(0..33) {
+    // See also `src/isa/aarch64.rs::AArch64InstructionGenerator::generate_random`:
+    // this is a parallel 38-slot sampler, but its slot numbers differ
+    // (notably, ROR is slot 37 there and slot 23 here).
+    match rng.random_range(0..38) {
         0 => {
             let imm = if immediates.is_empty() {
                 0
@@ -777,40 +798,56 @@ pub fn generate_random_instruction<R: rand::RngExt>(
             let shift = shifts[rng.random_range(0..shifts.len())];
             Instruction::MovK { rd, imm, shift }
         }
-        // Single-source bit-manipulation: CLZ / CLS / RBIT / REV / REV32 / REV16.
-        26 => {
-            let rn = pick_reg(rng);
-            match rng.random_range(0..6) {
-                0 => Instruction::Clz { rd, rn },
-                1 => Instruction::Cls { rd, rn },
-                2 => Instruction::Rbit { rd, rn },
-                3 => Instruction::Rev { rd, rn },
-                4 => Instruction::Rev32 { rd, rn },
-                _ => Instruction::Rev16 { rd, rn },
-            }
-        }
+        // Single-source bit-manipulation opcodes each keep a top-level slot
+        // so stochastic search does not starve CLZ/RBIT/REV-shaped targets.
+        26 => Instruction::Clz {
+            rd,
+            rn: pick_reg(rng),
+        },
+        27 => Instruction::Cls {
+            rd,
+            rn: pick_reg(rng),
+        },
+        28 => Instruction::Rbit {
+            rd,
+            rn: pick_reg(rng),
+        },
+        29 => Instruction::Rev {
+            rd,
+            rn: pick_reg(rng),
+        },
+        30 => Instruction::Rev32 {
+            rd,
+            rn: pick_reg(rng),
+        },
+        31 => Instruction::Rev16 {
+            rd,
+            rn: pick_reg(rng),
+        },
         // CCMP / CCMN: conditional compare. The dispatch picks Ccmp or Ccmn
         // uniformly; the rm operand is sampled via random_operand and then
         // clamped/coerced to a valid 5-bit immediate if it lands on the
         // immediate side. nzcv is a 4-bit literal; cond from NORMAL_CONDITIONS.
-        27 => {
+        32 => {
             // CCMP/CCMN forbid SP in `rn` and in the register form of `rm`
             // (encoded in the Xn slot, not XSP). `generate_all_instructions`
             // filters SP at enumeration time; mirror that here so the
             // mutator does not bleed avoidable is_encodable_aarch64
-            // rejections. The debug_assert guards against a degenerate
-            // `registers = [SP]` caller, which would otherwise spin
-            // forever in the retry loop below.
-            debug_assert!(
-                registers.iter().any(|r| *r != Register::SP),
-                "CCMP/CCMN random generator requires at least one non-SP register",
-            );
-            let pick_non_sp = |rng: &mut R| loop {
-                let r = pick_reg(rng);
-                if r != Register::SP {
-                    break r;
-                }
-            };
+            // rejections. Build a filtered pool up front so pathological
+            // SP-only inputs fall back finitely instead of retrying forever.
+            let non_sp: Vec<Register> = registers
+                .iter()
+                .copied()
+                .filter(|r| *r != Register::SP)
+                .collect();
+            if non_sp.is_empty() {
+                return Instruction::Mneg {
+                    rd,
+                    rn: pick_reg(rng),
+                    rm: pick_reg(rng),
+                };
+            }
+            let pick_non_sp = |rng: &mut R| non_sp[rng.random_range(0..non_sp.len())];
             let rn = pick_non_sp(rng);
             let rm = match random_operand(rng, registers, immediates) {
                 Operand::Register(Register::SP) => Operand::Register(pick_non_sp(rng)),
@@ -819,8 +856,13 @@ pub fn generate_random_instruction<R: rand::RngExt>(
                 // random_operand only returns Register/Immediate, but the
                 // compiler can't prove that — drop ShiftedRegister/Extended-
                 // Register to a plain register (CCMP rejects both forms).
-                Operand::ShiftedRegister { reg, .. } | Operand::ExtendedRegister { reg, .. } => {
+                Operand::ShiftedRegister { reg, .. } | Operand::ExtendedRegister { reg, .. }
+                    if reg != Register::SP =>
+                {
                     Operand::Register(reg)
+                }
+                Operand::ShiftedRegister { .. } | Operand::ExtendedRegister { .. } => {
+                    Operand::Register(pick_non_sp(rng))
                 }
             };
             let nzcv = (rng.random::<u32>() & 0x0F) as u8;
@@ -835,17 +877,20 @@ pub fn generate_random_instruction<R: rand::RngExt>(
         // SP rejected in rd and rn (matches `generate_all_instructions` and
         // `is_encodable_aarch64`); 2D constraint on (lsb, width) enforced by
         // sampling width AFTER lsb so width is bounded by `64-lsb`.
-        28 => {
-            debug_assert!(
-                registers.iter().any(|r| *r != Register::SP),
-                "bit-field random generator requires at least one non-SP register",
-            );
-            let pick_non_sp = |rng: &mut R| loop {
-                let r = pick_reg(rng);
-                if r != Register::SP {
-                    break r;
-                }
-            };
+        33 => {
+            let non_sp: Vec<Register> = registers
+                .iter()
+                .copied()
+                .filter(|r| *r != Register::SP)
+                .collect();
+            if non_sp.is_empty() {
+                return Instruction::Mneg {
+                    rd,
+                    rn: pick_reg(rng),
+                    rm: pick_reg(rng),
+                };
+            }
+            let pick_non_sp = |rng: &mut R| non_sp[rng.random_range(0..non_sp.len())];
             let rd_local = pick_non_sp(rng);
             let rn = pick_non_sp(rng);
             let lsb = (rng.random::<u32>() & 0x3F) as u8;
@@ -891,7 +936,7 @@ pub fn generate_random_instruction<R: rand::RngExt>(
             }
         }
         // Multiply-accumulate family: MADD/MSUB (4-operand) and MNEG/SMULH/UMULH (3-operand).
-        29 => {
+        34 => {
             let rn = pick_reg(rng);
             let rm = pick_reg(rng);
             match rng.random_range(0..5) {
@@ -909,7 +954,7 @@ pub fn generate_random_instruction<R: rand::RngExt>(
             }
         }
         // Issue #66 multiply / divide: MUL/SDIV/UDIV. All register-only.
-        30 => {
+        35 => {
             let rn = pick_reg(rng);
             let rm = pick_reg(rng);
             match rng.random_range(0..3) {
@@ -920,7 +965,7 @@ pub fn generate_random_instruction<R: rand::RngExt>(
         }
         // Issue #66 compares: CMP/CMN accept reg or imm; TST is register-only
         // at the encoder, so its `rm` is clamped to a register draw.
-        31 => {
+        36 => {
             let rn = pick_reg(rng);
             match rng.random_range(0..3) {
                 0 => Instruction::Cmp {
@@ -941,7 +986,7 @@ pub fn generate_random_instruction<R: rand::RngExt>(
         // Issue #66 conditional selects: CSEL/CSINC/CSINV/CSNEG. Register-only,
         // condition sampled from NORMAL_CONDITIONS (AL/NV excluded — AL
         // collapses to MOV rd,rn and NV is reserved).
-        32 => {
+        37 => {
             let rn = pick_reg(rng);
             let rm = pick_reg(rng);
             let cond = crate::ir::types::Condition::random_normal(rng);
@@ -1067,6 +1112,7 @@ pub fn is_move_op(instr: &Instruction) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::convert::Infallible;
 
     fn default_registers() -> Vec<Register> {
         vec![Register::X0, Register::X1, Register::X2]
@@ -1074,6 +1120,82 @@ mod tests {
 
     fn default_immediates() -> Vec<i64> {
         vec![-1, 0, 1, 2]
+    }
+
+    struct BudgetedRng {
+        words: Vec<u32>,
+        next_word: usize,
+        fallback: u32,
+        remaining_draws: usize,
+    }
+
+    impl BudgetedRng {
+        fn new(words: Vec<u32>) -> Self {
+            Self {
+                words,
+                next_word: 0,
+                fallback: 0,
+                remaining_draws: 64,
+            }
+        }
+
+        fn draw_word(&mut self) -> u32 {
+            assert!(
+                self.remaining_draws > 0,
+                "random generator exceeded its draw budget"
+            );
+            self.remaining_draws -= 1;
+            let word = self
+                .words
+                .get(self.next_word)
+                .copied()
+                .unwrap_or(self.fallback);
+            self.next_word += 1;
+            word
+        }
+    }
+
+    impl rand::TryRng for BudgetedRng {
+        type Error = Infallible;
+
+        fn try_next_u32(&mut self) -> Result<u32, Self::Error> {
+            Ok(self.draw_word())
+        }
+
+        fn try_next_u64(&mut self) -> Result<u64, Self::Error> {
+            let low = u64::from(self.draw_word());
+            let high = u64::from(self.draw_word());
+            Ok(low | (high << 32))
+        }
+
+        fn try_fill_bytes(&mut self, dst: &mut [u8]) -> Result<(), Self::Error> {
+            for chunk in dst.chunks_mut(4) {
+                let bytes = self.draw_word().to_le_bytes();
+                chunk.copy_from_slice(&bytes[..chunk.len()]);
+            }
+            Ok(())
+        }
+    }
+
+    // Inverts `random_range`'s Lemire mapping: returns the smallest 32-bit
+    // word `w` such that `(w * range) >> 32 == value`, so a `BudgetedRng` can
+    // be primed to force a specific `random_range(0..range)` outcome.
+    fn word_for_range(range: u32, value: u32) -> u32 {
+        assert!(range > 0);
+        assert!(value < range);
+        let numerator = (u128::from(value)) << 32;
+        let word = numerator.div_ceil(u128::from(range)) as u32;
+        debug_assert_eq!(((u64::from(word) * u64::from(range)) >> 32) as u32, value);
+        word
+    }
+
+    // Primes a `BudgetedRng` to steer `generate_random_instruction` down a
+    // chosen opcode arm: the first draw is the `rd` index (`random_range(0..2)`
+    // for these 2-register pools), the second is the opcode slot
+    // (`random_range(0..38)`). Slot 32 = CCMP/CCMN arm, slot 33 = bit-field arm
+    // — keep these in sync with the match in `generate_random_instruction`.
+    fn rng_for_opcode_slot(slot: u32, rd_index: u32) -> BudgetedRng {
+        BudgetedRng::new(vec![word_for_range(2, rd_index), word_for_range(38, slot)])
     }
 
     #[test]
@@ -1099,6 +1221,39 @@ mod tests {
     }
 
     #[test]
+    fn generate_encodable_instructions_contains_w_add_sub_mov() {
+        let instrs = generate_all_encodable_instructions(
+            &[Register::X0, Register::X1, Register::X2],
+            &[0, 1],
+        );
+
+        assert!(instrs.iter().any(|i| matches!(
+            i,
+            Instruction::MovRegW {
+                rd: Register::X0,
+                rn: Register::X1
+            }
+        )));
+        assert!(instrs.iter().any(|i| matches!(
+            i,
+            Instruction::AddW {
+                rd: Register::X0,
+                rn: Register::X1,
+                rm: Operand::Register(Register::X2)
+            }
+        )));
+        assert!(instrs.iter().any(|i| matches!(
+            i,
+            Instruction::SubW {
+                rd: Register::X0,
+                rn: Register::X1,
+                rm: Operand::Immediate(1)
+            }
+        )));
+        assert!(instrs.iter().all(Instruction::is_encodable_aarch64));
+    }
+
+    #[test]
     fn test_generate_all_instructions_contains_eor() {
         let instrs = generate_all_instructions(&default_registers(), &default_immediates());
         let has_eor = instrs.iter().any(|i| matches!(i, Instruction::Eor { .. }));
@@ -1115,6 +1270,9 @@ mod tests {
 
     #[test]
     fn test_generate_all_instructions_covers_issue_66_opcodes() {
+        // Candidate generation intentionally uses `InstructionType::opcode_id`
+        // from `src/isa/aarch64.rs`; add a sync guard beside any future
+        // candidate-local table instead of letting the two drift silently.
         // Regression guard: every IR opcode family enumerated by issue #66
         // (Mul/Sdiv/Udiv/Cmp/Cmn/Tst/Csel/Csinc/Csinv/Csneg, opcode_ids
         // 10..=19) must appear in the exhaustive enumeration. Narrower scope
@@ -1146,6 +1304,80 @@ mod tests {
         (0..draws)
             .map(|_| generate_random_instruction(&mut rng, &regs, &imms).opcode_id())
             .collect()
+    }
+
+    #[test]
+    fn generate_random_instruction_promotes_single_source_bit_ops_to_top_level_slots() {
+        use rand::SeedableRng;
+        use rand_chacha::ChaCha8Rng;
+        use std::collections::HashMap;
+
+        let regs = default_registers();
+        let imms = default_immediates();
+        let mut rng = ChaCha8Rng::seed_from_u64(0x115);
+        let mut counts: HashMap<u8, u32> = HashMap::new();
+        const N: u32 = 30_000;
+
+        for _ in 0..N {
+            let id = generate_random_instruction(&mut rng, &regs, &imms).opcode_id();
+            *counts.entry(id).or_default() += 1;
+        }
+
+        for (label, instr) in [
+            (
+                "Clz",
+                Instruction::Clz {
+                    rd: Register::X0,
+                    rn: Register::X1,
+                },
+            ),
+            (
+                "Cls",
+                Instruction::Cls {
+                    rd: Register::X0,
+                    rn: Register::X1,
+                },
+            ),
+            (
+                "Rbit",
+                Instruction::Rbit {
+                    rd: Register::X0,
+                    rn: Register::X1,
+                },
+            ),
+            (
+                "Rev",
+                Instruction::Rev {
+                    rd: Register::X0,
+                    rn: Register::X1,
+                },
+            ),
+            (
+                "Rev32",
+                Instruction::Rev32 {
+                    rd: Register::X0,
+                    rn: Register::X1,
+                },
+            ),
+            (
+                "Rev16",
+                Instruction::Rev16 {
+                    rd: Register::X0,
+                    rn: Register::X1,
+                },
+            ),
+        ] {
+            let id = instr.opcode_id();
+            let count = counts.get(&id).copied().unwrap_or(0);
+            assert!(
+                count >= 500,
+                "expected >= 500 samples for {} (id {}) in {} draws, got {}",
+                label,
+                id,
+                N,
+                count
+            );
+        }
     }
 
     #[test]
@@ -1325,6 +1557,69 @@ mod tests {
     }
 
     #[test]
+    fn generate_random_instruction_samples_bitfield_and_madd_families_evenly() {
+        use rand::SeedableRng;
+        use rand_chacha::ChaCha8Rng;
+
+        let regs = default_registers();
+        let imms = default_immediates();
+        let mut rng = ChaCha8Rng::seed_from_u64(0x153);
+        let mut bitfield_count = 0u32;
+        let mut madd_count = 0u32;
+
+        // Both families occupy exactly one top-level slot in the
+        // `rng.random_range(0..SLOTS)` dispatch, so "equal sampling weight" means
+        // equal probability of *entering* the slot (~1/SLOTS), not equal per-variant
+        // weight: slot 33 makes a secondary 0..6 draw (plus SP-rejection retries) and
+        // slot 34 a 0..5 draw. DRAWS is sized so each family is expected EXPECTED_PER_FAMILY times.
+        const SLOTS: u32 = 38;
+        const EXPECTED_PER_FAMILY: u32 = 2_000;
+        const DRAWS: u32 = SLOTS * EXPECTED_PER_FAMILY;
+
+        for _ in 0..DRAWS {
+            let instr = generate_random_instruction(&mut rng, &regs, &imms);
+            match instr {
+                Instruction::Ubfx { .. }
+                | Instruction::Sbfx { .. }
+                | Instruction::Bfi { .. }
+                | Instruction::Bfxil { .. }
+                | Instruction::Ubfiz { .. }
+                | Instruction::Sbfiz { .. } => bitfield_count += 1,
+                Instruction::Madd { .. }
+                | Instruction::Msub { .. }
+                | Instruction::Mneg { .. }
+                | Instruction::Smulh { .. }
+                | Instruction::Umulh { .. } => madd_count += 1,
+                _ => {}
+            }
+        }
+
+        // Each count is ~Binomial(DRAWS, 1/SLOTS); the std-dev of their difference is
+        // sqrt(2 * DRAWS * (1/38) * (37/38)) ≈ 63, so a tolerance of 250 is ≈ 4σ
+        // (p_fail ≈ 1e-5) — tight enough to catch a slot-weight regression, loose
+        // enough not to flake.
+        let delta = bitfield_count.abs_diff(madd_count);
+        assert!(
+            delta <= 250,
+            "bit-field and multiply-accumulate should have equal top-level sampling weight \
+             over {DRAWS} draws, got bitfield={bitfield_count}, madd={madd_count}, delta={delta}",
+        );
+
+        // Delta alone would still pass if both families collapsed to the same wrong
+        // rate (e.g. ~500 each), so bound each absolute count near the expected value
+        // to also catch a degenerate dispatch.
+        for (name, count) in [
+            ("bit-field", bitfield_count),
+            ("multiply-accumulate", madd_count),
+        ] {
+            assert!(
+                (1_500..=2_500).contains(&count),
+                "{name} family count {count} is far from the expected {EXPECTED_PER_FAMILY} over {DRAWS} draws",
+            );
+        }
+    }
+
+    #[test]
     fn test_generate_all_instructions_contains_csel_family() {
         let instrs = generate_all_instructions(&default_registers(), &default_immediates());
         assert!(instrs.iter().any(|i| matches!(i, Instruction::Csel { .. })));
@@ -1385,6 +1680,29 @@ mod tests {
             Instruction::Tst {
                 rm: Operand::Register(_),
                 ..
+            }
+        )));
+    }
+
+    #[test]
+    fn test_generate_all_instructions_includes_n_only_conditional_compare_nzcv_sample() {
+        let instrs = generate_all_instructions(&[Register::X0, Register::X1], &[0]);
+        assert!(instrs.iter().any(|i| matches!(
+            i,
+            Instruction::Ccmp {
+                rn: Register::X0,
+                rm: Operand::Register(Register::X1),
+                nzcv: 8,
+                cond: crate::ir::types::Condition::MI
+            }
+        )));
+        assert!(instrs.iter().any(|i| matches!(
+            i,
+            Instruction::Ccmn {
+                rn: Register::X0,
+                rm: Operand::Immediate(0),
+                nzcv: 8,
+                cond: crate::ir::types::Condition::PL
             }
         )));
     }
@@ -1460,6 +1778,67 @@ mod tests {
     }
 
     #[test]
+    fn test_generate_all_instructions_shifted_register_prefilters_sp() {
+        let registers = vec![Register::X0, Register::X1, Register::SP];
+        let instrs = generate_all_instructions(&registers, &[]);
+
+        let mut shifted_count = 0;
+        for instr in &instrs {
+            match instr {
+                Instruction::Add {
+                    rd,
+                    rn,
+                    rm: Operand::ShiftedRegister { reg, .. },
+                }
+                | Instruction::AddW {
+                    rd,
+                    rn,
+                    rm: Operand::ShiftedRegister { reg, .. },
+                }
+                | Instruction::Sub {
+                    rd,
+                    rn,
+                    rm: Operand::ShiftedRegister { reg, .. },
+                }
+                | Instruction::SubW {
+                    rd,
+                    rn,
+                    rm: Operand::ShiftedRegister { reg, .. },
+                }
+                | Instruction::And {
+                    rd,
+                    rn,
+                    rm: Operand::ShiftedRegister { reg, .. },
+                    ..
+                }
+                | Instruction::Orr {
+                    rd,
+                    rn,
+                    rm: Operand::ShiftedRegister { reg, .. },
+                    ..
+                }
+                | Instruction::Eor {
+                    rd,
+                    rn,
+                    rm: Operand::ShiftedRegister { reg, .. },
+                    ..
+                } => {
+                    shifted_count += 1;
+                    assert_ne!(*rd, Register::SP, "shifted-register rd uses SP: {instr}");
+                    assert_ne!(*rn, Register::SP, "shifted-register rn uses SP: {instr}");
+                    assert_ne!(*reg, Register::SP, "shifted-register rm uses SP: {instr}");
+                }
+                _ => {}
+            }
+        }
+
+        assert!(
+            shifted_count > 0,
+            "enumeration must retain valid shifted-register candidates"
+        );
+    }
+
+    #[test]
     fn test_generate_random_instruction() {
         let mut rng = rand::rng();
         let regs = default_registers();
@@ -1470,6 +1849,68 @@ mod tests {
             if let Some(dest) = instr.destination() {
                 assert!(regs.contains(&dest));
             }
+        }
+    }
+
+    #[test]
+    fn generate_random_instruction_handles_sp_only_ccmp_and_bitfield_slots() {
+        let regs = [Register::SP];
+        let imms = default_immediates();
+
+        for slot in [32, 33] {
+            let mut rng = rng_for_opcode_slot(slot, 0);
+            let instr = generate_random_instruction(&mut rng, &regs, &imms);
+            assert!(
+                matches!(
+                    instr,
+                    Instruction::Mneg {
+                        rd: Register::SP,
+                        rn: Register::SP,
+                        rm: Register::SP,
+                    }
+                ),
+                "slot {slot} should fall back finitely for an SP-only pool, got {instr:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn generate_random_instruction_filters_sp_from_ccmp_and_bitfield_operands() {
+        let regs = [Register::SP, Register::X0];
+        let imms = default_immediates();
+
+        let mut ccmp_rng = rng_for_opcode_slot(32, 0);
+        let ccmp = generate_random_instruction(&mut ccmp_rng, &regs, &imms);
+        match ccmp {
+            Instruction::Ccmp {
+                rn,
+                rm: Operand::Register(rm),
+                ..
+            }
+            | Instruction::Ccmn {
+                rn,
+                rm: Operand::Register(rm),
+                ..
+            } => {
+                assert_eq!(rn, Register::X0);
+                assert_eq!(rm, Register::X0);
+            }
+            other => panic!("expected register-form CCMP/CCMN, got {other:?}"),
+        }
+
+        let mut bitfield_rng = rng_for_opcode_slot(33, 0);
+        let bitfield = generate_random_instruction(&mut bitfield_rng, &regs, &imms);
+        match bitfield {
+            Instruction::Ubfx { rd, rn, .. }
+            | Instruction::Sbfx { rd, rn, .. }
+            | Instruction::Bfi { rd, rn, .. }
+            | Instruction::Bfxil { rd, rn, .. }
+            | Instruction::Ubfiz { rd, rn, .. }
+            | Instruction::Sbfiz { rd, rn, .. } => {
+                assert_eq!(rd, Register::X0);
+                assert_eq!(rn, Register::X0);
+            }
+            other => panic!("expected bit-field instruction, got {other:?}"),
         }
     }
 

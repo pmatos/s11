@@ -7,7 +7,6 @@
 //! - Hybrid: parallel execution combining symbolic + multiple stochastic workers
 
 pub mod candidate;
-pub mod candidate_x86;
 pub mod config;
 pub mod enumerative;
 pub mod llm;
@@ -34,10 +33,8 @@ use crate::isa::ISA;
 /// AArch64, x86-64 and x86-32 once the search bodies route through the
 /// ISA-trait executors. `LiveOut` and `Result` are associated types so
 /// the trait does not force a particular live-out representation or
-/// result-carrier shape — implementors pick (AArch64 uses
-/// `crate::semantics::live_out::LiveOut`; x86 will use
-/// `crate::semantics::state::X86LiveOutMask` until `LiveOutMask<R>`
-/// subsumes both in #77 stage 2 step 16).
+/// result-carrier shape — implementors pick the per-ISA `RegisterSet`
+/// specialization they need (`LiveOut` for AArch64, `X86LiveOut` for x86).
 #[allow(dead_code)]
 pub trait SearchAlgorithm<I: ISA> {
     /// Live-out contract type this implementation accepts.
@@ -77,9 +74,34 @@ mod tests {
         assert_impl::<crate::isa::AArch64, llm::LlmSearch>();
         // x86_64 and x86_32 instantiations land via this PR (issue #73).
         // A future drop of either backend impl trips this at compile time.
+        assert_impl::<crate::isa::X86_64, enumerative::EnumerativeSearch<crate::isa::X86_64>>();
+        assert_impl::<crate::isa::X86_32, enumerative::EnumerativeSearch<crate::isa::X86_32>>();
         assert_impl::<crate::isa::X86_64, stochastic::StochasticSearch<crate::isa::X86_64>>();
         assert_impl::<crate::isa::X86_64, symbolic::SymbolicSearch<crate::isa::X86_64>>();
         assert_impl::<crate::isa::X86_32, stochastic::StochasticSearch<crate::isa::X86_32>>();
         assert_impl::<crate::isa::X86_32, symbolic::SymbolicSearch<crate::isa::X86_32>>();
+
+        fn assert_register_set_live_out<I, A>()
+        where
+            I: ISA,
+            A: SearchAlgorithm<I, LiveOut = crate::semantics::live_out::RegisterSet<I::Register>>,
+        {
+        }
+        assert_register_set_live_out::<
+            crate::isa::X86_64,
+            stochastic::StochasticSearch<crate::isa::X86_64>,
+        >();
+        assert_register_set_live_out::<
+            crate::isa::X86_64,
+            symbolic::SymbolicSearch<crate::isa::X86_64>,
+        >();
+        assert_register_set_live_out::<
+            crate::isa::X86_32,
+            stochastic::StochasticSearch<crate::isa::X86_32>,
+        >();
+        assert_register_set_live_out::<
+            crate::isa::X86_32,
+            symbolic::SymbolicSearch<crate::isa::X86_32>,
+        >();
     }
 }

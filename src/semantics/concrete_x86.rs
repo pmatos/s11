@@ -3,18 +3,15 @@
 //! Mirrors `semantics::concrete::apply_instruction_concrete` but over
 //! ## Deletion gate
 //!
-//! Issue #77 stage 2 step 18 plans to delete this file once
-//! `optimize_elf_binary_x86` (src/main.rs) and the x86 unit tests below
-//! route through `<X86_64 as ConcreteExecutor<X86Instruction>>::execute_instruction`
-//! (added in step 17). That migration is blocked on the
-//! SearchAlgorithm<I> follow-up to step 11. Until then this file is the
-//! authoritative x86 concrete interpreter and the trait impl delegates here.
+//! Issue #77 keeps this file as the x86 instruction interpreter while the
+//! public search/equivalence callers route through the ISA trait surface.
 //!
 //! `X86Instruction` and `X86ConcreteMachineState`. Operand widths follow
 //! `state.width()` — writes to registers are already masked by the
 //! state, and flag computation receives the correct width.
 
 use crate::isa::x86::X86Instruction;
+use crate::semantics::live_out::X86LiveOut;
 use crate::semantics::state::{ConcreteValue, Eflags, X86ConcreteMachineState};
 
 /// Apply a single x86 instruction to a concrete machine state.
@@ -160,7 +157,7 @@ pub fn apply_sequence_concrete_x86(
 pub fn states_equal_for_live_out_x86(
     state1: &crate::semantics::state::X86ConcreteMachineState,
     state2: &crate::semantics::state::X86ConcreteMachineState,
-    mask: &crate::semantics::state::X86LiveOutMask,
+    mask: &X86LiveOut,
 ) -> bool {
     for reg in mask.iter() {
         if state1.get_register(*reg) != state2.get_register(*reg) {
@@ -409,7 +406,8 @@ mod tests {
 
     #[test]
     fn states_equal_for_live_out_x86_ignores_non_live_registers() {
-        use crate::semantics::state::{ConcreteValue, X86ConcreteMachineState, X86LiveOutMask};
+        use crate::semantics::live_out::RegisterSet;
+        use crate::semantics::state::{ConcreteValue, X86ConcreteMachineState};
 
         let mut a = X86ConcreteMachineState::new_zeroed(64);
         let mut b = X86ConcreteMachineState::new_zeroed(64);
@@ -419,19 +417,18 @@ mod tests {
         b.set_register(X86Register::RCX, ConcreteValue::new(99)); // differs
 
         // Only RAX live-out: equal.
-        let mask = X86LiveOutMask::from_registers(vec![X86Register::RAX]);
+        let mask = RegisterSet::from_registers(vec![X86Register::RAX]);
         assert!(states_equal_for_live_out_x86(&a, &b, &mask));
 
         // RCX live-out too: unequal.
-        let mask = X86LiveOutMask::from_registers(vec![X86Register::RAX, X86Register::RCX]);
+        let mask = RegisterSet::from_registers(vec![X86Register::RAX, X86Register::RCX]);
         assert!(!states_equal_for_live_out_x86(&a, &b, &mask));
     }
 
     #[test]
     fn states_equal_for_live_out_x86_honours_flags_live() {
-        use crate::semantics::state::{
-            ConcreteValue, Eflags, X86ConcreteMachineState, X86LiveOutMask,
-        };
+        use crate::semantics::live_out::RegisterSet;
+        use crate::semantics::state::{ConcreteValue, Eflags, X86ConcreteMachineState};
 
         let mut a = X86ConcreteMachineState::new_zeroed(64);
         let mut b = X86ConcreteMachineState::new_zeroed(64);
@@ -442,7 +439,7 @@ mod tests {
         a.set_flags(flags_set);
         // b keeps default (zf = false).
 
-        let no_flags = X86LiveOutMask::from_registers(vec![X86Register::RAX]);
+        let no_flags = RegisterSet::from_registers(vec![X86Register::RAX]);
         assert!(states_equal_for_live_out_x86(&a, &b, &no_flags));
 
         let with_flags = no_flags.with_flags(true);

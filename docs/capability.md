@@ -9,17 +9,39 @@ mnemonic inventories.
 Status: primary target. Assembly text and ELF/Capstone input share the same
 parser path for accepted mnemonics. Search rewrites the straight-line prefix of
 a region; supported control-flow terminators are parsed and then held fixed.
+The ELF/Capstone bridge first normalizes a small set of Capstone-only aliases
+that map to one existing IR instruction: Capstone `mov Xd, #imm` move-wide
+aliases are normalized to single-instruction `movz`/`movn` forms when the
+immediate is representable by one move-wide instruction, and Capstone
+`cinc`/`cinv`/`cneg` aliases are normalized to `csinc`/`csinv`/`csneg`.
+Aliases that require multiple instructions remain unsupported and make
+optimization reject the selected window.
+
+Numbered `W` registers are accepted only by width-aware parser rules (such as
+logical-immediate and memory forms) or scoped W/X register slots (such as
+extended-register operands and TBZ/TBNZ). Generic widthless data-processing and
+CBZ/CBNZ forms still reject `w0`-`w30` because the current IR would otherwise
+model 32-bit instructions with existing 64-bit semantics.
 
 Algorithms:
 - Enumerative, stochastic, symbolic, hybrid, and LLM-assisted search are
   available for AArch64.
+- Enumerative search scales with the generated instruction families in its
+  candidate pool. At the default AArch64 8-register CLI scope, `madd`/`msub`
+  contribute `2 * 8^4` and `mneg`/`smulh`/`umulh` contribute `3 * 8^3`, or
+  9,728 extra candidates per length bucket; use `--timeout` or smaller
+  optimization windows to bound runtime.
 - Hybrid and LLM remain AArch64-only.
 
 Rewritable straight-line mnemonics accepted by the parser and Capstone bridge:
 
 - Data movement and aliases: `mov`, `mvn`, `neg`, `negs`, `movn`, `movz`,
   `movk`
+  - Register `mov` supports both 64-bit `X` and 32-bit `W` forms.
 - Arithmetic and flag-setting arithmetic: `add`, `sub`, `adds`, `subs`
+  - Non-flag-setting `add` and `sub` support both 64-bit `X` and 32-bit `W`
+    register/immediate/shifted-register forms. W extended-register arithmetic
+    remains out of scope for now.
 - Logical and inverted-logical forms: `and`, `ands`, `orr`, `eor`, `bic`,
   `bics`, `orn`, `eon`
   - Logical-immediate forms for `and`, `ands`, `orr`, `eor`, and `tst`
@@ -55,8 +77,8 @@ Known gaps:
 
 ## x86-64 / x86-32
 
-Status: supported through a parallel x86 pipeline for ELF optimization and
-width-parameterised SMT equivalence.
+Status: supported through the shared ISA trait-backed ELF optimization path,
+with width-parameterised SMT equivalence.
 
 Rewritable straight-line mnemonic families:
 

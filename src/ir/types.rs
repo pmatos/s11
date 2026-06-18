@@ -285,6 +285,19 @@ pub enum Operand {
     },
 }
 
+impl Operand {
+    pub fn display_with_width(&self, width: RegisterWidth) -> String {
+        match self {
+            Operand::Register(reg) => width.register_name(*reg).to_string(),
+            Operand::Immediate(imm) => format!("#{imm}"),
+            Operand::ShiftedRegister { reg, kind, amount } => {
+                format!("{}, {} #{}", width.register_name(*reg), kind, amount)
+            }
+            Operand::ExtendedRegister { .. } => format!("{self}"),
+        }
+    }
+}
+
 impl fmt::Display for Operand {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {

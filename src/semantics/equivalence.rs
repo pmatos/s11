@@ -1,23 +1,18 @@
 //! Semantic equivalence checking for instruction sequences
 //!
-//! Issue #77 stage 2 step 19 plans to delete `X86EquivalenceConfig`,
-//! `check_equivalence_x86`, and `run_fast_path_x86` once
-//! `EquivalenceConfig<I>` is wired to consume `RegisterSet<I::Register>`
-//! and the SearchAlgorithm<I> follow-up to step 11 lands. The CMP-presence
-//! heuristic in `run_fast_path_x86` merges into the generic `run_fast_path`
-//! as an `I::Flags`-aware optimisation (only triggers when `I::Flags != ()`).
-//! Today the x86 path still owns its config + entry points; the AArch64
-//! equivalence path consumes the generic surface via the trait route step 9
-//! introduced.
+//! AArch64 and x86 route through `check_equivalence_for<I>` with
+//! ISA-specific hooks for concrete execution, symbolic lowering, and fixed
+//! terminator handling.
 
 #![allow(dead_code)]
 
 use crate::ir::Instruction;
 use crate::ir::instructions::split_terminator;
+use crate::isa::{AArch64, ISA};
 use crate::semantics::concrete::{
     apply_sequence_concrete, find_first_difference, states_equal_for_live_out,
 };
-use crate::semantics::live_out::LiveOut;
+use crate::semantics::live_out::{LiveOut, RegisterSet};
 use crate::semantics::smt::{
     MachineState, SolverConfig, apply_sequence, create_solver_with_config, states_not_equal,
     states_not_equal_for_live_out,
@@ -91,13 +86,53 @@ pub enum EquivalenceResult {
     Unknown(String),
 }
 
-/// Configuration for equivalence checking
+/// Per-ISA default live-out policy for equivalence configuration.
+///
+/// AArch64 preserves the historical `EquivalenceConfig::default()` behavior of
+/// comparing all architectural registers. x86 preserves the historical
+/// x86 config behavior of starting with an empty live-out contract that
+/// callers populate explicitly.
+pub trait EquivalenceConfigDefaults: ISA {
+    fn default_live_out() -> RegisterSet<Self::Register>;
+}
+
+impl EquivalenceConfigDefaults for AArch64 {
+    fn default_live_out() -> RegisterSet<Self::Register> {
+        LiveOut::all_registers()
+    }
+}
+
+impl EquivalenceConfigDefaults for crate::isa::X86_64 {
+    fn default_live_out() -> RegisterSet<Self::Register> {
+        RegisterSet::empty()
+    }
+}
+
+impl EquivalenceConfigDefaults for crate::isa::X86_32 {
+    fn default_live_out() -> RegisterSet<Self::Register> {
+        RegisterSet::empty()
+    }
+}
+
+impl EquivalenceConfigDefaults for crate::isa::RiscV64 {
+    fn default_live_out() -> RegisterSet<Self::Register> {
+        RegisterSet::empty()
+    }
+}
+
+impl EquivalenceConfigDefaults for crate::isa::RiscV32 {
+    fn default_live_out() -> RegisterSet<Self::Register> {
+        RegisterSet::empty()
+    }
+}
+
+/// Configuration for equivalence checking, parameterized by ISA.
 #[derive(Debug, Clone)]
-pub struct EquivalenceConfig {
+pub struct EquivalenceConfigFor<I: ISA> {
     /// Observable architectural state that must match after execution.
     /// Per ADR-0004 decision 5, `flags_live` lives on the mask itself
     /// (`live_out.flags_live()`) rather than as a separate config field.
-    pub live_out: LiveOut,
+    pub live_out: RegisterSet<I::Register>,
     /// Number of random tests to run before SMT
     pub random_test_count: usize,
     /// Timeout for SMT solver
@@ -111,10 +146,17 @@ pub struct EquivalenceConfig {
     pub memory_live: bool,
 }
 
-impl Default for EquivalenceConfig {
+/// AArch64 compatibility alias. Existing callers keep using
+/// `EquivalenceConfig`; new ISA-generic code can name `EquivalenceConfigFor<I>`.
+pub type EquivalenceConfig = EquivalenceConfigFor<AArch64>;
+
+impl<I> Default for EquivalenceConfigFor<I>
+where
+    I: EquivalenceConfigDefaults,
+{
     fn default() -> Self {
         Self {
-            live_out: LiveOut::all_registers(),
+            live_out: I::default_live_out(),
             random_test_count: 10,
             smt_timeout: Some(Duration::from_secs(30)),
             fast_only: false,
@@ -123,7 +165,10 @@ impl Default for EquivalenceConfig {
     }
 }
 
-impl EquivalenceConfig {
+impl<I> EquivalenceConfigFor<I>
+where
+    I: EquivalenceConfigDefaults,
+{
     /// Create a config that only uses fast path (no SMT)
     pub fn fast_only() -> Self {
         Self {
@@ -133,7 +178,7 @@ impl EquivalenceConfig {
     }
 
     /// Create a config with a specific live-out contract.
-    pub fn with_live_out(live_out: LiveOut) -> Self {
+    pub fn with_live_out(live_out: RegisterSet<I::Register>) -> Self {
         Self {
             live_out,
             ..Default::default()
@@ -157,7 +202,7 @@ impl EquivalenceConfig {
     /// directly. The trade-off is deliberate; silently *losing* flag
     /// liveness in a chained builder is a much more dangerous failure
     /// mode than retaining it.
-    pub fn live_out(mut self, live_out: LiveOut) -> Self {
+    pub fn live_out(mut self, live_out: RegisterSet<I::Register>) -> Self {
         let merged_flags = self.live_out.flags_live() || live_out.flags_live();
         self.live_out = live_out.with_flags(merged_flags);
         self
@@ -265,6 +310,187 @@ pub struct EquivalenceMetrics {
     /// the solver was not invoked (fast path resolved the candidate or the
     /// pre-SMT guard fired).
     pub smt_elapsed: Duration,
+}
+
+/// ISA-specific hooks underneath the generic equivalence control flow.
+///
+/// The public `check_equivalence_for<I>` function owns the common algorithm:
+/// peel fixed terminators, derive the effective live-out contract, run the
+/// concrete fast path, and finally ask Z3 whether any live-out state can
+/// differ. Implementors provide only the ISA-specific pieces: terminator
+/// splitting, config augmentation, fast concrete execution, and SMT lowering.
+pub trait EquivalenceBackend: EquivalenceConfigDefaults + Sized {
+    fn split_terminator(
+        seq: &[Self::Instruction],
+    ) -> (&[Self::Instruction], Option<&Self::Instruction>);
+
+    fn terminator_mismatch_result() -> EquivalenceResult {
+        EquivalenceResult::NotEquivalent
+    }
+
+    fn adjust_config_for_sequences(
+        _config: &mut EquivalenceConfigFor<Self>,
+        _seq1: &[Self::Instruction],
+        _seq2: &[Self::Instruction],
+        _terminator: Option<&Self::Instruction>,
+    ) {
+    }
+
+    fn pre_smt_guard_for(
+        _seq1: &[Self::Instruction],
+        _seq2: &[Self::Instruction],
+        _config: &EquivalenceConfigFor<Self>,
+    ) -> Option<EquivalenceResult> {
+        None
+    }
+
+    fn run_fast_path_for(
+        seq1: &[Self::Instruction],
+        seq2: &[Self::Instruction],
+        config: &EquivalenceConfigFor<Self>,
+    ) -> Option<EquivalenceResult>;
+
+    fn build_smt_solver_for(
+        seq1: &[Self::Instruction],
+        seq2: &[Self::Instruction],
+        config: &EquivalenceConfigFor<Self>,
+    ) -> z3::Solver;
+}
+
+impl EquivalenceBackend for AArch64 {
+    fn split_terminator(seq: &[Instruction]) -> (&[Instruction], Option<&Instruction>) {
+        split_terminator(seq)
+    }
+
+    fn terminator_mismatch_result() -> EquivalenceResult {
+        EquivalenceResult::NotEquivalentFast(ConcreteMachineState::new_zeroed())
+    }
+
+    fn adjust_config_for_sequences(
+        config: &mut EquivalenceConfigFor<Self>,
+        seq1: &[Instruction],
+        seq2: &[Instruction],
+        terminator: Option<&Instruction>,
+    ) {
+        // ADR-0007: auto-derive memory_live and force fast_only off when memory
+        // ops appear. Sparse concrete inputs cannot prove memory equivalence.
+        let memory_touched = crate::validation::live_out::touches_memory(seq1)
+            || crate::validation::live_out::touches_memory(seq2);
+        if memory_touched {
+            config.memory_live = true;
+            config.fast_only = false;
+        }
+
+        if let Some(t) = terminator {
+            *config = augment_config_for_terminator(config, t);
+        }
+    }
+
+    fn pre_smt_guard_for(
+        seq1: &[Instruction],
+        seq2: &[Instruction],
+        config: &EquivalenceConfigFor<Self>,
+    ) -> Option<EquivalenceResult> {
+        pre_smt_guard(seq1, seq2, config.live_out.flags_live())
+    }
+
+    fn run_fast_path_for(
+        seq1: &[Instruction],
+        seq2: &[Instruction],
+        config: &EquivalenceConfigFor<Self>,
+    ) -> Option<EquivalenceResult> {
+        run_fast_path(seq1, seq2, config)
+    }
+
+    fn build_smt_solver_for(
+        seq1: &[Instruction],
+        seq2: &[Instruction],
+        config: &EquivalenceConfigFor<Self>,
+    ) -> z3::Solver {
+        build_smt_solver(seq1, seq2, config)
+    }
+}
+
+impl EquivalenceBackend for crate::isa::X86_64 {
+    fn split_terminator(
+        seq: &[crate::isa::x86::X86Instruction],
+    ) -> (
+        &[crate::isa::x86::X86Instruction],
+        Option<&crate::isa::x86::X86Instruction>,
+    ) {
+        crate::ir::instructions::split_terminator_x86(seq)
+    }
+
+    fn adjust_config_for_sequences(
+        config: &mut EquivalenceConfigFor<Self>,
+        _seq1: &[crate::isa::x86::X86Instruction],
+        _seq2: &[crate::isa::x86::X86Instruction],
+        terminator: Option<&crate::isa::x86::X86Instruction>,
+    ) {
+        if matches!(
+            terminator,
+            Some(crate::isa::x86::X86Instruction::Jcc { .. })
+        ) {
+            config.live_out = config.live_out.clone().with_flags(true);
+        }
+    }
+
+    fn run_fast_path_for(
+        seq1: &[crate::isa::x86::X86Instruction],
+        seq2: &[crate::isa::x86::X86Instruction],
+        config: &EquivalenceConfigFor<Self>,
+    ) -> Option<EquivalenceResult> {
+        run_fast_path_x86(seq1, seq2, config, 64)
+    }
+
+    fn build_smt_solver_for(
+        seq1: &[crate::isa::x86::X86Instruction],
+        seq2: &[crate::isa::x86::X86Instruction],
+        config: &EquivalenceConfigFor<Self>,
+    ) -> z3::Solver {
+        build_smt_solver_x86(seq1, seq2, config, 64)
+    }
+}
+
+impl EquivalenceBackend for crate::isa::X86_32 {
+    fn split_terminator(
+        seq: &[crate::isa::x86::X86Instruction],
+    ) -> (
+        &[crate::isa::x86::X86Instruction],
+        Option<&crate::isa::x86::X86Instruction>,
+    ) {
+        crate::ir::instructions::split_terminator_x86(seq)
+    }
+
+    fn adjust_config_for_sequences(
+        config: &mut EquivalenceConfigFor<Self>,
+        _seq1: &[crate::isa::x86::X86Instruction],
+        _seq2: &[crate::isa::x86::X86Instruction],
+        terminator: Option<&crate::isa::x86::X86Instruction>,
+    ) {
+        if matches!(
+            terminator,
+            Some(crate::isa::x86::X86Instruction::Jcc { .. })
+        ) {
+            config.live_out = config.live_out.clone().with_flags(true);
+        }
+    }
+
+    fn run_fast_path_for(
+        seq1: &[crate::isa::x86::X86Instruction],
+        seq2: &[crate::isa::x86::X86Instruction],
+        config: &EquivalenceConfigFor<Self>,
+    ) -> Option<EquivalenceResult> {
+        run_fast_path_x86(seq1, seq2, config, 32)
+    }
+
+    fn build_smt_solver_for(
+        seq1: &[crate::isa::x86::X86Instruction],
+        seq2: &[crate::isa::x86::X86Instruction],
+        config: &EquivalenceConfigFor<Self>,
+    ) -> z3::Solver {
+        build_smt_solver_x86(seq1, seq2, config, 32)
+    }
 }
 
 /// Build the fast-path input randomization set.
@@ -444,7 +670,21 @@ pub fn check_equivalence_with_config(
     seq2: &[Instruction],
     config: &EquivalenceConfig,
 ) -> EquivalenceResult {
-    let (result, _) = check_equivalence_with_config_metrics(seq1, seq2, config);
+    check_equivalence_for::<AArch64>(seq1, seq2, config)
+}
+
+/// Check equivalence for any ISA that implements the equivalence backend
+/// hooks. This is the ISA-generic entry point for callers that do not need
+/// per-call solver metrics.
+pub fn check_equivalence_for<I>(
+    seq1: &[I::Instruction],
+    seq2: &[I::Instruction],
+    config: &EquivalenceConfigFor<I>,
+) -> EquivalenceResult
+where
+    I: EquivalenceBackend,
+{
+    let (result, _) = check_equivalence_for_metrics::<I>(seq1, seq2, config);
     result
 }
 
@@ -493,61 +733,38 @@ pub fn check_equivalence_with_config_metrics(
     seq2: &[Instruction],
     config: &EquivalenceConfig,
 ) -> (EquivalenceResult, EquivalenceMetrics) {
+    check_equivalence_for_metrics::<AArch64>(seq1, seq2, config)
+}
+
+/// Metrics-bearing variant of `check_equivalence_for`.
+pub fn check_equivalence_for_metrics<I>(
+    seq1: &[I::Instruction],
+    seq2: &[I::Instruction],
+    config: &EquivalenceConfigFor<I>,
+) -> (EquivalenceResult, EquivalenceMetrics)
+where
+    I: EquivalenceBackend,
+{
     let metrics = EquivalenceMetrics::default();
 
-    // Issue #69: terminator-identity precheck — see `check_equivalence`.
-    let (prefix1, terminator1) = split_terminator(seq1);
-    let (prefix2, terminator2) = split_terminator(seq2);
+    let (prefix1, terminator1) = I::split_terminator(seq1);
+    let (prefix2, terminator2) = I::split_terminator(seq2);
     if terminator1 != terminator2 {
-        return (
-            EquivalenceResult::NotEquivalentFast(ConcreteMachineState::new_zeroed()),
-            metrics,
-        );
+        return (I::terminator_mismatch_result(), metrics);
     }
 
-    // ADR-0007: auto-derive memory_live and force fast_only off when memory
-    // ops appear (see `check_equivalence_with_config` above for rationale).
-    let memory_touched = crate::validation::live_out::touches_memory(prefix1)
-        || crate::validation::live_out::touches_memory(prefix2);
-    let mut config_owned;
-    let config: &EquivalenceConfig = if memory_touched && (!config.memory_live || config.fast_only)
-    {
-        config_owned = config.clone();
-        config_owned.memory_live = true;
-        if config_owned.fast_only {
-            config_owned.fast_only = false;
-        }
-        &config_owned
-    } else {
-        config
-    };
+    let mut effective_config = config.clone();
+    I::adjust_config_for_sequences(&mut effective_config, prefix1, prefix2, terminator1);
 
-    // Issue #240: the reattached terminator consumes prefix-produced state —
-    // `BCond` reads NZCV; `Cbz`/`Cbnz`/`Ret`/`Br` read a register;
-    // `Tbz`/`Tbnz` read a register. The caller's `live_out` only covers what
-    // the *prefix* must agree on post-execution; we extend it here with the
-    // terminator's input contract so two prefixes that produce different
-    // branch-predicate inputs aren't accepted as equivalent. Built once and
-    // reused for the pre-SMT guard, fast path, and SMT builder so the
-    // augmentation is canonical across all three.
-    let augmented_owned;
-    let effective_config: &EquivalenceConfig = match terminator1 {
-        Some(t) => {
-            augmented_owned = augment_config_for_terminator(config, t);
-            &augmented_owned
-        }
-        None => config,
-    };
-
-    if let Some(early) = pre_smt_guard(prefix1, prefix2, effective_config.live_out.flags_live()) {
+    if let Some(early) = I::pre_smt_guard_for(prefix1, prefix2, &effective_config) {
         return (early, metrics);
     }
 
-    if let Some(fast) = run_fast_path(prefix1, prefix2, effective_config) {
+    if let Some(fast) = I::run_fast_path_for(prefix1, prefix2, &effective_config) {
         return (fast, metrics);
     }
 
-    let solver = build_smt_solver(prefix1, prefix2, effective_config);
+    let solver = I::build_smt_solver_for(prefix1, prefix2, &effective_config);
     let smt_start = std::time::Instant::now();
     let sat_result = solver.check();
     let smt_elapsed = smt_start.elapsed();
@@ -718,121 +935,22 @@ pub fn find_counterexample_concrete(
 // x86 equivalence checking
 // ============================================================================
 
-/// Equivalence-check configuration for the x86 backend. Carries the
-/// bitvector width (64 for x86-64, 32 for x86-32) which threads through
-/// to `MachineStateX86::new_symbolic` and the immediate lowering.
-#[derive(Debug, Clone)]
-pub struct X86EquivalenceConfig {
-    pub live_out: crate::semantics::state::X86LiveOutMask,
-    pub width: u32,
-    pub random_test_count: usize,
-    pub smt_timeout: Option<Duration>,
-    pub fast_only: bool,
-}
-
-impl X86EquivalenceConfig {
-    /// Construct a baseline config. **Note:** `live_out` defaults to
-    /// `X86LiveOutMask::empty()` — equivalence over an empty live-out
-    /// set is vacuously true. Callers must populate the mask (typically
-    /// via `live_out(x86_live_out_from_target(target))`) before using
-    /// the config, or any two sequences will compare as equivalent.
-    pub fn new(width: u32) -> Self {
-        Self {
-            live_out: crate::semantics::state::X86LiveOutMask::empty(),
-            width,
-            random_test_count: 10,
-            smt_timeout: Some(Duration::from_secs(30)),
-            fast_only: false,
-        }
-    }
-
-    pub fn live_out(mut self, mask: crate::semantics::state::X86LiveOutMask) -> Self {
-        self.live_out = mask;
-        self
-    }
-
-    pub fn fast_only(mut self) -> Self {
-        self.fast_only = true;
-        self
-    }
-}
-
-/// Convenience wrapper used by both x86 search backends
-/// (`stochastic/backend.rs` and `symbolic/backend.rs`). Builds an
-/// `X86EquivalenceConfig` from the supplied mask + width + timeout
-/// and invokes `check_equivalence_x86`. Two backends were each
-/// inlining this same builder + call — a single helper here keeps
-/// them from drifting.
-pub fn check_equivalence_x86_for_search(
-    target: &[crate::isa::x86::X86Instruction],
-    proposal: &[crate::isa::x86::X86Instruction],
-    live_out: &crate::semantics::state::X86LiveOutMask,
-    width: u32,
-    timeout: std::time::Duration,
-) -> EquivalenceResult {
-    let mut cfg = X86EquivalenceConfig::new(width);
-    cfg.live_out = live_out.clone();
-    cfg.smt_timeout = Some(timeout);
-    check_equivalence_x86(target, proposal, &cfg)
-}
-
-/// Check whether two x86 instruction sequences are equivalent under the
-/// given live-out mask and operand width. Mirrors `check_equivalence_with_config`
-/// for the AArch64 backend: fast path uses the concrete interpreter over
-/// random inputs (and EFLAGS comparison when CMP is present or the mask
-/// declares flags live); slow path lowers to Z3 BVs and checks UNSAT of the
-/// not-equal assertion over live-out registers, plus the five tracked
-/// EFLAGS bits when `flags_live` is set.
-pub fn check_equivalence_x86(
+fn build_smt_solver_x86<I>(
     seq1: &[crate::isa::x86::X86Instruction],
     seq2: &[crate::isa::x86::X86Instruction],
-    config: &X86EquivalenceConfig,
-) -> EquivalenceResult {
-    // Peel matching Jcc terminators and require both sides to share the
-    // exact same terminator (struct equality on the condition code).
-    // Mirrors the AArch64 precheck in `check_equivalence`.
-    let (prefix1, terminator1) = crate::ir::instructions::split_terminator_x86(seq1);
-    let (prefix2, terminator2) = crate::ir::instructions::split_terminator_x86(seq2);
-    if terminator1 != terminator2 {
-        return EquivalenceResult::NotEquivalent;
-    }
-
-    // When a Jcc terminator is held fixed across both sides, its branch
-    // outcome consumes the prefix's final EFLAGS. The caller-supplied
-    // live-out mask may not declare flags live (e.g. when the target
-    // contains only MOV/CMOV which `has_side_effects` reports as
-    // flag-clean), so force `flags_live=true` for the prefix comparison
-    // whenever a Jcc was peeled — otherwise a proposal that clobbers
-    // EFLAGS before the branch would be accepted unsoundly.
-    let effective_config = if matches!(
-        terminator1,
-        Some(crate::isa::x86::X86Instruction::Jcc { .. })
-    ) && !config.live_out.flags_live()
-    {
-        let mut c = config.clone();
-        c.live_out = c.live_out.with_flags(true);
-        std::borrow::Cow::Owned(c)
-    } else {
-        std::borrow::Cow::Borrowed(config)
-    };
-    let config = effective_config.as_ref();
-
-    // Fast path: 10 random inputs over the prefixes only.
-    if let Some(refutation) = run_fast_path_x86(prefix1, prefix2, config) {
-        return refutation;
-    }
-    if config.fast_only {
-        return EquivalenceResult::Equivalent;
-    }
-
-    // SMT path.
+    config: &EquivalenceConfigFor<I>,
+    width: u32,
+) -> z3::Solver
+where
+    I: ISA<Instruction = crate::isa::x86::X86Instruction, Register = crate::isa::x86::X86Register>,
+{
     let solver_config = SolverConfig {
         timeout: config.smt_timeout,
     };
     let solver = create_solver_with_config(&solver_config);
-    let initial = crate::semantics::smt_x86::MachineStateX86::new_symbolic("init", config.width);
-    let final1 = crate::semantics::smt_x86::apply_sequence(initial.clone(), prefix1);
-    let final2 = crate::semantics::smt_x86::apply_sequence(initial, prefix2);
+    let initial = crate::semantics::smt_x86::MachineStateX86::new_symbolic("init", width);
+    let final1 = crate::semantics::smt_x86::apply_sequence(initial.clone(), seq1);
+    let final2 = crate::semantics::smt_x86::apply_sequence(initial, seq2);
 
     let mut disjuncts: Vec<z3::ast::Bool> = Vec::new();
     for reg in config.live_out.iter() {
@@ -853,14 +971,18 @@ pub fn check_equivalence_x86(
         z3::ast::Bool::or(&disjuncts.iter().collect::<Vec<_>>())
     };
     solver.assert(&any_diff);
-    interpret_smt_result(solver.check())
+    solver
 }
 
-fn run_fast_path_x86(
+fn run_fast_path_x86<I>(
     seq1: &[crate::isa::x86::X86Instruction],
     seq2: &[crate::isa::x86::X86Instruction],
-    config: &X86EquivalenceConfig,
-) -> Option<EquivalenceResult> {
+    config: &EquivalenceConfigFor<I>,
+    width: u32,
+) -> Option<EquivalenceResult>
+where
+    I: ISA<Instruction = crate::isa::x86::X86Instruction, Register = crate::isa::x86::X86Register>,
+{
     use crate::isa::x86::X86Register;
     use crate::semantics::concrete_x86::apply_instruction_concrete_x86;
     use crate::semantics::state::X86ConcreteMachineState;
@@ -890,7 +1012,7 @@ fn run_fast_path_x86(
         } else {
             (n as u64).wrapping_mul(0x9e37_79b9_7f4a_7c15)
         };
-        let mut state = X86ConcreteMachineState::new_zeroed(config.width);
+        let mut state = X86ConcreteMachineState::new_zeroed(width);
         for i in 0..16u8 {
             if let Some(reg) = X86Register::from_index(i) {
                 state.set_register(
@@ -930,6 +1052,9 @@ fn run_fast_path_x86(
             return Some(EquivalenceResult::NotEquivalent);
         }
     }
+    if config.fast_only {
+        return Some(EquivalenceResult::Equivalent);
+    }
     None
 }
 
@@ -938,7 +1063,7 @@ mod tests {
     use super::*;
     use crate::ir::{Operand, Register};
     use crate::isa::x86::{X86Instruction, X86Register};
-    use crate::semantics::state::X86LiveOutMask;
+    use crate::semantics::live_out::X86LiveOut;
 
     #[test]
     fn aarch64_with_flags_writes_through_mask() {
@@ -979,6 +1104,38 @@ mod tests {
     }
 
     #[test]
+    fn equivalence_config_for_aarch64_preserves_compatibility_alias() {
+        let config: EquivalenceConfigFor<crate::isa::AArch64> = EquivalenceConfig::default()
+            .with_flags(true)
+            .live_out(LiveOut::from_registers(vec![Register::X0]))
+            .random_tests(3)
+            .timeout(Duration::from_millis(25))
+            .set_fast_only(true);
+
+        assert!(config.live_out.contains(Register::X0));
+        assert!(config.live_out.flags_live());
+        assert_eq!(config.random_test_count, 3);
+        assert_eq!(config.smt_timeout, Some(Duration::from_millis(25)));
+        assert!(config.fast_only);
+    }
+
+    #[test]
+    fn equivalence_config_for_x86_uses_register_set_live_out() {
+        let config = EquivalenceConfigFor::<crate::isa::X86_64>::default()
+            .with_flags(true)
+            .live_out(X86LiveOut::from_registers(vec![X86Register::RAX]))
+            .random_tests(2)
+            .no_timeout()
+            .set_fast_only(true);
+
+        assert!(config.live_out.contains(X86Register::RAX));
+        assert!(config.live_out.flags_live());
+        assert_eq!(config.random_test_count, 2);
+        assert_eq!(config.smt_timeout, None);
+        assert!(config.fast_only);
+    }
+
+    #[test]
     fn x86_mov_zero_equivalent_to_xor_self_when_flags_dead() {
         let seq_mov = vec![X86Instruction::MovImm {
             rd: X86Register::RAX,
@@ -988,10 +1145,10 @@ mod tests {
             rd: X86Register::RAX,
             rs: X86Register::RAX,
         }];
-        let cfg = X86EquivalenceConfig::new(64)
-            .live_out(X86LiveOutMask::from_registers(vec![X86Register::RAX]));
+        let cfg = EquivalenceConfigFor::<crate::isa::X86_64>::default()
+            .live_out(X86LiveOut::from_registers(vec![X86Register::RAX]));
         assert_eq!(
-            check_equivalence_x86(&seq_mov, &seq_xor, &cfg),
+            check_equivalence_for::<crate::isa::X86_64>(&seq_mov, &seq_xor, &cfg),
             EquivalenceResult::Equivalent
         );
     }
@@ -1008,13 +1165,35 @@ mod tests {
             rd: X86Register::RAX,
             rs: X86Register::RAX,
         }];
-        let cfg = X86EquivalenceConfig::new(64)
-            .live_out(X86LiveOutMask::from_registers(vec![X86Register::RAX]).with_flags(true))
-            .fast_only();
+        let cfg = EquivalenceConfigFor::<crate::isa::X86_64>::default()
+            .live_out(X86LiveOut::from_registers(vec![X86Register::RAX]).with_flags(true))
+            .set_fast_only(true);
         assert!(matches!(
-            check_equivalence_x86(&seq_mov, &seq_xor, &cfg),
+            check_equivalence_for::<crate::isa::X86_64>(&seq_mov, &seq_xor, &cfg),
             EquivalenceResult::NotEquivalent
         ));
+    }
+
+    #[test]
+    fn x86_fast_only_refutation_skips_smt_when_flags_live() {
+        let seq_mov = vec![X86Instruction::MovImm {
+            rd: X86Register::RAX,
+            imm: 0,
+        }];
+        let seq_xor = vec![X86Instruction::XorReg {
+            rd: X86Register::RAX,
+            rs: X86Register::RAX,
+        }];
+        let cfg = EquivalenceConfigFor::<crate::isa::X86_64>::fast_only()
+            .live_out(X86LiveOut::from_registers(vec![X86Register::RAX]).with_flags(true));
+
+        let (result, metrics) =
+            check_equivalence_for_metrics::<crate::isa::X86_64>(&seq_mov, &seq_xor, &cfg);
+
+        assert_eq!(result, EquivalenceResult::NotEquivalent);
+        assert!(!metrics.smt_called);
+        assert_eq!(metrics.smt_elapsed, Duration::ZERO);
+        assert!(metrics.smt_formula_bytes.is_none());
     }
 
     #[test]
@@ -1029,12 +1208,12 @@ mod tests {
             rn: X86Register::RAX,
             rs: X86Register::RCX,
         }];
-        let cfg = X86EquivalenceConfig::new(64)
-            .live_out(X86LiveOutMask::empty())
-            .fast_only();
+        let cfg = EquivalenceConfigFor::<crate::isa::X86_64>::default()
+            .live_out(X86LiveOut::empty())
+            .set_fast_only(true);
         // CMP is present, so EFLAGS comparison auto-engages.
         assert!(matches!(
-            check_equivalence_x86(&seq1, &seq2, &cfg),
+            check_equivalence_for::<crate::isa::X86_64>(&seq1, &seq2, &cfg),
             EquivalenceResult::NotEquivalent
         ));
     }
@@ -1049,12 +1228,77 @@ mod tests {
             rd: X86Register::RAX,
             imm: 42,
         }];
-        let cfg = X86EquivalenceConfig::new(64)
-            .live_out(X86LiveOutMask::from_registers(vec![X86Register::RAX]));
+        let cfg = EquivalenceConfigFor::<crate::isa::X86_64>::default()
+            .live_out(X86LiveOut::from_registers(vec![X86Register::RAX]));
         assert_eq!(
-            check_equivalence_x86(&seq1, &seq2, &cfg),
+            check_equivalence_for::<crate::isa::X86_64>(&seq1, &seq2, &cfg),
             EquivalenceResult::Equivalent
         );
+    }
+
+    #[test]
+    fn x86_64_fast_only_equivalent_result_skips_smt() {
+        let seq1 = vec![X86Instruction::MovImm {
+            rd: X86Register::RAX,
+            imm: 42,
+        }];
+        let seq2 = vec![X86Instruction::MovImm {
+            rd: X86Register::RAX,
+            imm: 42,
+        }];
+        let cfg = EquivalenceConfigFor::<crate::isa::X86_64>::fast_only()
+            .live_out(X86LiveOut::from_registers(vec![X86Register::RAX]));
+
+        let (result, metrics) =
+            check_equivalence_for_metrics::<crate::isa::X86_64>(&seq1, &seq2, &cfg);
+
+        assert_eq!(result, EquivalenceResult::Equivalent);
+        assert!(!metrics.smt_called);
+        assert_eq!(metrics.smt_elapsed, Duration::ZERO);
+        assert!(metrics.smt_formula_bytes.is_none());
+    }
+
+    #[test]
+    fn x86_32_fast_only_equivalent_result_skips_smt() {
+        let seq1 = vec![X86Instruction::MovImm {
+            rd: X86Register::RAX,
+            imm: 42,
+        }];
+        let seq2 = vec![X86Instruction::MovImm {
+            rd: X86Register::RAX,
+            imm: 42,
+        }];
+        let cfg = EquivalenceConfigFor::<crate::isa::X86_32>::fast_only()
+            .live_out(X86LiveOut::from_registers(vec![X86Register::RAX]));
+
+        let (result, metrics) =
+            check_equivalence_for_metrics::<crate::isa::X86_32>(&seq1, &seq2, &cfg);
+
+        assert_eq!(result, EquivalenceResult::Equivalent);
+        assert!(!metrics.smt_called);
+        assert_eq!(metrics.smt_elapsed, Duration::ZERO);
+        assert!(metrics.smt_formula_bytes.is_none());
+    }
+
+    #[test]
+    fn x86_non_fast_equivalent_result_still_invokes_smt() {
+        let seq_mov = vec![X86Instruction::MovImm {
+            rd: X86Register::RAX,
+            imm: 0,
+        }];
+        let seq_xor = vec![X86Instruction::XorReg {
+            rd: X86Register::RAX,
+            rs: X86Register::RAX,
+        }];
+        let cfg = EquivalenceConfigFor::<crate::isa::X86_64>::default()
+            .live_out(X86LiveOut::from_registers(vec![X86Register::RAX]));
+
+        let (result, metrics) =
+            check_equivalence_for_metrics::<crate::isa::X86_64>(&seq_mov, &seq_xor, &cfg);
+
+        assert_eq!(result, EquivalenceResult::Equivalent);
+        assert!(metrics.smt_called);
+        assert!(metrics.smt_elapsed > Duration::ZERO);
     }
 
     // --- SMT path catches flag-only divergence when flags_live ---
@@ -1076,11 +1320,11 @@ mod tests {
             rn: X86Register::RAX,
             rs: X86Register::RCX,
         }];
-        let mut cfg =
-            X86EquivalenceConfig::new(64).live_out(X86LiveOutMask::empty().with_flags(true));
+        let mut cfg = EquivalenceConfigFor::<crate::isa::X86_64>::default()
+            .live_out(X86LiveOut::empty().with_flags(true));
         cfg.random_test_count = 0;
         assert!(matches!(
-            check_equivalence_x86(&seq1, &seq2, &cfg),
+            check_equivalence_for::<crate::isa::X86_64>(&seq1, &seq2, &cfg),
             EquivalenceResult::NotEquivalent
         ));
     }
@@ -1105,9 +1349,10 @@ mod tests {
                 cond: X86Condition::NE,
             },
         ];
-        let cfg = X86EquivalenceConfig::new(64).live_out(X86LiveOutMask::empty());
+        let cfg =
+            EquivalenceConfigFor::<crate::isa::X86_64>::default().live_out(X86LiveOut::empty());
         assert!(matches!(
-            check_equivalence_x86(&seq_je, &seq_jne, &cfg),
+            check_equivalence_for::<crate::isa::X86_64>(&seq_je, &seq_jne, &cfg),
             EquivalenceResult::NotEquivalent
         ));
     }
@@ -1124,9 +1369,10 @@ mod tests {
         };
         let seq1 = vec![prefix, jcc];
         let seq2 = vec![prefix, jcc];
-        let cfg = X86EquivalenceConfig::new(64).live_out(X86LiveOutMask::empty());
+        let cfg =
+            EquivalenceConfigFor::<crate::isa::X86_64>::default().live_out(X86LiveOut::empty());
         assert_eq!(
-            check_equivalence_x86(&seq1, &seq2, &cfg),
+            check_equivalence_for::<crate::isa::X86_64>(&seq1, &seq2, &cfg),
             EquivalenceResult::Equivalent
         );
     }
@@ -1148,11 +1394,11 @@ mod tests {
             rd: X86Register::RAX,
             rs: X86Register::RBX,
         }];
-        let cfg = X86EquivalenceConfig::new(64)
-            .live_out(X86LiveOutMask::from_registers(vec![X86Register::RAX]))
-            .fast_only();
+        let cfg = EquivalenceConfigFor::<crate::isa::X86_64>::default()
+            .live_out(X86LiveOut::from_registers(vec![X86Register::RAX]))
+            .set_fast_only(true);
         assert!(matches!(
-            check_equivalence_x86(&target, &proposal, &cfg),
+            check_equivalence_for::<crate::isa::X86_64>(&target, &proposal, &cfg),
             EquivalenceResult::NotEquivalent
         ));
     }
@@ -1185,10 +1431,10 @@ mod tests {
                 cond: X86Condition::E,
             },
         ];
-        let cfg = X86EquivalenceConfig::new(64)
-            .live_out(X86LiveOutMask::from_registers(vec![X86Register::RAX]));
+        let cfg = EquivalenceConfigFor::<crate::isa::X86_64>::default()
+            .live_out(X86LiveOut::from_registers(vec![X86Register::RAX]));
         assert!(matches!(
-            check_equivalence_x86(&target, &proposal, &cfg),
+            check_equivalence_for::<crate::isa::X86_64>(&target, &proposal, &cfg),
             EquivalenceResult::NotEquivalent
         ));
     }
@@ -1207,9 +1453,10 @@ mod tests {
             },
         ];
         let seq_without = vec![prefix];
-        let cfg = X86EquivalenceConfig::new(64).live_out(X86LiveOutMask::empty());
+        let cfg =
+            EquivalenceConfigFor::<crate::isa::X86_64>::default().live_out(X86LiveOut::empty());
         assert!(matches!(
-            check_equivalence_x86(&seq_with_jcc, &seq_without, &cfg),
+            check_equivalence_for::<crate::isa::X86_64>(&seq_with_jcc, &seq_without, &cfg),
             EquivalenceResult::NotEquivalent
         ));
     }
@@ -1228,10 +1475,11 @@ mod tests {
             rn: X86Register::RAX,
             rs: X86Register::RCX,
         }];
-        let mut cfg = X86EquivalenceConfig::new(64).live_out(X86LiveOutMask::empty());
+        let mut cfg =
+            EquivalenceConfigFor::<crate::isa::X86_64>::default().live_out(X86LiveOut::empty());
         cfg.random_test_count = 0;
         assert_eq!(
-            check_equivalence_x86(&seq1, &seq2, &cfg),
+            check_equivalence_for::<crate::isa::X86_64>(&seq1, &seq2, &cfg),
             EquivalenceResult::Equivalent
         );
     }
@@ -1244,11 +1492,11 @@ mod tests {
             rn: X86Register::RAX,
             rs: X86Register::RBX,
         }];
-        let mut cfg =
-            X86EquivalenceConfig::new(64).live_out(X86LiveOutMask::empty().with_flags(true));
+        let mut cfg = EquivalenceConfigFor::<crate::isa::X86_64>::default()
+            .live_out(X86LiveOut::empty().with_flags(true));
         cfg.random_test_count = 0;
         assert_eq!(
-            check_equivalence_x86(&cmp.clone(), &cmp, &cfg),
+            check_equivalence_for::<crate::isa::X86_64>(&cmp.clone(), &cmp, &cfg),
             EquivalenceResult::Equivalent
         );
     }
@@ -1686,6 +1934,51 @@ mod tests {
 
         assert_eq!(
             check_equivalence(&seq1, &seq2),
+            EquivalenceResult::Equivalent
+        );
+    }
+
+    #[test]
+    fn w_mov_add_fuses_to_w_add() {
+        let seq1 = vec![
+            Instruction::MovRegW {
+                rd: Register::X0,
+                rn: Register::X1,
+            },
+            Instruction::AddW {
+                rd: Register::X0,
+                rn: Register::X0,
+                rm: Operand::Immediate(1),
+            },
+        ];
+
+        let seq2 = vec![Instruction::AddW {
+            rd: Register::X0,
+            rn: Register::X1,
+            rm: Operand::Immediate(1),
+        }];
+
+        assert_eq!(
+            check_equivalence(&seq1, &seq2),
+            EquivalenceResult::Equivalent
+        );
+    }
+
+    #[test]
+    fn w_add_is_not_x_add_when_high_bits_are_live() {
+        let w_add = vec![Instruction::AddW {
+            rd: Register::X0,
+            rn: Register::X1,
+            rm: Operand::Immediate(0),
+        }];
+        let x_add = vec![Instruction::Add {
+            rd: Register::X0,
+            rn: Register::X1,
+            rm: Operand::Immediate(0),
+        }];
+
+        assert_ne!(
+            check_equivalence(&w_add, &x_add),
             EquivalenceResult::Equivalent
         );
     }
@@ -2501,6 +2794,46 @@ mod tests {
         );
     }
 
+    /// SMT proves `SBFX rd,rn,#lsb,#width` ≡
+    /// `LSR tmp,rn,#lsb; LSL tmp,tmp,#(64-width); ASR rd,tmp,#(64-width)`.
+    #[test]
+    fn test_sbfx_equivalent_to_lsr_lsl_asr() {
+        let lsb = 4i64;
+        let width = 8u8;
+        let sign_extend_shift = 64i64 - width as i64;
+
+        let sbfx = vec![Instruction::Sbfx {
+            rd: Register::X0,
+            rn: Register::X1,
+            lsb: lsb as u8,
+            width,
+        }];
+
+        let lsr_lsl_asr = vec![
+            Instruction::Lsr {
+                rd: Register::X2,
+                rn: Register::X1,
+                shift: Operand::Immediate(lsb),
+            },
+            Instruction::Lsl {
+                rd: Register::X2,
+                rn: Register::X2,
+                shift: Operand::Immediate(sign_extend_shift),
+            },
+            Instruction::Asr {
+                rd: Register::X0,
+                rn: Register::X2,
+                shift: Operand::Immediate(sign_extend_shift),
+            },
+        ];
+
+        let config = EquivalenceConfig::with_live_out(LiveOut::from_registers(vec![Register::X0]));
+        assert_eq!(
+            check_equivalence_with_config(&sbfx, &lsr_lsl_asr, &config),
+            EquivalenceResult::Equivalent
+        );
+    }
+
     /// Acceptance criterion #1 from issue #61:
     /// SMT proves `UBFX rd,rn,#lsb,#width` ≡ `LSR t,rn,#lsb; AND rd,t,#((1<<width)-1)`.
     #[test]
@@ -2533,6 +2866,133 @@ mod tests {
         let config = EquivalenceConfig::with_live_out(LiveOut::from_registers(vec![Register::X0]));
         assert_eq!(
             check_equivalence_with_config(&ubfx, &lsr_and, &config),
+            EquivalenceResult::Equivalent
+        );
+    }
+
+    /// SMT proves `BFXIL rd,rn,#lsb,#width` ≡ {
+    ///   LSR tmp,rn,#lsb; AND tmp,tmp,#low_mask;
+    ///   AND clear,rd,#!low_mask; ORR rd,clear,tmp
+    /// }.
+    #[test]
+    fn test_bfxil_equivalent_to_lsr_mask_clear_or() {
+        let lsb = 8i64;
+        let width = 8u8;
+        let low_mask = (1i64 << width) - 1;
+        let clear_mask = !low_mask;
+
+        let bfxil = vec![Instruction::Bfxil {
+            rd: Register::X0,
+            rn: Register::X1,
+            lsb: lsb as u8,
+            width,
+        }];
+
+        let expanded = vec![
+            Instruction::Lsr {
+                rd: Register::X2,
+                rn: Register::X1,
+                shift: Operand::Immediate(lsb),
+            },
+            Instruction::And {
+                rd: Register::X2,
+                rn: Register::X2,
+                rm: Operand::Immediate(low_mask),
+                width: crate::ir::RegisterWidth::X64,
+            },
+            Instruction::And {
+                rd: Register::X3,
+                rn: Register::X0,
+                rm: Operand::Immediate(clear_mask),
+                width: crate::ir::RegisterWidth::X64,
+            },
+            Instruction::Orr {
+                rd: Register::X0,
+                rn: Register::X3,
+                rm: Operand::Register(Register::X2),
+                width: crate::ir::RegisterWidth::X64,
+            },
+        ];
+
+        let config = EquivalenceConfig::with_live_out(LiveOut::from_registers(vec![Register::X0]));
+        assert_eq!(
+            check_equivalence_with_config(&bfxil, &expanded, &config),
+            EquivalenceResult::Equivalent
+        );
+    }
+
+    /// SMT proves `UBFIZ rd,rn,#lsb,#width` ≡
+    /// `AND tmp,rn,#low_mask; LSL rd,tmp,#lsb`.
+    #[test]
+    fn test_ubfiz_equivalent_to_and_lsl() {
+        let lsb = 4i64;
+        let width = 8u8;
+        let low_mask = (1i64 << width) - 1;
+
+        let ubfiz = vec![Instruction::Ubfiz {
+            rd: Register::X0,
+            rn: Register::X1,
+            lsb: lsb as u8,
+            width,
+        }];
+
+        let and_lsl = vec![
+            Instruction::And {
+                rd: Register::X2,
+                rn: Register::X1,
+                rm: Operand::Immediate(low_mask),
+                width: crate::ir::RegisterWidth::X64,
+            },
+            Instruction::Lsl {
+                rd: Register::X0,
+                rn: Register::X2,
+                shift: Operand::Immediate(lsb),
+            },
+        ];
+
+        let config = EquivalenceConfig::with_live_out(LiveOut::from_registers(vec![Register::X0]));
+        assert_eq!(
+            check_equivalence_with_config(&ubfiz, &and_lsl, &config),
+            EquivalenceResult::Equivalent
+        );
+    }
+
+    /// SMT proves `SBFIZ rd,rn,#lsb,#width` ≡
+    /// `LSL tmp,rn,#(64-width); ASR tmp,tmp,#(64-width); LSL rd,tmp,#lsb`.
+    #[test]
+    fn test_sbfiz_equivalent_to_lsl_asr_lsl() {
+        let lsb = 4i64;
+        let width = 8u8;
+        let sign_extend_shift = 64i64 - width as i64;
+
+        let sbfiz = vec![Instruction::Sbfiz {
+            rd: Register::X0,
+            rn: Register::X1,
+            lsb: lsb as u8,
+            width,
+        }];
+
+        let lsl_asr_lsl = vec![
+            Instruction::Lsl {
+                rd: Register::X2,
+                rn: Register::X1,
+                shift: Operand::Immediate(sign_extend_shift),
+            },
+            Instruction::Asr {
+                rd: Register::X2,
+                rn: Register::X2,
+                shift: Operand::Immediate(sign_extend_shift),
+            },
+            Instruction::Lsl {
+                rd: Register::X0,
+                rn: Register::X2,
+                shift: Operand::Immediate(lsb),
+            },
+        ];
+
+        let config = EquivalenceConfig::with_live_out(LiveOut::from_registers(vec![Register::X0]));
+        assert_eq!(
+            check_equivalence_with_config(&sbfiz, &lsl_asr_lsl, &config),
             EquivalenceResult::Equivalent
         );
     }

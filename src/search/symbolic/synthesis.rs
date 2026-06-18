@@ -41,7 +41,7 @@ fn should_stop(config: &SearchConfig, start_time: Instant) -> bool {
 /// Routes through `SymbolicBackend<I>` for every ISA-specific operation:
 /// candidate enumeration, sequence-cost summation, equivalence check.
 /// AArch64 routes to `check_equivalence_with_config`; x86 routes to
-/// `check_equivalence_x86`.
+/// x86's generic equivalence backend.
 pub struct SymbolicSearch<I = crate::isa::AArch64> {
     statistics: SearchStatistics,
     _marker: PhantomData<I>,
@@ -406,12 +406,29 @@ mod tests {
     use crate::semantics::EquivalenceMetrics;
     use crate::semantics::cost::CostMetric;
     use crate::semantics::live_out::LiveOut;
-    use std::sync::Mutex;
-    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    use std::sync::{Arc, Mutex};
     use std::time::Duration;
 
     static TEST_EQUIVALENCE_CHECKS: AtomicUsize = AtomicUsize::new(0);
+    static TEST_STOP_FLAG: Mutex<Option<Arc<AtomicBool>>> = Mutex::new(None);
     static SYMBOLIC_INNER_LOOP_TEST_LOCK: Mutex<()> = Mutex::new(());
+
+    struct TestStopFlagGuard;
+
+    impl Drop for TestStopFlagGuard {
+        fn drop(&mut self) {
+            if let Ok(mut slot) = TEST_STOP_FLAG.lock() {
+                *slot = None;
+            }
+        }
+    }
+
+    fn install_test_stop_flag(flag: Arc<AtomicBool>) -> TestStopFlagGuard {
+        let mut slot = TEST_STOP_FLAG.lock().expect("test stop flag lock poisoned");
+        *slot = Some(flag);
+        TestStopFlagGuard
+    }
 
     #[derive(Clone)]
     struct TestIsa;
@@ -581,7 +598,13 @@ mod tests {
             _width: u32,
             _timeout: Duration,
         ) -> (EquivalenceResult, EquivalenceMetrics) {
-            TEST_EQUIVALENCE_CHECKS.fetch_add(1, Ordering::SeqCst);
+            let check_number = TEST_EQUIVALENCE_CHECKS.fetch_add(1, Ordering::SeqCst) + 1;
+            if check_number == 1 {
+                let slot = TEST_STOP_FLAG.lock().expect("test stop flag lock poisoned");
+                if let Some(flag) = slot.as_ref() {
+                    flag.store(true, Ordering::SeqCst);
+                }
+            }
             std::thread::sleep(Duration::from_millis(1));
             (
                 EquivalenceResult::NotEquivalent,
@@ -668,6 +691,44 @@ mod tests {
             // The instruction should write to X0
             assert_eq!(optimized[0].destination(), Some(Register::X0));
         }
+    }
+
+    #[test]
+    fn symbolic_search_drops_flag_writer_only_when_flags_are_dead() {
+        let config = SearchConfig::default()
+            .with_symbolic(SymbolicConfig::default().with_timeout(Duration::from_secs(5)))
+            .with_registers(vec![Register::X0, Register::X1])
+            .with_immediates(vec![0, 7]);
+        let target = vec![
+            Instruction::Cmp {
+                rn: Register::X0,
+                rm: Operand::Immediate(0),
+            },
+            Instruction::MovImm {
+                rd: Register::X1,
+                imm: 7,
+            },
+        ];
+        let live_out = LiveOut::from_registers(vec![Register::X1]);
+
+        let mut search = SymbolicSearch::<AArch64>::new();
+        let flags_dead = search.search(&target, &live_out, &config);
+        assert!(
+            flags_dead.found_optimization,
+            "flags-dead search should drop the unobserved CMP"
+        );
+        let optimized = flags_dead
+            .optimized_sequence
+            .expect("optimization should be present");
+        assert_eq!(optimized.len(), 1);
+        assert!(!optimized.iter().any(Instruction::modifies_flags));
+
+        search.reset();
+        let flags_live = search.search(&target, &live_out.with_flags(true), &config);
+        assert!(
+            !flags_live.found_optimization,
+            "flags-live search must keep the CMP because NZCV is observable"
+        );
     }
 
     #[test]
@@ -772,9 +833,6 @@ mod tests {
 
     #[test]
     fn symbolic_length_two_inner_loop_respects_cooperative_stop_flag() {
-        use std::sync::Arc;
-        use std::sync::atomic::AtomicBool;
-        use std::thread;
         use std::time::Instant;
 
         let _guard = SYMBOLIC_INNER_LOOP_TEST_LOCK
@@ -783,14 +841,7 @@ mod tests {
         TEST_EQUIVALENCE_CHECKS.store(0, Ordering::SeqCst);
 
         let flag = Arc::new(AtomicBool::new(false));
-        let flag_for_stop = Arc::clone(&flag);
-
-        let stopper = thread::spawn(move || {
-            while TEST_EQUIVALENCE_CHECKS.load(Ordering::SeqCst) == 0 {
-                thread::yield_now();
-            }
-            flag_for_stop.store(true, Ordering::SeqCst);
-        });
+        let _stop_guard = install_test_stop_flag(Arc::clone(&flag));
 
         let mut search: SymbolicSearch<TestIsa> = SymbolicSearch::new();
         let config = SearchConfig::default()
@@ -814,8 +865,6 @@ mod tests {
             Instant::now(),
         );
 
-        stopper.join().expect("stopper thread panicked");
-
         let checks = TEST_EQUIVALENCE_CHECKS.load(Ordering::SeqCst);
         assert_eq!(result, None);
         assert!(
@@ -826,9 +875,6 @@ mod tests {
 
     #[test]
     fn symbolic_length_three_inner_loops_respect_cooperative_stop_flag() {
-        use std::sync::Arc;
-        use std::sync::atomic::AtomicBool;
-        use std::thread;
         use std::time::Instant;
 
         let _guard = SYMBOLIC_INNER_LOOP_TEST_LOCK
@@ -837,14 +883,7 @@ mod tests {
         TEST_EQUIVALENCE_CHECKS.store(0, Ordering::SeqCst);
 
         let flag = Arc::new(AtomicBool::new(false));
-        let flag_for_stop = Arc::clone(&flag);
-
-        let stopper = thread::spawn(move || {
-            while TEST_EQUIVALENCE_CHECKS.load(Ordering::SeqCst) == 0 {
-                thread::yield_now();
-            }
-            flag_for_stop.store(true, Ordering::SeqCst);
-        });
+        let _stop_guard = install_test_stop_flag(Arc::clone(&flag));
 
         let mut search: SymbolicSearch<TestIsa> = SymbolicSearch::new();
         let config = SearchConfig::default()
@@ -868,8 +907,6 @@ mod tests {
             &mut best_cost,
             Instant::now(),
         );
-
-        stopper.join().expect("stopper thread panicked");
 
         let checks = TEST_EQUIVALENCE_CHECKS.load(Ordering::SeqCst);
         assert_eq!(result, None);
@@ -928,7 +965,7 @@ mod tests {
     fn x86_symbolic_runs_end_to_end() {
         use crate::isa::X86_64;
         use crate::isa::x86::{X86Instruction, X86Register};
-        use crate::semantics::state::X86LiveOutMask;
+        use crate::semantics::live_out::X86LiveOut;
         use std::time::Duration;
 
         let mut search: SymbolicSearch<X86_64> = SymbolicSearch::new();
@@ -938,7 +975,7 @@ mod tests {
             .with_x86_width(64)
             .with_timeout_option(Some(Duration::from_secs(30)));
 
-        let live_out = X86LiveOutMask::from_registers(vec![X86Register::RAX]).with_flags(false);
+        let live_out = X86LiveOut::from_registers(vec![X86Register::RAX]).with_flags(false);
 
         // Target: `mov rax, 0; add rax, rbx` — equivalent to a single
         // `mov rax, rbx` when flags aren't live (live_out.flags_live = false)
@@ -969,7 +1006,7 @@ mod tests {
     fn x86_symbolic_mode32_runs_end_to_end() {
         use crate::isa::X86_32;
         use crate::isa::x86::{X86Instruction, X86Register};
-        use crate::semantics::state::X86LiveOutMask;
+        use crate::semantics::live_out::X86LiveOut;
         use std::time::Duration;
 
         let mut search: SymbolicSearch<X86_32> = SymbolicSearch::new();
@@ -979,7 +1016,7 @@ mod tests {
             .with_x86_width(32)
             .with_timeout_option(Some(Duration::from_secs(5)));
 
-        let live_out = X86LiveOutMask::from_registers(vec![X86Register::RAX]).with_flags(false);
+        let live_out = X86LiveOut::from_registers(vec![X86Register::RAX]).with_flags(false);
         let target = vec![
             X86Instruction::MovImm {
                 rd: X86Register::RAX,

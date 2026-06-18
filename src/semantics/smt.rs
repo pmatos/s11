@@ -81,6 +81,24 @@ fn eval_logical_operand(state: &MachineState, operand: &Operand, width: Register
     }
 }
 
+fn eval_w_operand(state: &MachineState, operand: &Operand) -> BV {
+    match operand {
+        Operand::Register(reg) => state.get_register(*reg).extract(31, 0),
+        Operand::Immediate(imm) => BV::from_i64(*imm, 32),
+        Operand::ShiftedRegister { reg, kind, amount } => {
+            let value = state.get_register(*reg).extract(31, 0);
+            let amt = BV::from_u64(u64::from(*amount), 32);
+            match kind {
+                crate::ir::ShiftKind::Lsl => value.bvshl(&amt),
+                crate::ir::ShiftKind::Lsr => value.bvlshr(&amt),
+                crate::ir::ShiftKind::Asr => value.bvashr(&amt),
+                crate::ir::ShiftKind::Ror => bv_ror(&value, &amt, 32),
+            }
+        }
+        Operand::ExtendedRegister { .. } => state.eval_operand(operand).extract(31, 0),
+    }
+}
+
 fn zero_extend_to_state_width(value: BV, value_width: u32, state_width: u32) -> BV {
     if value_width == state_width {
         value
@@ -89,24 +107,37 @@ fn zero_extend_to_state_width(value: BV, value_width: u32, state_width: u32) -> 
     }
 }
 
-/// Count leading zeros of a `width`-bit BV using a nested ITE chain.
-/// Iterates bit positions from LSB upward; later iterations overwrite the
-/// result when their bit is set, so the final result is the CLZ of the
-/// input — the number of leading zeros — derived from the highest-set-bit
-/// position found (or `width` if no bit is set).
-//
-// TODO(#112): replace this width-deep ITE chain with an O(log n) binary-search
-// decomposition (top-W/2 / top-W/4 / … / top-1) to reduce Z3 formula depth.
+/// Count leading zeros of a `width`-bit BV with a binary-search decomposition.
+///
+/// The result remains `width` bits wide, while the selected chunk halves on
+/// each step. If the upper half is zero, add its width to the count and
+/// continue with the lower half; otherwise continue with the upper half.
 fn bv_clz(value: &BV, width: u32) -> BV {
-    let mut result = BV::from_u64(width as u64, width);
-    let one_bit = BV::from_u64(1, 1);
-    for pos in 0..width {
-        let bit = value.extract(pos, pos);
-        let is_set = bit.eq(&one_bit);
-        let clz_if_top = BV::from_u64((width - 1 - pos) as u64, width);
-        result = is_set.ite(&clz_if_top, &result);
+    debug_assert!(width > 0, "bv_clz requires a nonzero width");
+    debug_assert!(
+        width.is_power_of_two(),
+        "bv_clz binary-search decomposition requires power-of-two width"
+    );
+
+    let mut chunk = value.clone();
+    let mut chunk_width = width;
+    let mut count = BV::from_u64(0, width);
+
+    while chunk_width > 1 {
+        let half = chunk_width / 2;
+        let upper = chunk.extract(chunk_width - 1, half);
+        let lower = chunk.extract(half - 1, 0);
+        let upper_is_zero = upper.eq(BV::from_u64(0, half));
+
+        let incremented = count.bvadd(BV::from_u64(half as u64, width));
+        count = upper_is_zero.ite(&incremented, &count);
+        chunk = upper_is_zero.ite(&lower, &upper);
+        chunk_width = half;
     }
-    result
+
+    let bit_is_zero = chunk.eq(BV::from_u64(0, 1));
+    let incremented = count.bvadd(BV::from_u64(1, width));
+    bit_is_zero.ite(&incremented, &count)
 }
 
 /// Configuration for the SMT solver
@@ -510,6 +541,10 @@ pub fn apply_instruction(mut state: MachineState, instruction: &Instruction) -> 
             let value = state.get_register(*rn).clone();
             state.set_register(*rd, value);
         }
+        Instruction::MovRegW { rd, rn } => {
+            let value = state.get_register(*rn).extract(31, 0);
+            state.set_register(*rd, zero_extend_to_state_width(value, 32, width));
+        }
         Instruction::MovImm { rd, imm } => {
             let value = BV::from_i64(*imm, width);
             state.set_register(*rd, value);
@@ -520,11 +555,23 @@ pub fn apply_instruction(mut state: MachineState, instruction: &Instruction) -> 
             let result = lhs.bvadd(&rhs);
             state.set_register(*rd, result);
         }
+        Instruction::AddW { rd, rn, rm } => {
+            let lhs = state.get_register(*rn).extract(31, 0);
+            let rhs = eval_w_operand(&state, rm);
+            let result = lhs.bvadd(&rhs);
+            state.set_register(*rd, zero_extend_to_state_width(result, 32, width));
+        }
         Instruction::Sub { rd, rn, rm } => {
             let lhs = state.get_register(*rn).clone();
             let rhs = state.eval_operand(rm);
             let result = lhs.bvsub(&rhs);
             state.set_register(*rd, result);
+        }
+        Instruction::SubW { rd, rn, rm } => {
+            let lhs = state.get_register(*rn).extract(31, 0);
+            let rhs = eval_w_operand(&state, rm);
+            let result = lhs.bvsub(&rhs);
+            state.set_register(*rd, zero_extend_to_state_width(result, 32, width));
         }
         Instruction::And {
             rd,
@@ -1222,6 +1269,44 @@ mod tests {
     use super::*;
     use z3::{SatResult, Solver};
 
+    fn max_nested_ite_depth(smt: &str) -> usize {
+        let bytes = smt.as_bytes();
+        let mut paren_depth = 0usize;
+        let mut ite_paren_depths = Vec::new();
+        let mut max_depth = 0usize;
+        let mut i = 0usize;
+
+        while i < bytes.len() {
+            match bytes[i] {
+                b'(' => {
+                    paren_depth += 1;
+                    if is_ite_head(bytes, i) {
+                        ite_paren_depths.push(paren_depth);
+                        max_depth = max_depth.max(ite_paren_depths.len());
+                    }
+                    i += 1;
+                }
+                b')' => {
+                    while ite_paren_depths.last().copied() == Some(paren_depth) {
+                        ite_paren_depths.pop();
+                    }
+                    paren_depth = paren_depth.saturating_sub(1);
+                    i += 1;
+                }
+                _ => i += 1,
+            }
+        }
+
+        max_depth
+    }
+
+    fn is_ite_head(bytes: &[u8], open_paren: usize) -> bool {
+        matches!(bytes.get(open_paren + 1..open_paren + 4), Some(b"ite"))
+            && bytes
+                .get(open_paren + 4)
+                .is_some_and(|b| b.is_ascii_whitespace() || *b == b')')
+    }
+
     #[test]
     fn test_mov_zero_equivalence() {
         let solver = Solver::new();
@@ -1659,6 +1744,19 @@ mod tests {
         let solver = Solver::new();
         solver.assert(final_x0.eq(BV::from_u64(63, 64)).not());
         assert_eq!(solver.check(), SatResult::Unsat, "CLZ(1) must be 63");
+    }
+
+    #[test]
+    fn test_bv_clz_formula_has_logarithmic_ite_depth() {
+        let value = BV::new_const("x", 64);
+        let clz = bv_clz(&value, 64);
+        let smt = clz.to_string();
+
+        assert!(
+            max_nested_ite_depth(&smt) <= 16,
+            "CLZ SMT term should be logarithmic-depth, got nested ite depth {}",
+            max_nested_ite_depth(&smt)
+        );
     }
 
     /// Floor-log2 acceptance test (issue #58): for nonzero `x1`, the sequence
@@ -2888,7 +2986,12 @@ mod tests {
         let values: &[u64] = &[
             0,
             1,
-            0x8000_0000_0000_0000,
+            2,
+            3,
+            0x10,
+            1 << 31,
+            1 << 32,
+            1 << 63,
             0x0000_0000_0000_0080,
             0x0000_0000_FFFF_FFFF,
             0xFFFF_FFFF_FFFF_FFFF,
@@ -2910,7 +3013,20 @@ mod tests {
             0,                     // all zero -> 63
             0xFFFF_FFFF_FFFF_FFFF, // all one -> 63
             0x8000_0000_0000_0000, // sign-bit only -> 0
-            0x4000_0000_0000_0000, // alternate sign -> 0
+            0x4000_0000_0000_0000, // opposite sign after sign bit -> 0
+            0xBFFF_FFFF_FFFF_FFFF, // negative opposite sign after sign bit -> 0
+            0xC000_0000_0000_0000, // one leading sign replica -> 1
+            1,                     // positive sign-fold boundary -> 62
+            2,                     // positive sign-fold boundary -> 61
+            3,                     // positive sign-fold boundary -> 61
+            0x10,                  // positive sign-fold nibble boundary -> 59
+            1 << 31,               // positive sign-fold 32-bit boundary -> 31
+            1 << 32,               // positive sign-fold 32-bit boundary -> 30
+            0xFFFF_FFFF_FFFF_FFFE, // negative sign-fold boundary -> 62
+            0xFFFF_FFFF_FFFF_FFFD, // negative sign-fold boundary -> 61
+            0xFFFF_FFFF_FFFF_FFEF, // negative sign-fold nibble boundary -> 59
+            0xFFFF_FFFF_7FFF_FFFF, // negative sign-fold 32-bit boundary -> 31
+            0xFFFF_FFFE_FFFF_FFFF, // negative sign-fold 32-bit boundary -> 30
             0x0000_0000_FFFF_FFFF, // mid run -> 31
         ];
         for &v1 in values {

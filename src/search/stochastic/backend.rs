@@ -5,19 +5,14 @@
 //! body needs a handful of helpers that aren't part of the executor /
 //! cost / assembler / mutator core traits — RNG-driven random-input
 //! generation, sequence-level cost summation, sequence encodability
-//! against the assembler, equivalence dispatch — so we bundle those
+//! against the assembler — so we bundle those
 //! into `StochasticBackend<I>`.
 //!
 //! Both AArch64 and x86 implement this trait by delegating to the
-//! existing free helpers (`apply_sequence_concrete`, `sequence_cost`,
-//! `check_equivalence_with_config`, etc. for AArch64;
-//! `apply_sequence_concrete_x86`, `cost_x86::sequence_cost`,
-//! `check_equivalence_x86` for x86). When the `EquivalenceConfig<I>`
-//! genericisation in #77 stage 2 step 16 lands, the
-//! `check_equivalence` method can be dropped in favour of a single
-//! generic equivalence check.
+//! existing free helpers (`apply_sequence_concrete`, `check_equivalence_for`,
+//! etc. for AArch64; `apply_sequence_concrete_x86` for x86).
 
-use crate::isa::ISA;
+use crate::isa::{CostModel, ISA, InstructionGenerator};
 use crate::search::config::SearchConfig;
 use crate::semantics::cost::CostMetric;
 use crate::semantics::{EquivalenceMetrics, EquivalenceResult};
@@ -77,10 +72,7 @@ pub trait StochasticBackend<I: ISA>: Sized {
     /// Sequence-level encodability against the ISA's assembler.
     fn is_encodable(seq: &[I::Instruction]) -> bool;
 
-    /// Run the full equivalence check. AArch64 routes to
-    /// `check_equivalence_with_config_metrics`; x86 routes to
-    /// `check_equivalence_x86` and returns default metrics (no x86
-    /// instrumentation yet — issue #70 only wires AArch64).
+    /// Run the full equivalence check.
     fn check_equivalence(
         target: &[I::Instruction],
         proposal: &[I::Instruction],
@@ -171,7 +163,11 @@ impl StochasticBackend<crate::isa::AArch64> for crate::isa::AArch64 {
     }
 
     fn sequence_cost(seq: &[crate::ir::Instruction], metric: &CostMetric, _width: u32) -> u64 {
-        crate::semantics::cost::sequence_cost(seq, metric)
+        <crate::isa::AArch64 as CostModel<crate::ir::Instruction>>::sequence_cost(
+            &crate::isa::AArch64,
+            seq,
+            metric,
+        )
     }
 
     fn is_encodable(seq: &[crate::ir::Instruction]) -> bool {
@@ -185,15 +181,13 @@ impl StochasticBackend<crate::isa::AArch64> for crate::isa::AArch64 {
         _width: u32,
         timeout: Duration,
     ) -> (EquivalenceResult, EquivalenceMetrics) {
-        // Treat NZCV as live-out: the pre-refactor `mcmc.rs` body
-        // built the EquivalenceConfig with `.with_flags(true)` so the
-        // SMT solver cannot certify rewrites that diverge on flags
-        // (e.g. `ADD;CMP` → `ADDS`). Symmetry with
-        // `SymbolicBackend<AArch64>::check_equivalence`.
+        // Honor the caller's live-out mask: ELF optimization derives
+        // `flags_live` from the surrounding context, while CLI/test callers
+        // can still opt into conservative NZCV comparison via the mask.
         let cfg = crate::semantics::EquivalenceConfig::with_live_out(live_out.clone())
             .random_tests(0)
             .timeout(timeout)
-            .with_flags(true);
+            .with_flags(live_out.flags_live());
         crate::semantics::equivalence::check_equivalence_with_config_metrics(target, proposal, &cfg)
     }
 
@@ -250,12 +244,31 @@ fn x86_random_sequence<R: RngExt>(
     imms: &[i64],
     mode: crate::assembler::x86::X86Mode,
 ) -> Vec<crate::isa::x86::X86Instruction> {
-    crate::search::candidate_x86::generate_random_x86_sequence(rng, len, regs, imms, mode)
+    let regs: Vec<_> = regs
+        .iter()
+        .copied()
+        .filter(|r| {
+            mode != crate::assembler::x86::X86Mode::Mode32 || matches!(r.index(), Some(i) if i < 8)
+        })
+        .collect();
+    let regs = if regs.is_empty() {
+        vec![crate::isa::x86::X86Register::RAX]
+    } else {
+        regs
+    };
+    let imms = if imms.is_empty() {
+        vec![0]
+    } else {
+        imms.to_vec()
+    };
+    (0..len)
+        .map(|_| crate::isa::x86::X86InstructionGenerator.generate_random(rng, &regs, &imms))
+        .collect()
 }
 
 impl StochasticBackend<crate::isa::X86_64> for crate::isa::X86_64 {
     type State = crate::semantics::state::X86ConcreteMachineState;
-    type LiveOut = crate::semantics::state::X86LiveOutMask;
+    type LiveOut = crate::semantics::live_out::X86LiveOut;
 
     fn registers_from_config(config: &SearchConfig) -> Vec<crate::isa::x86::X86Register> {
         config.x86_available_registers.clone()
@@ -292,29 +305,33 @@ impl StochasticBackend<crate::isa::X86_64> for crate::isa::X86_64 {
     fn sequence_cost(
         seq: &[crate::isa::x86::X86Instruction],
         metric: &CostMetric,
-        width: u32,
+        _width: u32,
     ) -> u64 {
-        crate::semantics::cost_x86::sequence_cost(seq, metric, width)
+        <crate::isa::X86_64 as CostModel<crate::isa::x86::X86Instruction>>::sequence_cost(
+            &crate::isa::X86_64,
+            seq,
+            metric,
+        )
     }
 
     fn is_encodable(seq: &[crate::isa::x86::X86Instruction]) -> bool {
-        crate::search::candidate_x86::is_x86_sequence_encodable(
-            seq,
-            crate::assembler::x86::X86Mode::Mode64,
-        )
+        crate::search::candidate::is_sequence_encodable_for(seq, &crate::isa::X86_64)
     }
 
     fn check_equivalence(
         target: &[crate::isa::x86::X86Instruction],
         proposal: &[crate::isa::x86::X86Instruction],
         live_out: &Self::LiveOut,
-        width: u32,
+        _width: u32,
         timeout: Duration,
     ) -> (EquivalenceResult, EquivalenceMetrics) {
-        let result = crate::semantics::equivalence::check_equivalence_x86_for_search(
-            target, proposal, live_out, width, timeout,
-        );
-        (result, EquivalenceMetrics::default())
+        let cfg =
+            crate::semantics::equivalence::EquivalenceConfigFor::<crate::isa::X86_64>::default()
+                .live_out(live_out.clone())
+                .timeout(timeout);
+        crate::semantics::equivalence::check_equivalence_for_metrics::<crate::isa::X86_64>(
+            target, proposal, &cfg,
+        )
     }
 
     fn random_sequence<R: RngExt>(
@@ -342,7 +359,7 @@ impl StochasticBackend<crate::isa::X86_64> for crate::isa::X86_64 {
 
 impl StochasticBackend<crate::isa::X86_32> for crate::isa::X86_32 {
     type State = crate::semantics::state::X86ConcreteMachineState;
-    type LiveOut = crate::semantics::state::X86LiveOutMask;
+    type LiveOut = crate::semantics::live_out::X86LiveOut;
 
     fn registers_from_config(config: &SearchConfig) -> Vec<crate::isa::x86::X86Register> {
         config.x86_available_registers.clone()
@@ -379,29 +396,33 @@ impl StochasticBackend<crate::isa::X86_32> for crate::isa::X86_32 {
     fn sequence_cost(
         seq: &[crate::isa::x86::X86Instruction],
         metric: &CostMetric,
-        width: u32,
+        _width: u32,
     ) -> u64 {
-        crate::semantics::cost_x86::sequence_cost(seq, metric, width)
+        <crate::isa::X86_32 as CostModel<crate::isa::x86::X86Instruction>>::sequence_cost(
+            &crate::isa::X86_32,
+            seq,
+            metric,
+        )
     }
 
     fn is_encodable(seq: &[crate::isa::x86::X86Instruction]) -> bool {
-        crate::search::candidate_x86::is_x86_sequence_encodable(
-            seq,
-            crate::assembler::x86::X86Mode::Mode32,
-        )
+        crate::search::candidate::is_sequence_encodable_for(seq, &crate::isa::X86_32)
     }
 
     fn check_equivalence(
         target: &[crate::isa::x86::X86Instruction],
         proposal: &[crate::isa::x86::X86Instruction],
         live_out: &Self::LiveOut,
-        width: u32,
+        _width: u32,
         timeout: Duration,
     ) -> (EquivalenceResult, EquivalenceMetrics) {
-        let result = crate::semantics::equivalence::check_equivalence_x86_for_search(
-            target, proposal, live_out, width, timeout,
-        );
-        (result, EquivalenceMetrics::default())
+        let cfg =
+            crate::semantics::equivalence::EquivalenceConfigFor::<crate::isa::X86_32>::default()
+                .live_out(live_out.clone())
+                .timeout(timeout);
+        crate::semantics::equivalence::check_equivalence_for_metrics::<crate::isa::X86_32>(
+            target, proposal, &cfg,
+        )
     }
 
     fn random_sequence<R: RngExt>(
@@ -438,8 +459,50 @@ mod tests {
     //! candidate, which depends on RNG and isn't a reliable coverage
     //! signal).
     use super::*;
+    use crate::ir::{Instruction, Operand, Register};
+    use crate::isa::AArch64;
     use crate::isa::x86::{X86Instruction, X86Register};
-    use crate::semantics::state::X86LiveOutMask;
+    use crate::semantics::live_out::LiveOut;
+    use crate::semantics::live_out::X86LiveOut;
+
+    #[test]
+    fn aarch64_backend_honors_flags_dead_live_out_mask() {
+        let target = vec![
+            Instruction::Cmp {
+                rn: Register::X0,
+                rm: Operand::Immediate(0),
+            },
+            Instruction::MovImm {
+                rd: Register::X1,
+                imm: 7,
+            },
+        ];
+        let proposal = vec![Instruction::MovImm {
+            rd: Register::X1,
+            imm: 7,
+        }];
+        let live_out = LiveOut::from_registers(vec![Register::X1]);
+
+        let result = <AArch64 as StochasticBackend<AArch64>>::check_equivalence(
+            &target,
+            &proposal,
+            &live_out,
+            64,
+            Duration::from_secs(2),
+        );
+
+        assert_eq!(result.0, EquivalenceResult::Equivalent);
+
+        let flags_live_result = <AArch64 as StochasticBackend<AArch64>>::check_equivalence(
+            &target,
+            &proposal,
+            &live_out.with_flags(true),
+            64,
+            Duration::from_secs(2),
+        );
+
+        assert_ne!(flags_live_result.0, EquivalenceResult::Equivalent);
+    }
 
     #[test]
     fn x86_32_stochastic_width_is_architectural_even_with_default_config() {
@@ -467,14 +530,14 @@ mod tests {
             rd: X86Register::RAX,
             imm: 0,
         }];
-        let mask = X86LiveOutMask::from_registers(vec![X86Register::RAX]);
+        let mask = X86LiveOut::from_registers(vec![X86Register::RAX]);
         // Self-equivalent at width 64.
-        let r = crate::semantics::equivalence::check_equivalence_x86_for_search(
-            &target,
-            &target,
-            &mask,
-            64,
-            Duration::from_secs(2),
+        let cfg =
+            crate::semantics::equivalence::EquivalenceConfigFor::<crate::isa::X86_64>::default()
+                .live_out(mask)
+                .timeout(Duration::from_secs(2));
+        let r = crate::semantics::equivalence::check_equivalence_for::<crate::isa::X86_64>(
+            &target, &target, &cfg,
         );
         assert!(matches!(r, EquivalenceResult::Equivalent));
     }
@@ -485,14 +548,14 @@ mod tests {
             rd: X86Register::RAX,
             imm: 0,
         }];
-        let mask = X86LiveOutMask::from_registers(vec![X86Register::RAX]);
+        let mask = X86LiveOut::from_registers(vec![X86Register::RAX]);
         // Self-equivalent at width 32 — exercises the width=32 path.
-        let r = crate::semantics::equivalence::check_equivalence_x86_for_search(
-            &target,
-            &target,
-            &mask,
-            32,
-            Duration::from_secs(2),
+        let cfg =
+            crate::semantics::equivalence::EquivalenceConfigFor::<crate::isa::X86_32>::default()
+                .live_out(mask)
+                .timeout(Duration::from_secs(2));
+        let r = crate::semantics::equivalence::check_equivalence_for::<crate::isa::X86_32>(
+            &target, &target, &cfg,
         );
         assert!(matches!(r, EquivalenceResult::Equivalent));
     }
@@ -503,7 +566,7 @@ mod tests {
             rd: X86Register::RAX,
             imm: 0,
         }];
-        let mask = X86LiveOutMask::from_registers(vec![X86Register::RAX]);
+        let mask = X86LiveOut::from_registers(vec![X86Register::RAX]);
         let r = <crate::isa::X86_64 as StochasticBackend<crate::isa::X86_64>>::check_equivalence(
             &target,
             &target,
@@ -520,7 +583,7 @@ mod tests {
             rd: X86Register::RAX,
             imm: 0,
         }];
-        let mask = X86LiveOutMask::from_registers(vec![X86Register::RAX]);
+        let mask = X86LiveOut::from_registers(vec![X86Register::RAX]);
         let r = <crate::isa::X86_32 as StochasticBackend<crate::isa::X86_32>>::check_equivalence(
             &target,
             &target,
