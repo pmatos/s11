@@ -37,6 +37,12 @@ pub trait SymbolicBackend<I: ISA>: Sized {
         None
     }
 
+    /// Whether this backend can find a strict metric improvement without
+    /// reducing the number of rewritable instructions.
+    fn can_improve_at_same_instruction_count(_metric: &CostMetric) -> bool {
+        false
+    }
+
     /// Sum the cost of every instruction in the sequence.
     fn sequence_cost(seq: &[I::Instruction], metric: &CostMetric, width: u32) -> u64;
 
@@ -135,6 +141,10 @@ impl SymbolicBackend<crate::isa::X86_64> for crate::isa::X86_64 {
             .copied()
     }
 
+    fn can_improve_at_same_instruction_count(metric: &CostMetric) -> bool {
+        matches!(metric, CostMetric::CodeSize)
+    }
+
     fn sequence_cost(
         seq: &[crate::isa::x86::X86Instruction],
         metric: &CostMetric,
@@ -203,6 +213,10 @@ impl SymbolicBackend<crate::isa::X86_32> for crate::isa::X86_32 {
         crate::ir::instructions::split_terminator_x86(target)
             .1
             .copied()
+    }
+
+    fn can_improve_at_same_instruction_count(metric: &CostMetric) -> bool {
+        matches!(metric, CostMetric::CodeSize)
     }
 
     fn sequence_cost(
