@@ -587,9 +587,11 @@ pub fn generate_all_instructions(registers: &[Register], immediates: &[i64]) -> 
     }
 
     // Bit-field manipulation (UBFX/SBFX/BFI/BFXIL/UBFIZ/SBFIZ): sparse
-    // (lsb, width) samples to keep the enumerative budget bounded. With
-    // 31 non-SP registers × 31 rn × ~24 valid (lsb,width) pairs × 6 variants
-    // ≈ 138k additional candidates, comparable to the CCMP/CCMN budget.
+    // (lsb, width) samples to keep the enumerative budget bounded, emitted for
+    // both the X (64-bit) and W (32-bit) register forms. The shared sample
+    // tables are filtered per width against the encodability bound
+    // (lsb < bound, lsb+width <= bound), so the W form naturally drops lsb=32/63
+    // and width=64. This roughly doubles the bit-field slice of the pool.
     const BITFIELD_LSB_SAMPLES: [u8; 5] = [0, 1, 16, 32, 63];
     const BITFIELD_WIDTH_SAMPLES: [u8; 6] = [1, 4, 8, 16, 32, 64];
     for &rd in registers {
@@ -600,17 +602,59 @@ pub fn generate_all_instructions(registers: &[Register], immediates: &[i64]) -> 
             if rn == Register::SP {
                 continue;
             }
-            for &lsb in &BITFIELD_LSB_SAMPLES {
-                for &width in &BITFIELD_WIDTH_SAMPLES {
-                    if (lsb as u16 + width as u16) > 64 {
+            for reg_width in [RegisterWidth::X64, RegisterWidth::W32] {
+                let bound = reg_width.bit_width() as u16;
+                for &lsb in &BITFIELD_LSB_SAMPLES {
+                    if lsb as u16 >= bound {
                         continue;
                     }
-                    instrs.push(Instruction::Ubfx { rd, rn, lsb, width });
-                    instrs.push(Instruction::Sbfx { rd, rn, lsb, width });
-                    instrs.push(Instruction::Bfi { rd, rn, lsb, width });
-                    instrs.push(Instruction::Bfxil { rd, rn, lsb, width });
-                    instrs.push(Instruction::Ubfiz { rd, rn, lsb, width });
-                    instrs.push(Instruction::Sbfiz { rd, rn, lsb, width });
+                    for &width in &BITFIELD_WIDTH_SAMPLES {
+                        if width as u16 > bound || (lsb as u16 + width as u16) > bound {
+                            continue;
+                        }
+                        instrs.push(Instruction::Ubfx {
+                            rd,
+                            rn,
+                            lsb,
+                            width,
+                            reg_width,
+                        });
+                        instrs.push(Instruction::Sbfx {
+                            rd,
+                            rn,
+                            lsb,
+                            width,
+                            reg_width,
+                        });
+                        instrs.push(Instruction::Bfi {
+                            rd,
+                            rn,
+                            lsb,
+                            width,
+                            reg_width,
+                        });
+                        instrs.push(Instruction::Bfxil {
+                            rd,
+                            rn,
+                            lsb,
+                            width,
+                            reg_width,
+                        });
+                        instrs.push(Instruction::Ubfiz {
+                            rd,
+                            rn,
+                            lsb,
+                            width,
+                            reg_width,
+                        });
+                        instrs.push(Instruction::Sbfiz {
+                            rd,
+                            rn,
+                            lsb,
+                            width,
+                            reg_width,
+                        });
+                    }
                 }
             }
         }
@@ -875,8 +919,9 @@ pub fn generate_random_instruction<R: rand::RngExt>(
         }
         // Bit-field manipulation (UBFX/SBFX/BFI/BFXIL/UBFIZ/SBFIZ).
         // SP rejected in rd and rn (matches `generate_all_instructions` and
-        // `is_encodable_aarch64`); 2D constraint on (lsb, width) enforced by
-        // sampling width AFTER lsb so width is bounded by `64-lsb`.
+        // `is_encodable_aarch64`). The register width is picked first; the 2D
+        // constraint on (lsb, width) is enforced relative to that width's bound
+        // (32 for W, 64 for X) by sampling width AFTER lsb.
         33 => {
             let non_sp: Vec<Register> = registers
                 .iter()
@@ -893,8 +938,14 @@ pub fn generate_random_instruction<R: rand::RngExt>(
             let pick_non_sp = |rng: &mut R| non_sp[rng.random_range(0..non_sp.len())];
             let rd_local = pick_non_sp(rng);
             let rn = pick_non_sp(rng);
-            let lsb = (rng.random::<u32>() & 0x3F) as u8;
-            let max_w = 64 - lsb as u32;
+            let reg_width = if rng.random_bool(0.5) {
+                RegisterWidth::W32
+            } else {
+                RegisterWidth::X64
+            };
+            let bound = reg_width.bit_width() as u32;
+            let lsb = (rng.random::<u32>() % bound) as u8;
+            let max_w = bound - lsb as u32;
             let width = ((rng.random::<u32>() % max_w) + 1) as u8;
             match rng.random_range(0..6) {
                 0 => Instruction::Ubfx {
@@ -902,36 +953,42 @@ pub fn generate_random_instruction<R: rand::RngExt>(
                     rn,
                     lsb,
                     width,
+                    reg_width,
                 },
                 1 => Instruction::Sbfx {
                     rd: rd_local,
                     rn,
                     lsb,
                     width,
+                    reg_width,
                 },
                 2 => Instruction::Bfi {
                     rd: rd_local,
                     rn,
                     lsb,
                     width,
+                    reg_width,
                 },
                 3 => Instruction::Bfxil {
                     rd: rd_local,
                     rn,
                     lsb,
                     width,
+                    reg_width,
                 },
                 4 => Instruction::Ubfiz {
                     rd: rd_local,
                     rn,
                     lsb,
                     width,
+                    reg_width,
                 },
                 _ => Instruction::Sbfiz {
                     rd: rd_local,
                     rn,
                     lsb,
                     width,
+                    reg_width,
                 },
             }
         }
@@ -2043,6 +2100,48 @@ mod tests {
         let ids: Vec<_> = instrs.iter().map(InstructionType::opcode_id).collect();
         let unique: std::collections::HashSet<_> = ids.iter().collect();
         assert_eq!(ids.len(), unique.len());
+    }
+
+    #[test]
+    fn test_generate_all_instructions_includes_w_bitfield() {
+        let registers = vec![Register::X0, Register::X1];
+        let all = generate_all_instructions(&registers, &[0]);
+        let is_w = |i: &Instruction| {
+            matches!(
+                i,
+                Instruction::Ubfx {
+                    reg_width: RegisterWidth::W32,
+                    ..
+                } | Instruction::Sbfx {
+                    reg_width: RegisterWidth::W32,
+                    ..
+                } | Instruction::Bfi {
+                    reg_width: RegisterWidth::W32,
+                    ..
+                } | Instruction::Bfxil {
+                    reg_width: RegisterWidth::W32,
+                    ..
+                } | Instruction::Ubfiz {
+                    reg_width: RegisterWidth::W32,
+                    ..
+                } | Instruction::Sbfiz {
+                    reg_width: RegisterWidth::W32,
+                    ..
+                }
+            )
+        };
+        assert!(
+            all.iter().any(is_w),
+            "enumerative output must contain W-form bit-field instructions"
+        );
+        // Every W-form bit-field instruction must satisfy is_encodable_aarch64
+        // (lsb<=31, lsb+width<=32).
+        for instr in all.iter().filter(|i| is_w(i)) {
+            assert!(
+                instr.is_encodable_aarch64(),
+                "enumerative produced un-encodable W bit-field: {instr}"
+            );
+        }
     }
 
     #[test]

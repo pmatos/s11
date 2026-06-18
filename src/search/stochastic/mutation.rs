@@ -394,28 +394,67 @@ impl Mutator {
                 }
             }
             // Bit-field manipulation: 4-way operand mutation (rd, rn, lsb, width)
-            // with 2D clamping so the (lsb + width <= 64) constraint is always
-            // preserved. When mutating lsb, clamp width if necessary.
-            Instruction::Ubfx { rd, rn, lsb, width }
-            | Instruction::Sbfx { rd, rn, lsb, width }
-            | Instruction::Bfi { rd, rn, lsb, width }
-            | Instruction::Bfxil { rd, rn, lsb, width }
-            | Instruction::Ubfiz { rd, rn, lsb, width }
-            | Instruction::Sbfiz { rd, rn, lsb, width } => {
+            // with 2D clamping so the (lsb + width <= bound) constraint is always
+            // preserved, where `bound` is 32 for the W form and 64 for X. The
+            // register width form itself is never changed here (that would be a
+            // cross-width opcode bridge, which we deliberately avoid).
+            Instruction::Ubfx {
+                rd,
+                rn,
+                lsb,
+                width,
+                reg_width,
+            }
+            | Instruction::Sbfx {
+                rd,
+                rn,
+                lsb,
+                width,
+                reg_width,
+            }
+            | Instruction::Bfi {
+                rd,
+                rn,
+                lsb,
+                width,
+                reg_width,
+            }
+            | Instruction::Bfxil {
+                rd,
+                rn,
+                lsb,
+                width,
+                reg_width,
+            }
+            | Instruction::Ubfiz {
+                rd,
+                rn,
+                lsb,
+                width,
+                reg_width,
+            }
+            | Instruction::Sbfiz {
+                rd,
+                rn,
+                lsb,
+                width,
+                reg_width,
+            } => {
+                let bound = reg_width.bit_width() as u32;
                 match rng.random_range(0..4) {
                     0 => *rd = self.random_register(rng),
                     1 => *rn = self.random_register(rng),
                     2 => {
                         // Mutate width: bound by current lsb so the pair stays valid.
-                        let max_w = (64 - *lsb).max(1);
-                        *width = ((rng.random::<u32>() % max_w as u32) + 1) as u8;
+                        let max_w = (bound - *lsb as u32).max(1);
+                        *width = ((rng.random::<u32>() % max_w) + 1) as u8;
                     }
                     _ => {
                         // Mutate lsb; clamp width down if the new lsb would
-                        // overflow the (lsb + width <= 64) constraint.
-                        *lsb = (rng.random::<u32>() & 0x3F) as u8;
-                        if (*lsb as u16 + *width as u16) > 64 {
-                            *width = 64 - *lsb;
+                        // overflow the (lsb + width <= bound) constraint.
+                        *lsb = (rng.random::<u32>() % bound) as u8;
+                        if (*lsb as u16 + *width as u16) > bound as u16 {
+                            *width = bound as u8 - *lsb;
                         }
                     }
                 }
@@ -970,53 +1009,305 @@ impl Mutator {
             // and insert (BFI/BFXIL/UBFIZ/SBFIZ) variants changes whether rd
             // is read; MCMC tolerates this because invalid proposals fail
             // equivalence checking and are rejected by the acceptance step.
-            Instruction::Ubfx { rd, rn, lsb, width } => match rng.random_range(0..6) {
-                0 => Instruction::Sbfx { rd, rn, lsb, width },
-                1 => Instruction::Bfi { rd, rn, lsb, width },
-                2 => Instruction::Bfxil { rd, rn, lsb, width },
-                3 => Instruction::Ubfiz { rd, rn, lsb, width },
-                4 => Instruction::Sbfiz { rd, rn, lsb, width },
-                _ => Instruction::Ubfx { rd, rn, lsb, width },
+            Instruction::Ubfx {
+                rd,
+                rn,
+                lsb,
+                width,
+                reg_width,
+            } => match rng.random_range(0..6) {
+                0 => Instruction::Sbfx {
+                    rd,
+                    rn,
+                    lsb,
+                    width,
+                    reg_width,
+                },
+                1 => Instruction::Bfi {
+                    rd,
+                    rn,
+                    lsb,
+                    width,
+                    reg_width,
+                },
+                2 => Instruction::Bfxil {
+                    rd,
+                    rn,
+                    lsb,
+                    width,
+                    reg_width,
+                },
+                3 => Instruction::Ubfiz {
+                    rd,
+                    rn,
+                    lsb,
+                    width,
+                    reg_width,
+                },
+                4 => Instruction::Sbfiz {
+                    rd,
+                    rn,
+                    lsb,
+                    width,
+                    reg_width,
+                },
+                _ => Instruction::Ubfx {
+                    rd,
+                    rn,
+                    lsb,
+                    width,
+                    reg_width,
+                },
             },
-            Instruction::Sbfx { rd, rn, lsb, width } => match rng.random_range(0..6) {
-                0 => Instruction::Ubfx { rd, rn, lsb, width },
-                1 => Instruction::Bfi { rd, rn, lsb, width },
-                2 => Instruction::Bfxil { rd, rn, lsb, width },
-                3 => Instruction::Ubfiz { rd, rn, lsb, width },
-                4 => Instruction::Sbfiz { rd, rn, lsb, width },
-                _ => Instruction::Sbfx { rd, rn, lsb, width },
+            Instruction::Sbfx {
+                rd,
+                rn,
+                lsb,
+                width,
+                reg_width,
+            } => match rng.random_range(0..6) {
+                0 => Instruction::Ubfx {
+                    rd,
+                    rn,
+                    lsb,
+                    width,
+                    reg_width,
+                },
+                1 => Instruction::Bfi {
+                    rd,
+                    rn,
+                    lsb,
+                    width,
+                    reg_width,
+                },
+                2 => Instruction::Bfxil {
+                    rd,
+                    rn,
+                    lsb,
+                    width,
+                    reg_width,
+                },
+                3 => Instruction::Ubfiz {
+                    rd,
+                    rn,
+                    lsb,
+                    width,
+                    reg_width,
+                },
+                4 => Instruction::Sbfiz {
+                    rd,
+                    rn,
+                    lsb,
+                    width,
+                    reg_width,
+                },
+                _ => Instruction::Sbfx {
+                    rd,
+                    rn,
+                    lsb,
+                    width,
+                    reg_width,
+                },
             },
-            Instruction::Bfi { rd, rn, lsb, width } => match rng.random_range(0..6) {
-                0 => Instruction::Ubfx { rd, rn, lsb, width },
-                1 => Instruction::Sbfx { rd, rn, lsb, width },
-                2 => Instruction::Bfxil { rd, rn, lsb, width },
-                3 => Instruction::Ubfiz { rd, rn, lsb, width },
-                4 => Instruction::Sbfiz { rd, rn, lsb, width },
-                _ => Instruction::Bfi { rd, rn, lsb, width },
+            Instruction::Bfi {
+                rd,
+                rn,
+                lsb,
+                width,
+                reg_width,
+            } => match rng.random_range(0..6) {
+                0 => Instruction::Ubfx {
+                    rd,
+                    rn,
+                    lsb,
+                    width,
+                    reg_width,
+                },
+                1 => Instruction::Sbfx {
+                    rd,
+                    rn,
+                    lsb,
+                    width,
+                    reg_width,
+                },
+                2 => Instruction::Bfxil {
+                    rd,
+                    rn,
+                    lsb,
+                    width,
+                    reg_width,
+                },
+                3 => Instruction::Ubfiz {
+                    rd,
+                    rn,
+                    lsb,
+                    width,
+                    reg_width,
+                },
+                4 => Instruction::Sbfiz {
+                    rd,
+                    rn,
+                    lsb,
+                    width,
+                    reg_width,
+                },
+                _ => Instruction::Bfi {
+                    rd,
+                    rn,
+                    lsb,
+                    width,
+                    reg_width,
+                },
             },
-            Instruction::Bfxil { rd, rn, lsb, width } => match rng.random_range(0..6) {
-                0 => Instruction::Ubfx { rd, rn, lsb, width },
-                1 => Instruction::Sbfx { rd, rn, lsb, width },
-                2 => Instruction::Bfi { rd, rn, lsb, width },
-                3 => Instruction::Ubfiz { rd, rn, lsb, width },
-                4 => Instruction::Sbfiz { rd, rn, lsb, width },
-                _ => Instruction::Bfxil { rd, rn, lsb, width },
+            Instruction::Bfxil {
+                rd,
+                rn,
+                lsb,
+                width,
+                reg_width,
+            } => match rng.random_range(0..6) {
+                0 => Instruction::Ubfx {
+                    rd,
+                    rn,
+                    lsb,
+                    width,
+                    reg_width,
+                },
+                1 => Instruction::Sbfx {
+                    rd,
+                    rn,
+                    lsb,
+                    width,
+                    reg_width,
+                },
+                2 => Instruction::Bfi {
+                    rd,
+                    rn,
+                    lsb,
+                    width,
+                    reg_width,
+                },
+                3 => Instruction::Ubfiz {
+                    rd,
+                    rn,
+                    lsb,
+                    width,
+                    reg_width,
+                },
+                4 => Instruction::Sbfiz {
+                    rd,
+                    rn,
+                    lsb,
+                    width,
+                    reg_width,
+                },
+                _ => Instruction::Bfxil {
+                    rd,
+                    rn,
+                    lsb,
+                    width,
+                    reg_width,
+                },
             },
-            Instruction::Ubfiz { rd, rn, lsb, width } => match rng.random_range(0..6) {
-                0 => Instruction::Ubfx { rd, rn, lsb, width },
-                1 => Instruction::Sbfx { rd, rn, lsb, width },
-                2 => Instruction::Bfi { rd, rn, lsb, width },
-                3 => Instruction::Bfxil { rd, rn, lsb, width },
-                4 => Instruction::Sbfiz { rd, rn, lsb, width },
-                _ => Instruction::Ubfiz { rd, rn, lsb, width },
+            Instruction::Ubfiz {
+                rd,
+                rn,
+                lsb,
+                width,
+                reg_width,
+            } => match rng.random_range(0..6) {
+                0 => Instruction::Ubfx {
+                    rd,
+                    rn,
+                    lsb,
+                    width,
+                    reg_width,
+                },
+                1 => Instruction::Sbfx {
+                    rd,
+                    rn,
+                    lsb,
+                    width,
+                    reg_width,
+                },
+                2 => Instruction::Bfi {
+                    rd,
+                    rn,
+                    lsb,
+                    width,
+                    reg_width,
+                },
+                3 => Instruction::Bfxil {
+                    rd,
+                    rn,
+                    lsb,
+                    width,
+                    reg_width,
+                },
+                4 => Instruction::Sbfiz {
+                    rd,
+                    rn,
+                    lsb,
+                    width,
+                    reg_width,
+                },
+                _ => Instruction::Ubfiz {
+                    rd,
+                    rn,
+                    lsb,
+                    width,
+                    reg_width,
+                },
             },
-            Instruction::Sbfiz { rd, rn, lsb, width } => match rng.random_range(0..6) {
-                0 => Instruction::Ubfx { rd, rn, lsb, width },
-                1 => Instruction::Sbfx { rd, rn, lsb, width },
-                2 => Instruction::Bfi { rd, rn, lsb, width },
-                3 => Instruction::Bfxil { rd, rn, lsb, width },
-                4 => Instruction::Ubfiz { rd, rn, lsb, width },
-                _ => Instruction::Sbfiz { rd, rn, lsb, width },
+            Instruction::Sbfiz {
+                rd,
+                rn,
+                lsb,
+                width,
+                reg_width,
+            } => match rng.random_range(0..6) {
+                0 => Instruction::Ubfx {
+                    rd,
+                    rn,
+                    lsb,
+                    width,
+                    reg_width,
+                },
+                1 => Instruction::Sbfx {
+                    rd,
+                    rn,
+                    lsb,
+                    width,
+                    reg_width,
+                },
+                2 => Instruction::Bfi {
+                    rd,
+                    rn,
+                    lsb,
+                    width,
+                    reg_width,
+                },
+                3 => Instruction::Bfxil {
+                    rd,
+                    rn,
+                    lsb,
+                    width,
+                    reg_width,
+                },
+                4 => Instruction::Ubfiz {
+                    rd,
+                    rn,
+                    lsb,
+                    width,
+                    reg_width,
+                },
+                _ => Instruction::Sbfiz {
+                    rd,
+                    rn,
+                    lsb,
+                    width,
+                    reg_width,
+                },
             },
             // Branches / terminators: never opcode-mutated. rewritable_len()
             // excludes the terminator slot before this fires; identity is
@@ -2822,6 +3113,75 @@ mod tests {
     }
 
     #[test]
+    fn w_bitfield_operand_mutation_stays_encodable_and_keeps_width() {
+        let mutator = default_mutator();
+        let mut rng = rand::rng();
+
+        let original = Instruction::Sbfx {
+            rd: Register::X0,
+            rn: Register::X1,
+            lsb: 4,
+            width: 8,
+            reg_width: crate::ir::RegisterWidth::W32,
+        };
+        for _ in 0..400 {
+            let mut seq = vec![original];
+            mutator.mutate_operand(&mut rng, &mut seq);
+            assert!(
+                seq[0].is_encodable_aarch64(),
+                "W operand mutation must stay encodable (lsb<=31, lsb+width<=32): {}",
+                seq[0]
+            );
+            // Operand mutation must not change the register width form.
+            assert!(
+                matches!(
+                    seq[0],
+                    Instruction::Sbfx {
+                        reg_width: crate::ir::RegisterWidth::W32,
+                        ..
+                    }
+                ),
+                "operand mutation changed the W form: {}",
+                seq[0]
+            );
+        }
+    }
+
+    #[test]
+    fn w_bitfield_opcode_mutation_preserves_width() {
+        let mutator = default_mutator();
+        let mut rng = rand::rng();
+
+        let original = Instruction::Ubfx {
+            rd: Register::X0,
+            rn: Register::X1,
+            lsb: 4,
+            width: 8,
+            reg_width: crate::ir::RegisterWidth::W32,
+        };
+        for _ in 0..200 {
+            let mut seq = vec![original];
+            mutator.mutate_opcode(&mut rng, &mut seq);
+            let reg_width = match seq[0] {
+                Instruction::Ubfx { reg_width, .. }
+                | Instruction::Sbfx { reg_width, .. }
+                | Instruction::Bfi { reg_width, .. }
+                | Instruction::Bfxil { reg_width, .. }
+                | Instruction::Ubfiz { reg_width, .. }
+                | Instruction::Sbfiz { reg_width, .. } => Some(reg_width),
+                _ => None,
+            };
+            assert_eq!(
+                reg_width,
+                Some(crate::ir::RegisterWidth::W32),
+                "opcode mutation must keep the W width (no X<->W bridging): {}",
+                seq[0]
+            );
+            assert!(seq[0].is_encodable_aarch64());
+        }
+    }
+
+    #[test]
     fn test_bitfield_operand_mutation_changes_fields_and_stays_encodable() {
         let mutator = default_mutator();
         let mut rng = rand::rng();
@@ -2831,6 +3191,7 @@ mod tests {
             rn: Register::X1,
             lsb: 8,
             width: 16,
+            reg_width: crate::ir::RegisterWidth::X64,
         };
         let mut changed = false;
         for _ in 0..200 {
@@ -2861,6 +3222,7 @@ mod tests {
             rn: Register::X1,
             lsb: 8,
             width: 16,
+            reg_width: crate::ir::RegisterWidth::X64,
         };
         let mut swapped_to_peer = false;
         for _ in 0..200 {

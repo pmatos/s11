@@ -2755,6 +2755,7 @@ mod tests {
             rn: Register::X1,
             lsb,
             width,
+            reg_width: crate::ir::RegisterWidth::X64,
         }];
 
         let expanded = vec![
@@ -2807,6 +2808,7 @@ mod tests {
             rn: Register::X1,
             lsb: lsb as u8,
             width,
+            reg_width: crate::ir::RegisterWidth::X64,
         }];
 
         let lsr_lsl_asr = vec![
@@ -2847,6 +2849,7 @@ mod tests {
             rn: Register::X1,
             lsb: lsb as u8,
             width,
+            reg_width: crate::ir::RegisterWidth::X64,
         }];
 
         let lsr_and = vec![
@@ -2870,6 +2873,127 @@ mod tests {
         );
     }
 
+    /// Acceptance (#145): the SMT lowering of a W-form bit-field op zeroes bits
+    /// [63:32]. SBFX is the discriminating case (the X form fills the upper half
+    /// with the sign). `SBFX W0,W1,#0,#8` must equal `SBFX X2,X1,#0,#8; MOV W0,W2`
+    /// (the W MOV zeroes the upper half). This only holds when the W SMT lowering
+    /// narrows the result to 32 bits before storing.
+    #[test]
+    fn test_sbfx_w_form_zeroes_upper_half_smt() {
+        let lhs = vec![Instruction::Sbfx {
+            rd: Register::X0,
+            rn: Register::X1,
+            lsb: 0,
+            width: 8,
+            reg_width: crate::ir::RegisterWidth::W32,
+        }];
+        let rhs = vec![
+            Instruction::Sbfx {
+                rd: Register::X2,
+                rn: Register::X1,
+                lsb: 0,
+                width: 8,
+                reg_width: crate::ir::RegisterWidth::X64,
+            },
+            Instruction::MovRegW {
+                rd: Register::X0,
+                rn: Register::X2,
+            },
+        ];
+        let config = EquivalenceConfig::with_live_out(LiveOut::from_registers(vec![Register::X0]));
+        assert_eq!(
+            check_equivalence_with_config(&lhs, &rhs, &config),
+            EquivalenceResult::Equivalent
+        );
+    }
+
+    /// Acceptance (#145): a W-form UBFX equals an LSR/AND mask sequence whose
+    /// final AND is a W op (so the result is a 32-bit value zero-extended to 64).
+    #[test]
+    fn test_ubfx_w_form_equivalent_to_lsr_w_and_mask() {
+        let lsb = 4i64;
+        let width = 8u8;
+        let mask = (1i64 << width) - 1;
+
+        let ubfx_w = vec![Instruction::Ubfx {
+            rd: Register::X0,
+            rn: Register::X1,
+            lsb: lsb as u8,
+            width,
+            reg_width: crate::ir::RegisterWidth::W32,
+        }];
+
+        let lsr_and = vec![
+            Instruction::Lsr {
+                rd: Register::X2,
+                rn: Register::X1,
+                shift: Operand::Immediate(lsb),
+            },
+            Instruction::And {
+                rd: Register::X0,
+                rn: Register::X2,
+                rm: Operand::Immediate(mask),
+                width: crate::ir::RegisterWidth::W32,
+            },
+        ];
+
+        let config = EquivalenceConfig::with_live_out(LiveOut::from_registers(vec![Register::X0]));
+        assert_eq!(
+            check_equivalence_with_config(&ubfx_w, &lsr_and, &config),
+            EquivalenceResult::Equivalent
+        );
+    }
+
+    /// Acceptance (#145): a sequence mixing X-form and W-form bit-field ops is
+    /// handled by the equivalence checker. The mixed sequence (X-form UBFX then
+    /// W-form SBFX) equals the all-X expansion where the W result is reproduced
+    /// by an X-form SBFX followed by a W MOV that zeroes bits [63:32].
+    #[test]
+    fn cross_width_mixed_bitfield_sequence_survives_equivalence() {
+        use crate::ir::RegisterWidth::{W32, X64};
+        let mixed = vec![
+            Instruction::Ubfx {
+                rd: Register::X2,
+                rn: Register::X1,
+                lsb: 8,
+                width: 16,
+                reg_width: X64,
+            },
+            Instruction::Sbfx {
+                rd: Register::X0,
+                rn: Register::X2,
+                lsb: 0,
+                width: 8,
+                reg_width: W32,
+            },
+        ];
+        let expanded = vec![
+            Instruction::Ubfx {
+                rd: Register::X2,
+                rn: Register::X1,
+                lsb: 8,
+                width: 16,
+                reg_width: X64,
+            },
+            Instruction::Sbfx {
+                rd: Register::X0,
+                rn: Register::X2,
+                lsb: 0,
+                width: 8,
+                reg_width: X64,
+            },
+            Instruction::MovRegW {
+                rd: Register::X0,
+                rn: Register::X0,
+            },
+        ];
+        let config = EquivalenceConfig::with_live_out(LiveOut::from_registers(vec![Register::X0]));
+        assert_eq!(
+            check_equivalence_with_config(&mixed, &expanded, &config),
+            EquivalenceResult::Equivalent
+        );
+    }
+
     /// SMT proves `BFXIL rd,rn,#lsb,#width` ≡ {
     ///   LSR tmp,rn,#lsb; AND tmp,tmp,#low_mask;
     ///   AND clear,rd,#!low_mask; ORR rd,clear,tmp
@@ -2886,6 +3010,7 @@ mod tests {
             rn: Register::X1,
             lsb: lsb as u8,
             width,
+            reg_width: crate::ir::RegisterWidth::X64,
         }];
 
         let expanded = vec![
@@ -2934,6 +3059,7 @@ mod tests {
             rn: Register::X1,
             lsb: lsb as u8,
             width,
+            reg_width: crate::ir::RegisterWidth::X64,
         }];
 
         let and_lsl = vec![
@@ -2970,6 +3096,7 @@ mod tests {
             rn: Register::X1,
             lsb: lsb as u8,
             width,
+            reg_width: crate::ir::RegisterWidth::X64,
         }];
 
         let lsl_asr_lsl = vec![

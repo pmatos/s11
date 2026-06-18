@@ -1835,52 +1835,130 @@ impl AArch64Assembler {
                 }
             }
             // Bit-field manipulation aliases (UBFX/SBFX/BFI/BFXIL/UBFIZ/SBFIZ).
-            Instruction::Ubfx { rd, rn, lsb, width } => {
+            Instruction::Ubfx {
+                rd,
+                rn,
+                lsb,
+                width,
+                reg_width,
+            } => {
                 let rd_reg = register_to_dynasm(*rd)?;
                 let rn_reg = register_to_dynasm(*rn)?;
                 let lsb_imm = *lsb as u32;
                 let width_imm = *width as u32;
-                dynasm!(ops ; .arch aarch64 ; ubfx X(rd_reg), X(rn_reg), lsb_imm, width_imm);
+                match reg_width {
+                    crate::ir::RegisterWidth::W32 => {
+                        dynasm!(ops ; .arch aarch64 ; ubfx W(rd_reg), W(rn_reg), lsb_imm, width_imm)
+                    }
+                    crate::ir::RegisterWidth::X64 => {
+                        dynasm!(ops ; .arch aarch64 ; ubfx X(rd_reg), X(rn_reg), lsb_imm, width_imm)
+                    }
+                }
                 Ok(())
             }
-            Instruction::Sbfx { rd, rn, lsb, width } => {
+            Instruction::Sbfx {
+                rd,
+                rn,
+                lsb,
+                width,
+                reg_width,
+            } => {
                 let rd_reg = register_to_dynasm(*rd)?;
                 let rn_reg = register_to_dynasm(*rn)?;
                 let lsb_imm = *lsb as u32;
                 let width_imm = *width as u32;
-                dynasm!(ops ; .arch aarch64 ; sbfx X(rd_reg), X(rn_reg), lsb_imm, width_imm);
+                match reg_width {
+                    crate::ir::RegisterWidth::W32 => {
+                        dynasm!(ops ; .arch aarch64 ; sbfx W(rd_reg), W(rn_reg), lsb_imm, width_imm)
+                    }
+                    crate::ir::RegisterWidth::X64 => {
+                        dynasm!(ops ; .arch aarch64 ; sbfx X(rd_reg), X(rn_reg), lsb_imm, width_imm)
+                    }
+                }
                 Ok(())
             }
-            Instruction::Bfi { rd, rn, lsb, width } => {
+            Instruction::Bfi {
+                rd,
+                rn,
+                lsb,
+                width,
+                reg_width,
+            } => {
                 let rd_reg = register_to_dynasm(*rd)?;
                 let rn_reg = register_to_dynasm(*rn)?;
                 let lsb_imm = *lsb as u32;
                 let width_imm = *width as u32;
-                dynasm!(ops ; .arch aarch64 ; bfi X(rd_reg), X(rn_reg), lsb_imm, width_imm);
+                match reg_width {
+                    crate::ir::RegisterWidth::W32 => {
+                        dynasm!(ops ; .arch aarch64 ; bfi W(rd_reg), W(rn_reg), lsb_imm, width_imm)
+                    }
+                    crate::ir::RegisterWidth::X64 => {
+                        dynasm!(ops ; .arch aarch64 ; bfi X(rd_reg), X(rn_reg), lsb_imm, width_imm)
+                    }
+                }
                 Ok(())
             }
-            Instruction::Bfxil { rd, rn, lsb, width } => {
+            Instruction::Bfxil {
+                rd,
+                rn,
+                lsb,
+                width,
+                reg_width,
+            } => {
                 let rd_reg = register_to_dynasm(*rd)?;
                 let rn_reg = register_to_dynasm(*rn)?;
                 let lsb_imm = *lsb as u32;
                 let width_imm = *width as u32;
-                dynasm!(ops ; .arch aarch64 ; bfxil X(rd_reg), X(rn_reg), lsb_imm, width_imm);
+                match reg_width {
+                    crate::ir::RegisterWidth::W32 => {
+                        dynasm!(ops ; .arch aarch64 ; bfxil W(rd_reg), W(rn_reg), lsb_imm, width_imm)
+                    }
+                    crate::ir::RegisterWidth::X64 => {
+                        dynasm!(ops ; .arch aarch64 ; bfxil X(rd_reg), X(rn_reg), lsb_imm, width_imm)
+                    }
+                }
                 Ok(())
             }
-            Instruction::Ubfiz { rd, rn, lsb, width } => {
+            Instruction::Ubfiz {
+                rd,
+                rn,
+                lsb,
+                width,
+                reg_width,
+            } => {
                 let rd_reg = register_to_dynasm(*rd)?;
                 let rn_reg = register_to_dynasm(*rn)?;
                 let lsb_imm = *lsb as u32;
                 let width_imm = *width as u32;
-                dynasm!(ops ; .arch aarch64 ; ubfiz X(rd_reg), X(rn_reg), lsb_imm, width_imm);
+                match reg_width {
+                    crate::ir::RegisterWidth::W32 => {
+                        dynasm!(ops ; .arch aarch64 ; ubfiz W(rd_reg), W(rn_reg), lsb_imm, width_imm)
+                    }
+                    crate::ir::RegisterWidth::X64 => {
+                        dynasm!(ops ; .arch aarch64 ; ubfiz X(rd_reg), X(rn_reg), lsb_imm, width_imm)
+                    }
+                }
                 Ok(())
             }
-            Instruction::Sbfiz { rd, rn, lsb, width } => {
+            Instruction::Sbfiz {
+                rd,
+                rn,
+                lsb,
+                width,
+                reg_width,
+            } => {
                 let rd_reg = register_to_dynasm(*rd)?;
                 let rn_reg = register_to_dynasm(*rn)?;
                 let lsb_imm = *lsb as u32;
                 let width_imm = *width as u32;
-                dynasm!(ops ; .arch aarch64 ; sbfiz X(rd_reg), X(rn_reg), lsb_imm, width_imm);
+                match reg_width {
+                    crate::ir::RegisterWidth::W32 => {
+                        dynasm!(ops ; .arch aarch64 ; sbfiz W(rd_reg), W(rn_reg), lsb_imm, width_imm)
+                    }
+                    crate::ir::RegisterWidth::X64 => {
+                        dynasm!(ops ; .arch aarch64 ; sbfiz X(rd_reg), X(rn_reg), lsb_imm, width_imm)
+                    }
+                }
                 Ok(())
             }
 
@@ -3088,6 +3166,7 @@ mod tests {
             rn: Register::X1,
             lsb: 8,
             width: 16,
+            reg_width: crate::ir::RegisterWidth::X64,
         }];
         let bytes = assembler
             .assemble_instructions(&instructions, 0)
@@ -3105,6 +3184,7 @@ mod tests {
             rn: Register::X1,
             lsb: 0,
             width: 64,
+            reg_width: crate::ir::RegisterWidth::X64,
         }];
         let bytes = assembler
             .assemble_instructions(&instructions, 0)
@@ -3118,6 +3198,83 @@ mod tests {
     }
 
     #[test]
+    fn test_bitfield_w_form_assembles_to_w_registers() {
+        // Acceptance (#145): each W-form bit-field op emits W operands and
+        // round-trips through Capstone with the same mnemonic. lsb=8/width=8
+        // keeps lsb+width=16 < 32 so we avoid the LSR/MOV alias boundary.
+        use crate::ir::RegisterWidth::W32;
+        let cases: [(&str, Instruction); 6] = [
+            (
+                "ubfx",
+                Instruction::Ubfx {
+                    rd: Register::X0,
+                    rn: Register::X1,
+                    lsb: 8,
+                    width: 8,
+                    reg_width: W32,
+                },
+            ),
+            (
+                "sbfx",
+                Instruction::Sbfx {
+                    rd: Register::X0,
+                    rn: Register::X1,
+                    lsb: 8,
+                    width: 8,
+                    reg_width: W32,
+                },
+            ),
+            (
+                "bfi",
+                Instruction::Bfi {
+                    rd: Register::X0,
+                    rn: Register::X1,
+                    lsb: 8,
+                    width: 8,
+                    reg_width: W32,
+                },
+            ),
+            (
+                "bfxil",
+                Instruction::Bfxil {
+                    rd: Register::X0,
+                    rn: Register::X1,
+                    lsb: 8,
+                    width: 8,
+                    reg_width: W32,
+                },
+            ),
+            (
+                "ubfiz",
+                Instruction::Ubfiz {
+                    rd: Register::X0,
+                    rn: Register::X1,
+                    lsb: 8,
+                    width: 8,
+                    reg_width: W32,
+                },
+            ),
+            (
+                "sbfiz",
+                Instruction::Sbfiz {
+                    rd: Register::X0,
+                    rn: Register::X1,
+                    lsb: 8,
+                    width: 8,
+                    reg_width: W32,
+                },
+            ),
+        ];
+        for (mnem, instr) in cases {
+            let mut assembler = AArch64Assembler::new();
+            let bytes = assembler
+                .assemble_instructions(&[instr], 0)
+                .unwrap_or_else(|e| panic!("{mnem} W encoding should succeed: {e}"));
+            disassemble_and_verify(&bytes, mnem, &["w0", "w1"]);
+        }
+    }
+
+    #[test]
     fn test_sbfiz_correctness() {
         let mut assembler = AArch64Assembler::new();
         let instructions = vec![Instruction::Sbfiz {
@@ -3125,6 +3282,7 @@ mod tests {
             rn: Register::X1,
             lsb: 4,
             width: 8,
+            reg_width: crate::ir::RegisterWidth::X64,
         }];
         let bytes = assembler
             .assemble_instructions(&instructions, 0)
@@ -3140,6 +3298,7 @@ mod tests {
             rn: Register::X1,
             lsb: 4,
             width: 8,
+            reg_width: crate::ir::RegisterWidth::X64,
         }];
         let bytes = assembler
             .assemble_instructions(&instructions, 0)
@@ -3155,6 +3314,7 @@ mod tests {
             rn: Register::X1,
             lsb: 8,
             width: 8,
+            reg_width: crate::ir::RegisterWidth::X64,
         }];
         let bytes = assembler
             .assemble_instructions(&instructions, 0)
@@ -3170,6 +3330,7 @@ mod tests {
             rn: Register::X1,
             lsb: 4,
             width: 8,
+            reg_width: crate::ir::RegisterWidth::X64,
         }];
         let bytes = assembler
             .assemble_instructions(&instructions, 0)
@@ -3185,6 +3346,7 @@ mod tests {
             rn: Register::X1,
             lsb: 8,
             width: 16,
+            reg_width: crate::ir::RegisterWidth::X64,
         }];
         let bytes = assembler
             .assemble_instructions(&instructions, 0)
@@ -3204,6 +3366,7 @@ mod tests {
             rn: Register::X3,
             lsb: 32,
             width: 8,
+            reg_width: crate::ir::RegisterWidth::X64,
         }];
         let bytes = assembler
             .assemble_instructions(&instructions, 0)

@@ -1480,7 +1480,10 @@ fn parse_ccmn(operands: &[&str]) -> Result<Instruction, String> {
 
 /// Parse a bit-field-manipulation instruction operand list:
 /// `rd, rn, #lsb, #width`. Used by UBFX/SBFX/BFI/BFXIL/UBFIZ/SBFIZ.
-fn parse_bfm_like(operands: &[&str], mnem: &str) -> Result<(Register, Register, u8, u8), String> {
+fn parse_bfm_like(
+    operands: &[&str],
+    mnem: &str,
+) -> Result<(Register, Register, u8, u8, RegisterWidth), String> {
     if operands.len() != 4 {
         return Err(format!(
             "{} requires 4 operands, got {}",
@@ -1488,25 +1491,35 @@ fn parse_bfm_like(operands: &[&str], mnem: &str) -> Result<(Register, Register, 
             operands.len()
         ));
     }
-    let rd = parse_register(operands[0])?;
-    let rn = parse_register(operands[1])?;
+    // rd and rn must use matching widths; the width selects X (64) vs W (32)
+    // and bounds the lsb/width immediates accordingly.
+    let (rd, rn, reg_width) = parse_same_width_registers(mnem, operands)?;
+    let bound = reg_width.bit_width() as i64;
     let lsb_raw = parse_immediate(operands[2])?;
-    if !(0..=63).contains(&lsb_raw) {
-        return Err(format!("{} lsb {} out of range (0..=63)", mnem, lsb_raw));
+    if !(0..bound).contains(&lsb_raw) {
+        return Err(format!(
+            "{} lsb {} out of range (0..={})",
+            mnem,
+            lsb_raw,
+            bound - 1
+        ));
     }
     let width_raw = parse_immediate(operands[3])?;
-    if !(1..=64).contains(&width_raw) {
+    if !(1..=bound).contains(&width_raw) {
         return Err(format!(
-            "{} width {} out of range (1..=64)",
-            mnem, width_raw
+            "{} width {} out of range (1..={})",
+            mnem, width_raw, bound
         ));
     }
     let lsb = lsb_raw as u8;
     let width = width_raw as u8;
-    if (lsb as u16 + width as u16) > 64 {
-        return Err(format!("{} lsb {} + width {} exceeds 64", mnem, lsb, width));
+    if (lsb as u16 + width as u16) > bound as u16 {
+        return Err(format!(
+            "{} lsb {} + width {} exceeds {}",
+            mnem, lsb, width, bound
+        ));
     }
-    Ok((rd, rn, lsb, width))
+    Ok((rd, rn, lsb, width, reg_width))
 }
 
 fn parse_ccmp_like(
@@ -1800,22 +1813,58 @@ pub fn parse_line(line: &str) -> Result<LineResult, ParseLineError> {
         "ccmp" => parse_ccmp(&operands).map_err(ParseLineError::Other)?,
         "ccmn" => parse_ccmn(&operands).map_err(ParseLineError::Other)?,
         "ubfx" => parse_bfm_like(&operands, "ubfx")
-            .map(|(rd, rn, lsb, width)| Instruction::Ubfx { rd, rn, lsb, width })
+            .map(|(rd, rn, lsb, width, reg_width)| Instruction::Ubfx {
+                rd,
+                rn,
+                lsb,
+                width,
+                reg_width,
+            })
             .map_err(ParseLineError::Other)?,
         "sbfx" => parse_bfm_like(&operands, "sbfx")
-            .map(|(rd, rn, lsb, width)| Instruction::Sbfx { rd, rn, lsb, width })
+            .map(|(rd, rn, lsb, width, reg_width)| Instruction::Sbfx {
+                rd,
+                rn,
+                lsb,
+                width,
+                reg_width,
+            })
             .map_err(ParseLineError::Other)?,
         "bfi" => parse_bfm_like(&operands, "bfi")
-            .map(|(rd, rn, lsb, width)| Instruction::Bfi { rd, rn, lsb, width })
+            .map(|(rd, rn, lsb, width, reg_width)| Instruction::Bfi {
+                rd,
+                rn,
+                lsb,
+                width,
+                reg_width,
+            })
             .map_err(ParseLineError::Other)?,
         "bfxil" => parse_bfm_like(&operands, "bfxil")
-            .map(|(rd, rn, lsb, width)| Instruction::Bfxil { rd, rn, lsb, width })
+            .map(|(rd, rn, lsb, width, reg_width)| Instruction::Bfxil {
+                rd,
+                rn,
+                lsb,
+                width,
+                reg_width,
+            })
             .map_err(ParseLineError::Other)?,
         "ubfiz" => parse_bfm_like(&operands, "ubfiz")
-            .map(|(rd, rn, lsb, width)| Instruction::Ubfiz { rd, rn, lsb, width })
+            .map(|(rd, rn, lsb, width, reg_width)| Instruction::Ubfiz {
+                rd,
+                rn,
+                lsb,
+                width,
+                reg_width,
+            })
             .map_err(ParseLineError::Other)?,
         "sbfiz" => parse_bfm_like(&operands, "sbfiz")
-            .map(|(rd, rn, lsb, width)| Instruction::Sbfiz { rd, rn, lsb, width })
+            .map(|(rd, rn, lsb, width, reg_width)| Instruction::Sbfiz {
+                rd,
+                rn,
+                lsb,
+                width,
+                reg_width,
+            })
             .map_err(ParseLineError::Other)?,
         "csel" => parse_csel(&operands).map_err(ParseLineError::Other)?,
         "csinc" => parse_csinc(&operands).map_err(ParseLineError::Other)?,
@@ -2688,9 +2737,63 @@ mod tests {
                 rn: Register::X1,
                 lsb: 5,
                 width: 10,
+                reg_width: crate::ir::RegisterWidth::X64
             }
         );
         assert_eq!(format!("{}", parsed), "ubfx x0, x1, #5, #10");
+    }
+
+    #[test]
+    fn parse_bitfield_w_roundtrip() {
+        // Each W-form mnemonic round-trips: parse `w` operands, build a W32
+        // variant, and Display back to `w` operands.
+        for mnem in ["ubfx", "sbfx", "bfi", "bfxil", "ubfiz", "sbfiz"] {
+            let text = format!("{mnem} w0, w1, #5, #10");
+            let parsed = match parse_line(&text).unwrap() {
+                LineResult::Instruction(instr) => instr,
+                LineResult::Skip => panic!("unexpected skip"),
+            };
+            assert_eq!(
+                parsed.destination(),
+                Some(Register::X0),
+                "{mnem} W destination"
+            );
+            assert_eq!(format!("{parsed}"), text, "{mnem} W round-trip Display");
+        }
+    }
+
+    #[test]
+    fn parse_bitfield_w_builds_w32_variant() {
+        let parsed = match parse_line("ubfx w0, w1, #5, #10").unwrap() {
+            LineResult::Instruction(instr) => instr,
+            LineResult::Skip => panic!("unexpected skip"),
+        };
+        assert_eq!(
+            parsed,
+            Instruction::Ubfx {
+                rd: Register::X0,
+                rn: Register::X1,
+                lsb: 5,
+                width: 10,
+                reg_width: crate::ir::RegisterWidth::W32,
+            }
+        );
+    }
+
+    #[test]
+    fn parse_bitfield_rejects_mixed_widths() {
+        assert!(parse_line("ubfx w0, x1, #5, #10").is_err());
+        assert!(parse_line("ubfx x0, w1, #5, #10").is_err());
+    }
+
+    #[test]
+    fn parse_bitfield_w_rejects_out_of_range() {
+        // lsb=32 is valid for X but not W.
+        assert!(parse_line("ubfx w0, w1, #32, #1").is_err());
+        // lsb+width > 32 rejected for W.
+        assert!(parse_line("sbfx w0, w1, #16, #17").is_err());
+        // width=33 rejected for W.
+        assert!(parse_line("bfi w0, w1, #0, #33").is_err());
     }
 
     #[test]
@@ -2706,6 +2809,7 @@ mod tests {
                 rn: Register::X1,
                 lsb: 5,
                 width: 10,
+                reg_width: crate::ir::RegisterWidth::X64
             }
         );
         assert_eq!(format!("{}", parsed), "sbfx x0, x1, #5, #10");
@@ -2724,6 +2828,7 @@ mod tests {
                 rn: Register::X1,
                 lsb: 5,
                 width: 10,
+                reg_width: crate::ir::RegisterWidth::X64
             }
         );
         assert_eq!(format!("{}", parsed), "bfi x0, x1, #5, #10");
@@ -2742,6 +2847,7 @@ mod tests {
                 rn: Register::X1,
                 lsb: 5,
                 width: 10,
+                reg_width: crate::ir::RegisterWidth::X64
             }
         );
         assert_eq!(format!("{}", parsed), "bfxil x0, x1, #5, #10");
@@ -2760,6 +2866,7 @@ mod tests {
                 rn: Register::X1,
                 lsb: 5,
                 width: 10,
+                reg_width: crate::ir::RegisterWidth::X64
             }
         );
         assert_eq!(format!("{}", parsed), "ubfiz x0, x1, #5, #10");
@@ -2778,6 +2885,7 @@ mod tests {
                 rn: Register::X1,
                 lsb: 5,
                 width: 10,
+                reg_width: crate::ir::RegisterWidth::X64
             }
         );
         assert_eq!(format!("{}", parsed), "sbfiz x0, x1, #5, #10");
