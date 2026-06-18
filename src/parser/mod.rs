@@ -313,6 +313,28 @@ fn is_label(line: &str) -> bool {
     trimmed.ends_with(':') && !trimmed.is_empty()
 }
 
+/// Strip leading label definitions from a line, if present.
+fn strip_leading_labels(mut line: &str) -> &str {
+    loop {
+        let Some(colon_pos) = line.find(':') else {
+            return line;
+        };
+        if colon_pos == 0 {
+            return line;
+        }
+        if let Some(whitespace_pos) = line.find(char::is_whitespace)
+            && whitespace_pos < colon_pos
+        {
+            return line;
+        }
+
+        line = line[colon_pos + 1..].trim_start();
+        if line.is_empty() {
+            return line;
+        }
+    }
+}
+
 /// Check if a line is a directive
 fn is_directive(line: &str) -> bool {
     line.trim().starts_with('.')
@@ -1756,6 +1778,11 @@ pub fn parse_line(line: &str) -> Result<LineResult, ParseLineError> {
         return Ok(LineResult::Skip);
     }
 
+    let trimmed = strip_leading_labels(trimmed);
+    if trimmed.is_empty() {
+        return Ok(LineResult::Skip);
+    }
+
     // Skip directives
     if is_directive(trimmed) {
         return Ok(LineResult::Skip);
@@ -2259,6 +2286,35 @@ mod tests {
     }
 
     #[test]
+    fn parse_line_accepts_inline_label_before_instruction() {
+        match parse_line("_start: add x0, x1, x2").unwrap() {
+            LineResult::Instruction(Instruction::Add { rd, rn, rm }) => {
+                assert_eq!(rd, Register::X0);
+                assert_eq!(rn, Register::X1);
+                assert_eq!(rm, Operand::Register(Register::X2));
+            }
+            _ => panic!("expected Add"),
+        }
+    }
+
+    #[test]
+    fn parse_line_accepts_multiple_inline_labels_before_instruction() {
+        assert!(matches!(
+            parse_line("outer: inner:").unwrap(),
+            LineResult::Skip
+        ));
+
+        match parse_line("outer: inner: add x0, x1, x2").unwrap() {
+            LineResult::Instruction(Instruction::Add { rd, rn, rm }) => {
+                assert_eq!(rd, Register::X0);
+                assert_eq!(rn, Register::X1);
+                assert_eq!(rm, Operand::Register(Register::X2));
+            }
+            _ => panic!("expected Add"),
+        }
+    }
+
+    #[test]
     fn parse_w_add_sub_mov_register_forms_roundtrip() {
         for text in [
             "add w0, w1, w2",
@@ -2457,6 +2513,23 @@ mod tests {
         assert_eq!(instructions.len(), 2);
         assert!(matches!(instructions[0], Instruction::MovReg { .. }));
         assert!(matches!(instructions[1], Instruction::Add { .. }));
+    }
+
+    #[test]
+    fn parse_assembly_string_accepts_inline_label_before_instruction() {
+        let instructions = parse_assembly_string(
+            ".text\n_start: add x0, x1, x2\n",
+            "inline-label.s".to_string(),
+        )
+        .unwrap();
+        assert_eq!(
+            instructions,
+            vec![Instruction::Add {
+                rd: Register::X0,
+                rn: Register::X1,
+                rm: Operand::Register(Register::X2),
+            }]
+        );
     }
 
     #[test]
