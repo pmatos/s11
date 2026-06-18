@@ -154,6 +154,45 @@ class TestRemoveWorktreeKeepDir(unittest.TestCase):
             self.assertEqual(git_file.read_text(), git_file_contents)
             self.assertTrue(admin_dir.exists())
 
+    def test_preserve_helper_reports_lost_pointer_when_rollback_write_fails(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = pathlib.Path(d)
+            worktree_path = root / "repo_feature"
+            worktree_path.mkdir()
+            common_dir = root / "repo" / ".git"
+            admin_dir = common_dir / "worktrees" / "repo_feature"
+            admin_dir.mkdir(parents=True)
+            git_file = worktree_path / ".git"
+            git_file_contents = f"gitdir: {admin_dir}\n"
+            git_file.write_text(git_file_contents)
+
+            def fake_run_command(cmd, **kwargs):
+                if cmd == [
+                    "git",
+                    "-C",
+                    str(worktree_path),
+                    "rev-parse",
+                    "--git-common-dir",
+                ]:
+                    return SimpleNamespace(stdout=f"{common_dir}\n", returncode=0)
+                # prune leaves admin_dir in place, forcing the rollback path
+                return SimpleNamespace(stdout="", returncode=0)
+
+            output = io.StringIO()
+            with (
+                mock.patch.object(wtm, "run_command", side_effect=fake_run_command),
+                mock.patch.object(
+                    pathlib.Path, "write_text", side_effect=OSError("disk full")
+                ),
+                contextlib.redirect_stdout(output),
+            ):
+                self.assertFalse(wtm.unregister_worktree_preserving_dir(worktree_path))
+
+            # The rollback could not recreate the pointer; the user must be told distinctly.
+            self.assertFalse(git_file.exists())
+            self.assertIn("Rollback also failed", output.getvalue())
+            self.assertIn(".git pointer lost", output.getvalue())
+
     def test_preserve_helper_dry_run_does_not_remove_git_pointer(self):
         with tempfile.TemporaryDirectory() as d:
             root = pathlib.Path(d)

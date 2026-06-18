@@ -351,7 +351,13 @@ def unregister_worktree_preserving_dir(worktree_path):
                 raise RuntimeError(f"preserved directory disappeared: {worktree_path}")
         except Exception as e:
             if not git_file.exists():
-                git_file.write_text(git_file_contents)
+                try:
+                    git_file.write_text(git_file_contents)
+                except OSError as rollback_error:
+                    print(
+                        f"❌ Rollback also failed — .git pointer lost for "
+                        f"'{worktree_path}': {rollback_error}"
+                    )
             print(f"❌ Failed to unregister worktree while preserving directory: {e}")
             return False
 
