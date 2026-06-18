@@ -60,9 +60,12 @@ Rewritable straight-line mnemonics accepted by the parser and Capstone bridge:
 - Memory loads and stores (issue #68, [ADR-0007](adr/0007-memory-model.md);
   byte-addressed Z3-array memory model with sound full aliasing, whole-memory
   live-out auto-derived): `ldr`, `ldrb`, `ldrh`, `ldrsb`, `ldrsh`, `ldrsw`,
-  `str`, `strb`, `strh`, `ldp`, `stp`, `ldpsw` — accepted in immediate-offset,
-  pre-index, post-index, register-offset, and register-extend addressing
-  forms, in both `W` and `X` widths
+  `str`, `strb`, `strh`, `ldp`, `stp`, `ldpsw`. Single-register memory
+  instructions accept immediate-offset, pre-index, post-index, register-offset,
+  and register-extend addressing in supported `W`/`X`-sized forms. Pair memory
+  instructions accept immediate-offset, pre-index, and post-index addressing
+  only; `ldp`/`stp` cover `W` and `X` pairs, and `ldpsw` loads sign-extended
+  word pairs.
 
 Fixed control-flow terminators:
 
