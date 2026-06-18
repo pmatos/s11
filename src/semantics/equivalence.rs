@@ -377,6 +377,11 @@ impl EquivalenceBackend for AArch64 {
         let memory_touched = crate::validation::live_out::touches_memory(seq1)
             || crate::validation::live_out::touches_memory(seq2);
         if memory_touched {
+            if config.fast_only {
+                eprintln!(
+                    "[s11] warning: --fast-only disabled for memory-bearing window (see ADR-0007)"
+                );
+            }
             config.memory_live = true;
             config.fast_only = false;
         }
