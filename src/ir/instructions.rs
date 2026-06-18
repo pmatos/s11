@@ -339,6 +339,19 @@ pub enum Instruction {
         rn: Register,
         rm: Operand,
     },
+    // Add/subtract with carry. AArch64 has only the register form (no
+    // immediate, no shifted-register), so `rm` is a plain `Register`.
+    // Adc/Sbc read the carry flag; Adcs/Sbcs additionally write NZCV.
+    Adc {
+        rd: Register,
+        rn: Register,
+        rm: Register,
+    },
+    Adcs {
+        rd: Register,
+        rn: Register,
+        rm: Register,
+    },
     Ands {
         rd: Register,
         rn: Register,
@@ -598,6 +611,8 @@ impl Instruction {
             | Instruction::Eon { rd, .. }
             | Instruction::Adds { rd, .. }
             | Instruction::Subs { rd, .. }
+            | Instruction::Adc { rd, .. }
+            | Instruction::Adcs { rd, .. }
             | Instruction::Ands { rd, .. }
             | Instruction::Cset { rd, .. }
             | Instruction::Csetm { rd, .. }
@@ -710,6 +725,7 @@ impl Instruction {
                 | Instruction::Bics { .. }
                 | Instruction::Adds { .. }
                 | Instruction::Subs { .. }
+                | Instruction::Adcs { .. }
                 | Instruction::Ands { .. }
                 | Instruction::Ccmp { .. }
                 | Instruction::Ccmn { .. }
@@ -730,6 +746,9 @@ impl Instruction {
                 | Instruction::Ccmp { .. }
                 | Instruction::Ccmn { .. }
                 | Instruction::BCond { .. }
+                // ADC/SBC family reads the carry flag as a live-in.
+                | Instruction::Adc { .. }
+                | Instruction::Adcs { .. }
         )
     }
 
@@ -937,6 +956,8 @@ impl Instruction {
                 Operand::ShiftedRegister { .. } => false,
                 Operand::ExtendedRegister { .. } => false,
             },
+            // ADC/ADCS: register-only form, always encodable.
+            Instruction::Adc { .. } | Instruction::Adcs { .. } => true,
             // ANDS: register or encodable bitmask immediate (issue #65).
             // ShiftedRegister out of scope (#59). The immediate form uses the
             // plain X slot for both rd and rn (rejects SP); XZR is fine for rd
@@ -1162,6 +1183,10 @@ impl Instruction {
                     regs.push(*r);
                 }
                 regs
+            }
+            // ADC/ADCS read rn and rm (both plain registers).
+            Instruction::Adc { rn, rm, .. } | Instruction::Adcs { rn, rm, .. } => {
+                vec![*rn, *rm]
             }
             // CSET / CSETM have no source registers (read flags, not regs).
             Instruction::Cset { .. } | Instruction::Csetm { .. } => vec![],
@@ -1506,6 +1531,8 @@ impl fmt::Display for Instruction {
             Instruction::Eon { rd, rn, rm } => write!(f, "eon {}, {}, {}", rd, rn, rm),
             Instruction::Adds { rd, rn, rm } => write!(f, "adds {}, {}, {}", rd, rn, rm),
             Instruction::Subs { rd, rn, rm } => write!(f, "subs {}, {}, {}", rd, rn, rm),
+            Instruction::Adc { rd, rn, rm } => write!(f, "adc {}, {}, {}", rd, rn, rm),
+            Instruction::Adcs { rd, rn, rm } => write!(f, "adcs {}, {}, {}", rd, rn, rm),
             Instruction::Ands { rd, rn, rm, width } => write!(
                 f,
                 "ands {}, {}, {}",

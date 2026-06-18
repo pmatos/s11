@@ -53,6 +53,22 @@ impl ConditionFlags {
         Self { n, z, c, v }
     }
 
+    /// Compute flags from an add-with-carry result: `lhs + rhs + carry_in`.
+    /// `carry_in` is 0 or 1. Uses 128-bit widening for exact carry-out (C)
+    /// and signed overflow (V).
+    pub fn from_adc(lhs: u64, rhs: u64, carry_in: u64) -> Self {
+        let wide = lhs as u128 + rhs as u128 + carry_in as u128;
+        let result = wide as u64;
+        let v =
+            (lhs as i64 as i128 + rhs as i64 as i128 + carry_in as i128) != result as i64 as i128;
+        Self {
+            n: (result as i64) < 0,
+            z: result == 0,
+            c: wide > u64::MAX as u128,
+            v,
+        }
+    }
+
     /// Compute flags from a logical operation result (AND, ORR, EOR, TST)
     pub fn from_logical(result: u64) -> Self {
         Self {

@@ -39,6 +39,7 @@ Rewritable straight-line mnemonics accepted by the parser and Capstone bridge:
   `movk`
   - Register `mov` supports both 64-bit `X` and 32-bit `W` forms.
 - Arithmetic and flag-setting arithmetic: `add`, `sub`, `adds`, `subs`
+- Add/subtract with carry (X-only, register form): `adc`, `adcs`
   - Non-flag-setting `add` and `sub` support both 64-bit `X` and 32-bit `W`
     register/immediate/shifted-register forms. W extended-register arithmetic
     remains out of scope for now.
