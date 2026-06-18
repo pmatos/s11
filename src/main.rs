@@ -2483,6 +2483,10 @@ mod cli_helper_tests {
             ("sub", "w0, w1, #3"),
             ("adds", "x0, x1, #1"),
             ("subs", "x0, x1, x2"),
+            ("adc", "x0, x1, x2"),
+            ("adcs", "x0, x1, x2"),
+            ("sbc", "x0, x1, x2"),
+            ("sbcs", "x0, x1, x2"),
             ("and", "x0, x1, x2"),
             ("and", "w0, w1, #0xff"),
             ("ands", "x0, x1, x2"),
@@ -2635,7 +2639,7 @@ mod cli_helper_tests {
         // Tripwire: bump in lockstep when adding/removing rows. Catches
         // accidental row deletion and forces a re-read when adding a parser
         // mnemonic without a matching test row.
-        assert_eq!(cases.len(), 144);
+        assert_eq!(cases.len(), 148);
 
         fn docs_mnemonic(mnemonic: &'static str) -> &'static str {
             if mnemonic.starts_with("b.") {
