@@ -252,6 +252,7 @@ impl SearchAlgorithm<crate::isa::AArch64> for LlmSearch {
                     }
                 }
                 IterationOutcome::NotShorter { candidate_len } => {
+                    stats.candidates_pruned_by_cost += 1;
                     if config.verbose {
                         eprintln!(
                             "llm-search: not-shorter on call {} (got {} instructions)",
@@ -533,6 +534,10 @@ mod tests {
         assert!(search.ledger().is_empty());
         assert_eq!(search.timings().codex_calls, 1);
         assert_eq!(search.timings().verifications, 0);
+        let stats = search.statistics();
+        assert_eq!(stats.candidates_evaluated, 1);
+        assert_eq!(stats.candidates_pruned_by_cost, 1);
+        assert_eq!(stats.smt_queries, 0);
     }
 
     #[cfg(unix)]

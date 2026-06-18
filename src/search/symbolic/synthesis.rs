@@ -157,11 +157,11 @@ where
                     return best_at_length;
                 }
 
+                self.statistics.candidates_evaluated += 1;
                 if candidate_cost >= *best_cost {
+                    self.statistics.candidates_pruned_by_cost += 1;
                     continue;
                 }
-
-                self.statistics.candidates_evaluated += 1;
 
                 if self.verify_equivalence(target, &candidate, live_out, config) {
                     *best_cost = candidate_cost;
@@ -196,11 +196,11 @@ where
                         return best_at_length;
                     }
 
+                    self.statistics.candidates_evaluated += 1;
                     if candidate_cost >= *best_cost {
+                        self.statistics.candidates_pruned_by_cost += 1;
                         continue;
                     }
-
-                    self.statistics.candidates_evaluated += 1;
 
                     if self.verify_equivalence(target, &candidate, live_out, config) {
                         *best_cost = candidate_cost;
@@ -266,12 +266,12 @@ where
                             return best_at_length;
                         }
 
+                        self.statistics.candidates_evaluated += 1;
                         if candidate_cost >= *best_cost {
+                            self.statistics.candidates_pruned_by_cost += 1;
                             count += 1;
                             continue;
                         }
-
-                        self.statistics.candidates_evaluated += 1;
 
                         if self.verify_equivalence(target, &candidate, live_out, config) {
                             *best_cost = candidate_cost;
@@ -957,6 +957,114 @@ mod tests {
             0,
             "length-2 search should not count candidates after the timeout expires",
         );
+    }
+
+    #[test]
+    fn symbolic_length_one_counts_cost_pruned_candidate() {
+        use std::time::Instant;
+
+        let _guard = SYMBOLIC_INNER_LOOP_TEST_LOCK
+            .lock()
+            .expect("symbolic inner-loop test lock poisoned");
+        reset_symbolic_inner_loop_test_state();
+
+        let mut search: SymbolicSearch<TestIsa> = SymbolicSearch::new();
+        let config = SearchConfig::default().with_timeout_option(None);
+        let all_instructions = [TestInstruction(0)];
+        let target = [TestInstruction(100), TestInstruction(101)];
+        let mut best_cost = 0;
+
+        let result = search.search_at_length(
+            &target,
+            &(),
+            &config,
+            &all_instructions,
+            1,
+            &mut best_cost,
+            Instant::now(),
+        );
+
+        assert_eq!(result, None);
+        assert_eq!(search.statistics().candidates_evaluated, 1);
+        assert_eq!(search.statistics().candidates_pruned_by_cost, 1);
+        assert_eq!(TEST_EQUIVALENCE_CHECKS.load(Ordering::SeqCst), 0);
+        assert_eq!(search.statistics().smt_queries, 0);
+        assert_eq!(search.statistics().candidates_passed_fast, 0);
+    }
+
+    #[test]
+    fn symbolic_length_two_counts_cost_pruned_candidate() {
+        use std::time::Instant;
+
+        let _guard = SYMBOLIC_INNER_LOOP_TEST_LOCK
+            .lock()
+            .expect("symbolic inner-loop test lock poisoned");
+        reset_symbolic_inner_loop_test_state();
+
+        let mut search: SymbolicSearch<TestIsa> = SymbolicSearch::new();
+        let config = SearchConfig::default().with_timeout_option(None);
+        let all_instructions = [TestInstruction(0)];
+        let target = [
+            TestInstruction(100),
+            TestInstruction(101),
+            TestInstruction(102),
+        ];
+        let mut best_cost = 0;
+
+        let result = search.search_at_length(
+            &target,
+            &(),
+            &config,
+            &all_instructions,
+            2,
+            &mut best_cost,
+            Instant::now(),
+        );
+
+        assert_eq!(result, None);
+        assert_eq!(search.statistics().candidates_evaluated, 1);
+        assert_eq!(search.statistics().candidates_pruned_by_cost, 1);
+        assert_eq!(TEST_EQUIVALENCE_CHECKS.load(Ordering::SeqCst), 0);
+        assert_eq!(search.statistics().smt_queries, 0);
+        assert_eq!(search.statistics().candidates_passed_fast, 0);
+    }
+
+    #[test]
+    fn symbolic_length_three_counts_cost_pruned_candidate() {
+        use std::time::Instant;
+
+        let _guard = SYMBOLIC_INNER_LOOP_TEST_LOCK
+            .lock()
+            .expect("symbolic inner-loop test lock poisoned");
+        reset_symbolic_inner_loop_test_state();
+
+        let mut search: SymbolicSearch<TestIsa> = SymbolicSearch::new();
+        let config = SearchConfig::default().with_timeout_option(None);
+        let all_instructions = [TestInstruction(0)];
+        let target = [
+            TestInstruction(100),
+            TestInstruction(101),
+            TestInstruction(102),
+            TestInstruction(103),
+        ];
+        let mut best_cost = 0;
+
+        let result = search.search_at_length(
+            &target,
+            &(),
+            &config,
+            &all_instructions,
+            3,
+            &mut best_cost,
+            Instant::now(),
+        );
+
+        assert_eq!(result, None);
+        assert_eq!(search.statistics().candidates_evaluated, 1);
+        assert_eq!(search.statistics().candidates_pruned_by_cost, 1);
+        assert_eq!(TEST_EQUIVALENCE_CHECKS.load(Ordering::SeqCst), 0);
+        assert_eq!(search.statistics().smt_queries, 0);
+        assert_eq!(search.statistics().candidates_passed_fast, 0);
     }
 
     #[test]

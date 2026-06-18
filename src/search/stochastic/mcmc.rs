@@ -266,6 +266,8 @@ where
                         );
                     }
                 }
+            } else {
+                self.statistics.candidates_pruned_by_cost += 1;
             }
 
             if acceptance.accept(&mut rng, current_cost, proposal_cost) {
@@ -641,6 +643,26 @@ mod tests {
         let recorded_timeout = run_timeout_probe_search(symbolic_config);
 
         assert_eq!(recorded_timeout, Some(5000));
+    }
+
+    #[test]
+    fn stochastic_counts_fast_passing_non_improving_proposal_as_cost_pruned() {
+        let mut search: StochasticSearch<TimeoutProbeIsa> = StochasticSearch::new();
+        let config = SearchConfig::default().with_stochastic(
+            StochasticConfig::default()
+                .with_iterations(1)
+                .with_test_count(0)
+                .with_seed(1),
+        );
+        let target = [TimeoutProbeInstruction(1)];
+
+        let result = search.search(&target, &(), &config);
+
+        assert!(!result.found_optimization);
+        assert_eq!(result.statistics.candidates_evaluated, 1);
+        assert_eq!(result.statistics.candidates_passed_fast, 1);
+        assert_eq!(result.statistics.candidates_pruned_by_cost, 1);
+        assert_eq!(result.statistics.smt_queries, 0);
     }
 
     #[test]
