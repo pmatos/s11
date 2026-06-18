@@ -269,21 +269,18 @@ where
     shared
         .smt_elapsed_nanos
         .fetch_add(solver_nanos, Ordering::Relaxed);
-    // Count only candidates that actually reached `solver.check()`. The
-    // pre-SMT guard (`flag_writers_diverge && flags_live`) returns
-    // `NotEquivalent` with `metrics.smt_called == false`, and the
-    // fast-path returns `NotEquivalentFast` the same way — using the
-    // metric is both correct and future-proof against new early-return
-    // paths (PR #269 review).
+    // Count only candidates that actually reached `solver.check()`. The same
+    // metric also marks candidates that passed fast concrete validation,
+    // including ones later disproved by SMT.
     if metrics.smt_called {
         shared.smt_queries.fetch_add(1, Ordering::Relaxed);
+        shared
+            .candidates_passed_fast
+            .fetch_add(1, Ordering::Relaxed);
     }
     match verdict {
         EquivalenceResult::Equivalent => {
             shared.smt_equivalent.fetch_add(1, Ordering::Relaxed);
-            shared
-                .candidates_passed_fast
-                .fetch_add(1, Ordering::Relaxed);
             true
         }
         _ => false,
@@ -1302,6 +1299,61 @@ mod tests {
         assert!(shared.stop.load(Ordering::Relaxed));
         assert_eq!(shared.smt_queries.load(Ordering::Relaxed), 0);
         assert_eq!(shared.smt_elapsed_nanos.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn verify_candidate_does_not_count_pre_smt_guard_as_smt() {
+        let target = vec![Instruction::Cmp {
+            rn: Register::X0,
+            rm: Operand::Immediate(0),
+        }];
+        let candidate = vec![Instruction::MovImm {
+            rd: Register::X1,
+            imm: 7,
+        }];
+        let live_out = LiveOut::from_registers(vec![]).with_flags(true);
+        let config = SearchConfig::default().with_timeout_option(None);
+        let shared = SharedState::<AArch64>::new(u64::MAX);
+
+        assert!(!verify_candidate::<AArch64>(
+            &target,
+            &candidate,
+            &live_out,
+            &config,
+            &shared,
+            std::time::Instant::now(),
+        ));
+        assert_eq!(shared.smt_queries.load(Ordering::Relaxed), 0);
+        assert_eq!(shared.candidates_passed_fast.load(Ordering::Relaxed), 0);
+        assert_eq!(shared.smt_elapsed_nanos.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn verify_candidate_counts_smt_refutation_as_fast_pass() {
+        let target = vec![Instruction::Add {
+            rd: Register::X0,
+            rn: Register::X1,
+            rm: Operand::Immediate(1),
+        }];
+        let candidate = vec![Instruction::MovImm {
+            rd: Register::X0,
+            imm: 1,
+        }];
+        let live_out = LiveOut::from_registers(vec![Register::X0]);
+        let config = SearchConfig::default().with_timeout_option(None);
+        let shared = SharedState::<AArch64>::new(u64::MAX);
+
+        assert!(!verify_candidate::<AArch64>(
+            &target,
+            &candidate,
+            &live_out,
+            &config,
+            &shared,
+            std::time::Instant::now(),
+        ));
+        assert_eq!(shared.smt_queries.load(Ordering::Relaxed), 1);
+        assert_eq!(shared.candidates_passed_fast.load(Ordering::Relaxed), 1);
+        assert_eq!(shared.smt_equivalent.load(Ordering::Relaxed), 0);
     }
 
     #[test]
