@@ -475,6 +475,37 @@ pub fn compute_flags_add(lhs: &BV, rhs: &BV, width: u32) -> Nzcv {
     (n, z, c, v)
 }
 
+/// Compute symbolic NZCV for add-with-carry `lhs + rhs + carry` at `width`.
+/// `carry` is a 1-bit BV. Mirrors `ConditionFlags::from_adc` in `state.rs`.
+/// The three addends are widened to `width + 1` bits; because `bvadd` is
+/// modular same-width, the sum is `width + 1` bits and bit `width` is the
+/// carry-out.
+pub fn compute_flags_adc(lhs: &BV, rhs: &BV, carry: &BV, width: u32) -> Nzcv {
+    let sum = lhs
+        .zero_ext(1)
+        .bvadd(&rhs.zero_ext(1))
+        .bvadd(&carry.zero_ext(width));
+    let result = sum.extract(width - 1, 0);
+    let zero = BV::from_u64(0, width);
+    let msb = width - 1;
+    let n = result.extract(msb, msb);
+    let z = result.eq(&zero).ite(&bv_one(), &bv_zero());
+    let c = sum.extract(width, width); // carry-out
+    let lhs_sign = lhs.extract(msb, msb);
+    let rhs_sign = rhs.extract(msb, msb);
+    let res_sign = result.extract(msb, msb);
+    let signs_match = lhs_sign.bvxor(&rhs_sign).bvxor(&bv_one());
+    let signs_flip = lhs_sign.bvxor(&res_sign);
+    let v = signs_match.bvand(&signs_flip);
+    (n, z, c, v)
+}
+
+/// Compute symbolic NZCV for subtract-with-carry `lhs - rhs - (1 - carry)`,
+/// which equals `lhs + NOT(rhs) + carry`. Mirrors `ConditionFlags::from_sbc`.
+pub fn compute_flags_sbc(lhs: &BV, rhs: &BV, carry: &BV, width: u32) -> Nzcv {
+    compute_flags_adc(lhs, &rhs.bvnot(), carry, width)
+}
+
 /// Convert a 4-bit NZCV literal to four 1-bit BV constants.
 /// Layout per ARM ARM: bit3 = N, bit2 = Z, bit1 = C, bit0 = V.
 pub fn nzcv_to_bvs(byte: u8) -> Nzcv {
@@ -849,6 +880,42 @@ pub fn apply_instruction(mut state: MachineState, instruction: &Instruction) -> 
             let rhs = state.eval_operand(rm);
             let (n, z, c, v) = compute_flags_sub(&lhs, &rhs, width);
             state.set_register(*rd, lhs.bvsub(&rhs));
+            state.set_flags(n, z, c, v);
+        }
+        // Add with carry: rd = rn + rm + C (1-bit carry widened to `width`).
+        Instruction::Adc { rd, rn, rm } => {
+            let lhs = state.get_register(*rn).clone();
+            let rhs = state.get_register(*rm).clone();
+            let carry = state.get_flags().2.clone();
+            state.set_register(*rd, lhs.bvadd(&rhs).bvadd(&carry.zero_ext(width - 1)));
+        }
+        Instruction::Adcs { rd, rn, rm } => {
+            let lhs = state.get_register(*rn).clone();
+            let rhs = state.get_register(*rm).clone();
+            let carry = state.get_flags().2.clone();
+            let (n, z, c, v) = compute_flags_adc(&lhs, &rhs, &carry, width);
+            state.set_register(*rd, lhs.bvadd(&rhs).bvadd(&carry.zero_ext(width - 1)));
+            state.set_flags(n, z, c, v);
+        }
+        // Subtract with carry: rd = rn + NOT(rm) + C.
+        Instruction::Sbc { rd, rn, rm } => {
+            let lhs = state.get_register(*rn).clone();
+            let rhs = state.get_register(*rm).clone();
+            let carry = state.get_flags().2.clone();
+            state.set_register(
+                *rd,
+                lhs.bvadd(&rhs.bvnot()).bvadd(&carry.zero_ext(width - 1)),
+            );
+        }
+        Instruction::Sbcs { rd, rn, rm } => {
+            let lhs = state.get_register(*rn).clone();
+            let rhs = state.get_register(*rm).clone();
+            let carry = state.get_flags().2.clone();
+            let (n, z, c, v) = compute_flags_sbc(&lhs, &rhs, &carry, width);
+            state.set_register(
+                *rd,
+                lhs.bvadd(&rhs.bvnot()).bvadd(&carry.zero_ext(width - 1)),
+            );
             state.set_flags(n, z, c, v);
         }
         Instruction::Ands {
