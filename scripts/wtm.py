@@ -286,6 +286,81 @@ def find_worktree_by_branch(branch_name):
         return None
 
 
+def resolve_gitfile_path(path_text, worktree_path):
+    """Resolve a path from a linked-worktree .git file."""
+    path = Path(path_text)
+    if not path.is_absolute():
+        path = worktree_path / path
+    return path.resolve()
+
+
+def unregister_worktree_preserving_dir(worktree_path):
+    """Unregister a linked worktree without deleting its directory contents."""
+    git_file = worktree_path / ".git"
+    if not git_file.exists():
+        print(f"❌ Cannot preserve '{worktree_path}': missing .git pointer")
+        return False
+    if git_file.is_dir():
+        print(
+            f"❌ Cannot preserve '{worktree_path}': "
+            ".git is a directory, not a worktree pointer"
+        )
+        return False
+
+    try:
+        common_dir_result = run_command(
+            ["git", "-C", str(worktree_path), "rev-parse", "--git-common-dir"],
+            capture_output=True,
+        )
+        common_dir_text = common_dir_result.stdout.strip()
+        if not common_dir_text:
+            print(f"❌ Cannot preserve '{worktree_path}': git common dir is empty")
+            return False
+        common_dir = resolve_gitfile_path(common_dir_text, worktree_path)
+
+        git_file_contents = git_file.read_text()
+        git_file_lines = git_file_contents.splitlines()
+        first_line = git_file_lines[0] if git_file_lines else ""
+        if not first_line.startswith("gitdir:"):
+            print(f"❌ Cannot preserve '{worktree_path}': malformed .git pointer")
+            return False
+
+        admin_gitdir = resolve_gitfile_path(first_line[len("gitdir:") :].strip(), worktree_path)
+        worktrees_dir = (common_dir / "worktrees").resolve()
+        if not admin_gitdir.is_relative_to(worktrees_dir):
+            print(
+                f"❌ Cannot preserve '{worktree_path}': worktree metadata is outside {worktrees_dir}"
+            )
+            return False
+        if not admin_gitdir.exists():
+            print(f"❌ Cannot preserve '{worktree_path}': worktree metadata is missing")
+            return False
+
+        if DRY_RUN:
+            print("   [DRY RUN] Would remove .git pointer and prune worktree metadata")
+            return True
+
+        git_file.unlink()
+        try:
+            run_command(
+                ["git", "--git-dir", str(common_dir), "worktree", "prune", "--expire", "now"]
+            )
+            if admin_gitdir.exists():
+                raise RuntimeError(f"worktree metadata still exists: {admin_gitdir}")
+            if not worktree_path.exists():
+                raise RuntimeError(f"preserved directory disappeared: {worktree_path}")
+        except Exception as e:
+            if not git_file.exists():
+                git_file.write_text(git_file_contents)
+            print(f"❌ Failed to unregister worktree while preserving directory: {e}")
+            return False
+
+        return True
+    except (OSError, subprocess.CalledProcessError) as e:
+        print(f"❌ Failed to unregister worktree while preserving directory: {e}")
+        return False
+
+
 def remove_worktree(branch_or_path, keep_dir=False):
     """Remove a worktree and optionally its directory."""
     worktree_path = None
@@ -344,7 +419,8 @@ def remove_worktree(branch_or_path, keep_dir=False):
     try:
         print("🗑️  Removing worktree registration...")
         if keep_dir:
-            run_command(["git", "worktree", "remove", "--force", str(worktree_path)])
+            if not unregister_worktree_preserving_dir(worktree_path):
+                return False
         else:
             # Remove worktree and let git handle directory removal
             run_command(["git", "worktree", "remove", str(worktree_path)])
