@@ -425,6 +425,14 @@ fn candidate_solver_timeout(config: &SearchConfig, start: Instant) -> Option<Dur
     candidate_solver_timeout_for_elapsed(config, start.elapsed())
 }
 
+fn report_skipped_length(length: usize, verbose: bool, mut emit: impl FnMut(&str)) {
+    if verbose {
+        emit(&format!(
+            "warning: enumerative search length {length} is not yet implemented; skipping"
+        ));
+    }
+}
+
 fn run_length_one<I>(
     target: &[I::Instruction],
     live_out: &<I as EnumerativeBackend<I>>::LiveOut,
@@ -573,7 +581,9 @@ where
                         s,
                         start,
                     ),
-                    _ => {} // length >= 3 lands in a follow-up TDD cycle.
+                    _ => report_skipped_length(length, config.verbose, |message| {
+                        eprintln!("{message}")
+                    }),
                 }
             }
         };
@@ -1940,7 +1950,7 @@ mod tests {
 
     #[test]
     fn length_four_target_iterates_past_length_three_dispatch() {
-        // Pins the `_ => {}` arm of the per-length dispatch: a length-4
+        // Pins the skipped-length arm of the per-length dispatch: a length-4
         // target makes the outer loop iterate over lengths 1, 2, and 3, so
         // length 3 must hit the not-yet-implemented arm without panicking.
         // The target intentionally has a length-1 equivalent (`add x0, x1,
@@ -1971,14 +1981,33 @@ mod tests {
         let live_out = LiveOut::from_registers(vec![Register::X0]);
 
         let mut search = EnumerativeSearch::<crate::isa::AArch64>::new();
-        let result = search.search(&target, &live_out, &small_config());
+        let result = search.search(&target, &live_out, &small_config().verbose());
 
         // The important assertion is that the search returned — i.e. the
-        // length-3 `_ => {}` arm did not panic, the loop iterated past it,
-        // and the result was assembled cleanly.
+        // length-3 skipped-length arm did not panic, the loop iterated past
+        // it, and the result was assembled cleanly.
         assert!(result.statistics.elapsed_time > std::time::Duration::ZERO);
         assert!(result.found_optimization, "length-1 collapse should fire");
         assert_eq!(result.optimized_sequence.as_ref().map(Vec::len), Some(1));
+    }
+
+    #[test]
+    fn skipped_length_warning_is_verbose_gated() {
+        let mut quiet_messages = Vec::new();
+        report_skipped_length(3, false, |message| quiet_messages.push(message.to_owned()));
+
+        assert!(
+            quiet_messages.is_empty(),
+            "quiet enumerative search should not report skipped lengths"
+        );
+
+        let mut verbose_messages = Vec::new();
+        report_skipped_length(3, true, |message| verbose_messages.push(message.to_owned()));
+
+        assert_eq!(
+            verbose_messages,
+            vec!["warning: enumerative search length 3 is not yet implemented; skipping"]
+        );
     }
 
     #[test]
