@@ -309,22 +309,20 @@ where
             .unwrap_or(Duration::from_secs(5));
         let width = <I as SymbolicBackend<I>>::width(config);
 
-        self.statistics.smt_queries += 1;
-
         let (verdict, metrics) = <I as SymbolicBackend<I>>::check_equivalence(
             target, candidate, live_out, width, timeout,
         );
         self.statistics.smt_elapsed += metrics.smt_elapsed;
+        // `smt_called` means the candidate survived the fast concrete
+        // pre-filter and reached Z3, regardless of the solver verdict.
+        if metrics.smt_called {
+            self.statistics.smt_queries += 1;
+            self.statistics.candidates_passed_fast += 1;
+        }
         match verdict {
             EquivalenceResult::Equivalent => {
                 self.statistics.smt_equivalent += 1;
-                self.statistics.candidates_passed_fast += 1;
                 true
-            }
-            EquivalenceResult::NotEquivalentFast(_) => {
-                // Failed fast test, no SMT query needed
-                self.statistics.smt_queries -= 1; // Don't count as SMT query
-                false
             }
             _ => false,
         }
@@ -415,12 +413,15 @@ mod tests {
     use crate::semantics::EquivalenceMetrics;
     use crate::semantics::cost::CostMetric;
     use crate::semantics::live_out::LiveOut;
+    use crate::semantics::state::ConcreteMachineState;
     use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
     use std::sync::{Arc, Mutex};
     use std::time::Duration;
 
     static TEST_EQUIVALENCE_CHECKS: AtomicUsize = AtomicUsize::new(0);
     static TEST_EQUIVALENCE_EQUIVALENT_ON_CHECK: AtomicUsize = AtomicUsize::new(0);
+    static TEST_EQUIVALENCE_FAST_FAILURE: AtomicBool = AtomicBool::new(false);
+    static TEST_EQUIVALENCE_SMT_CALLED: AtomicBool = AtomicBool::new(false);
     static TEST_SEQUENCE_COST_DELAY_MS: AtomicU64 = AtomicU64::new(0);
     static TEST_STOP_FLAG: Mutex<Option<Arc<AtomicBool>>> = Mutex::new(None);
     static SYMBOLIC_INNER_LOOP_TEST_LOCK: Mutex<()> = Mutex::new(());
@@ -444,6 +445,8 @@ mod tests {
     fn reset_symbolic_inner_loop_test_state() {
         TEST_EQUIVALENCE_CHECKS.store(0, Ordering::SeqCst);
         TEST_EQUIVALENCE_EQUIVALENT_ON_CHECK.store(0, Ordering::SeqCst);
+        TEST_EQUIVALENCE_FAST_FAILURE.store(false, Ordering::SeqCst);
+        TEST_EQUIVALENCE_SMT_CALLED.store(false, Ordering::SeqCst);
         TEST_SEQUENCE_COST_DELAY_MS.store(0, Ordering::SeqCst);
         let mut slot = TEST_STOP_FLAG.lock().expect("test stop flag lock poisoned");
         *slot = None;
@@ -629,13 +632,20 @@ mod tests {
                 }
             }
             std::thread::sleep(Duration::from_millis(1));
+            let metrics = EquivalenceMetrics {
+                smt_called: TEST_EQUIVALENCE_SMT_CALLED.load(Ordering::SeqCst),
+                ..EquivalenceMetrics::default()
+            };
             if check_number == TEST_EQUIVALENCE_EQUIVALENT_ON_CHECK.load(Ordering::SeqCst) {
-                return (EquivalenceResult::Equivalent, EquivalenceMetrics::default());
+                return (EquivalenceResult::Equivalent, metrics);
             }
-            (
-                EquivalenceResult::NotEquivalent,
-                EquivalenceMetrics::default(),
-            )
+            if TEST_EQUIVALENCE_FAST_FAILURE.load(Ordering::SeqCst) {
+                return (
+                    EquivalenceResult::NotEquivalentFast(ConcreteMachineState::new_zeroed()),
+                    metrics,
+                );
+            }
+            (EquivalenceResult::NotEquivalent, metrics)
         }
 
         fn width(_config: &SearchConfig) -> u32 {
@@ -1138,6 +1148,48 @@ mod tests {
         }];
 
         assert!(!search.verify_equivalence(&target, &candidate, &live_out, &config));
+    }
+
+    #[test]
+    fn symbolic_verify_counts_smt_counterexample_as_fast_pass() {
+        let _guard = SYMBOLIC_INNER_LOOP_TEST_LOCK
+            .lock()
+            .expect("symbolic inner-loop test lock poisoned");
+        reset_symbolic_inner_loop_test_state();
+        TEST_EQUIVALENCE_SMT_CALLED.store(true, Ordering::SeqCst);
+
+        let mut search: SymbolicSearch<TestIsa> = SymbolicSearch::new();
+        let config = SearchConfig::default().with_timeout_option(None);
+        let target = [TestInstruction(1)];
+        let candidate = [TestInstruction(2)];
+
+        assert!(!search.verify_equivalence(&target, &candidate, &(), &config));
+
+        let stats = search.statistics();
+        assert_eq!(stats.smt_queries, 1);
+        assert_eq!(stats.candidates_passed_fast, 1);
+        assert_eq!(stats.smt_equivalent, 0);
+    }
+
+    #[test]
+    fn symbolic_verify_does_not_count_fast_refutation_as_fast_pass() {
+        let _guard = SYMBOLIC_INNER_LOOP_TEST_LOCK
+            .lock()
+            .expect("symbolic inner-loop test lock poisoned");
+        reset_symbolic_inner_loop_test_state();
+        TEST_EQUIVALENCE_FAST_FAILURE.store(true, Ordering::SeqCst);
+
+        let mut search: SymbolicSearch<TestIsa> = SymbolicSearch::new();
+        let config = SearchConfig::default().with_timeout_option(None);
+        let target = [TestInstruction(1)];
+        let candidate = [TestInstruction(2)];
+
+        assert!(!search.verify_equivalence(&target, &candidate, &(), &config));
+
+        let stats = search.statistics();
+        assert_eq!(stats.smt_queries, 0);
+        assert_eq!(stats.candidates_passed_fast, 0);
+        assert_eq!(stats.smt_equivalent, 0);
     }
 
     // ---- x86 symbolic search (issue #73 Phase D step 7) ----
