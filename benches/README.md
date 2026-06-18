@@ -93,6 +93,7 @@ across commits.
   "smt_queries": 73000,
   "smt_equivalent": 1,
   "candidates_evaluated": 85000,
+  "candidates_pruned_by_cost": 12000,
   "improved": true,
   "timeout": false,
   "git_sha": "9576937",
@@ -112,7 +113,8 @@ across commits.
 | `search_elapsed_ms` | Wall time of the search itself, truncated to milliseconds for legibility. Sub-millisecond runs serialise as `0`; the bench driver uses the precise `Duration` internally so criterion's timing analysis sees real values. |
 | `smt_elapsed_ms` | Cumulative Z3 `solver.check()` time. Often zero — the pre-SMT guard rejects most flag-divergent candidates before reaching the solver. |
 | `smt_queries` / `smt_equivalent` | SMT call count (net of fast-path rollbacks) and how many proved equivalence. |
-| `candidates_evaluated` | Total candidates considered. |
+| `candidates_evaluated` | Candidates constructed and considered, including candidates later rejected by a cost/best-bound gate. |
+| `candidates_pruned_by_cost` | Evaluated candidates rejected before verification because they were not cheaper than the current best solution. |
 | `improved` / `timeout` | `improved`: whether the search returned a strictly cheaper sequence than the target — **not** "search completed without error" (a clean timeout that finds nothing also reports `improved: false`). Combine with `timeout` to distinguish "explored fully, no win" from "ran out of time." |
 | `git_sha` / `timestamp_utc` | Run provenance, stamped once per `cargo bench` invocation. |
 

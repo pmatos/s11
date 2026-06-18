@@ -1241,6 +1241,10 @@ fn print_search_statistics(stats: &search::result::SearchStatistics) {
     println!("  Elapsed time: {:?}", stats.elapsed_time);
     println!("  Candidates evaluated: {}", stats.candidates_evaluated);
     println!(
+        "  Candidates pruned by cost: {}",
+        stats.candidates_pruned_by_cost
+    );
+    println!(
         "  Candidates passed fast test: {}",
         stats.candidates_passed_fast
     );
@@ -3358,6 +3362,7 @@ mod cli_helper_tests {
         print_unsupported_mnemonic_ledger(&ledger);
 
         let mut stats = SearchStatistics::new(Algorithm::Stochastic);
+        stats.candidates_pruned_by_cost = 3;
         stats.iterations = 10;
         stats.accepted_proposals = 5;
         print_search_statistics(&stats);

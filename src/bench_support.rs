@@ -160,6 +160,7 @@ pub struct BenchRecord {
     pub smt_queries: u64,
     pub smt_equivalent: u64,
     pub candidates_evaluated: u64,
+    pub candidates_pruned_by_cost: u64,
     /// `true` if the search returned a strictly cheaper sequence than
     /// the target. Note: this does NOT mean "search ran without error" —
     /// a timeout that finds no improvement also reports `improved: false`.
@@ -287,6 +288,7 @@ pub fn run_bench(spec: &BenchSpec) -> BenchRecord {
         smt_queries: statistics.smt_queries,
         smt_equivalent: statistics.smt_equivalent,
         candidates_evaluated: statistics.candidates_evaluated,
+        candidates_pruned_by_cost: statistics.candidates_pruned_by_cost,
         improved,
         timeout: timed_out,
         git_sha: None,
@@ -366,6 +368,7 @@ mod tests {
             smt_queries: 3,
             smt_equivalent: 1,
             candidates_evaluated: 20,
+            candidates_pruned_by_cost: 4,
             improved: true,
             timeout: false,
             git_sha: None,
@@ -384,6 +387,7 @@ mod tests {
             .map(|l| serde_json::from_str(l).expect("each line must be valid JSON"))
             .collect();
         assert_eq!(parsed[0]["benchmark_id"], "demo");
+        assert_eq!(parsed[0]["candidates_pruned_by_cost"], 4);
         assert_eq!(parsed[1]["benchmark_id"], "demo-2");
     }
 
@@ -459,6 +463,7 @@ mod tests {
         assert_eq!(record.best_cost, 1);
         assert!(record.smt_queries > 0, "enumerative search must hit SMT");
         assert!(record.candidates_evaluated > 0);
+        assert!(record.candidates_pruned_by_cost <= record.candidates_evaluated);
         assert!(!record.timeout);
     }
 }
