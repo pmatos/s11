@@ -3539,6 +3539,32 @@ mod tests {
     }
 
     #[test]
+    fn parse_single_reg_memory_rejects_unencodable_immediate_offsets() {
+        for text in [
+            "ldr x0, [x1, #32768]",
+            "str x0, [x1, #256]!",
+            "str x0, [x1], #256",
+            "ldrsw x0, [x1, #-257]",
+        ] {
+            let err = parse_line(text).expect_err("unencodable memory offset should be rejected");
+            let msg = err.to_string();
+            assert!(
+                msg.contains("instruction cannot be encoded in AArch64"),
+                "{text}: error should come from encodability gate, got {msg}"
+            );
+        }
+
+        for text in [
+            "ldr x0, [x1, #32760]",
+            "str x0, [x1, #-256]!",
+            "str x0, [x1], #255",
+            "ldr x0, [x1, #255]",
+        ] {
+            parse_line(text).unwrap_or_else(|err| panic!("{text}: expected parse, got {err}"));
+        }
+    }
+
+    #[test]
     fn parse_ldr_pre_index_yields_pre_index_mode() {
         use crate::ir::types::{AccessWidth, AddressOperand, IndexMode};
         let instr = parse_one("ldr x0, [x1, #8]!");
