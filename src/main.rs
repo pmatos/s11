@@ -120,14 +120,14 @@ pub enum CliArch {
 
 impl std::fmt::Display for CliArch {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let value = match self {
-            CliArch::Aarch64 => "aarch64",
-            CliArch::Riscv32 => "riscv32",
-            CliArch::Riscv64 => "riscv64",
-            CliArch::X86_64 => "x86-64",
-            CliArch::X86_32 => "x86-32",
-        };
-        f.write_str(value)
+        // Derive the spelling from clap's ValueEnum so Display and the CLI
+        // parser stay in sync by construction (a `#[value(name = ...)]` or a
+        // renamed variant can never drift the error message from what users type).
+        f.write_str(
+            self.to_possible_value()
+                .expect("CliArch has no skipped variants")
+                .get_name(),
+        )
     }
 }
 
