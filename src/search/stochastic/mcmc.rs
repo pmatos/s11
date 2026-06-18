@@ -544,7 +544,7 @@ mod tests {
         static RECORDED_SMT_TIMEOUT_MS: std::cell::Cell<Option<u64>> =
             const { std::cell::Cell::new(None) };
         static PROBE_EQUIVALENCE_RESULT: std::cell::RefCell<EquivalenceResult> =
-            std::cell::RefCell::new(EquivalenceResult::Equivalent);
+            const { std::cell::RefCell::new(EquivalenceResult::Equivalent) };
     }
 
     impl StochasticBackend<TimeoutProbeIsa> for TimeoutProbeIsa {
