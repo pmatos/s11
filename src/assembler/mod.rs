@@ -1262,10 +1262,9 @@ impl AArch64Assembler {
                 Ok(())
             }
             Instruction::Cmp { rn, rm } => {
-                let rn_reg = register_to_dynasm(*rn)?;
-
                 match rm {
                     Operand::Register(rm_reg) => {
+                        let rn_reg = register_to_dynasm(*rn)?;
                         let rm_reg_num = register_to_dynasm(*rm_reg)?;
                         dynasm!(ops
                             ; .arch aarch64
@@ -1277,6 +1276,7 @@ impl AArch64Assembler {
                         if *imm < 0 || *imm > 0xFFF {
                             return Err(format!("Immediate {} out of range for CMP", imm));
                         }
+                        let rn_reg = register_to_dynasm_xsp(*rn)?;
                         dynasm!(ops
                             ; .arch aarch64
                             ; cmp XSP(rn_reg), #*imm as u32
@@ -1284,6 +1284,7 @@ impl AArch64Assembler {
                         Ok(())
                     }
                     Operand::ShiftedRegister { reg, kind, amount } => {
+                        let rn_reg = register_to_dynasm(*rn)?;
                         let rm_reg_num = register_to_dynasm(*reg)?;
                         emit_shifted_reg_2op_arith!(ops, cmp, rn_reg, rm_reg_num, kind, *amount)
                     }
@@ -1298,10 +1299,9 @@ impl AArch64Assembler {
                 }
             }
             Instruction::Cmn { rn, rm } => {
-                let rn_reg = register_to_dynasm(*rn)?;
-
                 match rm {
                     Operand::Register(rm_reg) => {
+                        let rn_reg = register_to_dynasm(*rn)?;
                         let rm_reg_num = register_to_dynasm(*rm_reg)?;
                         dynasm!(ops
                             ; .arch aarch64
@@ -1313,6 +1313,7 @@ impl AArch64Assembler {
                         if *imm < 0 || *imm > 0xFFF {
                             return Err(format!("Immediate {} out of range for CMN", imm));
                         }
+                        let rn_reg = register_to_dynasm_xsp(*rn)?;
                         dynasm!(ops
                             ; .arch aarch64
                             ; cmn XSP(rn_reg), #*imm as u32
@@ -1320,6 +1321,7 @@ impl AArch64Assembler {
                         Ok(())
                     }
                     Operand::ShiftedRegister { reg, kind, amount } => {
+                        let rn_reg = register_to_dynasm(*rn)?;
                         let rm_reg_num = register_to_dynasm(*reg)?;
                         emit_shifted_reg_2op_arith!(ops, cmn, rn_reg, rm_reg_num, kind, *amount)
                     }
@@ -3457,6 +3459,33 @@ mod tests {
         }
     }
 
+    /// CMP/CMN immediate-form also uses the `Xn|SP` source slot.
+    #[test]
+    fn test_cmp_cmn_imm_accept_sp_rn() {
+        for (instr, mnemonic) in [
+            (
+                Instruction::Cmp {
+                    rn: Register::SP,
+                    rm: Operand::Immediate(8),
+                },
+                "cmp",
+            ),
+            (
+                Instruction::Cmn {
+                    rn: Register::SP,
+                    rm: Operand::Immediate(8),
+                },
+                "cmn",
+            ),
+        ] {
+            let mut assembler = AArch64Assembler::new();
+            let bytes = assembler
+                .assemble_instructions(&[instr], 0)
+                .unwrap_or_else(|e| panic!("{} sp, #8 should encode: {}", mnemonic, e));
+            disassemble_and_verify(&bytes, mnemonic, &["sp", "#8"]);
+        }
+    }
+
     #[test]
     fn test_add_imm_sp_rn_roundtrip() {
         let mut assembler = AArch64Assembler::new();
@@ -4282,7 +4311,7 @@ mod tests {
             ),
             (
                 Instruction::Cmp {
-                    rn: Register::X6,
+                    rn: Register::SP,
                     rm: Operand::ExtendedRegister {
                         reg: Register::X7,
                         kind: ExtendKind::Uxtw,
@@ -4290,7 +4319,19 @@ mod tests {
                     },
                 },
                 "cmp",
-                vec!["x6".into(), "w7".into(), "uxtw #3".into()],
+                vec!["sp".into(), "w7".into(), "uxtw #3".into()],
+            ),
+            (
+                Instruction::Cmn {
+                    rn: Register::SP,
+                    rm: Operand::ExtendedRegister {
+                        reg: Register::X7,
+                        kind: ExtendKind::Uxtw,
+                        shift: 3,
+                    },
+                },
+                "cmn",
+                vec!["sp".into(), "w7".into(), "uxtw #3".into()],
             ),
             (
                 Instruction::Add {
