@@ -23,7 +23,11 @@ use rand::RngExt;
 
 const ADDRESS_OFFSET_POOL: [i64; 8] = [0, 8, 16, 24, 32, 64, -8, -256];
 const SHIFTED_REGISTER_OPERAND_PROBABILITY: f64 = 0.30;
+/// Shift amounts proposed for X-form (64-bit) shifted-register operands.
 const SHIFTED_REGISTER_AMOUNTS_X64: [u8; 7] = [1, 2, 3, 4, 8, 16, 32];
+/// Shift amounts for W-form (32-bit) shifted-register operands. Caps at 31
+/// because AArch64 limits `Wd` shifted-register immediates to `0..=31`
+/// (ARM ARM C3.5.2); amount 32 is valid only for the X-form.
 const SHIFTED_REGISTER_AMOUNTS_W32: [u8; 7] = [1, 2, 3, 4, 8, 16, 31];
 
 /// Additional probability budget reserved for extended-register proposals,
@@ -1860,6 +1864,7 @@ mod tests {
         let mutator = default_mutator();
         let mut rng = StdRng::seed_from_u64(139);
         let mut saw_operand_shifted = false;
+        let mut saw_subw_operand_shifted = false;
         let mut saw_opcode_shifted = false;
 
         for _ in 0..20_000 {
@@ -1882,6 +1887,32 @@ mod tests {
                 assert!(
                     seq[0].is_encodable_aarch64(),
                     "AddW operand mutation must remain encodable: {:?}",
+                    seq[0]
+                );
+            }
+
+            // SubW shares the AddW match arm, so it must observe the same
+            // W-safe amount pool. Probe it explicitly so the coverage is
+            // self-documenting and survives a future arm split.
+            let mut seq = vec![Instruction::SubW {
+                rd: Register::X0,
+                rn: Register::X1,
+                rm: Operand::Register(Register::X2),
+            }];
+            mutator.mutate_operand(&mut rng, &mut seq);
+            if let Instruction::SubW {
+                rm: Operand::ShiftedRegister { amount, .. },
+                ..
+            } = seq[0]
+            {
+                saw_subw_operand_shifted = true;
+                assert!(
+                    amount <= 31,
+                    "SubW operand mutation must not emit shifted amount {amount}"
+                );
+                assert!(
+                    seq[0].is_encodable_aarch64(),
+                    "SubW operand mutation must remain encodable: {:?}",
                     seq[0]
                 );
             }
@@ -1912,6 +1943,10 @@ mod tests {
         assert!(
             saw_operand_shifted,
             "AddW operand mutation should still explore shifted-register operands"
+        );
+        assert!(
+            saw_subw_operand_shifted,
+            "SubW operand mutation should still explore shifted-register operands"
         );
         assert!(
             saw_opcode_shifted,
