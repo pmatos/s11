@@ -69,6 +69,14 @@ impl ConditionFlags {
         }
     }
 
+    /// Compute flags from a subtract-with-carry result. AArch64 SBC computes
+    /// `rn - rm - (1 - carry_in)`, which equals `rn + NOT(rm) + carry_in`.
+    /// `carry_in` is 0 or 1. Reusing the add-with-carry rule on the bitwise
+    /// complement of `rm` gives the correct NZCV (C = "no borrow").
+    pub fn from_sbc(lhs: u64, rhs: u64, carry_in: u64) -> Self {
+        Self::from_adc(lhs, !rhs, carry_in)
+    }
+
     /// Compute flags from a logical operation result (AND, ORR, EOR, TST)
     pub fn from_logical(result: u64) -> Self {
         Self {

@@ -352,6 +352,16 @@ pub enum Instruction {
         rn: Register,
         rm: Register,
     },
+    Sbc {
+        rd: Register,
+        rn: Register,
+        rm: Register,
+    },
+    Sbcs {
+        rd: Register,
+        rn: Register,
+        rm: Register,
+    },
     Ands {
         rd: Register,
         rn: Register,
@@ -613,6 +623,8 @@ impl Instruction {
             | Instruction::Subs { rd, .. }
             | Instruction::Adc { rd, .. }
             | Instruction::Adcs { rd, .. }
+            | Instruction::Sbc { rd, .. }
+            | Instruction::Sbcs { rd, .. }
             | Instruction::Ands { rd, .. }
             | Instruction::Cset { rd, .. }
             | Instruction::Csetm { rd, .. }
@@ -726,6 +738,7 @@ impl Instruction {
                 | Instruction::Adds { .. }
                 | Instruction::Subs { .. }
                 | Instruction::Adcs { .. }
+                | Instruction::Sbcs { .. }
                 | Instruction::Ands { .. }
                 | Instruction::Ccmp { .. }
                 | Instruction::Ccmn { .. }
@@ -749,6 +762,8 @@ impl Instruction {
                 // ADC/SBC family reads the carry flag as a live-in.
                 | Instruction::Adc { .. }
                 | Instruction::Adcs { .. }
+                | Instruction::Sbc { .. }
+                | Instruction::Sbcs { .. }
         )
     }
 
@@ -956,8 +971,11 @@ impl Instruction {
                 Operand::ShiftedRegister { .. } => false,
                 Operand::ExtendedRegister { .. } => false,
             },
-            // ADC/ADCS: register-only form, always encodable.
-            Instruction::Adc { .. } | Instruction::Adcs { .. } => true,
+            // ADC/ADCS/SBC/SBCS: register-only form, always encodable.
+            Instruction::Adc { .. }
+            | Instruction::Adcs { .. }
+            | Instruction::Sbc { .. }
+            | Instruction::Sbcs { .. } => true,
             // ANDS: register or encodable bitmask immediate (issue #65).
             // ShiftedRegister out of scope (#59). The immediate form uses the
             // plain X slot for both rd and rn (rejects SP); XZR is fine for rd
@@ -1184,8 +1202,11 @@ impl Instruction {
                 }
                 regs
             }
-            // ADC/ADCS read rn and rm (both plain registers).
-            Instruction::Adc { rn, rm, .. } | Instruction::Adcs { rn, rm, .. } => {
+            // ADC/ADCS/SBC/SBCS read rn and rm (both plain registers).
+            Instruction::Adc { rn, rm, .. }
+            | Instruction::Adcs { rn, rm, .. }
+            | Instruction::Sbc { rn, rm, .. }
+            | Instruction::Sbcs { rn, rm, .. } => {
                 vec![*rn, *rm]
             }
             // CSET / CSETM have no source registers (read flags, not regs).
@@ -1533,6 +1554,8 @@ impl fmt::Display for Instruction {
             Instruction::Subs { rd, rn, rm } => write!(f, "subs {}, {}, {}", rd, rn, rm),
             Instruction::Adc { rd, rn, rm } => write!(f, "adc {}, {}, {}", rd, rn, rm),
             Instruction::Adcs { rd, rn, rm } => write!(f, "adcs {}, {}, {}", rd, rn, rm),
+            Instruction::Sbc { rd, rn, rm } => write!(f, "sbc {}, {}, {}", rd, rn, rm),
+            Instruction::Sbcs { rd, rn, rm } => write!(f, "sbcs {}, {}, {}", rd, rn, rm),
             Instruction::Ands { rd, rn, rm, width } => write!(
                 f,
                 "ands {}, {}, {}",

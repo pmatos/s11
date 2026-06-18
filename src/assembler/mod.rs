@@ -1743,6 +1743,21 @@ impl AArch64Assembler {
                 dynasm!(ops ; .arch aarch64 ; adcs X(rd_reg), X(rn_reg), X(rm_reg));
                 Ok(())
             }
+            // Subtract with carry: register-only form.
+            Instruction::Sbc { rd, rn, rm } => {
+                let rd_reg = register_to_dynasm(*rd)?;
+                let rn_reg = register_to_dynasm(*rn)?;
+                let rm_reg = register_to_dynasm(*rm)?;
+                dynasm!(ops ; .arch aarch64 ; sbc X(rd_reg), X(rn_reg), X(rm_reg));
+                Ok(())
+            }
+            Instruction::Sbcs { rd, rn, rm } => {
+                let rd_reg = register_to_dynasm(*rd)?;
+                let rn_reg = register_to_dynasm(*rn)?;
+                let rm_reg = register_to_dynasm(*rm)?;
+                dynasm!(ops ; .arch aarch64 ; sbcs X(rd_reg), X(rn_reg), X(rm_reg));
+                Ok(())
+            }
             Instruction::Ands { rd, rn, rm, width } => {
                 let rd_reg = register_to_dynasm(*rd)?;
                 let rn_reg = register_to_dynasm(*rn)?;
@@ -3533,6 +3548,34 @@ mod tests {
             )
             .expect("ADCS register form should encode");
         disassemble_and_verify(&bytes, "adcs", &["x0", "x1", "x2"]);
+    }
+
+    #[test]
+    fn test_sbc_sbcs_register_roundtrip() {
+        let mut assembler = AArch64Assembler::new();
+        let bytes = assembler
+            .assemble_instructions(
+                &[Instruction::Sbc {
+                    rd: Register::X0,
+                    rn: Register::X1,
+                    rm: Register::X2,
+                }],
+                0,
+            )
+            .expect("SBC register form should encode");
+        disassemble_and_verify(&bytes, "sbc", &["x0", "x1", "x2"]);
+
+        let bytes = assembler
+            .assemble_instructions(
+                &[Instruction::Sbcs {
+                    rd: Register::X0,
+                    rn: Register::X1,
+                    rm: Register::X2,
+                }],
+                0,
+            )
+            .expect("SBCS register form should encode");
+        disassemble_and_verify(&bytes, "sbcs", &["x0", "x1", "x2"]);
     }
 
     #[test]

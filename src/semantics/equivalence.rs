@@ -2529,6 +2529,32 @@ mod tests {
         );
     }
 
+    #[test]
+    fn test_sbc_not_equivalent_to_sub_because_borrow_in_is_live() {
+        // SBC = rn - rm - (1 - carry); it reads the carry/borrow flag, unlike
+        // SUB. They must not be certified equivalent.
+        let sbc = vec![Instruction::Sbc {
+            rd: Register::X0,
+            rn: Register::X1,
+            rm: Register::X2,
+        }];
+        let sub = vec![Instruction::Sub {
+            rd: Register::X0,
+            rn: Register::X1,
+            rm: Operand::Register(Register::X2),
+        }];
+        assert_eq!(
+            check_equivalence(&sbc, &sub),
+            EquivalenceResult::NotEquivalent,
+            "SBC must not be equal to SUB: it depends on borrow-in"
+        );
+        assert_eq!(
+            check_equivalence(&sbc, &sbc),
+            EquivalenceResult::Equivalent,
+            "SBC must be equivalent to itself"
+        );
+    }
+
     /// Soundness regression: `BICS x0, x1, x2` → `BIC x0, x1, x2` drops the
     /// NZCV side-effect. Rejected when flags are observable.
     #[test]

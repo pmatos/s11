@@ -280,6 +280,8 @@ impl InstructionType for Instruction {
             // (same as branches/memory).
             Instruction::Adc { .. } => 69,
             Instruction::Adcs { .. } => 70,
+            Instruction::Sbc { .. } => 71,
+            Instruction::Sbcs { .. } => 72,
         }
     }
 
@@ -318,6 +320,8 @@ impl InstructionType for Instruction {
             Instruction::Subs { .. } => "subs",
             Instruction::Adc { .. } => "adc",
             Instruction::Adcs { .. } => "adcs",
+            Instruction::Sbc { .. } => "sbc",
+            Instruction::Sbcs { .. } => "sbcs",
             Instruction::Ands { .. } => "ands",
             Instruction::Cset { .. } => "cset",
             Instruction::Csetm { .. } => "csetm",
@@ -1181,6 +1185,8 @@ impl InstructionGenerator<Instruction> for AArch64InstructionGenerator {
                     Instruction::Subs { rn, rm, .. } => Instruction::Subs { rd: new_rd, rn, rm },
                     Instruction::Adc { rn, rm, .. } => Instruction::Adc { rd: new_rd, rn, rm },
                     Instruction::Adcs { rn, rm, .. } => Instruction::Adcs { rd: new_rd, rn, rm },
+                    Instruction::Sbc { rn, rm, .. } => Instruction::Sbc { rd: new_rd, rn, rm },
+                    Instruction::Sbcs { rn, rm, .. } => Instruction::Sbcs { rd: new_rd, rn, rm },
                     Instruction::Ands { rn, rm, width, .. } => Instruction::Ands {
                         rd: new_rd,
                         rn,
@@ -1588,6 +1594,14 @@ impl InstructionGenerator<Instruction> for AArch64InstructionGenerator {
                     Instruction::Adcs { rd, rn, .. } => {
                         let new_rm = registers[rng.random_range(0..registers.len())];
                         Instruction::Adcs { rd, rn, rm: new_rm }
+                    }
+                    Instruction::Sbc { rd, rn, .. } => {
+                        let new_rm = registers[rng.random_range(0..registers.len())];
+                        Instruction::Sbc { rd, rn, rm: new_rm }
+                    }
+                    Instruction::Sbcs { rd, rn, .. } => {
+                        let new_rm = registers[rng.random_range(0..registers.len())];
+                        Instruction::Sbcs { rd, rn, rm: new_rm }
                     }
                     Instruction::Ands {
                         rd,

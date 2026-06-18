@@ -568,6 +568,28 @@ fn parse_adcs(operands: &[&str]) -> Result<Instruction, String> {
     Ok(Instruction::Adcs { rd, rn, rm })
 }
 
+/// Parse SBC instruction (register-only; no immediate or shifted form)
+fn parse_sbc(operands: &[&str]) -> Result<Instruction, String> {
+    if operands.len() != 3 {
+        return Err(format!("sbc requires 3 operands, got {}", operands.len()));
+    }
+    let rd = parse_register(operands[0])?;
+    let rn = parse_register(operands[1])?;
+    let rm = parse_register(operands[2])?;
+    Ok(Instruction::Sbc { rd, rn, rm })
+}
+
+/// Parse SBCS instruction (register-only; no immediate or shifted form)
+fn parse_sbcs(operands: &[&str]) -> Result<Instruction, String> {
+    if operands.len() != 3 {
+        return Err(format!("sbcs requires 3 operands, got {}", operands.len()));
+    }
+    let rd = parse_register(operands[0])?;
+    let rn = parse_register(operands[1])?;
+    let rm = parse_register(operands[2])?;
+    Ok(Instruction::Sbcs { rd, rn, rm })
+}
+
 /// Parse ANDS instruction (register-only rm)
 fn parse_ands(operands: &[&str]) -> Result<Instruction, String> {
     if operands.len() == 3 {
@@ -1865,6 +1887,8 @@ pub fn parse_line(line: &str) -> Result<LineResult, ParseLineError> {
         "subs" => parse_subs(&operands).map_err(ParseLineError::Other)?,
         "adc" => parse_adc(&operands).map_err(ParseLineError::Other)?,
         "adcs" => parse_adcs(&operands).map_err(ParseLineError::Other)?,
+        "sbc" => parse_sbc(&operands).map_err(ParseLineError::Other)?,
+        "sbcs" => parse_sbcs(&operands).map_err(ParseLineError::Other)?,
         "ands" => parse_ands(&operands).map_err(ParseLineError::Other)?,
         "cset" => parse_cset(&operands).map_err(ParseLineError::Other)?,
         "csetm" => parse_csetm(&operands).map_err(ParseLineError::Other)?,
@@ -2307,6 +2331,24 @@ mod tests {
         // ADC/ADCS have no immediate form — an immediate operand must be rejected.
         assert!(parse_line("adc x0, x1, #1").is_err());
         assert!(parse_line("adcs x0, x1, #1").is_err());
+    }
+
+    #[test]
+    fn test_parse_line_sbc_register_only() {
+        match parse_line("sbc x0, x1, x2").unwrap() {
+            LineResult::Instruction(Instruction::Sbc { rd, rn, rm }) => {
+                assert_eq!((rd, rn, rm), (Register::X0, Register::X1, Register::X2));
+            }
+            _ => panic!("expected Sbc"),
+        }
+        match parse_line("sbcs x0, x1, x2").unwrap() {
+            LineResult::Instruction(Instruction::Sbcs { rd, rn, rm }) => {
+                assert_eq!((rd, rn, rm), (Register::X0, Register::X1, Register::X2));
+            }
+            _ => panic!("expected Sbcs"),
+        }
+        assert!(parse_line("sbc x0, x1, #1").is_err());
+        assert!(parse_line("sbcs x0, x1, #1").is_err());
     }
 
     #[test]
