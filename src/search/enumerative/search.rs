@@ -1261,10 +1261,7 @@ mod tests {
         );
 
         assert_eq!(shared.candidates_evaluated.load(Ordering::Relaxed), 1);
-        assert_eq!(
-            shared.candidates_pruned_by_cost.load(Ordering::Relaxed),
-            1
-        );
+        assert_eq!(shared.candidates_pruned_by_cost.load(Ordering::Relaxed), 1);
         assert_eq!(VERIFY_STATS_CHECKS.load(AtomicOrdering::SeqCst), 0);
         assert_eq!(shared.smt_queries.load(Ordering::Relaxed), 0);
         assert_eq!(shared.candidates_passed_fast.load(Ordering::Relaxed), 0);
@@ -1293,10 +1290,7 @@ mod tests {
         );
 
         assert_eq!(shared.candidates_evaluated.load(Ordering::Relaxed), 1);
-        assert_eq!(
-            shared.candidates_pruned_by_cost.load(Ordering::Relaxed),
-            1
-        );
+        assert_eq!(shared.candidates_pruned_by_cost.load(Ordering::Relaxed), 1);
         assert_eq!(VERIFY_STATS_CHECKS.load(AtomicOrdering::SeqCst), 0);
         assert_eq!(shared.smt_queries.load(Ordering::Relaxed), 0);
         assert_eq!(shared.candidates_passed_fast.load(Ordering::Relaxed), 0);
