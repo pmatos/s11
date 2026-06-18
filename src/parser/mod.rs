@@ -2315,6 +2315,30 @@ mod tests {
     }
 
     #[test]
+    fn parse_line_accepts_dotted_local_label_before_instruction() {
+        match parse_line(".Lfoo: add x0, x1, x2").unwrap() {
+            LineResult::Instruction(Instruction::Add { rd, rn, rm }) => {
+                assert_eq!(rd, Register::X0);
+                assert_eq!(rn, Register::X1);
+                assert_eq!(rm, Operand::Register(Register::X2));
+            }
+            _ => panic!("expected Add"),
+        }
+    }
+
+    #[test]
+    fn parse_line_accepts_numeric_local_label_before_instruction() {
+        match parse_line("1: add x0, x1, x2").unwrap() {
+            LineResult::Instruction(Instruction::Add { rd, rn, rm }) => {
+                assert_eq!(rd, Register::X0);
+                assert_eq!(rn, Register::X1);
+                assert_eq!(rm, Operand::Register(Register::X2));
+            }
+            _ => panic!("expected Add"),
+        }
+    }
+
+    #[test]
     fn parse_w_add_sub_mov_register_forms_roundtrip() {
         for text in [
             "add w0, w1, w2",
