@@ -523,8 +523,12 @@ pub fn x86_reads_flags(instr: &X86Instruction) -> bool {
     )
 }
 
-fn x86_imm32_ok(imm: i64) -> bool {
+fn x86_signed_imm32_ok(imm: i64) -> bool {
     i32::try_from(imm).is_ok()
+}
+
+fn x86_imm32_bitpattern_ok(imm: i64) -> bool {
+    x86_signed_imm32_ok(imm) || u32::try_from(imm).is_ok()
 }
 
 impl crate::isa::traits::FlagsAnalysis<X86Instruction> for X86_64 {
@@ -672,7 +676,7 @@ impl crate::isa::traits::Assembler<X86Instruction> for X86_64 {
             | X86Instruction::AndImm { imm, .. }
             | X86Instruction::OrImm { imm, .. }
             | X86Instruction::XorImm { imm, .. }
-            | X86Instruction::CmpImm { imm, .. } => x86_imm32_ok(*imm),
+            | X86Instruction::CmpImm { imm, .. } => x86_signed_imm32_ok(*imm),
             X86Instruction::MovReg { .. }
             | X86Instruction::MovImm { .. }
             | X86Instruction::AddReg { .. }
@@ -711,9 +715,9 @@ impl crate::isa::traits::Assembler<X86Instruction> for X86_32 {
             | X86Instruction::SubImm { rd, imm }
             | X86Instruction::AndImm { rd, imm }
             | X86Instruction::OrImm { rd, imm }
-            | X86Instruction::XorImm { rd, imm } => reg_ok_32(*rd) && x86_imm32_ok(*imm),
+            | X86Instruction::XorImm { rd, imm } => reg_ok_32(*rd) && x86_imm32_bitpattern_ok(*imm),
             X86Instruction::CmpReg { rn, rs } => reg_ok_32(*rn) && reg_ok_32(*rs),
-            X86Instruction::CmpImm { rn, imm } => reg_ok_32(*rn) && x86_imm32_ok(*imm),
+            X86Instruction::CmpImm { rn, imm } => reg_ok_32(*rn) && x86_imm32_bitpattern_ok(*imm),
             X86Instruction::Cmov { rd, rs, .. } => reg_ok_32(*rd) && reg_ok_32(*rs),
             X86Instruction::Jcc { .. } => true,
         }
@@ -1243,6 +1247,9 @@ impl OperandType for X86Operand {
 mod tests {
     use super::*;
 
+    type ImmForm = (&'static str, fn(i64) -> X86Instruction);
+    type RegImmForm = (&'static str, fn(X86Register, i64) -> X86Instruction);
+
     #[test]
     fn x86_generator_generate_all_covers_every_opcode() {
         use crate::isa::traits::{InstructionGenerator, InstructionType};
@@ -1420,6 +1427,19 @@ mod tests {
         assert!(!crate::search::candidate::is_sequence_encodable_for(
             &mov_imm64, &X86_32
         ));
+
+        let add_imm32_high_bit = [X86Instruction::AddImm {
+            rd: X86Register::RAX,
+            imm: i64::from(u32::MAX),
+        }];
+        assert!(
+            !crate::search::candidate::is_sequence_encodable_for(&add_imm32_high_bit, &X86_64),
+            "x86-64 non-MOV immediates sign-extend imm32 and cannot encode positive u32::MAX"
+        );
+        assert!(
+            crate::search::candidate::is_sequence_encodable_for(&add_imm32_high_bit, &X86_32),
+            "x86-32 non-MOV immediates can encode canonical u32 bit patterns"
+        );
     }
 
     #[test]
@@ -1431,7 +1451,7 @@ mod tests {
             )
         }
 
-        let immediate_forms: [(&str, fn(i64) -> X86Instruction); 6] = [
+        let immediate_forms: [ImmForm; 6] = [
             ("add", |imm| X86Instruction::AddImm {
                 rd: X86Register::RAX,
                 imm,
@@ -1492,7 +1512,7 @@ mod tests {
             )
         }
 
-        let immediate_forms: [(&str, fn(X86Register, i64) -> X86Instruction); 7] = [
+        let immediate_forms: [RegImmForm; 7] = [
             ("mov", |rd, imm| X86Instruction::MovImm { rd, imm }),
             ("add", |rd, imm| X86Instruction::AddImm { rd, imm }),
             ("sub", |rd, imm| X86Instruction::SubImm { rd, imm }),
@@ -1512,12 +1532,16 @@ mod tests {
                 "{name} should accept low registers with i32::MAX"
             );
             assert!(
-                !can_assemble(form(X86Register::RAX, i64::from(i32::MIN) - 1)),
-                "{name} should reject values below signed imm32"
+                can_assemble(form(X86Register::RAX, i64::from(u32::MAX))),
+                "{name} should accept low registers with u32::MAX bit pattern"
             );
             assert!(
-                !can_assemble(form(X86Register::RAX, i64::from(i32::MAX) + 1)),
-                "{name} should reject values above signed imm32"
+                !can_assemble(form(X86Register::RAX, i64::from(i32::MIN) - 1)),
+                "{name} should reject non-canonical values below signed imm32"
+            );
+            assert!(
+                !can_assemble(form(X86Register::RAX, i64::from(u32::MAX) + 1)),
+                "{name} should reject values above canonical u32 bit pattern range"
             );
             assert!(
                 !can_assemble(form(X86Register::R8, 0)),
