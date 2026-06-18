@@ -251,11 +251,9 @@ fn x86_random_sequence<R: RngExt>(
             mode != crate::assembler::x86::X86Mode::Mode32 || matches!(r.index(), Some(i) if i < 8)
         })
         .collect();
-    let regs = if regs.is_empty() {
-        vec![crate::isa::x86::X86Register::RAX]
-    } else {
-        regs
-    };
+    if regs.is_empty() {
+        return Vec::new();
+    }
     let imms = if imms.is_empty() {
         vec![0]
     } else {
@@ -521,6 +519,25 @@ mod tests {
                 &SearchConfig::default().with_x86_width(32),
             ),
             64
+        );
+    }
+
+    #[test]
+    fn x86_random_sequence_respects_empty_register_pool() {
+        use rand::SeedableRng;
+        use rand_chacha::ChaCha8Rng;
+
+        let mut rng = ChaCha8Rng::seed_from_u64(7);
+
+        assert!(
+            x86_random_sequence(
+                &mut rng,
+                3,
+                &[],
+                &[1],
+                crate::assembler::x86::X86Mode::Mode64,
+            )
+            .is_empty()
         );
     }
 
