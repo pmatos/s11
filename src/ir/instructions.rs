@@ -2,8 +2,8 @@
 
 use crate::ir::aarch64_encoding::logical_imm64_encodable;
 use crate::ir::types::{
-    AccessWidth, AddressOperand, Condition, IndexMode, LabelId, Operand, Register, RegisterWidth,
-    ShiftKind,
+    AccessWidth, AddressOperand, Condition, ExtendKind, IndexMode, LabelId, Operand, Register,
+    RegisterWidth, ShiftKind,
 };
 use std::fmt;
 
@@ -351,6 +351,29 @@ pub enum Instruction {
         rn: Register,
         rm: Operand,
     },
+    // Add/subtract with carry. AArch64 has only the register form (no
+    // immediate, no shifted-register), so `rm` is a plain `Register`.
+    // Adc/Sbc read the carry flag; Adcs/Sbcs additionally write NZCV.
+    Adc {
+        rd: Register,
+        rn: Register,
+        rm: Register,
+    },
+    Adcs {
+        rd: Register,
+        rn: Register,
+        rm: Register,
+    },
+    Sbc {
+        rd: Register,
+        rn: Register,
+        rm: Register,
+    },
+    Sbcs {
+        rd: Register,
+        rn: Register,
+        rm: Register,
+    },
     Ands {
         rd: Register,
         rn: Register,
@@ -610,6 +633,10 @@ impl Instruction {
             | Instruction::Eon { rd, .. }
             | Instruction::Adds { rd, .. }
             | Instruction::Subs { rd, .. }
+            | Instruction::Adc { rd, .. }
+            | Instruction::Adcs { rd, .. }
+            | Instruction::Sbc { rd, .. }
+            | Instruction::Sbcs { rd, .. }
             | Instruction::Ands { rd, .. }
             | Instruction::Cset { rd, .. }
             | Instruction::Csetm { rd, .. }
@@ -722,6 +749,8 @@ impl Instruction {
                 | Instruction::Bics { .. }
                 | Instruction::Adds { .. }
                 | Instruction::Subs { .. }
+                | Instruction::Adcs { .. }
+                | Instruction::Sbcs { .. }
                 | Instruction::Ands { .. }
                 | Instruction::Ccmp { .. }
                 | Instruction::Ccmn { .. }
@@ -742,6 +771,11 @@ impl Instruction {
                 | Instruction::Ccmp { .. }
                 | Instruction::Ccmn { .. }
                 | Instruction::BCond { .. }
+                // ADC/SBC family reads the carry flag as a live-in.
+                | Instruction::Adc { .. }
+                | Instruction::Adcs { .. }
+                | Instruction::Sbc { .. }
+                | Instruction::Sbcs { .. }
         )
     }
 
@@ -948,6 +982,11 @@ impl Instruction {
                 Operand::ShiftedRegister { .. } => false,
                 Operand::ExtendedRegister { .. } => false,
             },
+            // ADC/ADCS/SBC/SBCS: register-only form, always encodable.
+            Instruction::Adc { .. }
+            | Instruction::Adcs { .. }
+            | Instruction::Sbc { .. }
+            | Instruction::Sbcs { .. } => true,
             // ANDS: register or encodable bitmask immediate (issue #65).
             // ShiftedRegister out of scope (#59). The immediate form uses the
             // plain X slot for both rd and rn (rejects SP); XZR is fine for rd
@@ -1183,6 +1222,13 @@ impl Instruction {
                 }
                 regs
             }
+            // ADC/ADCS/SBC/SBCS read rn and rm (both plain registers).
+            Instruction::Adc { rn, rm, .. }
+            | Instruction::Adcs { rn, rm, .. }
+            | Instruction::Sbc { rn, rm, .. }
+            | Instruction::Sbcs { rn, rm, .. } => {
+                vec![*rn, *rm]
+            }
             // CSET / CSETM have no source registers (read flags, not regs).
             Instruction::Cset { .. } | Instruction::Csetm { .. } => vec![],
             // ROR reads rn and shift (if register)
@@ -1273,7 +1319,9 @@ fn address_source_registers(addr: &AddressOperand) -> Vec<Register> {
 /// level; (d) signed loads only support B/H/W access widths (LDRSX does
 /// not exist — LDR handles 64-bit zero-extension); (e) for `Reg` / `Ext`
 /// address modes the index register cannot be SP — the Rm field encodes
-/// X0..X30 / XZR, not SP (`register_to_dynasm(SP)` returns None).
+/// X0..X30 / XZR, not SP (`register_to_dynasm(SP)` returns None); (f)
+/// memory `Ext` modes only accept UXTW/SXTW/UXTX/SXTX with shift 0 or the
+/// access-size scale shift.
 fn is_encodable_ldr_like(rt: Register, addr: &AddressOperand, width: AccessWidth) -> bool {
     if !is_x_or_xzr(rt) {
         return false;
@@ -1285,8 +1333,25 @@ fn is_encodable_ldr_like(rt: Register, addr: &AddressOperand, width: AccessWidth
         return false;
     }
     match addr {
-        AddressOperand::Reg { idx, .. } | AddressOperand::Ext { idx, .. } => {
+        AddressOperand::Reg { idx, .. } => {
             if !is_x_or_xzr(*idx) {
+                return false;
+            }
+        }
+        AddressOperand::Ext {
+            idx, kind, shift, ..
+        } => {
+            if !is_x_or_xzr(*idx) {
+                return false;
+            }
+            if !matches!(
+                kind,
+                ExtendKind::Uxtw | ExtendKind::Sxtw | ExtendKind::Uxtx | ExtendKind::Sxtx
+            ) {
+                return false;
+            }
+            let scaled_shift = width.scale_shift();
+            if *shift != 0 && *shift != scaled_shift {
                 return false;
             }
         }
@@ -1507,6 +1572,10 @@ impl fmt::Display for Instruction {
             Instruction::Eon { rd, rn, rm } => write!(f, "eon {}, {}, {}", rd, rn, rm),
             Instruction::Adds { rd, rn, rm } => write!(f, "adds {}, {}, {}", rd, rn, rm),
             Instruction::Subs { rd, rn, rm } => write!(f, "subs {}, {}, {}", rd, rn, rm),
+            Instruction::Adc { rd, rn, rm } => write!(f, "adc {}, {}, {}", rd, rn, rm),
+            Instruction::Adcs { rd, rn, rm } => write!(f, "adcs {}, {}, {}", rd, rn, rm),
+            Instruction::Sbc { rd, rn, rm } => write!(f, "sbc {}, {}, {}", rd, rn, rm),
+            Instruction::Sbcs { rd, rn, rm } => write!(f, "sbcs {}, {}, {}", rd, rn, rm),
             Instruction::Ands { rd, rn, rm, width } => write!(
                 f,
                 "ands {}, {}, {}",
@@ -2003,6 +2072,85 @@ mod tests {
             width: AccessWidth::Extended,
         };
         assert!(!ldr.is_encodable_aarch64());
+    }
+
+    #[test]
+    fn memory_register_extend_shift_encodability_matches_access_width() {
+        use crate::ir::ExtendKind;
+
+        for (width, shift) in [
+            (AccessWidth::Byte, 1),
+            (AccessWidth::Half, 2),
+            (AccessWidth::Word, 3),
+            (AccessWidth::Extended, 4),
+        ] {
+            let ldr = Instruction::Ldr {
+                rt: Register::X0,
+                addr: AddressOperand::Ext {
+                    base: Register::X1,
+                    idx: Register::X2,
+                    kind: ExtendKind::Uxtw,
+                    shift,
+                },
+                width,
+            };
+            assert!(
+                !ldr.is_encodable_aarch64(),
+                "{width:?} access should reject extend shift {shift}"
+            );
+        }
+
+        let bad_str = Instruction::Str {
+            rt: Register::X0,
+            addr: AddressOperand::Ext {
+                base: Register::X1,
+                idx: Register::X2,
+                kind: ExtendKind::Sxtx,
+                shift: 2,
+            },
+            width: AccessWidth::Extended,
+        };
+        assert!(!bad_str.is_encodable_aarch64());
+
+        let bad_kind = Instruction::Ldr {
+            rt: Register::X0,
+            addr: AddressOperand::Ext {
+                base: Register::X1,
+                idx: Register::X2,
+                kind: ExtendKind::Uxtb,
+                shift: 0,
+            },
+            width: AccessWidth::Byte,
+        };
+        assert!(!bad_kind.is_encodable_aarch64());
+    }
+
+    #[test]
+    fn memory_register_extend_shift_encodability_allows_scaled_forms() {
+        use crate::ir::ExtendKind;
+
+        for (width, kind, shift) in [
+            (AccessWidth::Byte, ExtendKind::Uxtw, 0),
+            (AccessWidth::Half, ExtendKind::Sxtw, 1),
+            (AccessWidth::Word, ExtendKind::Uxtw, 2),
+            (AccessWidth::Extended, ExtendKind::Uxtx, 3),
+            (AccessWidth::Extended, ExtendKind::Sxtx, 0),
+        ] {
+            let ldr = Instruction::Ldr {
+                rt: Register::X0,
+                addr: AddressOperand::Ext {
+                    base: Register::X1,
+                    idx: Register::X2,
+                    kind,
+                    shift,
+                },
+                width,
+            };
+            assert!(
+                ldr.is_encodable_aarch64(),
+                "{width:?} access should accept {kind:?} shift {shift}"
+            );
+        }
     }
 
     #[test]
