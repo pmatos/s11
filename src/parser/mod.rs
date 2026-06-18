@@ -1084,6 +1084,23 @@ fn parse_pair_mem(
             2 + consumed
         ));
     }
+    match &addr {
+        crate::ir::types::AddressOperand::Reg { .. } => {
+            return Err(format!(
+                "{}: pair instructions do not support register-offset addressing; \
+                 use immediate-offset, pre-index, or post-index addressing",
+                mnem
+            ));
+        }
+        crate::ir::types::AddressOperand::Ext { .. } => {
+            return Err(format!(
+                "{}: pair instructions do not support register-extend addressing; \
+                 use immediate-offset, pre-index, or post-index addressing",
+                mnem
+            ));
+        }
+        crate::ir::types::AddressOperand::Imm { .. } => {}
+    }
     if is_load {
         Ok(Instruction::Ldp {
             rt1,
@@ -3645,6 +3662,49 @@ mod tests {
                     shift: expected_shift,
                 },
                 "{text}"
+            );
+        }
+    }
+
+    #[test]
+    fn pair_mem_rejects_register_offset_addressing() {
+        for text in [
+            "ldp x0, x1, [x2, x3]",
+            "ldp x0, x1, [x2, x3, lsl #3]",
+            "stp x0, x1, [x2, x3]",
+            "ldpsw x0, x1, [x2, x3, lsl #2]",
+        ] {
+            let err = parse_line(text).expect_err("pair register-offset should be rejected");
+            let msg = err.to_string();
+            let mnemonic = text.split_whitespace().next().unwrap();
+            assert!(
+                msg.contains(mnemonic),
+                "{text}: error should name mnemonic `{mnemonic}`, got {msg}"
+            );
+            assert!(
+                msg.contains("register-offset"),
+                "{text}: error should name register-offset addressing, got {msg}"
+            );
+        }
+    }
+
+    #[test]
+    fn pair_mem_rejects_register_extend_addressing() {
+        for text in [
+            "ldp x0, x1, [x2, w3, uxtw #3]",
+            "stp x0, x1, [x2, w3, sxtw]",
+            "ldpsw x0, x1, [x2, w3, sxtw #2]",
+        ] {
+            let err = parse_line(text).expect_err("pair register-extend should be rejected");
+            let msg = err.to_string();
+            let mnemonic = text.split_whitespace().next().unwrap();
+            assert!(
+                msg.contains(mnemonic),
+                "{text}: error should name mnemonic `{mnemonic}`, got {msg}"
+            );
+            assert!(
+                msg.contains("register-extend"),
+                "{text}: error should name register-extend addressing, got {msg}"
             );
         }
     }
