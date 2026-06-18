@@ -3,7 +3,7 @@ use std::fs;
 use std::path::Path;
 
 /// Intel SDM canonical multi-byte NOP sequences, indexed by length.
-/// Index 0 is the empty slice (fallback for `len == 0`); indices 1..=9
+/// Index 0 is the empty slice; indices 1..=9
 /// are the recommended sequences from the Intel optimization reference.
 const X86_NOP_TABLE: [&[u8]; 10] = [
     &[],
@@ -68,7 +68,13 @@ impl DetectedArch {
                     &[0x1f, 0x20, 0x03, 0xd5]
                 }
             }
-            DetectedArch::X86_64 => X86_NOP_TABLE[len.min(9)],
+            DetectedArch::X86_64 => {
+                if len == 0 {
+                    &[]
+                } else {
+                    X86_NOP_TABLE[len.min(9)]
+                }
+            }
             DetectedArch::X86_32 => {
                 if len == 0 {
                     &[]
@@ -295,9 +301,11 @@ mod tests {
     }
 
     #[test]
-    fn x86_64_nop_sequence_canonical_lengths_one_through_nine() {
-        let canonical: [&[u8]; 10] = [
-            &[],
+    fn x86_64_nop_sequence_canonical_lengths_zero_through_nine() {
+        let empty: &[u8] = &[];
+        assert_eq!(DetectedArch::X86_64.nop_sequence(0), empty);
+
+        let canonical: [&[u8]; 9] = [
             &[0x90],
             &[0x66, 0x90],
             &[0x0f, 0x1f, 0x00],
@@ -308,7 +316,8 @@ mod tests {
             &[0x0f, 0x1f, 0x84, 0x00, 0x00, 0x00, 0x00, 0x00],
             &[0x66, 0x0f, 0x1f, 0x84, 0x00, 0x00, 0x00, 0x00, 0x00],
         ];
-        for (len, expected) in canonical.iter().enumerate() {
+        for (idx, expected) in canonical.iter().enumerate() {
+            let len = idx + 1;
             assert_eq!(
                 DetectedArch::X86_64.nop_sequence(len),
                 *expected,
