@@ -577,9 +577,6 @@ where
         }
 
         if candidate.len() == self.length {
-            if self.stop_if_timed_out() {
-                return;
-            }
             evaluate_candidate::<I>(
                 self.target,
                 self.live_out,
@@ -669,9 +666,10 @@ where
 
         let run_lengths = |s: &SharedState<I>| {
             // Search increasing lengths up to target.len()-1 so we never
-            // propose a candidate as long as the target. We keep going after
-            // a hit only while this length can still beat the current best;
-            // the lower-bound check avoids cost-pruned product sweeps.
+            // propose a candidate as long as the target. The per-length cost
+            // lower bound is non-decreasing in length and `best_cost` only
+            // falls, so once a length cannot beat the current best no longer
+            // length can either — break out instead of scanning the rest.
             for length in 1..target.len() {
                 if Self::timed_out(start, config.timeout) || s.stop.load(Ordering::Relaxed) {
                     break;
@@ -682,7 +680,7 @@ where
                 let lower_bound =
                     length_cost_lower_bound(length, min_instruction_cost, terminator_cost);
                 if lower_bound >= s.best_cost.load(Ordering::Acquire) {
-                    continue;
+                    break;
                 }
                 match length {
                     1 => run_length_one::<I>(
