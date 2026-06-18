@@ -745,6 +745,10 @@ mod tests {
 
         let result = search.search(&target, &live_out, &config);
 
+        // cost_bound = 0 caps best_cost at min(0, original) = 0. Every AArch64
+        // instruction has cost >= 1, so no candidate sequence can be strictly
+        // cheaper than 0; the length loop prunes every candidate before any SMT
+        // query runs (candidates_evaluated == 0, smt_queries == 0).
         assert!(!result.found_optimization);
         assert!(result.optimized_sequence.is_none());
         assert_eq!(result.statistics.best_cost_found, 2);
