@@ -122,7 +122,7 @@ fn encode_64(ops: &mut dynasmrt::x64::Assembler, instr: &X86Instruction) -> Resu
         }
         X86Instruction::AddImm { rd, imm } => {
             let rd = reg_index(*rd)?;
-            let imm = imm_i32(*imm)?;
+            let imm = signed_imm_i32(*imm)?;
             dynasm!(ops ; .arch x64 ; add Rq(rd), imm);
             Ok(())
         }
@@ -134,7 +134,7 @@ fn encode_64(ops: &mut dynasmrt::x64::Assembler, instr: &X86Instruction) -> Resu
         }
         X86Instruction::SubImm { rd, imm } => {
             let rd = reg_index(*rd)?;
-            let imm = imm_i32(*imm)?;
+            let imm = signed_imm_i32(*imm)?;
             dynasm!(ops ; .arch x64 ; sub Rq(rd), imm);
             Ok(())
         }
@@ -146,7 +146,7 @@ fn encode_64(ops: &mut dynasmrt::x64::Assembler, instr: &X86Instruction) -> Resu
         }
         X86Instruction::AndImm { rd, imm } => {
             let rd = reg_index(*rd)?;
-            let imm = imm_i32(*imm)?;
+            let imm = signed_imm_i32(*imm)?;
             dynasm!(ops ; .arch x64 ; and Rq(rd), imm);
             Ok(())
         }
@@ -158,7 +158,7 @@ fn encode_64(ops: &mut dynasmrt::x64::Assembler, instr: &X86Instruction) -> Resu
         }
         X86Instruction::OrImm { rd, imm } => {
             let rd = reg_index(*rd)?;
-            let imm = imm_i32(*imm)?;
+            let imm = signed_imm_i32(*imm)?;
             dynasm!(ops ; .arch x64 ; or Rq(rd), imm);
             Ok(())
         }
@@ -170,7 +170,7 @@ fn encode_64(ops: &mut dynasmrt::x64::Assembler, instr: &X86Instruction) -> Resu
         }
         X86Instruction::XorImm { rd, imm } => {
             let rd = reg_index(*rd)?;
-            let imm = imm_i32(*imm)?;
+            let imm = signed_imm_i32(*imm)?;
             dynasm!(ops ; .arch x64 ; xor Rq(rd), imm);
             Ok(())
         }
@@ -182,7 +182,7 @@ fn encode_64(ops: &mut dynasmrt::x64::Assembler, instr: &X86Instruction) -> Resu
         }
         X86Instruction::CmpImm { rn, imm } => {
             let rn = reg_index(*rn)?;
-            let imm = imm_i32(*imm)?;
+            let imm = signed_imm_i32(*imm)?;
             dynasm!(ops ; .arch x64 ; cmp Rq(rn), imm);
             Ok(())
         }
@@ -240,8 +240,18 @@ fn encode_64(ops: &mut dynasmrt::x64::Assembler, instr: &X86Instruction) -> Resu
 /// Truncate an `i64` immediate down to `i32` for the imm32-form opcodes.
 /// Returns an error if the value would not be representable as a
 /// sign-extended 32-bit immediate.
-fn imm_i32(imm: i64) -> Result<i32, String> {
+fn signed_imm_i32(imm: i64) -> Result<i32, String> {
     i32::try_from(imm).map_err(|_| format!("immediate {} does not fit in 32 bits", imm))
+}
+
+/// Like [`signed_imm_i32`] but also accepts canonical 32-bit bit patterns.
+/// Values in `i32::MIN..=u32::MAX` are reinterpreted as their two's-complement
+/// `i32`; this is sound for the 32-bit encoder because immediates are masked to
+/// the operand width, so `0xffff_ffff` and `-1` encode identically.
+fn imm32_bitpattern_i32(imm: i64) -> Result<i32, String> {
+    i32::try_from(imm)
+        .or_else(|_| u32::try_from(imm).map(|imm| imm as i32))
+        .map_err(|_| format!("immediate {} does not fit in 32 bits", imm))
 }
 
 fn encode_32(ops: &mut dynasmrt::x86::Assembler, instr: &X86Instruction) -> Result<(), String> {
@@ -254,7 +264,7 @@ fn encode_32(ops: &mut dynasmrt::x86::Assembler, instr: &X86Instruction) -> Resu
         }
         X86Instruction::MovImm { rd, imm } => {
             let rd = reg_index_32(*rd)?;
-            let imm = imm_i32(*imm)?;
+            let imm = imm32_bitpattern_i32(*imm)?;
             dynasm!(ops ; .arch x86 ; mov Rd(rd), imm);
             Ok(())
         }
@@ -266,7 +276,7 @@ fn encode_32(ops: &mut dynasmrt::x86::Assembler, instr: &X86Instruction) -> Resu
         }
         X86Instruction::AddImm { rd, imm } => {
             let rd = reg_index_32(*rd)?;
-            let imm = imm_i32(*imm)?;
+            let imm = imm32_bitpattern_i32(*imm)?;
             dynasm!(ops ; .arch x86 ; add Rd(rd), imm);
             Ok(())
         }
@@ -278,7 +288,7 @@ fn encode_32(ops: &mut dynasmrt::x86::Assembler, instr: &X86Instruction) -> Resu
         }
         X86Instruction::SubImm { rd, imm } => {
             let rd = reg_index_32(*rd)?;
-            let imm = imm_i32(*imm)?;
+            let imm = imm32_bitpattern_i32(*imm)?;
             dynasm!(ops ; .arch x86 ; sub Rd(rd), imm);
             Ok(())
         }
@@ -290,7 +300,7 @@ fn encode_32(ops: &mut dynasmrt::x86::Assembler, instr: &X86Instruction) -> Resu
         }
         X86Instruction::AndImm { rd, imm } => {
             let rd = reg_index_32(*rd)?;
-            let imm = imm_i32(*imm)?;
+            let imm = imm32_bitpattern_i32(*imm)?;
             dynasm!(ops ; .arch x86 ; and Rd(rd), imm);
             Ok(())
         }
@@ -302,7 +312,7 @@ fn encode_32(ops: &mut dynasmrt::x86::Assembler, instr: &X86Instruction) -> Resu
         }
         X86Instruction::OrImm { rd, imm } => {
             let rd = reg_index_32(*rd)?;
-            let imm = imm_i32(*imm)?;
+            let imm = imm32_bitpattern_i32(*imm)?;
             dynasm!(ops ; .arch x86 ; or Rd(rd), imm);
             Ok(())
         }
@@ -314,7 +324,7 @@ fn encode_32(ops: &mut dynasmrt::x86::Assembler, instr: &X86Instruction) -> Resu
         }
         X86Instruction::XorImm { rd, imm } => {
             let rd = reg_index_32(*rd)?;
-            let imm = imm_i32(*imm)?;
+            let imm = imm32_bitpattern_i32(*imm)?;
             dynasm!(ops ; .arch x86 ; xor Rd(rd), imm);
             Ok(())
         }
@@ -326,7 +336,7 @@ fn encode_32(ops: &mut dynasmrt::x86::Assembler, instr: &X86Instruction) -> Resu
         }
         X86Instruction::CmpImm { rn, imm } => {
             let rn = reg_index_32(*rn)?;
-            let imm = imm_i32(*imm)?;
+            let imm = imm32_bitpattern_i32(*imm)?;
             dynasm!(ops ; .arch x86 ; cmp Rd(rn), imm);
             Ok(())
         }
@@ -757,6 +767,36 @@ mod tests {
             let disasm = disasm_x86_32(&bytes);
             assert_eq!(disasm[0].0, mnemonic);
         }
+    }
+
+    #[test]
+    fn x86_32_accepts_canonical_high_bit_imm32_values() {
+        // u32::MAX is a canonical 32-bit bit pattern; the encoder reinterprets
+        // it as -1, so each form disassembles back to the 0xffffffff operand.
+        check_x86_32(
+            X86Instruction::MovImm {
+                rd: X86Register::RAX,
+                imm: i64::from(u32::MAX),
+            },
+            "mov",
+            &["eax", "0xffffffff"],
+        );
+        check_x86_32(
+            X86Instruction::AddImm {
+                rd: X86Register::RAX,
+                imm: i64::from(u32::MAX),
+            },
+            "add",
+            &["eax", "0xffffffff"],
+        );
+        check_x86_32(
+            X86Instruction::CmpImm {
+                rn: X86Register::RAX,
+                imm: i64::from(u32::MAX),
+            },
+            "cmp",
+            &["eax", "0xffffffff"],
+        );
     }
 
     #[test]

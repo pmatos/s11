@@ -1,7 +1,7 @@
 //! Instruction generation utilities for search algorithms
 
 use crate::ir::instructions::MOVW_LEGAL_SHIFTS;
-use crate::ir::{Instruction, Operand, Register, RegisterWidth};
+use crate::ir::{Instruction, Operand, Register, RegisterWidth, ShiftKind};
 use crate::isa::{AArch64, Assembler, InstructionType};
 
 /// Generic encodability check: for any `<I: InstructionType, A: Assembler<I>>`,
@@ -44,6 +44,7 @@ pub fn generate_all_encodable_instructions(
 /// 0 is intentionally excluded: `<op> rd, rn, rm, lsl #0` is identical to the
 /// plain `<op> rd, rn, rm` form which `generate_all_instructions` already emits.
 const SHIFTED_OP_AMOUNTS: &[u8] = &[1, 2, 3, 4, 8, 16, 32];
+const TST_LOGICAL_IMM64_SAMPLES: &[i64] = &[0xff, 0xffff, 0x5555_5555_5555_5555, i64::MIN];
 
 pub fn generate_all_instructions(registers: &[Register], immediates: &[i64]) -> Vec<Instruction> {
     let mut instrs = Vec::new();
@@ -433,8 +434,8 @@ pub fn generate_all_instructions(registers: &[Register], immediates: &[i64]) -> 
     // CMP / CMN / TST plain forms (issue #66). These instructions have no
     // destination register, so they live outside the `rd` loop (same
     // rationale as the ExtendedRegister CMP/CMN block below). CMP/CMN
-    // accept reg and imm operands; TST is register-only per
-    // `is_encodable_aarch64`. Negative immediates are emitted unconditionally
+    // accept reg and imm operands; TST accepts reg and encodable bitmask
+    // immediates. Negative/non-bitmask immediates are emitted unconditionally
     // and filtered downstream by `generate_all_encodable_instructions`,
     // matching the ADD/SUB precedent inside the `rd` loop.
     for &rn in registers {
@@ -452,14 +453,61 @@ pub fn generate_all_instructions(registers: &[Register], immediates: &[i64]) -> 
             let imm_op = Operand::Immediate(imm);
             instrs.push(Instruction::Cmp { rn, rm: imm_op });
             instrs.push(Instruction::Cmn { rn, rm: imm_op });
+            instrs.push(Instruction::Tst {
+                rn,
+                rm: imm_op,
+                width: RegisterWidth::X64,
+            });
+        }
+    }
+
+    // Shifted-register CMP / CMN / TST candidates. These are destinationless
+    // like the plain/extended compare forms above, so generate them once per
+    // unique source tuple instead of once per `rd`. Arithmetic compares reject
+    // ROR; TST follows the logical shifted-register encoding and accepts it.
+    {
+        use crate::ir::ShiftKind;
+        for &rn in registers {
+            if rn == Register::SP {
+                continue;
+            }
+            for &rm in registers {
+                if rm == Register::SP {
+                    continue;
+                }
+                for &amount in SHIFTED_OP_AMOUNTS {
+                    for kind in [ShiftKind::Lsl, ShiftKind::Lsr, ShiftKind::Asr] {
+                        let sr = Operand::ShiftedRegister {
+                            reg: rm,
+                            kind,
+                            amount,
+                        };
+                        instrs.push(Instruction::Cmp { rn, rm: sr });
+                        instrs.push(Instruction::Cmn { rn, rm: sr });
+                        instrs.push(Instruction::Tst {
+                            rn,
+                            rm: sr,
+                            width: RegisterWidth::X64,
+                        });
+                    }
+                    instrs.push(Instruction::Tst {
+                        rn,
+                        rm: Operand::ShiftedRegister {
+                            reg: rm,
+                            kind: ShiftKind::Ror,
+                            amount,
+                        },
+                        width: RegisterWidth::X64,
+                    });
+                }
+            }
         }
     }
 
     // Issue #60: ExtendedRegister CMP/CMN candidates. These instructions
-    // have no destination register, so emitting them per-rd (as the
-    // shifted-register block above does) produced N identical copies per
-    // (rn, rm, kind, shift) tuple (codex P2 on #144). Generate once per
-    // unique (rn, rm, kind, shift) instead.
+    // have no destination register, so emitting them inside the per-rd binary
+    // blocks produced N identical copies per (rn, rm, kind, shift) tuple
+    // (codex P2 on #144). Generate once per unique tuple instead.
     {
         use crate::ir::ExtendKind;
         for &rn in registers {
@@ -963,26 +1011,11 @@ pub fn generate_random_instruction<R: rand::RngExt>(
                 _ => Instruction::Udiv { rd, rn, rm },
             }
         }
-        // Issue #66 compares: CMP/CMN accept reg or imm; TST is register-only
-        // at the encoder, so its `rm` is clamped to a register draw.
-        36 => {
-            let rn = pick_reg(rng);
-            match rng.random_range(0..3) {
-                0 => Instruction::Cmp {
-                    rn,
-                    rm: random_operand(rng, registers, immediates),
-                },
-                1 => Instruction::Cmn {
-                    rn,
-                    rm: random_operand(rng, registers, immediates),
-                },
-                _ => Instruction::Tst {
-                    rn,
-                    rm: Operand::Register(pick_reg(rng)),
-                    width: RegisterWidth::X64,
-                },
-            }
-        }
+        // Issue #66 compares/tests. CMP/CMN sample register, clamped
+        // immediate, and arithmetic shifted-register forms. TST samples
+        // register, logical-bitmask immediate, and logical shifted-register
+        // forms including ROR.
+        36 => random_compare_or_test_instruction(rng, registers, immediates),
         // Issue #66 conditional selects: CSEL/CSINC/CSINV/CSNEG. Register-only,
         // condition sampled from NORMAL_CONDITIONS (AL/NV excluded — AL
         // collapses to MOV rd,rn and NV is reserved).
@@ -999,6 +1032,149 @@ pub fn generate_random_instruction<R: rand::RngExt>(
         }
         _ => unreachable!(),
     }
+}
+
+fn random_compare_or_test_instruction<R: rand::RngExt>(
+    rng: &mut R,
+    registers: &[Register],
+    immediates: &[i64],
+) -> Instruction {
+    let family = rng.random_range(0..3);
+    let shape = rng.random_range(0..3);
+    match shape {
+        0 => random_register_compare_or_test(rng, registers, family),
+        1 if family == 2 => {
+            let non_sp = non_sp_registers(registers);
+            if non_sp.is_empty() {
+                return random_register_compare_or_test(rng, registers, family);
+            }
+            let rn = non_sp[rng.random_range(0..non_sp.len())];
+            let imm = random_tst_bitmask_immediate(rng, rn, immediates);
+            Instruction::Tst {
+                rn,
+                rm: Operand::Immediate(imm),
+                width: RegisterWidth::X64,
+            }
+        }
+        1 => {
+            let rn = pick_register(rng, registers);
+            let imm = if immediates.is_empty() {
+                0
+            } else {
+                immediates[rng.random_range(0..immediates.len())].rem_euclid(0x1000)
+            };
+            match family {
+                0 => Instruction::Cmp {
+                    rn,
+                    rm: Operand::Immediate(imm),
+                },
+                1 => Instruction::Cmn {
+                    rn,
+                    rm: Operand::Immediate(imm),
+                },
+                _ => unreachable!(),
+            }
+        }
+        _ => {
+            let non_sp = non_sp_registers(registers);
+            if non_sp.is_empty() {
+                return random_register_compare_or_test(rng, registers, family);
+            }
+            let rn = non_sp[rng.random_range(0..non_sp.len())];
+            let rm = random_compare_shifted_operand(rng, &non_sp, family == 2);
+            match family {
+                0 => Instruction::Cmp { rn, rm },
+                1 => Instruction::Cmn { rn, rm },
+                _ => Instruction::Tst {
+                    rn,
+                    rm,
+                    width: RegisterWidth::X64,
+                },
+            }
+        }
+    }
+}
+
+fn random_register_compare_or_test<R: rand::RngExt>(
+    rng: &mut R,
+    registers: &[Register],
+    family: u32,
+) -> Instruction {
+    let rn = pick_register(rng, registers);
+    let rm = Operand::Register(pick_register(rng, registers));
+    match family {
+        0 => Instruction::Cmp { rn, rm },
+        1 => Instruction::Cmn { rn, rm },
+        _ => Instruction::Tst {
+            rn,
+            rm,
+            width: RegisterWidth::X64,
+        },
+    }
+}
+
+fn random_compare_shifted_operand<R: rand::RngExt>(
+    rng: &mut R,
+    non_sp: &[Register],
+    allow_ror: bool,
+) -> Operand {
+    let reg = non_sp[rng.random_range(0..non_sp.len())];
+    let kind = if allow_ror {
+        match rng.random_range(0..4) {
+            0 => ShiftKind::Lsl,
+            1 => ShiftKind::Lsr,
+            2 => ShiftKind::Asr,
+            _ => ShiftKind::Ror,
+        }
+    } else {
+        match rng.random_range(0..3) {
+            0 => ShiftKind::Lsl,
+            1 => ShiftKind::Lsr,
+            _ => ShiftKind::Asr,
+        }
+    };
+    let amount = SHIFTED_OP_AMOUNTS[rng.random_range(0..SHIFTED_OP_AMOUNTS.len())];
+    Operand::ShiftedRegister { reg, kind, amount }
+}
+
+fn random_tst_bitmask_immediate<R: rand::RngExt>(
+    rng: &mut R,
+    rn: Register,
+    immediates: &[i64],
+) -> i64 {
+    let encodable: Vec<i64> = immediates
+        .iter()
+        .copied()
+        .filter(|imm| {
+            Instruction::Tst {
+                rn,
+                rm: Operand::Immediate(*imm),
+                width: RegisterWidth::X64,
+            }
+            .is_encodable_aarch64()
+        })
+        .collect();
+    if encodable.is_empty() {
+        TST_LOGICAL_IMM64_SAMPLES[rng.random_range(0..TST_LOGICAL_IMM64_SAMPLES.len())]
+    } else {
+        encodable[rng.random_range(0..encodable.len())]
+    }
+}
+
+fn pick_register<R: rand::RngExt>(rng: &mut R, registers: &[Register]) -> Register {
+    if registers.is_empty() {
+        Register::X0
+    } else {
+        registers[rng.random_range(0..registers.len())]
+    }
+}
+
+fn non_sp_registers(registers: &[Register]) -> Vec<Register> {
+    registers
+        .iter()
+        .copied()
+        .filter(|reg| *reg != Register::SP)
+        .collect()
 }
 
 fn random_operand<R: rand::RngExt>(
@@ -1198,6 +1374,17 @@ mod tests {
     // — keep these in sync with the match in `generate_random_instruction`.
     fn rng_for_opcode_slot(slot: u32, rd_index: u32) -> BudgetedRng {
         BudgetedRng::new(vec![word_for_range(2, rd_index), word_for_range(38, slot)])
+    }
+
+    fn rng_for_compare_slot(family: u32, shape: u32, tail: Vec<u32>) -> BudgetedRng {
+        let mut words = vec![
+            word_for_range(2, 0),
+            word_for_range(38, 36),
+            word_for_range(3, family),
+            word_for_range(3, shape),
+        ];
+        words.extend(tail);
+        BudgetedRng::new(words)
     }
 
     #[test]
@@ -1446,6 +1633,97 @@ mod tests {
     }
 
     #[test]
+    fn generate_random_compare_slot_samples_tst_immediate_and_shifted_forms() {
+        let regs = [Register::X0, Register::X1];
+
+        let mut cmp_rng = rng_for_compare_slot(
+            0,
+            2,
+            vec![
+                word_for_range(2, 0),
+                word_for_range(2, 1),
+                word_for_range(3, 0),
+                word_for_range(SHIFTED_OP_AMOUNTS.len() as u32, 0),
+            ],
+        );
+        let cmp = generate_random_instruction(&mut cmp_rng, &regs, &[]);
+        assert_eq!(
+            cmp,
+            Instruction::Cmp {
+                rn: Register::X0,
+                rm: Operand::ShiftedRegister {
+                    reg: Register::X1,
+                    kind: crate::ir::ShiftKind::Lsl,
+                    amount: 1,
+                },
+            }
+        );
+        assert!(cmp.is_encodable_aarch64());
+
+        let mut cmn_rng = rng_for_compare_slot(
+            1,
+            2,
+            vec![
+                word_for_range(2, 0),
+                word_for_range(2, 1),
+                word_for_range(3, 2),
+                word_for_range(SHIFTED_OP_AMOUNTS.len() as u32, 0),
+            ],
+        );
+        let cmn = generate_random_instruction(&mut cmn_rng, &regs, &[]);
+        assert_eq!(
+            cmn,
+            Instruction::Cmn {
+                rn: Register::X0,
+                rm: Operand::ShiftedRegister {
+                    reg: Register::X1,
+                    kind: crate::ir::ShiftKind::Asr,
+                    amount: 1,
+                },
+            }
+        );
+        assert!(cmn.is_encodable_aarch64());
+
+        let mut tst_shifted_rng = rng_for_compare_slot(
+            2,
+            2,
+            vec![
+                word_for_range(2, 0),
+                word_for_range(2, 1),
+                word_for_range(4, 3),
+                word_for_range(SHIFTED_OP_AMOUNTS.len() as u32, 0),
+            ],
+        );
+        let tst_shifted = generate_random_instruction(&mut tst_shifted_rng, &regs, &[]);
+        assert_eq!(
+            tst_shifted,
+            Instruction::Tst {
+                rn: Register::X0,
+                rm: Operand::ShiftedRegister {
+                    reg: Register::X1,
+                    kind: crate::ir::ShiftKind::Ror,
+                    amount: 1,
+                },
+                width: RegisterWidth::X64,
+            }
+        );
+        assert!(tst_shifted.is_encodable_aarch64());
+
+        let mut tst_imm_rng =
+            rng_for_compare_slot(2, 1, vec![word_for_range(2, 0), word_for_range(1, 0)]);
+        let tst_imm = generate_random_instruction(&mut tst_imm_rng, &regs, &[0xff]);
+        assert_eq!(
+            tst_imm,
+            Instruction::Tst {
+                rn: Register::X0,
+                rm: Operand::Immediate(0xff),
+                width: RegisterWidth::X64,
+            }
+        );
+        assert!(tst_imm.is_encodable_aarch64());
+    }
+
+    #[test]
     fn test_generate_random_reaches_csel_family() {
         let ids = random_opcode_ids(0x66, 5_000);
         for (label, instr) in [
@@ -1637,8 +1915,7 @@ mod tests {
     fn test_generate_all_instructions_contains_plain_compare_family() {
         // Cmp/Cmn must appear in plain Register and Immediate forms (the
         // ExtendedRegister form is handled separately by the #60 block).
-        // Tst must appear in plain Register form (TST has no immediate
-        // encoding per `is_encodable_aarch64`).
+        // Tst must appear in plain Register and bitmask-immediate forms.
         let instrs = generate_all_instructions(&default_registers(), &default_immediates());
         assert!(instrs.iter().any(|i| matches!(
             i,
@@ -1675,6 +1952,25 @@ mod tests {
                 ..
             }
         )));
+        assert!(instrs.iter().any(|i| matches!(
+            i,
+            Instruction::Tst {
+                rm: Operand::Immediate(_),
+                ..
+            }
+        )));
+    }
+
+    #[test]
+    fn generate_encodable_instructions_contains_tst_bitmask_immediate() {
+        let instrs = generate_all_encodable_instructions(&[Register::X0, Register::X1], &[0xff]);
+
+        assert!(instrs.contains(&Instruction::Tst {
+            rn: Register::X0,
+            rm: Operand::Immediate(0xff),
+            width: RegisterWidth::X64,
+        }));
+        assert!(instrs.iter().all(Instruction::is_encodable_aarch64));
     }
 
     #[test]
@@ -1716,6 +2012,120 @@ mod tests {
             has_shifted_add,
             "enumerate must include Add with ShiftedRegister rm"
         );
+    }
+
+    #[test]
+    fn generate_encodable_instructions_contains_shifted_compare_and_test_forms() {
+        let instrs = generate_all_encodable_instructions(&[Register::X0, Register::X1], &[]);
+
+        assert!(instrs.contains(&Instruction::Cmp {
+            rn: Register::X0,
+            rm: Operand::ShiftedRegister {
+                reg: Register::X1,
+                kind: crate::ir::ShiftKind::Lsl,
+                amount: 1,
+            },
+        }));
+        assert!(instrs.contains(&Instruction::Cmn {
+            rn: Register::X0,
+            rm: Operand::ShiftedRegister {
+                reg: Register::X1,
+                kind: crate::ir::ShiftKind::Asr,
+                amount: 1,
+            },
+        }));
+        assert!(instrs.contains(&Instruction::Tst {
+            rn: Register::X0,
+            rm: Operand::ShiftedRegister {
+                reg: Register::X1,
+                kind: crate::ir::ShiftKind::Ror,
+                amount: 1,
+            },
+            width: RegisterWidth::X64,
+        }));
+        assert!(!instrs.iter().any(|i| matches!(
+            i,
+            Instruction::Cmp {
+                rm: Operand::ShiftedRegister {
+                    kind: crate::ir::ShiftKind::Ror,
+                    ..
+                },
+                ..
+            } | Instruction::Cmn {
+                rm: Operand::ShiftedRegister {
+                    kind: crate::ir::ShiftKind::Ror,
+                    ..
+                },
+                ..
+            }
+        )));
+        assert!(instrs.iter().all(Instruction::is_encodable_aarch64));
+    }
+
+    #[test]
+    fn shifted_compare_and_test_generation_is_unique_and_prefilters_sp() {
+        let instrs = generate_all_instructions(&[Register::X0, Register::X1, Register::SP], &[]);
+
+        for expected in [
+            Instruction::Cmp {
+                rn: Register::X0,
+                rm: Operand::ShiftedRegister {
+                    reg: Register::X1,
+                    kind: crate::ir::ShiftKind::Lsl,
+                    amount: 1,
+                },
+            },
+            Instruction::Cmn {
+                rn: Register::X0,
+                rm: Operand::ShiftedRegister {
+                    reg: Register::X1,
+                    kind: crate::ir::ShiftKind::Asr,
+                    amount: 1,
+                },
+            },
+            Instruction::Tst {
+                rn: Register::X0,
+                rm: Operand::ShiftedRegister {
+                    reg: Register::X1,
+                    kind: crate::ir::ShiftKind::Ror,
+                    amount: 1,
+                },
+                width: RegisterWidth::X64,
+            },
+        ] {
+            let count = instrs.iter().filter(|instr| **instr == expected).count();
+            assert_eq!(count, 1, "{expected} must appear exactly once");
+        }
+
+        for instr in &instrs {
+            match instr {
+                Instruction::Cmp {
+                    rn,
+                    rm: Operand::ShiftedRegister { reg, .. },
+                }
+                | Instruction::Cmn {
+                    rn,
+                    rm: Operand::ShiftedRegister { reg, .. },
+                }
+                | Instruction::Tst {
+                    rn,
+                    rm: Operand::ShiftedRegister { reg, .. },
+                    ..
+                } => {
+                    assert_ne!(
+                        *rn,
+                        Register::SP,
+                        "shifted compare/test rn uses SP: {instr}"
+                    );
+                    assert_ne!(
+                        *reg,
+                        Register::SP,
+                        "shifted compare/test rm uses SP: {instr}"
+                    );
+                }
+                _ => {}
+            }
+        }
     }
 
     #[test]
