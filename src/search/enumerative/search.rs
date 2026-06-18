@@ -291,8 +291,16 @@ where
     }
 }
 
+struct CachedThreadPool {
+    effective_cores: usize,
+    pool: rayon::ThreadPool,
+}
+
 pub struct EnumerativeSearch<I: ISA = AArch64> {
     statistics: SearchStatistics,
+    private_pool: Option<CachedThreadPool>,
+    #[cfg(test)]
+    private_pool_builds: u64,
     _isa: PhantomData<I>,
 }
 
@@ -300,12 +308,57 @@ impl<I: ISA> EnumerativeSearch<I> {
     pub fn new() -> Self {
         Self {
             statistics: SearchStatistics::new(Algorithm::Enumerative),
+            private_pool: None,
+            #[cfg(test)]
+            private_pool_builds: 0,
             _isa: PhantomData,
         }
     }
 
     fn timed_out(start: Instant, timeout: Option<Duration>) -> bool {
         timeout.is_some_and(|t| start.elapsed() >= t)
+    }
+
+    fn cached_private_pool(
+        &mut self,
+        effective_cores: usize,
+    ) -> Result<&rayon::ThreadPool, rayon::ThreadPoolBuildError> {
+        let needs_rebuild = !matches!(
+            self.private_pool.as_ref(),
+            Some(cached) if cached.effective_cores == effective_cores
+        );
+
+        if needs_rebuild {
+            let pool = rayon::ThreadPoolBuilder::new()
+                .num_threads(effective_cores)
+                .build()?;
+            #[cfg(test)]
+            {
+                self.private_pool_builds += 1;
+            }
+            self.private_pool = Some(CachedThreadPool {
+                effective_cores,
+                pool,
+            });
+        }
+
+        Ok(&self
+            .private_pool
+            .as_ref()
+            .expect("private pool should be present after successful build")
+            .pool)
+    }
+
+    #[cfg(test)]
+    fn private_pool_build_count(&self) -> u64 {
+        self.private_pool_builds
+    }
+
+    #[cfg(test)]
+    fn private_pool_effective_cores(&self) -> Option<usize> {
+        self.private_pool
+            .as_ref()
+            .map(|cached| cached.effective_cores)
     }
 }
 
@@ -465,10 +518,7 @@ where
             // sized to that count. The `Some(1)` case in particular must
             // *not* fall through to the global rayon pool, or the user's
             // request for 1 thread would silently run on every logical core.
-            Some(n) => match rayon::ThreadPoolBuilder::new()
-                .num_threads(n.max(1))
-                .build()
-            {
+            Some(n) => match self.cached_private_pool(n.max(1)) {
                 Ok(pool) => pool.install(|| run_lengths(&shared)),
                 Err(e) => {
                     // Resource exhaustion (rare in practice): fall back to
@@ -740,6 +790,23 @@ mod tests {
         );
     }
 
+    fn mov_add_target() -> (Vec<Instruction>, LiveOut) {
+        (
+            vec![
+                Instruction::MovReg {
+                    rd: Register::X0,
+                    rn: Register::X1,
+                },
+                Instruction::Add {
+                    rd: Register::X0,
+                    rn: Register::X0,
+                    rm: Operand::Immediate(1),
+                },
+            ],
+            LiveOut::from_registers(vec![Register::X0]),
+        )
+    }
+
     #[test]
     fn aarch64_backend_honors_flags_dead_live_out_mask() {
         let target = vec![
@@ -955,6 +1022,110 @@ mod tests {
             result.optimized_sequence.as_ref().map(Vec::len),
             Some(1),
             "should collapse to a single instruction under cores=Some(2)"
+        );
+    }
+
+    #[test]
+    fn explicit_cores_cache_private_pool_across_search_calls() {
+        let (target, live_out) = mov_add_target();
+        let config = small_config().with_cores(Some(2));
+
+        let mut search = EnumerativeSearch::<crate::isa::AArch64>::new();
+        let first = search.search(&target, &live_out, &config);
+
+        assert!(
+            first.found_optimization,
+            "first search should find the rewrite"
+        );
+        assert_eq!(first.optimized_sequence.as_ref().map(Vec::len), Some(1));
+        assert_eq!(search.private_pool_build_count(), 1);
+
+        let second = search.search(&target, &live_out, &config);
+
+        assert!(
+            second.found_optimization,
+            "second search should still find the rewrite"
+        );
+        assert_eq!(second.optimized_sequence.as_ref().map(Vec::len), Some(1));
+        assert_eq!(
+            search.private_pool_build_count(),
+            1,
+            "same explicit core count should reuse the cached pool"
+        );
+    }
+
+    #[test]
+    fn explicit_cores_rebuild_private_pool_when_effective_core_count_changes() {
+        let (target, live_out) = mov_add_target();
+
+        let mut search = EnumerativeSearch::<crate::isa::AArch64>::new();
+        let one_thread = search.search(&target, &live_out, &small_config().with_cores(Some(1)));
+
+        assert!(
+            one_thread.found_optimization,
+            "single-thread private pool should find the rewrite"
+        );
+        assert_eq!(search.private_pool_effective_cores(), Some(1));
+        assert_eq!(search.private_pool_build_count(), 1);
+
+        let zero_threads = search.search(&target, &live_out, &small_config().with_cores(Some(0)));
+
+        assert!(
+            zero_threads.found_optimization,
+            "zero-thread request should be coerced to one worker and find the rewrite"
+        );
+        assert_eq!(search.private_pool_effective_cores(), Some(1));
+        assert_eq!(
+            search.private_pool_build_count(),
+            1,
+            "Some(0) and Some(1) have the same effective core count"
+        );
+
+        let two_threads = search.search(&target, &live_out, &small_config().with_cores(Some(2)));
+
+        assert!(
+            two_threads.found_optimization,
+            "new private pool should still find the rewrite"
+        );
+        assert_eq!(search.private_pool_effective_cores(), Some(2));
+        assert_eq!(
+            search.private_pool_build_count(),
+            2,
+            "different effective core count should rebuild exactly once"
+        );
+    }
+
+    #[test]
+    fn cores_none_uses_global_pool_without_clearing_cached_private_pool() {
+        let (target, live_out) = mov_add_target();
+
+        let mut search = EnumerativeSearch::<crate::isa::AArch64>::new();
+        let private_pool_result =
+            search.search(&target, &live_out, &small_config().with_cores(Some(1)));
+
+        assert!(
+            private_pool_result.found_optimization,
+            "private-pool precondition should find the rewrite"
+        );
+        assert_eq!(search.private_pool_effective_cores(), Some(1));
+        assert_eq!(search.private_pool_build_count(), 1);
+
+        let global_pool_result =
+            search.search(&target, &live_out, &small_config().with_cores(None));
+
+        assert!(
+            global_pool_result.found_optimization,
+            "global-pool search should still find the rewrite"
+        );
+        assert_eq!(
+            search.private_pool_effective_cores(),
+            Some(1),
+            "global-pool search should not clear the cached private pool"
+        );
+        assert_eq!(
+            search.private_pool_build_count(),
+            1,
+            "cores=None should not build another private pool"
         );
     }
 
