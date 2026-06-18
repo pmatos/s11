@@ -61,8 +61,12 @@ Rewritable straight-line mnemonics accepted by the parser and Capstone bridge:
   byte-addressed Z3-array memory model with sound full aliasing, whole-memory
   live-out auto-derived): `ldr`, `ldrb`, `ldrh`, `ldrsb`, `ldrsh`, `ldrsw`,
   `str`, `strb`, `strh`, `ldp`, `stp`, `ldpsw` — accepted in immediate-offset,
-  pre-index, post-index, register-offset, and register-extend addressing
-  forms, in both `W` and `X` widths
+  pre-index, post-index, register-offset, and register-extend addressing forms.
+  Unsized `ldr` / `str` infer `W` vs `X` width from the data register spelling.
+  Zero-extending `ldrb` / `ldrh` loads and `strb` / `strh` stores use scoped
+  `W`/`X` register slots.
+  `ldrsb` / `ldrsh` / `ldrsw` signed loads currently accept only X-form
+  destinations because the current `Ldrs` IR models X-form sign-extension.
 
 Fixed control-flow terminators:
 

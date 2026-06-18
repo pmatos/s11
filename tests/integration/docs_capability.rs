@@ -158,6 +158,12 @@ fn memory_operations_are_consistently_documented_with_known_gaps() {
         matrix.contains("`ldur`, `stur`, and `ldr (literal)` are out of scope"),
         "docs/capability.md must document unsupported memory-operation gaps"
     );
+    assert!(
+        matrix.contains(
+            "`ldrsb` / `ldrsh` / `ldrsw` signed loads currently accept only x-form destinations"
+        ),
+        "docs/capability.md must document the current signed-load destination-width limit"
+    );
 
     let tutorial = normalized_doc("TUTORIAL.md");
     assert!(
