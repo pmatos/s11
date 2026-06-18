@@ -1288,6 +1288,8 @@ pub fn is_move_op(instr: &Instruction) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::isa::InstructionGenerator;
+    use crate::isa::aarch64::AArch64InstructionGenerator;
     use std::convert::Infallible;
 
     fn default_registers() -> Vec<Register> {
@@ -1456,27 +1458,18 @@ mod tests {
     }
 
     #[test]
-    fn test_generate_all_instructions_covers_issue_66_opcodes() {
+    fn test_generate_all_instructions_covers_opcode_count() {
         // Candidate generation intentionally uses `InstructionType::opcode_id`
         // from `src/isa/aarch64.rs`; add a sync guard beside any future
         // candidate-local table instead of letting the two drift silently.
-        // Regression guard: every IR opcode family enumerated by issue #66
-        // (Mul/Sdiv/Udiv/Cmp/Cmn/Tst/Csel/Csinc/Csinv/Csneg, opcode_ids
-        // 10..=19) must appear in the exhaustive enumeration. Narrower scope
-        // than every-opcode coverage because origin/main has a pre-existing
-        // opcode_id collision between Sxt* and Ubfx/Sbfx/Bfi/Bfxil/Ubfiz that
-        // isn't in scope here.
         let instrs = generate_all_instructions(&default_registers(), &default_immediates());
         let ids: std::collections::BTreeSet<u8> =
             instrs.iter().map(InstructionType::opcode_id).collect();
-        // Keep this literal range: 10..=19 is the stable issue-66 opcode_id
-        // contract for Mul through Csneg. Deriving it from representative
-        // Instruction values would hide accidental renumbering, unlike the
-        // random-reach tests where that indirection is deliberate.
-        for id in 10u8..=19 {
+        let generator = AArch64InstructionGenerator;
+        for id in 0..generator.opcode_count() {
             assert!(
                 ids.contains(&id),
-                "missing issue-66 opcode_id {} in generate_all",
+                "missing opcode_id {} in generate_all",
                 id
             );
         }
@@ -2447,6 +2440,62 @@ mod tests {
                 rd: Register::X0,
                 rn: Register::X1,
                 shift: Operand::Immediate(0),
+            },
+            Instruction::Sxtb {
+                rd: Register::X0,
+                rn: Register::X1,
+            },
+            Instruction::Sxth {
+                rd: Register::X0,
+                rn: Register::X1,
+            },
+            Instruction::Sxtw {
+                rd: Register::X0,
+                rn: Register::X1,
+            },
+            Instruction::Uxtb {
+                rd: Register::X0,
+                rn: Register::X1,
+            },
+            Instruction::Uxth {
+                rd: Register::X0,
+                rn: Register::X1,
+            },
+            Instruction::Ubfx {
+                rd: Register::X0,
+                rn: Register::X1,
+                lsb: 0,
+                width: 1,
+            },
+            Instruction::Sbfx {
+                rd: Register::X0,
+                rn: Register::X1,
+                lsb: 0,
+                width: 1,
+            },
+            Instruction::Bfi {
+                rd: Register::X0,
+                rn: Register::X1,
+                lsb: 0,
+                width: 1,
+            },
+            Instruction::Bfxil {
+                rd: Register::X0,
+                rn: Register::X1,
+                lsb: 0,
+                width: 1,
+            },
+            Instruction::Ubfiz {
+                rd: Register::X0,
+                rn: Register::X1,
+                lsb: 0,
+                width: 1,
+            },
+            Instruction::Sbfiz {
+                rd: Register::X0,
+                rn: Register::X1,
+                lsb: 0,
+                width: 1,
             },
         ];
 
