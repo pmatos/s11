@@ -271,7 +271,11 @@ where
         .fetch_add(solver_nanos, Ordering::Relaxed);
     // Count only candidates that actually reached `solver.check()`. The same
     // metric also marks candidates that passed fast concrete validation,
-    // including ones later disproved by SMT.
+    // including ones later disproved by SMT. `smt_called` is the right guard
+    // because every early return that never reaches the solver leaves it
+    // false: the pre-SMT guard (`flag_writers_diverge && flags_live`) returns
+    // `NotEquivalent` and the fast-path returns `NotEquivalentFast`, neither of
+    // which should count as a fast pass (PR #269 review).
     if metrics.smt_called {
         shared.smt_queries.fetch_add(1, Ordering::Relaxed);
         shared
@@ -1354,6 +1358,39 @@ mod tests {
         assert_eq!(shared.smt_queries.load(Ordering::Relaxed), 1);
         assert_eq!(shared.candidates_passed_fast.load(Ordering::Relaxed), 1);
         assert_eq!(shared.smt_equivalent.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn verify_candidate_counts_smt_equivalence() {
+        // Commutativity: `add x0, x1, x2` == `add x0, x2, x1`. The candidate
+        // passes fast concrete validation and Z3 then proves equivalence, so
+        // the success path must record one SMT query, one fast pass, and one
+        // equivalence.
+        let target = vec![Instruction::Add {
+            rd: Register::X0,
+            rn: Register::X1,
+            rm: Operand::Register(Register::X2),
+        }];
+        let candidate = vec![Instruction::Add {
+            rd: Register::X0,
+            rn: Register::X2,
+            rm: Operand::Register(Register::X1),
+        }];
+        let live_out = LiveOut::from_registers(vec![Register::X0]);
+        let config = SearchConfig::default().with_timeout_option(None);
+        let shared = SharedState::<AArch64>::new(u64::MAX);
+
+        assert!(verify_candidate::<AArch64>(
+            &target,
+            &candidate,
+            &live_out,
+            &config,
+            &shared,
+            std::time::Instant::now(),
+        ));
+        assert_eq!(shared.smt_queries.load(Ordering::Relaxed), 1);
+        assert_eq!(shared.candidates_passed_fast.load(Ordering::Relaxed), 1);
+        assert_eq!(shared.smt_equivalent.load(Ordering::Relaxed), 1);
     }
 
     #[test]
