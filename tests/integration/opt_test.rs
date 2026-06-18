@@ -45,7 +45,12 @@ fn find_encoding_masked(elf_path: &Path, expected: &[u8; 4], mask: &[u8; 4], lab
         if size < expected.len() {
             continue;
         }
-        let bytes = &data[file_start..file_start + size];
+        let file_end = file_start
+            .checked_add(size)
+            .expect("executable section range should not overflow usize");
+        let bytes = data
+            .get(file_start..file_end)
+            .expect("executable section range should be present in ELF data");
         for off in (0..size - expected.len() + 1).step_by(4) {
             if (0..4).all(|i| bytes[off + i] & mask[i] == expected[i] & mask[i]) {
                 return section.sh_addr + off as u64;
@@ -77,6 +82,38 @@ fn executable_window(path: &Path, width: u64) -> (u64, u64) {
     }
 
     panic!("no executable window of {width} bytes found in {path:?}");
+}
+
+fn file_offset_for_executable_addr(path: &Path, addr: u64) -> usize {
+    let data = std::fs::read(path).expect("read test ELF");
+    let elf =
+        elf::ElfBytes::<elf::endian::AnyEndian>::minimal_parse(&data).expect("parse test ELF");
+    let section_headers = elf.section_headers().expect("read section headers");
+
+    for section in section_headers.iter() {
+        if section.sh_flags & elf::abi::SHF_EXECINSTR as u64 == 0 {
+            continue;
+        }
+
+        let section_end = section
+            .sh_addr
+            .checked_add(section.sh_size)
+            .expect("executable section address range should not overflow");
+        if !(section.sh_addr..section_end).contains(&addr) {
+            continue;
+        }
+
+        let file_offset = section
+            .sh_offset
+            .checked_add(addr - section.sh_addr)
+            .expect("executable section file range should not overflow")
+            as usize;
+        data.get(file_offset..file_offset + 4)
+            .expect("executable address should map to bytes in ELF data");
+        return file_offset;
+    }
+
+    panic!("executable address 0x{addr:x} not found in {path:?}");
 }
 
 fn assert_opt_arch_mismatch_rejected(test_elf: &Path, arch: &str) {
@@ -390,6 +427,60 @@ fn test_opt_address_alignment() {
 }
 
 #[test]
+fn test_opt_rejects_partially_decoded_window_with_first_bad_address() {
+    let binary = get_binary_path();
+    let source_elf = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("binaries")
+        .join("loops_debug");
+    check_test_binary(&source_elf);
+
+    let (start_addr, end_addr) = executable_window(&source_elf, 8);
+    let first_bad_addr = start_addr + 4;
+
+    let tmp_dir = tempfile::tempdir().expect("create temp fixture dir");
+    let test_elf = tmp_dir.path().join("loops_debug");
+    fs::copy(&source_elf, &test_elf).expect("copy ELF fixture to tmp");
+
+    let bad_offset = file_offset_for_executable_addr(&test_elf, first_bad_addr);
+    let mut data = fs::read(&test_elf).expect("read temp ELF");
+    data[bad_offset..bad_offset + 4].copy_from_slice(&[0xff, 0xff, 0xff, 0xff]);
+    fs::write(&test_elf, data).expect("write corrupted temp ELF");
+
+    let optimized_path = tmp_dir.path().join("loops_debug_optimized");
+    let output = Command::new(binary)
+        .arg("opt")
+        .arg(&test_elf)
+        .arg("--start-addr")
+        .arg(format!("0x{start_addr:x}"))
+        .arg("--end-addr")
+        .arg(format!("0x{end_addr:x}"))
+        .output()
+        .expect("Failed to execute s11");
+
+    assert!(
+        !output.status.success(),
+        "opt must reject an AArch64 window Capstone only partially decoded.\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr),
+    );
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("not fully decoded"),
+        "stderr should report the byte-coverage failure; got: {stderr}",
+    );
+    assert!(
+        stderr.contains(&format!("0x{first_bad_addr:x}")),
+        "stderr should report the first undecoded address 0x{first_bad_addr:x}; got: {stderr}",
+    );
+    assert!(
+        !optimized_path.exists(),
+        "no optimized binary should be written when decode coverage fails: {:?}",
+        optimized_path,
+    );
+}
+
+#[test]
 fn test_opt_rejects_unsupported_instruction_window() {
     let binary = get_binary_path();
     let test_elf = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -440,6 +531,10 @@ fn test_opt_rejects_unsupported_instruction_window() {
     assert!(
         stderr.contains(&format!("0x{start_addr:x}")),
         "stderr should report the offending address 0x{start_addr:x}; got: {stderr}",
+    );
+    assert!(
+        !stderr.contains("cannot optimize"),
+        "stderr should avoid redundant optimization framing; got: {stderr}",
     );
 
     assert!(
