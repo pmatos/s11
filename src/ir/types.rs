@@ -667,6 +667,19 @@ mod tests {
     }
 
     #[test]
+    fn test_extended_register_display_x_form_xzr() {
+        assert_eq!(
+            Operand::ExtendedRegister {
+                reg: Register::XZR,
+                kind: ExtendKind::Uxtx,
+                shift: 0,
+            }
+            .to_string(),
+            "xzr, uxtx #0"
+        );
+    }
+
+    #[test]
     fn test_condition_invert_pairs() {
         let pairs = [
             (Condition::EQ, Condition::NE),
