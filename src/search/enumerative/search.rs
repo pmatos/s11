@@ -97,7 +97,7 @@ pub trait EnumerativeBackend<I: ISA>: Sized {
         target: &[I::Instruction],
         candidate: &[I::Instruction],
         live_out: &Self::LiveOut,
-        config: &SearchConfig,
+        smt_timeout: Duration,
     ) -> (EquivalenceResult, EquivalenceMetrics);
 }
 
@@ -128,12 +128,8 @@ impl EnumerativeBackend<AArch64> for AArch64 {
         target: &[crate::ir::Instruction],
         candidate: &[crate::ir::Instruction],
         live_out: &Self::LiveOut,
-        config: &SearchConfig,
+        smt_timeout: Duration,
     ) -> (EquivalenceResult, EquivalenceMetrics) {
-        let smt_timeout = config
-            .symbolic
-            .solver_timeout
-            .unwrap_or(Duration::from_secs(5));
         let equiv_config = EquivalenceConfig::with_live_out(live_out.clone())
             .random_tests(5)
             .timeout(smt_timeout)
@@ -182,12 +178,8 @@ impl EnumerativeBackend<crate::isa::X86_64> for crate::isa::X86_64 {
         target: &[crate::isa::x86::X86Instruction],
         candidate: &[crate::isa::x86::X86Instruction],
         live_out: &Self::LiveOut,
-        config: &SearchConfig,
+        smt_timeout: Duration,
     ) -> (EquivalenceResult, EquivalenceMetrics) {
-        let smt_timeout = config
-            .symbolic
-            .solver_timeout
-            .unwrap_or(Duration::from_secs(5));
         let equiv_config =
             EquivalenceConfigFor::<crate::isa::X86_64>::with_live_out(live_out.clone())
                 .random_tests(5)
@@ -239,12 +231,8 @@ impl EnumerativeBackend<crate::isa::X86_32> for crate::isa::X86_32 {
         target: &[crate::isa::x86::X86Instruction],
         candidate: &[crate::isa::x86::X86Instruction],
         live_out: &Self::LiveOut,
-        config: &SearchConfig,
+        smt_timeout: Duration,
     ) -> (EquivalenceResult, EquivalenceMetrics) {
-        let smt_timeout = config
-            .symbolic
-            .solver_timeout
-            .unwrap_or(Duration::from_secs(5));
         let equiv_config =
             EquivalenceConfigFor::<crate::isa::X86_32>::with_live_out(live_out.clone())
                 .random_tests(5)
@@ -262,12 +250,17 @@ fn verify_candidate<I>(
     live_out: &<I as EnumerativeBackend<I>>::LiveOut,
     config: &SearchConfig,
     shared: &SharedState<I>,
+    start: Instant,
 ) -> bool
 where
     I: ISA + EnumerativeBackend<I>,
 {
+    let Some(smt_timeout) = candidate_solver_timeout(config, start) else {
+        shared.stop.store(true, Ordering::Relaxed);
+        return false;
+    };
     let (verdict, metrics) =
-        <I as EnumerativeBackend<I>>::check_equivalence(target, candidate, live_out, config);
+        <I as EnumerativeBackend<I>>::check_equivalence(target, candidate, live_out, smt_timeout);
     let solver_nanos: u64 = metrics
         .smt_elapsed
         .as_nanos()
@@ -407,6 +400,30 @@ where
     }
 }
 
+fn configured_solver_timeout(config: &SearchConfig) -> Duration {
+    config
+        .symbolic
+        .solver_timeout
+        .unwrap_or(Duration::from_secs(5))
+}
+
+fn candidate_solver_timeout_for_elapsed(
+    config: &SearchConfig,
+    elapsed: Duration,
+) -> Option<Duration> {
+    let solver_timeout = configured_solver_timeout(config);
+    let timeout = match config.timeout {
+        Some(search_timeout) => solver_timeout.min(search_timeout.checked_sub(elapsed)?),
+        None => solver_timeout,
+    };
+
+    (timeout.as_millis() > 0).then_some(timeout)
+}
+
+fn candidate_solver_timeout(config: &SearchConfig, start: Instant) -> Option<Duration> {
+    candidate_solver_timeout_for_elapsed(config, start.elapsed())
+}
+
 fn run_length_one<I>(
     target: &[I::Instruction],
     live_out: &<I as EnumerativeBackend<I>>::LiveOut,
@@ -435,7 +452,7 @@ fn run_length_one<I>(
             return;
         }
         shared.candidates_evaluated.fetch_add(1, Ordering::Relaxed);
-        if verify_candidate::<I>(target, &candidate, live_out, config, shared) {
+        if verify_candidate::<I>(target, &candidate, live_out, config, shared, start) {
             shared.record_improvement(candidate, candidate_cost);
         }
     });
@@ -481,7 +498,7 @@ fn run_length_two<I>(
                 continue;
             }
             shared.candidates_evaluated.fetch_add(1, Ordering::Relaxed);
-            if verify_candidate::<I>(target, &candidate, live_out, config, shared) {
+            if verify_candidate::<I>(target, &candidate, live_out, config, shared, start) {
                 shared.record_improvement(candidate, candidate_cost);
             }
         }
@@ -626,6 +643,45 @@ mod tests {
     use crate::ir::{Instruction, Operand, Register};
     use crate::isa::{ISA, ISAMutator, InstructionType, OperandType, RegisterType, U64};
     use crate::search::config::SymbolicConfig;
+
+    static LENGTH_TWO_COST_CALLS: AtomicU64 = AtomicU64::new(0);
+
+    impl EnumerativeBackend<crate::isa::RiscV64> for crate::isa::RiscV64 {
+        type LiveOut = ();
+
+        fn registers_from_config(_config: &SearchConfig) -> Vec<crate::isa::riscv::RiscVRegister> {
+            Vec::new()
+        }
+
+        fn immediates_from_config(_config: &SearchConfig) -> Vec<i64> {
+            Vec::new()
+        }
+
+        fn enumerate_all(
+            _regs: &[crate::isa::riscv::RiscVRegister],
+            _imms: &[i64],
+        ) -> Vec<crate::isa::riscv::RiscVInstruction> {
+            Vec::new()
+        }
+
+        fn sequence_cost(
+            _seq: &[crate::isa::riscv::RiscVInstruction],
+            _config: &SearchConfig,
+        ) -> u64 {
+            LENGTH_TWO_COST_CALLS.fetch_add(1, Ordering::Relaxed);
+            std::thread::sleep(std::time::Duration::from_millis(10));
+            1
+        }
+
+        fn check_equivalence(
+            _target: &[crate::isa::riscv::RiscVInstruction],
+            _candidate: &[crate::isa::riscv::RiscVInstruction],
+            _live_out: &Self::LiveOut,
+            _smt_timeout: Duration,
+        ) -> (EquivalenceResult, EquivalenceMetrics) {
+            panic!("cost-pruned timeout regression must not verify candidates")
+        }
+    }
 
     static CACHE_PROBE_TEST_LOCK: TestMutex<()> = TestMutex::new(());
     static CACHE_PROBE_ENUMERATE_CALLS: AtomicUsize = AtomicUsize::new(0);
@@ -807,7 +863,7 @@ mod tests {
             _target: &[CacheProbeInstruction],
             _candidate: &[CacheProbeInstruction],
             _live_out: &Self::LiveOut,
-            _config: &SearchConfig,
+            _smt_timeout: Duration,
         ) -> (EquivalenceResult, EquivalenceMetrics) {
             (
                 EquivalenceResult::NotEquivalent,
@@ -1103,7 +1159,7 @@ mod tests {
             _target: &[InnerTimeoutInstruction],
             _candidate: &[InnerTimeoutInstruction],
             _live_out: &Self::LiveOut,
-            _config: &SearchConfig,
+            _smt_timeout: Duration,
         ) -> (EquivalenceResult, EquivalenceMetrics) {
             panic!("cost pruning should prevent equivalence checks")
         }
@@ -1166,6 +1222,134 @@ mod tests {
     }
 
     #[test]
+    fn candidate_solver_timeout_is_bounded_by_search_budget() {
+        let configured_solver = SearchConfig::default()
+            .with_timeout(std::time::Duration::from_secs(10))
+            .with_symbolic(
+                SymbolicConfig::default().with_timeout(std::time::Duration::from_millis(250)),
+            );
+        assert_eq!(
+            candidate_solver_timeout_for_elapsed(
+                &configured_solver,
+                std::time::Duration::from_secs(1)
+            ),
+            Some(std::time::Duration::from_millis(250))
+        );
+
+        let capped_by_remaining_search = SearchConfig::default()
+            .with_timeout(std::time::Duration::from_millis(100))
+            .with_symbolic(
+                SymbolicConfig::default().with_timeout(std::time::Duration::from_secs(1)),
+            );
+        assert_eq!(
+            candidate_solver_timeout_for_elapsed(
+                &capped_by_remaining_search,
+                std::time::Duration::from_millis(40)
+            ),
+            Some(std::time::Duration::from_millis(60))
+        );
+        assert_eq!(
+            candidate_solver_timeout_for_elapsed(
+                &capped_by_remaining_search,
+                std::time::Duration::from_millis(100)
+            ),
+            None
+        );
+        assert_eq!(
+            candidate_solver_timeout_for_elapsed(
+                &capped_by_remaining_search,
+                std::time::Duration::from_micros(99_500)
+            ),
+            None
+        );
+
+        let symbolic_without_solver_timeout = SymbolicConfig {
+            solver_timeout: None,
+            ..SymbolicConfig::default()
+        };
+        let no_search_timeout = SearchConfig::default()
+            .with_timeout_option(None)
+            .with_symbolic(symbolic_without_solver_timeout);
+        assert_eq!(
+            candidate_solver_timeout_for_elapsed(
+                &no_search_timeout,
+                std::time::Duration::from_secs(999)
+            ),
+            Some(std::time::Duration::from_secs(5))
+        );
+    }
+
+    #[test]
+    fn verify_candidate_stops_without_smt_when_search_budget_is_exhausted() {
+        let target = vec![Instruction::MovImm {
+            rd: Register::X0,
+            imm: 0,
+        }];
+        let candidate = target.clone();
+        let live_out = LiveOut::from_registers(vec![Register::X0]);
+        let config = SearchConfig::default().with_timeout(std::time::Duration::from_millis(1));
+        let shared = SharedState::<AArch64>::new(u64::MAX);
+        let expired_start = std::time::Instant::now() - std::time::Duration::from_millis(1);
+
+        assert!(!verify_candidate::<AArch64>(
+            &target,
+            &candidate,
+            &live_out,
+            &config,
+            &shared,
+            expired_start,
+        ));
+        assert!(shared.stop.load(Ordering::Relaxed));
+        assert_eq!(shared.smt_queries.load(Ordering::Relaxed), 0);
+        assert_eq!(shared.smt_elapsed_nanos.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn length_two_search_honors_timeout_inside_inner_loop() {
+        use crate::isa::{RiscV64, RiscVInstruction, RiscVRegister};
+
+        let instr = RiscVInstruction::Addi {
+            rd: RiscVRegister::X1,
+            rs1: RiscVRegister::X1,
+            imm: 1,
+        };
+        let all_instructions = vec![instr; 6];
+        let target = vec![instr; 3];
+        let live_out = ();
+        let config = SearchConfig::default().with_timeout(std::time::Duration::from_millis(5));
+        let shared = SharedState::<RiscV64>::new(0);
+        LENGTH_TWO_COST_CALLS.store(0, Ordering::Relaxed);
+
+        let pool = rayon::ThreadPoolBuilder::new()
+            .num_threads(1)
+            .build()
+            .expect("private rayon pool");
+        let start = std::time::Instant::now();
+        pool.install(|| {
+            run_length_two::<RiscV64>(
+                &target,
+                &live_out,
+                &config,
+                &all_instructions,
+                None,
+                &shared,
+                start,
+            )
+        });
+
+        let cost_calls = LENGTH_TWO_COST_CALLS.load(Ordering::Relaxed);
+        assert!(
+            shared.stop.load(Ordering::Relaxed),
+            "timeout should set shared stop inside the inner length-two loop"
+        );
+        assert!(
+            cost_calls < all_instructions.len() as u64,
+            "expected timeout before a full inner sweep; saw {cost_calls} cost calls for {} instructions",
+            all_instructions.len()
+        );
+    }
+
+    #[test]
     fn aarch64_backend_honors_flags_dead_live_out_mask() {
         let target = vec![
             Instruction::Cmp {
@@ -1187,7 +1371,7 @@ mod tests {
             &target,
             &candidate,
             &live_out,
-            &SearchConfig::default(),
+            configured_solver_timeout(&SearchConfig::default()),
         );
 
         assert_eq!(result.0, EquivalenceResult::Equivalent);
@@ -1196,7 +1380,7 @@ mod tests {
             &target,
             &candidate,
             &live_out.with_flags(true),
-            &SearchConfig::default(),
+            configured_solver_timeout(&SearchConfig::default()),
         );
 
         assert_ne!(flags_live_result.0, EquivalenceResult::Equivalent);
