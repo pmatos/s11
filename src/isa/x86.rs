@@ -966,11 +966,10 @@ impl X86Mutator {
         if sequence.len() < 2 {
             return;
         }
-        let a = rng.random_range(0..sequence.len());
-        let mut b = rng.random_range(0..sequence.len());
-        while b == a {
-            b = rng.random_range(0..sequence.len());
-        }
+        let n = sequence.len();
+        let a = rng.random_range(0..n);
+        let offset = rng.random_range(0..(n - 1));
+        let b = (a + 1 + offset) % n;
         sequence.swap(a, b);
     }
 
@@ -2005,6 +2004,101 @@ mod tests {
     }
 
     // ---- X86Mutator (issue #73 Phase B) ----
+
+    struct BudgetedRng {
+        words: Vec<u32>,
+        next_word: usize,
+    }
+
+    impl BudgetedRng {
+        fn new(words: Vec<u32>) -> Self {
+            Self {
+                words,
+                next_word: 0,
+            }
+        }
+
+        fn draw_word(&mut self) -> u32 {
+            let word = self
+                .words
+                .get(self.next_word)
+                .copied()
+                .expect("random generator exceeded its draw budget");
+            self.next_word += 1;
+            word
+        }
+    }
+
+    impl rand::TryRng for BudgetedRng {
+        type Error = std::convert::Infallible;
+
+        fn try_next_u32(&mut self) -> Result<u32, Self::Error> {
+            Ok(self.draw_word())
+        }
+
+        fn try_next_u64(&mut self) -> Result<u64, Self::Error> {
+            let low = u64::from(self.draw_word());
+            let high = u64::from(self.draw_word());
+            Ok(low | (high << 32))
+        }
+
+        fn try_fill_bytes(&mut self, dst: &mut [u8]) -> Result<(), Self::Error> {
+            for chunk in dst.chunks_mut(4) {
+                let bytes = self.draw_word().to_le_bytes();
+                chunk.copy_from_slice(&bytes[..chunk.len()]);
+            }
+            Ok(())
+        }
+    }
+
+    fn word_for_range(range: u32, value: u32) -> u32 {
+        assert!(range > 0);
+        assert!(value < range);
+        let numerator = (u128::from(value)) << 32;
+        let word = numerator.div_ceil(u128::from(range)) as u32;
+        debug_assert_eq!(((u64::from(word) * u64::from(range)) >> 32) as u32, value);
+        word
+    }
+
+    #[test]
+    fn x86_mutator_swap_uses_two_draws_with_modular_second_index() {
+        let mutator = X86Mutator::default();
+        let mut sequence = vec![
+            X86Instruction::MovImm {
+                rd: X86Register::RAX,
+                imm: 0,
+            },
+            X86Instruction::AddReg {
+                rd: X86Register::RBX,
+                rs: X86Register::RCX,
+            },
+            X86Instruction::SubImm {
+                rd: X86Register::RDX,
+                imm: 1,
+            },
+        ];
+        let mut rng = BudgetedRng::new(vec![word_for_range(3, 1), word_for_range(2, 1)]);
+
+        mutator.mutate_swap(&mut rng, &mut sequence);
+
+        assert_eq!(
+            sequence,
+            vec![
+                X86Instruction::AddReg {
+                    rd: X86Register::RBX,
+                    rs: X86Register::RCX,
+                },
+                X86Instruction::MovImm {
+                    rd: X86Register::RAX,
+                    imm: 0,
+                },
+                X86Instruction::SubImm {
+                    rd: X86Register::RDX,
+                    imm: 1,
+                },
+            ]
+        );
+    }
 
     #[test]
     fn x86_mutator_eventually_changes_the_sequence() {
