@@ -313,11 +313,14 @@ impl fmt::Display for Operand {
                 let inner = if kind.is_x_form() {
                     format!("{}", reg)
                 } else {
-                    match reg.index() {
-                        Some(idx) => format!("w{}", idx),
-                        // SP has no W-form; fall back to its canonical name
-                        // (encodability gates SP out before any caller sees it).
-                        None => format!("{}", reg),
+                    match reg {
+                        Register::XZR => "wzr".to_string(),
+                        reg => match reg.index() {
+                            Some(idx) => format!("w{}", idx),
+                            // SP has no W-form; fall back to its canonical name
+                            // (encodability gates SP out before any caller sees it).
+                            None => format!("{}", reg),
+                        },
                     }
                 };
                 write!(f, "{}, {} #{}", inner, kind, shift)
@@ -658,6 +661,32 @@ mod tests {
                 }
             ),
             "x1, uxtx #4"
+        );
+    }
+
+    #[test]
+    fn test_extended_register_display_w_form_xzr() {
+        assert_eq!(
+            Operand::ExtendedRegister {
+                reg: Register::XZR,
+                kind: ExtendKind::Uxtb,
+                shift: 0,
+            }
+            .to_string(),
+            "wzr, uxtb #0"
+        );
+    }
+
+    #[test]
+    fn test_extended_register_display_x_form_xzr() {
+        assert_eq!(
+            Operand::ExtendedRegister {
+                reg: Register::XZR,
+                kind: ExtendKind::Uxtx,
+                shift: 0,
+            }
+            .to_string(),
+            "xzr, uxtx #0"
         );
     }
 
