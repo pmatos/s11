@@ -1208,6 +1208,16 @@ mod tests {
         assert_eq!(shared.smt_equivalent.load(Ordering::Relaxed), 1);
     }
 
+    #[test]
+    fn enumerative_verify_does_not_count_fast_refutation_as_fast_pass() {
+        let (is_equivalent, shared) = verify_stats_candidate(VERIFY_STATS_NOT_EQUIVALENT, false);
+
+        assert!(!is_equivalent);
+        assert_eq!(shared.smt_queries.load(Ordering::Relaxed), 0);
+        assert_eq!(shared.candidates_passed_fast.load(Ordering::Relaxed), 0);
+        assert_eq!(shared.smt_equivalent.load(Ordering::Relaxed), 0);
+    }
+
     fn small_config() -> SearchConfig {
         // Tight register/immediate pool so unit tests run fast.
         //
