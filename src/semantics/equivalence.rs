@@ -378,9 +378,16 @@ impl EquivalenceBackend for AArch64 {
             || crate::validation::live_out::touches_memory(seq2);
         if memory_touched {
             if config.fast_only {
-                eprintln!(
-                    "[s11] warning: --fast-only disabled for memory-bearing window (see ADR-0007)"
-                );
+                // This carve-out fires once per equivalence check, and a search
+                // pass invokes the check per candidate/window. Emit the warning
+                // at most once per process so multi-window `opt --fast-only` runs
+                // don't flood stderr with identical lines (ADR-0007).
+                static FAST_ONLY_WARNED: std::sync::Once = std::sync::Once::new();
+                FAST_ONLY_WARNED.call_once(|| {
+                    eprintln!(
+                        "[s11] warning: --fast-only disabled for memory-bearing window (see ADR-0007)"
+                    );
+                });
             }
             config.memory_live = true;
             config.fast_only = false;
