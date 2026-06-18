@@ -23,6 +23,8 @@ use rand::RngExt;
 
 const ADDRESS_OFFSET_POOL: [i64; 8] = [0, 8, 16, 24, 32, 64, -8, -256];
 const SHIFTED_REGISTER_OPERAND_PROBABILITY: f64 = 0.30;
+const SHIFTED_REGISTER_AMOUNTS_X64: [u8; 7] = [1, 2, 3, 4, 8, 16, 32];
+const SHIFTED_REGISTER_AMOUNTS_W32: [u8; 7] = [1, 2, 3, 4, 8, 16, 31];
 
 /// Drop ROR from a shifted-register operand when bridging from a logical
 /// opcode (AND/ORR/EOR/TST — ROR allowed) to an arithmetic opcode
@@ -185,10 +187,7 @@ impl Mutator {
                     *imm = self.random_immediate(rng);
                 }
             }
-            Instruction::Add { rd, rn, rm }
-            | Instruction::AddW { rd, rn, rm }
-            | Instruction::Sub { rd, rn, rm }
-            | Instruction::SubW { rd, rn, rm } => {
+            Instruction::Add { rd, rn, rm } | Instruction::Sub { rd, rn, rm } => {
                 let choice = rng.random_range(0..3);
                 match choice {
                     0 => *rd = self.random_register(rng),
@@ -196,7 +195,30 @@ impl Mutator {
                     // Add/Sub do not allow ROR in the shifted-register form.
                     // Immediates must fit `is_encodable_aarch64`'s 12-bit
                     // range (issue #87).
-                    _ => *rm = Self::clamp_imm12(self.random_operand_3op(rng, false)),
+                    _ => {
+                        *rm = Self::clamp_imm12(self.random_operand_3op(
+                            rng,
+                            false,
+                            RegisterWidth::X64,
+                        ));
+                    }
+                }
+            }
+            Instruction::AddW { rd, rn, rm } | Instruction::SubW { rd, rn, rm } => {
+                let choice = rng.random_range(0..3);
+                match choice {
+                    0 => *rd = self.random_register(rng),
+                    1 => *rn = self.random_register(rng),
+                    // W-form shifted-register amounts are limited to 0..=31.
+                    // Keep the same proposal heat as X-form Add/Sub while
+                    // using a W-safe amount pool.
+                    _ => {
+                        *rm = Self::clamp_imm12(self.random_operand_3op(
+                            rng,
+                            false,
+                            RegisterWidth::W32,
+                        ));
+                    }
                 }
             }
             Instruction::And { rd, rn, rm, width }
@@ -211,7 +233,7 @@ impl Mutator {
                         *rm = if *width == RegisterWidth::W32 {
                             Operand::Immediate(self.random_immediate(rng))
                         } else {
-                            self.random_operand_3op(rng, true)
+                            self.random_operand_3op(rng, true, RegisterWidth::X64)
                         }
                     }
                 }
@@ -264,7 +286,8 @@ impl Mutator {
                     *rn = self.random_register(rng);
                 } else {
                     // Same 12-bit clamp as Add/Sub (issue #87).
-                    *rm = Self::clamp_imm12(self.random_operand_3op(rng, false));
+                    *rm =
+                        Self::clamp_imm12(self.random_operand_3op(rng, false, RegisterWidth::X64));
                 }
             }
             Instruction::Tst { rn, rm, width } => {
@@ -280,7 +303,7 @@ impl Mutator {
                     if rng.random_bool(SHIFTED_REGISTER_OPERAND_PROBABILITY)
                         && !self.registers.is_empty()
                     {
-                        *rm = self.random_shifted_register(rng, true);
+                        *rm = self.random_shifted_register(rng, true, RegisterWidth::X64);
                     } else {
                         *rm = Operand::Register(self.random_register(rng));
                     }
@@ -526,7 +549,11 @@ impl Mutator {
                     Instruction::AddW {
                         rd,
                         rn,
-                        rm: Self::clamp_imm12(self.random_operand_3op(rng, false)),
+                        rm: Self::clamp_imm12(self.random_operand_3op(
+                            rng,
+                            false,
+                            RegisterWidth::W32,
+                        )),
                     }
                 } else {
                     Instruction::MovRegW { rd, rn }
@@ -1161,10 +1188,15 @@ impl Mutator {
     /// returns an `ExtendedRegister`; otherwise falls back to the plain
     /// register/immediate distribution. `allow_ror` toggles whether ROR is in
     /// the shifted kind pool — callers in arith bridges must pass false.
-    fn random_operand_3op<R: RngExt>(&self, rng: &mut R, allow_ror: bool) -> Operand {
+    fn random_operand_3op<R: RngExt>(
+        &self,
+        rng: &mut R,
+        allow_ror: bool,
+        width: RegisterWidth,
+    ) -> Operand {
         let choice: f64 = rng.random();
         if choice < SHIFTED_REGISTER_OPERAND_PROBABILITY && !self.registers.is_empty() {
-            self.random_shifted_register(rng, allow_ror)
+            self.random_shifted_register(rng, allow_ror, width)
         } else if choice < SHIFTED_REGISTER_OPERAND_PROBABILITY + 0.15
             && self.has_extended_register_source()
         {
@@ -1174,7 +1206,12 @@ impl Mutator {
         }
     }
 
-    fn random_shifted_register<R: RngExt>(&self, rng: &mut R, allow_ror: bool) -> Operand {
+    fn random_shifted_register<R: RngExt>(
+        &self,
+        rng: &mut R,
+        allow_ror: bool,
+        width: RegisterWidth,
+    ) -> Operand {
         let reg = self.random_register(rng);
         let kinds: &[crate::ir::ShiftKind] = if allow_ror {
             &[
@@ -1191,7 +1228,10 @@ impl Mutator {
             ]
         };
         let kind = kinds[rng.random_range(0..kinds.len())];
-        let amounts = [1u8, 2, 3, 4, 8, 16, 32];
+        let amounts = match width {
+            RegisterWidth::W32 => &SHIFTED_REGISTER_AMOUNTS_W32,
+            RegisterWidth::X64 => &SHIFTED_REGISTER_AMOUNTS_X64,
+        };
         let amount = amounts[rng.random_range(0..amounts.len())];
         Operand::ShiftedRegister { reg, kind, amount }
     }
@@ -1584,22 +1624,55 @@ mod tests {
         let mutator = default_mutator();
         let mut rng = StdRng::seed_from_u64(134);
         let trials = 10_000;
-        let mut shifted = 0;
+        let mut x64_shifted = 0;
+        let mut x64_saw_amount_32 = false;
 
         for _ in 0..trials {
-            match mutator.random_operand_3op(&mut rng, false) {
+            match mutator.random_operand_3op(&mut rng, false, RegisterWidth::X64) {
                 Operand::ShiftedRegister {
                     kind: crate::ir::ShiftKind::Ror,
                     ..
                 } => panic!("arithmetic shifted-register operands must not use ROR"),
-                Operand::ShiftedRegister { .. } => shifted += 1,
+                Operand::ShiftedRegister { amount, .. } => {
+                    x64_shifted += 1;
+                    x64_saw_amount_32 |= amount == 32;
+                }
                 _ => {}
             }
         }
 
         assert!(
-            (2_500..=3_500).contains(&shifted),
-            "expected shifted-register proposals in the 25%-35% band, got {shifted}/{trials}"
+            (2_500..=3_500).contains(&x64_shifted),
+            "expected X64 shifted-register proposals in the 25%-35% band, got {x64_shifted}/{trials}"
+        );
+        assert!(
+            x64_saw_amount_32,
+            "X64 shifted-register mutations should still explore amount 32"
+        );
+
+        let mut rng = StdRng::seed_from_u64(13432);
+        let mut w32_shifted = 0;
+
+        for _ in 0..trials {
+            match mutator.random_operand_3op(&mut rng, false, RegisterWidth::W32) {
+                Operand::ShiftedRegister {
+                    kind: crate::ir::ShiftKind::Ror,
+                    ..
+                } => panic!("W32 arithmetic shifted-register operands must not use ROR"),
+                Operand::ShiftedRegister { amount, .. } => {
+                    w32_shifted += 1;
+                    assert!(
+                        amount <= 31,
+                        "W32 shifted-register mutations must not emit amount {amount}"
+                    );
+                }
+                _ => {}
+            }
+        }
+
+        assert!(
+            (2_500..=3_500).contains(&w32_shifted),
+            "expected W32 shifted-register proposals in the 25%-35% band, got {w32_shifted}/{trials}"
         );
     }
 
@@ -1655,7 +1728,7 @@ mod tests {
         let mut rng = StdRng::seed_from_u64(137);
 
         for _ in 0..1_000 {
-            let operand = mutator.random_shifted_register(&mut rng, false);
+            let operand = mutator.random_shifted_register(&mut rng, false, RegisterWidth::X64);
             if let Operand::ShiftedRegister {
                 kind: crate::ir::ShiftKind::Ror,
                 ..
@@ -1693,7 +1766,7 @@ mod tests {
 
         let mut saw_ror = false;
         for _ in 0..1_000 {
-            let operand = mutator.random_shifted_register(&mut rng, true);
+            let operand = mutator.random_shifted_register(&mut rng, true, RegisterWidth::X64);
             if let Operand::ShiftedRegister {
                 kind: crate::ir::ShiftKind::Ror,
                 ..
@@ -1737,6 +1810,105 @@ mod tests {
         assert!(
             saw_ror,
             "logical shifted-register operand generator should still explore ROR"
+        );
+    }
+
+    #[test]
+    fn w32_arithmetic_shifted_register_operands_use_encodable_amounts() {
+        let mutator = default_mutator();
+        let mut rng = StdRng::seed_from_u64(138);
+
+        for _ in 0..1_000 {
+            let operand = mutator.random_shifted_register(&mut rng, false, RegisterWidth::W32);
+            let Operand::ShiftedRegister { amount, .. } = operand else {
+                panic!("shifted-register helper must produce a ShiftedRegister");
+            };
+            assert!(
+                amount <= 31,
+                "W-form shifted-register mutation must not emit amount {amount}"
+            );
+
+            for instr in [
+                Instruction::AddW {
+                    rd: Register::X0,
+                    rn: Register::X1,
+                    rm: operand,
+                },
+                Instruction::SubW {
+                    rd: Register::X0,
+                    rn: Register::X1,
+                    rm: operand,
+                },
+            ] {
+                assert!(
+                    instr.is_encodable_aarch64(),
+                    "W-form shifted-register mutation must remain encodable: {instr:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn w32_arithmetic_mutation_call_sites_use_w32_shift_amounts() {
+        let mutator = default_mutator();
+        let mut rng = StdRng::seed_from_u64(139);
+        let mut saw_operand_shifted = false;
+        let mut saw_opcode_shifted = false;
+
+        for _ in 0..20_000 {
+            let mut seq = vec![Instruction::AddW {
+                rd: Register::X0,
+                rn: Register::X1,
+                rm: Operand::Register(Register::X2),
+            }];
+            mutator.mutate_operand(&mut rng, &mut seq);
+            if let Instruction::AddW {
+                rm: Operand::ShiftedRegister { amount, .. },
+                ..
+            } = seq[0]
+            {
+                saw_operand_shifted = true;
+                assert!(
+                    amount <= 31,
+                    "AddW operand mutation must not emit shifted amount {amount}"
+                );
+                assert!(
+                    seq[0].is_encodable_aarch64(),
+                    "AddW operand mutation must remain encodable: {:?}",
+                    seq[0]
+                );
+            }
+
+            let mut seq = vec![Instruction::MovRegW {
+                rd: Register::X0,
+                rn: Register::X1,
+            }];
+            mutator.mutate_opcode(&mut rng, &mut seq);
+            if let Instruction::AddW {
+                rm: Operand::ShiftedRegister { amount, .. },
+                ..
+            } = seq[0]
+            {
+                saw_opcode_shifted = true;
+                assert!(
+                    amount <= 31,
+                    "MovRegW -> AddW opcode mutation must not emit shifted amount {amount}"
+                );
+                assert!(
+                    seq[0].is_encodable_aarch64(),
+                    "MovRegW -> AddW opcode mutation must remain encodable: {:?}",
+                    seq[0]
+                );
+            }
+        }
+
+        assert!(
+            saw_operand_shifted,
+            "AddW operand mutation should still explore shifted-register operands"
+        );
+        assert!(
+            saw_opcode_shifted,
+            "MovRegW -> AddW opcode mutation should still explore shifted-register operands"
         );
     }
 
