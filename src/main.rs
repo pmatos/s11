@@ -255,13 +255,12 @@ enum Commands {
 
 // --- ELF Binary Analysis ---
 
-/// Read an ELF's `e_machine` and map it to the matching `CliArch` variant.
-/// Returns an error if the binary can't be read or the architecture isn't
-/// one we support.
-fn detect_cli_arch_from_elf(path: &Path) -> Result<CliArch, Box<dyn std::error::Error>> {
-    let data = fs::read(path)?;
-    let elf = ElfBytes::<AnyEndian>::minimal_parse(&data)?;
-    match elf.ehdr.e_machine {
+/// Prefix shared by every "architecture mismatch" diagnostic so the disasm
+/// caller can recognise the error without coupling to the full message text.
+const ARCH_MISMATCH_PREFIX: &str = "Architecture mismatch:";
+
+fn cli_arch_from_e_machine(machine: u16) -> Result<CliArch, Box<dyn std::error::Error>> {
+    match machine {
         elf::abi::EM_AARCH64 => Ok(CliArch::Aarch64),
         elf::abi::EM_X86_64 => Ok(CliArch::X86_64),
         elf::abi::EM_386 => Ok(CliArch::X86_32),
@@ -269,7 +268,11 @@ fn detect_cli_arch_from_elf(path: &Path) -> Result<CliArch, Box<dyn std::error::
     }
 }
 
-fn analyze_elf_binary(path: &PathBuf, disasm_mode: bool) -> Result<(), Box<dyn std::error::Error>> {
+fn analyze_elf_binary(
+    path: &Path,
+    disasm_mode: bool,
+    expected_arch: Option<CliArch>,
+) -> Result<(), Box<dyn std::error::Error>> {
     if !disasm_mode {
         println!("Analyzing ELF binary: {}", path.display());
     }
@@ -281,11 +284,22 @@ fn analyze_elf_binary(path: &PathBuf, disasm_mode: bool) -> Result<(), Box<dyn s
     let elf = ElfBytes::<AnyEndian>::minimal_parse(&file_data)?;
 
     // Detect architecture; reject anything outside the supported set.
-    let arch = match elf.ehdr.e_machine {
-        elf::abi::EM_AARCH64 => "AArch64",
-        elf::abi::EM_X86_64 => "x86-64",
-        elf::abi::EM_386 => "x86-32",
-        m => return Err(format!("Unsupported architecture (e_machine: {})", m).into()),
+    let detected_arch = cli_arch_from_e_machine(elf.ehdr.e_machine)?;
+    if let Some(expected_arch) = expected_arch
+        && expected_arch != detected_arch
+    {
+        return Err(format!(
+            "{ARCH_MISMATCH_PREFIX} --arch {expected_arch:?} but ELF reports {detected_arch:?}"
+        )
+        .into());
+    }
+    let arch = match detected_arch {
+        CliArch::Aarch64 => "AArch64",
+        CliArch::X86_64 => "x86-64",
+        CliArch::X86_32 => "x86-32",
+        CliArch::Riscv32 | CliArch::Riscv64 => {
+            unreachable!("RISC-V is not produced by cli_arch_from_e_machine")
+        }
     };
 
     if !disasm_mode {
@@ -304,25 +318,27 @@ fn analyze_elf_binary(path: &PathBuf, disasm_mode: bool) -> Result<(), Box<dyn s
     }
 
     // Initialize Capstone disassembler per architecture.
-    let cs = match elf.ehdr.e_machine {
-        elf::abi::EM_AARCH64 => Capstone::new()
+    let cs = match detected_arch {
+        CliArch::Aarch64 => Capstone::new()
             .arm64()
             .mode(capstone::arch::arm64::ArchMode::Arm)
             .detail(true)
             .build()?,
-        elf::abi::EM_X86_64 => Capstone::new()
+        CliArch::X86_64 => Capstone::new()
             .x86()
             .mode(capstone::arch::x86::ArchMode::Mode64)
             .syntax(capstone::arch::x86::ArchSyntax::Intel)
             .detail(true)
             .build()?,
-        elf::abi::EM_386 => Capstone::new()
+        CliArch::X86_32 => Capstone::new()
             .x86()
             .mode(capstone::arch::x86::ArchMode::Mode32)
             .syntax(capstone::arch::x86::ArchSyntax::Intel)
             .detail(true)
             .build()?,
-        _ => unreachable!("e_machine already validated above"),
+        CliArch::Riscv32 | CliArch::Riscv64 => {
+            unreachable!("RISC-V is not produced by cli_arch_from_e_machine")
+        }
     };
 
     // Find and disassemble .text sections
@@ -903,7 +919,11 @@ fn build_hybrid_search_config(
         .with_timeout_option(options.timeout)
 }
 
-fn build_x86_stochastic_search_config(width: u32, options: &OptimizationOptions) -> SearchConfig {
+fn build_x86_stochastic_search_config(
+    target: &[isa::x86::X86Instruction],
+    width: u32,
+    options: &OptimizationOptions,
+) -> SearchConfig {
     let stochastic_config = StochasticConfig::default()
         .with_beta(options.beta)
         .with_iterations(options.iterations)
@@ -917,7 +937,26 @@ fn build_x86_stochastic_search_config(width: u32, options: &OptimizationOptions)
         .with_cost_metric(options.cost_metric)
         .with_timeout_option(options.timeout)
         .with_verbose(options.verbose)
-        .with_x86_registers(isa::x86::default_x86_registers())
+        .with_x86_registers(x86_registers_from_target(target))
+        .with_immediates(isa::x86::default_x86_immediates())
+        .with_x86_width(width)
+}
+
+fn build_x86_symbolic_search_config(
+    target: &[isa::x86::X86Instruction],
+    width: u32,
+    options: &OptimizationOptions,
+) -> SearchConfig {
+    let symbolic_config = SymbolicConfig::default()
+        .with_search_mode(options.search_mode)
+        .with_timeout(options.solver_timeout);
+
+    SearchConfig::default()
+        .with_symbolic(symbolic_config)
+        .with_cost_metric(options.cost_metric)
+        .with_timeout_option(options.timeout)
+        .with_verbose(options.verbose)
+        .with_x86_registers(x86_registers_from_target(target))
         .with_immediates(isa::x86::default_x86_immediates())
         .with_x86_width(width)
 }
@@ -1645,28 +1684,28 @@ fn convert_to_x86_ir(
     Ok(out)
 }
 
-/// Candidate register pool for the x86 enumerative path, drawn from the
-/// target's own registers (destinations + sources). The trait refactor
-/// regressed coverage by defaulting to the fixed `default_x86_registers()`
-/// pool, so a window over R10–R15 had no representable rewrite. Mirrors the
-/// pre-refactor `find_shorter_equivalent_x86` derivation. Falls back to the
-/// default pool only for an empty target (no rewrite is possible there).
-fn x86_enumerative_registers_from_target(
-    target: &[isa::x86::X86Instruction],
-) -> Vec<isa::x86::X86Register> {
+/// Candidate register pool for x86 search, drawn from the target's original
+/// destinations. The trait refactor regressed coverage by defaulting to the
+/// fixed `default_x86_registers()` pool, so a window over R10-R15 had no
+/// representable rewrite. Source-only registers are deliberately excluded: the
+/// single candidate pool can place registers in writable positions, while
+/// live-out tracking only makes original destinations plus EFLAGS observable.
+/// `RSP` and `RBP` are also excluded so search never synthesizes stack/frame
+/// writes. Falls back to the default pool only for an empty target; a non-empty
+/// target with no usable destinations returns an empty pool so search does not
+/// introduce unrelated writable registers.
+fn x86_registers_from_target(target: &[isa::x86::X86Instruction]) -> Vec<isa::x86::X86Register> {
     let mut pool: Vec<isa::x86::X86Register> = Vec::new();
-    let referenced = target.iter().flat_map(|instr| {
-        instr
-            .destination()
-            .into_iter()
-            .chain(instr.source_registers())
-    });
+    let referenced = target.iter().filter_map(|instr| instr.destination());
     for reg in referenced {
+        if matches!(reg, isa::x86::X86Register::RSP | isa::x86::X86Register::RBP) {
+            continue;
+        }
         if !pool.contains(&reg) {
             pool.push(reg);
         }
     }
-    if pool.is_empty() {
+    if target.is_empty() {
         return isa::x86::default_x86_registers();
     }
     pool
@@ -1697,17 +1736,16 @@ fn x86_enumerative_immediates_from_target(target: &[isa::x86::X86Instruction]) -
     imms
 }
 
-/// Build the search config for the x86 *enumerative* path. Unlike stochastic
-/// search (which samples a broad fixed pool), enumerative search draws
-/// candidates from the target's own registers/immediates and honours --cores
-/// now that the trait-backed search is rayon-parallel.
+/// Build the search config for the x86 *enumerative* path. Like stochastic and
+/// symbolic search, enumerative search draws candidates from the target's own
+/// registers; it additionally derives immediates from the target and honours
+/// --cores now that the trait-backed search is rayon-parallel.
 fn build_x86_enumerative_search_config(
     target: &[isa::x86::X86Instruction],
     width: u32,
     options: &OptimizationOptions,
 ) -> SearchConfig {
-    build_x86_stochastic_search_config(width, options)
-        .with_x86_registers(x86_enumerative_registers_from_target(target))
+    build_x86_stochastic_search_config(target, width, options)
         .with_immediates(x86_enumerative_immediates_from_target(target))
         .with_cores(options.cores)
 }
@@ -1763,7 +1801,10 @@ fn run_x86_stochastic(
     use search::stochastic::StochasticSearch;
     use validation::live_out::x86_live_out_from_target;
 
-    let config = build_x86_stochastic_search_config(width, options);
+    let config = build_x86_stochastic_search_config(target, width, options);
+    if config.x86_available_registers.is_empty() {
+        return None;
+    }
     let live_out = x86_live_out_from_target(target);
 
     // Extract (optimized, statistics) in each width branch separately:
@@ -1806,17 +1847,7 @@ fn run_x86_symbolic(
     use search::symbolic::SymbolicSearch;
     use validation::live_out::x86_live_out_from_target;
 
-    let symbolic_config = search::config::SymbolicConfig::default()
-        .with_search_mode(options.search_mode)
-        .with_timeout(options.solver_timeout);
-    let config = search::config::SearchConfig::default()
-        .with_symbolic(symbolic_config)
-        .with_cost_metric(options.cost_metric)
-        .with_timeout_option(options.timeout)
-        .with_verbose(options.verbose)
-        .with_x86_registers(isa::x86::default_x86_registers())
-        .with_immediates(isa::x86::default_x86_immediates())
-        .with_x86_width(width);
+    let config = build_x86_symbolic_search_config(target, width, options);
     let live_out = x86_live_out_from_target(target);
 
     let (optimized, statistics) = if width == 32 {
@@ -2091,38 +2122,22 @@ fn main() {
         Commands::Disasm { binary, arch } => {
             // Disassemble mode. `analyze_elf_binary` auto-detects the
             // architecture from e_machine and picks the right Capstone
-            // backend. The optional `--arch` is used to (a) early-reject
-            // RISC-V (still unsupported) and (b) cross-check against the
-            // ELF so a stale or wrong `--arch` value fails fast instead of
-            // silently producing disassembly for a different architecture.
-            if let Some(a) = arch {
-                match a {
-                    CliArch::Riscv32 | CliArch::Riscv64 => {
-                        eprintln!("RISC-V disassembly is not yet supported");
-                        std::process::exit(1);
-                    }
-                    CliArch::Aarch64 | CliArch::X86_64 | CliArch::X86_32 => {
-                        match detect_cli_arch_from_elf(&binary) {
-                            Ok(detected) if detected == a => {}
-                            Ok(detected) => {
-                                eprintln!(
-                                    "Architecture mismatch: --arch {:?} but ELF reports {:?}",
-                                    a, detected
-                                );
-                                std::process::exit(1);
-                            }
-                            Err(e) => {
-                                eprintln!("Error reading ELF: {}", e);
-                                std::process::exit(1);
-                            }
-                        }
-                    }
-                }
+            // backend. The optional `--arch` still early-rejects RISC-V, but
+            // supported hints are cross-checked inside the analyzer after its
+            // single ELF read/parse.
+            if let Some(CliArch::Riscv32 | CliArch::Riscv64) = arch {
+                eprintln!("RISC-V disassembly is not yet supported");
+                std::process::exit(1);
             }
-            match analyze_elf_binary(&binary, true) {
+            match analyze_elf_binary(&binary, true, arch) {
                 Ok(()) => {}
                 Err(e) => {
-                    eprintln!("Error analyzing binary: {}", e);
+                    let message = e.to_string();
+                    if message.starts_with(ARCH_MISMATCH_PREFIX) {
+                        eprintln!("{}", message);
+                    } else {
+                        eprintln!("Error analyzing binary: {}", message);
+                    }
                     std::process::exit(1);
                 }
             }
@@ -2160,8 +2175,7 @@ fn main() {
                 Some(a) if a == detected_arch => a,
                 Some(a) => {
                     eprintln!(
-                        "Architecture mismatch: --arch {:?} but ELF reports {:?}",
-                        a, detected_arch
+                        "{ARCH_MISMATCH_PREFIX} --arch {a:?} but ELF reports {detected_arch:?}"
                     );
                     std::process::exit(1);
                 }
@@ -2288,6 +2302,105 @@ mod cli_helper_tests {
             llm_max_calls: 0,
             llm_model: "test-model".to_string(),
         }
+    }
+
+    fn build_minimal_elf64(text_bytes: &[u8], text_vaddr: u64, machine: u16) -> Vec<u8> {
+        let elf_header_size = 64usize;
+        let shentsize = 64usize;
+        let shnum = 3usize;
+        let shstrtab: &[u8] = b"\0.text\0.shstrtab\0";
+        let text_offset = elf_header_size;
+        let shstrtab_offset = text_offset + text_bytes.len();
+        let shoff = shstrtab_offset + shstrtab.len();
+        let total_size = shoff + shentsize * shnum;
+
+        let mut buf = vec![0u8; total_size];
+
+        buf[0..4].copy_from_slice(b"\x7fELF");
+        buf[4] = elf::abi::ELFCLASS64;
+        buf[5] = elf::abi::ELFDATA2LSB;
+        buf[6] = elf::abi::EV_CURRENT;
+        buf[16..18].copy_from_slice(&elf::abi::ET_EXEC.to_le_bytes());
+        buf[18..20].copy_from_slice(&machine.to_le_bytes());
+        buf[20..24].copy_from_slice(&(elf::abi::EV_CURRENT as u32).to_le_bytes());
+        buf[40..48].copy_from_slice(&(shoff as u64).to_le_bytes());
+        buf[52..54].copy_from_slice(&(elf_header_size as u16).to_le_bytes());
+        buf[58..60].copy_from_slice(&(shentsize as u16).to_le_bytes());
+        buf[60..62].copy_from_slice(&(shnum as u16).to_le_bytes());
+        buf[62..64].copy_from_slice(&2u16.to_le_bytes());
+
+        buf[text_offset..text_offset + text_bytes.len()].copy_from_slice(text_bytes);
+        buf[shstrtab_offset..shstrtab_offset + shstrtab.len()].copy_from_slice(shstrtab);
+
+        let mut write_shdr = |index: usize, fields: [u64; 10]| {
+            let base = shoff + index * shentsize;
+            buf[base..base + 4].copy_from_slice(&(fields[0] as u32).to_le_bytes());
+            buf[base + 4..base + 8].copy_from_slice(&(fields[1] as u32).to_le_bytes());
+            buf[base + 8..base + 16].copy_from_slice(&fields[2].to_le_bytes());
+            buf[base + 16..base + 24].copy_from_slice(&fields[3].to_le_bytes());
+            buf[base + 24..base + 32].copy_from_slice(&fields[4].to_le_bytes());
+            buf[base + 32..base + 40].copy_from_slice(&fields[5].to_le_bytes());
+            buf[base + 40..base + 44].copy_from_slice(&(fields[6] as u32).to_le_bytes());
+            buf[base + 44..base + 48].copy_from_slice(&(fields[7] as u32).to_le_bytes());
+            buf[base + 48..base + 56].copy_from_slice(&fields[8].to_le_bytes());
+            buf[base + 56..base + 64].copy_from_slice(&fields[9].to_le_bytes());
+        };
+        write_shdr(0, [0; 10]);
+        write_shdr(
+            1,
+            [
+                1,
+                elf::abi::SHT_PROGBITS as u64,
+                (elf::abi::SHF_ALLOC | elf::abi::SHF_EXECINSTR) as u64,
+                text_vaddr,
+                text_offset as u64,
+                text_bytes.len() as u64,
+                0,
+                0,
+                1,
+                0,
+            ],
+        );
+        write_shdr(
+            2,
+            [
+                7,
+                elf::abi::SHT_STRTAB as u64,
+                0,
+                0,
+                shstrtab_offset as u64,
+                shstrtab.len() as u64,
+                0,
+                0,
+                1,
+                0,
+            ],
+        );
+
+        buf
+    }
+
+    #[test]
+    fn analyze_elf_binary_rejects_expected_arch_mismatch() {
+        let elf_bytes = build_minimal_elf64(&[0xc3], 0x1000, elf::abi::EM_X86_64);
+        let input = TempFile::new_bytes("s11-disasm-mismatch", "elf", &elf_bytes);
+
+        let err = analyze_elf_binary(input.path(), true, Some(CliArch::Aarch64))
+            .expect_err("mismatched expected architecture should fail");
+
+        assert!(
+            err.to_string().starts_with(ARCH_MISMATCH_PREFIX),
+            "diagnostic should report architecture mismatch: {err}"
+        );
+    }
+
+    #[test]
+    fn analyze_elf_binary_accepts_matching_expected_arch() {
+        let elf_bytes = build_minimal_elf64(&[0xc3], 0x1000, elf::abi::EM_X86_64);
+        let input = TempFile::new_bytes("s11-disasm-match", "elf", &elf_bytes);
+
+        analyze_elf_binary(input.path(), true, Some(CliArch::X86_64))
+            .expect("matching expected architecture should disassemble");
     }
 
     #[test]
@@ -3116,6 +3229,63 @@ mod cli_helper_tests {
         assert_eq!(optimized[0].destination(), Some(X86Register::R10));
     }
 
+    #[test]
+    fn x86_register_pool_is_destination_derived_and_empty_falls_back() {
+        let target = vec![
+            X86Instruction::CmpReg {
+                rn: X86Register::RSP,
+                rs: X86Register::R11,
+            },
+            X86Instruction::CmpReg {
+                rn: X86Register::RBP,
+                rs: X86Register::R12,
+            },
+            X86Instruction::MovReg {
+                rd: X86Register::R11,
+                rs: X86Register::R10,
+            },
+            X86Instruction::AddReg {
+                rd: X86Register::R12,
+                rs: X86Register::RSP,
+            },
+        ];
+
+        assert_eq!(
+            x86_registers_from_target(&target),
+            vec![X86Register::R11, X86Register::R12]
+        );
+        assert_eq!(
+            x86_registers_from_target(&[]),
+            isa::x86::default_x86_registers()
+        );
+        assert_eq!(
+            x86_registers_from_target(&[
+                X86Instruction::CmpImm {
+                    rn: X86Register::R10,
+                    imm: 1,
+                },
+                X86Instruction::CmpImm {
+                    rn: X86Register::R10,
+                    imm: 1,
+                },
+            ]),
+            Vec::<X86Register>::new()
+        );
+        assert_eq!(
+            x86_registers_from_target(&[
+                X86Instruction::CmpImm {
+                    rn: X86Register::RSP,
+                    imm: 1,
+                },
+                X86Instruction::CmpReg {
+                    rn: X86Register::RBP,
+                    rs: X86Register::RBP,
+                },
+            ]),
+            Vec::<X86Register>::new()
+        );
+    }
+
     /// Regression (PR #384): the enumerative config must be target-derived and
     /// must thread `--cores` (the trait-backed search is rayon-parallel and
     /// honours `config.cores`, but the old builder left it `None`).
@@ -3129,8 +3299,12 @@ mod cli_helper_tests {
                 imm: -1,
             },
             X86Instruction::AddReg {
-                rd: X86Register::R11,
-                rs: X86Register::R12,
+                rd: X86Register::R12,
+                rs: X86Register::R11,
+            },
+            X86Instruction::CmpImm {
+                rn: X86Register::R10,
+                imm: 1,
             },
         ];
         let config = build_x86_enumerative_search_config(&target, 64, &opts);
@@ -3139,6 +3313,10 @@ mod cli_helper_tests {
             config.x86_available_registers.contains(&X86Register::R11)
                 && config.x86_available_registers.contains(&X86Register::R12),
             "register pool must be derived from the target"
+        );
+        assert!(
+            !config.x86_available_registers.contains(&X86Register::R10),
+            "source-only registers must not become writable candidates"
         );
         assert!(
             !config.x86_available_registers.contains(&X86Register::RAX),
@@ -3243,7 +3421,29 @@ mod cli_helper_tests {
         opts.cost_metric = CostMetric::CodeSize;
         opts.verbose = true;
 
-        let config = build_x86_stochastic_search_config(32, &opts);
+        let target = vec![
+            X86Instruction::CmpReg {
+                rn: X86Register::RSP,
+                rs: X86Register::R11,
+            },
+            X86Instruction::CmpReg {
+                rn: X86Register::RBP,
+                rs: X86Register::R12,
+            },
+            X86Instruction::CmpImm {
+                rn: X86Register::R10,
+                imm: 1,
+            },
+            X86Instruction::MovImm {
+                rd: X86Register::R11,
+                imm: -1,
+            },
+            X86Instruction::AddReg {
+                rd: X86Register::R12,
+                rs: X86Register::RSP,
+            },
+        ];
+        let config = build_x86_stochastic_search_config(&target, 32, &opts);
 
         assert_eq!(
             config.symbolic.solver_timeout,
@@ -3257,7 +3457,42 @@ mod cli_helper_tests {
         assert!(config.verbose);
         assert_eq!(
             config.x86_available_registers,
-            isa::x86::default_x86_registers()
+            vec![X86Register::R11, X86Register::R12]
+        );
+        assert!(
+            !config.x86_available_registers.contains(&X86Register::RSP),
+            "stochastic register pool must not make RSP writable"
+        );
+        assert!(
+            !config.x86_available_registers.contains(&X86Register::RBP),
+            "stochastic register pool must not make RBP writable"
+        );
+        assert!(
+            !config.x86_available_registers.contains(&X86Register::R10),
+            "stochastic register pool must not make source-only registers writable"
+        );
+        assert!(
+            !config.x86_available_registers.contains(&X86Register::RAX),
+            "stochastic register pool must be derived from the target"
+        );
+        assert!(
+            build_x86_stochastic_search_config(
+                &[
+                    X86Instruction::CmpImm {
+                        rn: X86Register::RSP,
+                        imm: 1,
+                    },
+                    X86Instruction::CmpReg {
+                        rn: X86Register::RBP,
+                        rs: X86Register::RBP,
+                    },
+                ],
+                64,
+                &opts,
+            )
+            .x86_available_registers
+            .is_empty(),
+            "all stack/frame targets must not fall back to writable defaults"
         );
         assert_eq!(
             config.available_immediates,
@@ -3265,6 +3500,92 @@ mod cli_helper_tests {
         );
         assert_eq!(config.x86_width, 32);
         assert_eq!(config.x86_mode, assembler::x86::X86Mode::Mode32);
+    }
+
+    #[test]
+    fn build_x86_symbolic_search_config_is_target_derived_and_preserves_symbolic_options() {
+        let mut opts = options_for(Algorithm::Symbolic);
+        opts.timeout = Some(Duration::from_millis(23));
+        opts.solver_timeout = Duration::from_millis(29);
+        opts.search_mode = SearchMode::Binary;
+        opts.cost_metric = CostMetric::Latency;
+        opts.verbose = true;
+
+        let target = vec![
+            X86Instruction::CmpImm {
+                rn: X86Register::RSP,
+                imm: 1,
+            },
+            X86Instruction::CmpReg {
+                rn: X86Register::RBP,
+                rs: X86Register::RBP,
+            },
+            X86Instruction::CmpImm {
+                rn: X86Register::R10,
+                imm: 1,
+            },
+            X86Instruction::CmpImm {
+                rn: X86Register::R11,
+                imm: -1,
+            },
+            X86Instruction::MovImm {
+                rd: X86Register::R12,
+                imm: 0,
+            },
+        ];
+        let config = build_x86_symbolic_search_config(&target, 64, &opts);
+
+        assert_eq!(config.x86_available_registers, vec![X86Register::R12]);
+        assert!(
+            !config.x86_available_registers.contains(&X86Register::RSP),
+            "symbolic register pool must not make RSP writable"
+        );
+        assert!(
+            !config.x86_available_registers.contains(&X86Register::RBP),
+            "symbolic register pool must not make RBP writable"
+        );
+        assert!(
+            !config.x86_available_registers.contains(&X86Register::R10)
+                && !config.x86_available_registers.contains(&X86Register::R11),
+            "symbolic register pool must not make source-only registers writable"
+        );
+        assert!(
+            !config.x86_available_registers.contains(&X86Register::RAX),
+            "symbolic register pool must be derived from the target"
+        );
+        assert!(
+            build_x86_symbolic_search_config(
+                &[
+                    X86Instruction::CmpImm {
+                        rn: X86Register::RSP,
+                        imm: 1,
+                    },
+                    X86Instruction::CmpReg {
+                        rn: X86Register::RBP,
+                        rs: X86Register::RBP,
+                    },
+                ],
+                64,
+                &opts,
+            )
+            .x86_available_registers
+            .is_empty(),
+            "all stack/frame targets must not fall back to writable defaults"
+        );
+        assert_eq!(config.symbolic.search_mode, SearchMode::Binary);
+        assert_eq!(
+            config.symbolic.solver_timeout,
+            Some(Duration::from_millis(29))
+        );
+        assert_eq!(config.cost_metric, CostMetric::Latency);
+        assert_eq!(config.timeout, Some(Duration::from_millis(23)));
+        assert!(config.verbose);
+        assert_eq!(
+            config.available_immediates,
+            isa::x86::default_x86_immediates()
+        );
+        assert_eq!(config.x86_width, 64);
+        assert_eq!(config.x86_mode, assembler::x86::X86Mode::Mode64);
     }
 
     #[test]

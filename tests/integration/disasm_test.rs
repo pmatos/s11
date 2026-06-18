@@ -194,6 +194,45 @@ fn test_disasm_x86_64_binary_if_present() {
 }
 
 #[test]
+fn test_disasm_arch_mismatch_rejected_before_disassembly() {
+    let binary = get_binary_path();
+    let test_elf = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("binaries")
+        .join("simple_debug");
+    if !test_elf.exists() {
+        eprintln!("Skipping: {:?} not present (run build_tests.sh)", test_elf);
+        return;
+    }
+
+    let output = Command::new(binary)
+        .arg("disasm")
+        .arg("--arch")
+        .arg("x86-64")
+        .arg(&test_elf)
+        .output()
+        .expect("Failed to execute s11");
+
+    assert!(
+        !output.status.success(),
+        "Command should fail with mismatched --arch"
+    );
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.trim_start().starts_with("Architecture mismatch:"),
+        "Should reject mismatched architecture without starting disassembly, stderr: {stderr}"
+    );
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        !stdout
+            .lines()
+            .any(|line| line.trim_start().starts_with("0x")),
+        "Should not print disassembly after an architecture mismatch, stdout: {stdout}"
+    );
+}
+
+#[test]
 fn test_disasm_requires_binary() {
     let binary = get_binary_path();
 
