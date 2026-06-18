@@ -788,7 +788,8 @@ fn is_extend_keyword(kw: &str) -> bool {
 ///   - `[Xn, Xm]`                      → Reg { shift=0 }
 ///   - `[Xn, Xm, LSL #shift]`          → Reg { shift }, where shift is 0 or
 ///     log2(access bytes)
-///   - `[Xn, {W|X}m, UXTW/SXTW/UXTX/SXTX{ #shift}]`  → Ext
+///   - `[Xn, {W|X}m, UXTW/SXTW/UXTX/SXTX{ #shift}]`  → Ext, where shift is
+///     0 or log2(access bytes)
 ///
 /// Returns the parsed operand and the number of input tokens consumed (1 for
 /// the four bracketed forms, 2 for the trailing-immediate post-index form).
@@ -857,7 +858,7 @@ fn parse_memory_operand(
         } else if is_extend_keyword(kw) {
             let idx = parse_w_or_x_register(inner_parts[1])
                 .map_err(|e| format!("invalid index register in memory operand: {}", e))?;
-            let (kind, shift) = parse_memory_extend_tail(third)?;
+            let (kind, shift) = parse_memory_extend_tail(third, width)?;
             // Memory operands only accept the W/X-extend kinds (no byte/half).
             if !matches!(
                 kind,
@@ -948,12 +949,7 @@ fn parse_lsl_amount(tail: &str) -> Result<u8, String> {
 /// Parse the narrower `LSL #N` tail accepted by memory register-offset forms.
 fn parse_memory_lsl_amount(tail: &str, width: crate::ir::types::AccessWidth) -> Result<u8, String> {
     let shift = parse_lsl_amount(tail)?;
-    let scaled_shift = match width {
-        crate::ir::types::AccessWidth::Byte => 0,
-        crate::ir::types::AccessWidth::Half => 1,
-        crate::ir::types::AccessWidth::Word => 2,
-        crate::ir::types::AccessWidth::Extended => 3,
-    };
+    let scaled_shift = width.scale_shift();
 
     if shift == 0 || shift == scaled_shift {
         return Ok(shift);
@@ -973,7 +969,10 @@ fn parse_memory_lsl_amount(tail: &str, width: crate::ir::types::AccessWidth) -> 
 
 /// Parse a `<extend> #shift` tail used in memory operands. Returns the
 /// extend kind plus the optional shift (defaults to 0 if absent).
-fn parse_memory_extend_tail(tail: &str) -> Result<(crate::ir::types::ExtendKind, u8), String> {
+fn parse_memory_extend_tail(
+    tail: &str,
+    width: crate::ir::types::AccessWidth,
+) -> Result<(crate::ir::types::ExtendKind, u8), String> {
     use crate::ir::types::ExtendKind;
     let mut parts = tail.split_whitespace();
     let kw = parts.next().unwrap_or("").to_lowercase();
@@ -985,16 +984,25 @@ fn parse_memory_extend_tail(tail: &str) -> Result<(crate::ir::types::ExtendKind,
         _ => return Err(format!("unsupported memory extend keyword `{}`", kw)),
     };
     let shift = match parts.next() {
-        None => 0u8,
-        Some(imm_tok) => {
-            let amt = parse_immediate(imm_tok)?;
-            if !(0..=4).contains(&amt) {
-                return Err(format!("extend shift {} out of range (0..=4)", amt));
-            }
-            amt as u8
-        }
+        None => 0,
+        Some(imm_tok) => parse_immediate(imm_tok)?,
     };
-    Ok((kind, shift))
+    let scaled_shift = width.scale_shift();
+
+    if shift == 0 || shift == i64::from(scaled_shift) {
+        return Ok((kind, shift as u8));
+    }
+
+    let access_bytes = 1u8 << scaled_shift;
+    let expected = if scaled_shift == 0 {
+        "0".to_string()
+    } else {
+        format!("0 or {}", scaled_shift)
+    };
+    Err(format!(
+        "memory extend shift {} invalid for {}-byte access (expected {})",
+        shift, access_bytes, expected
+    ))
 }
 
 /// Infer `AccessWidth` for the unsized LDR/STR mnemonics (where the data
@@ -3083,14 +3091,14 @@ mod tests {
         );
 
         assert_eq!(
-            parse_one("ldr x0, [x1, w2, UxTw #2]"),
+            parse_one("ldr x0, [x1, w2, UxTw #3]"),
             Instruction::Ldr {
                 rt: Register::X0,
                 addr: AddressOperand::Ext {
                     base: Register::X1,
                     idx: Register::X2,
                     kind: ExtendKind::Uxtw,
-                    shift: 2,
+                    shift: 3,
                 },
                 width: AccessWidth::Extended,
             }
@@ -3536,7 +3544,7 @@ mod tests {
         assert_mem_round_trip("ldr x0, [x1, x2]");
         assert_mem_round_trip("ldr x0, [x1, x2, lsl #3]");
         // Register-extend.
-        assert_mem_round_trip("ldr x0, [x1, w2, uxtw #2]");
+        assert_mem_round_trip("ldr x0, [x1, w2, uxtw #3]");
         assert_mem_round_trip("ldr x0, [x1, w2, sxtw]");
         // Other mnemonics.
         assert_mem_round_trip("ldrb x0, [x1]");
@@ -3702,9 +3710,59 @@ mod tests {
     }
 
     #[test]
+    fn parse_memory_register_extend_rejects_illegal_shift_for_access_width() {
+        for (text, expected) in [
+            ("ldrb w0, [x1, w2, uxtw #1]", "expected 0"),
+            ("ldrh w0, [x1, w2, sxtw #2]", "expected 0 or 1"),
+            ("ldr w0, [x1, w2, uxtw #3]", "expected 0 or 2"),
+            ("ldr x0, [x1, w2, uxtw #4]", "expected 0 or 3"),
+            ("str x0, [x1, x2, sxtx #2]", "expected 0 or 3"),
+        ] {
+            let err = parse_line(text).expect_err("memory extend shift should be rejected");
+            let msg = err.to_string();
+            assert!(
+                msg.contains("memory extend shift"),
+                "{text}: error should name memory extend shift, got {msg}"
+            );
+            assert!(
+                msg.contains(expected),
+                "{text}: error should mention {expected}, got {msg}"
+            );
+        }
+    }
+
+    #[test]
+    fn parse_memory_register_extend_accepts_legal_shift_for_access_width() {
+        use crate::ir::types::{AddressOperand, ExtendKind};
+
+        for (text, expected_kind, expected_shift) in [
+            ("ldrb w0, [x1, w2, uxtw #0]", ExtendKind::Uxtw, 0),
+            ("ldrh w0, [x1, w2, sxtw #1]", ExtendKind::Sxtw, 1),
+            ("ldr w0, [x1, w2, uxtw #2]", ExtendKind::Uxtw, 2),
+            ("ldr x0, [x1, w2, uxtw #3]", ExtendKind::Uxtw, 3),
+            ("str x0, [x1, x2, sxtx #3]", ExtendKind::Sxtx, 3),
+        ] {
+            let instr = parse_one(text);
+            let (Instruction::Ldr { addr, .. } | Instruction::Str { addr, .. }) = instr else {
+                panic!("{text}: expected ldr/str-like instruction, got {instr:?}");
+            };
+            assert_eq!(
+                addr,
+                AddressOperand::Ext {
+                    base: Register::X1,
+                    idx: Register::X2,
+                    kind: expected_kind,
+                    shift: expected_shift,
+                },
+                "{text}"
+            );
+        }
+    }
+
+    #[test]
     fn parse_ldr_register_extend_with_w_index() {
         use crate::ir::types::{AccessWidth, AddressOperand, ExtendKind};
-        let instr = parse_one("ldr x0, [x1, w2, uxtw #2]");
+        let instr = parse_one("ldr x0, [x1, w2, uxtw #3]");
         assert_eq!(
             instr,
             Instruction::Ldr {
@@ -3713,7 +3771,7 @@ mod tests {
                     base: Register::X1,
                     idx: Register::X2,
                     kind: ExtendKind::Uxtw,
-                    shift: 2,
+                    shift: 3,
                 },
                 width: AccessWidth::Extended,
             }
