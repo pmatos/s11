@@ -719,7 +719,13 @@ mod tests {
         );
 
         let one_bit = |b: bool| BV::from_u64(b as u64, 1);
-        let (cf_pre, pf_pre, zf_pre, sf_pre, of_pre) = symbolic_pre.get_flags();
+        let EflagsBvRefs {
+            cf: cf_pre,
+            pf: pf_pre,
+            zf: zf_pre,
+            sf: sf_pre,
+            of: of_pre,
+        } = symbolic_pre.get_flags();
         solver.assert(cf_pre.eq(one_bit(input_flags.cf)));
         solver.assert(pf_pre.eq(one_bit(input_flags.pf)));
         solver.assert(zf_pre.eq(one_bit(input_flags.zf)));
@@ -727,7 +733,13 @@ mod tests {
         solver.assert(of_pre.eq(one_bit(input_flags.of)));
 
         let symbolic_post = apply_instruction(symbolic_pre, &instr);
-        let (cf_s, pf_s, zf_s, sf_s, of_s) = symbolic_post.get_flags();
+        let EflagsBvRefs {
+            cf: cf_s,
+            pf: pf_s,
+            zf: zf_s,
+            sf: sf_s,
+            of: of_s,
+        } = symbolic_post.get_flags();
         let expected_rd = BV::from_u64(concrete_post.get_register(X86Register::RAX).as_u64(), 64);
         let diffs = [
             symbolic_post
