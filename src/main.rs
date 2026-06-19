@@ -118,6 +118,19 @@ pub enum CliArch {
     X86_32,
 }
 
+impl std::fmt::Display for CliArch {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // Derive the spelling from clap's ValueEnum so Display and the CLI
+        // parser stay in sync by construction (a `#[value(name = ...)]` or a
+        // renamed variant can never drift the error message from what users type).
+        f.write_str(
+            self.to_possible_value()
+                .expect("CliArch has no skipped variants")
+                .get_name(),
+        )
+    }
+}
+
 impl From<DetectedArch> for CliArch {
     fn from(arch: DetectedArch) -> Self {
         // DetectedArch is the closed set of architectures ElfPatcher accepts
@@ -289,7 +302,7 @@ fn analyze_elf_binary(
         && expected_arch != detected_arch
     {
         return Err(format!(
-            "{ARCH_MISMATCH_PREFIX} --arch {expected_arch:?} but ELF reports {detected_arch:?}"
+            "{ARCH_MISMATCH_PREFIX} --arch {expected_arch} but ELF reports {detected_arch}"
         )
         .into());
     }
@@ -563,6 +576,14 @@ impl X86OptimizationBackend {
         };
         Ok(Self { arch, width })
     }
+
+    fn parse_mode(&self) -> parser::x86::X86ParseMode {
+        match self.arch {
+            DetectedArch::X86_64 => parser::x86::X86ParseMode::Mode64,
+            DetectedArch::X86_32 => parser::x86::X86ParseMode::Mode32,
+            DetectedArch::Aarch64 => unreachable!("x86 backend never receives AArch64"),
+        }
+    }
 }
 
 impl ElfOptimizationBackend for X86OptimizationBackend {
@@ -596,7 +617,7 @@ impl ElfOptimizationBackend for X86OptimizationBackend {
         &self,
         instructions: &capstone::Instructions,
     ) -> Result<Vec<Self::Instruction>, String> {
-        convert_to_x86_ir(instructions)
+        convert_to_x86_ir(instructions, self.parse_mode())
     }
 
     fn validate_window_ir(&self, ir: &[Self::Instruction]) -> Result<(), String> {
@@ -660,15 +681,34 @@ impl ElfOptimizationBackend for X86OptimizationBackend {
             )
             .into());
         }
-        let pinned_terminator_bytes: Option<Vec<u8>> = if original_terminator.is_some() {
-            let last = capstone_instructions
-                .iter()
-                .last()
-                .ok_or("expected non-empty disassembly when peeling terminator")?;
-            Some(last.bytes().to_vec())
-        } else {
-            None
-        };
+        let pinned_terminator_bytes: Option<Vec<u8>> =
+            if let Some(expected_terminator) = original_terminator {
+                let last = capstone_instructions
+                    .iter()
+                    .last()
+                    .ok_or("expected non-empty disassembly when peeling terminator")?;
+                #[cfg(debug_assertions)]
+                {
+                    let mn = last.mnemonic().unwrap_or("");
+                    let ops = last.op_str().unwrap_or("");
+                    let parsed_last = match x86_ir_from_mnemonic(mn, ops) {
+                        Ok(Some(instr)) => instr,
+                        Ok(None) => panic!(
+                            "last Capstone instruction must yield x86 IR when original IR has a Jcc"
+                        ),
+                        Err(err) => panic!(
+                            "last Capstone instruction must parse when original IR has a Jcc: {err}"
+                        ),
+                    };
+                    debug_assert_eq!(
+                        parsed_last, *expected_terminator,
+                        "peeled x86 Jcc terminator must correspond to the last Capstone instruction"
+                    );
+                }
+                Some(last.bytes().to_vec())
+            } else {
+                None
+            };
         let original_prefix_byte_size =
             original_bytes.len() - pinned_terminator_bytes.as_ref().map_or(0, |b| b.len());
 
@@ -1626,7 +1666,7 @@ fn validate_basic_block(ir: &[Instruction]) -> Result<(), String> {
 // (`convert_to_x86_ir`) and the length-1 enumerator used by the
 // enumerative x86 pipeline.
 
-use parser::x86::x86_ir_from_mnemonic;
+use parser::x86::{X86ParseMode, x86_ir_from_mnemonic_for_mode};
 
 /// Reject any non-terminal Jcc in an x86 optimization window. The
 /// optimizer only special-cases a trailing Jcc (peeled by
@@ -1653,12 +1693,13 @@ fn validate_x86_window_terminator_placement(ir: &[isa::x86::X86Instruction]) -> 
 
 fn convert_to_x86_ir(
     instructions: &capstone::Instructions,
+    mode: X86ParseMode,
 ) -> Result<Vec<isa::x86::X86Instruction>, String> {
     let mut out = Vec::new();
     for instruction in instructions.iter() {
         let mn = instruction.mnemonic().unwrap_or("");
         let ops = instruction.op_str().unwrap_or("");
-        match x86_ir_from_mnemonic(mn, ops) {
+        match x86_ir_from_mnemonic_for_mode(mn, ops, mode) {
             Ok(Some(ir)) => out.push(ir),
             Ok(None) => {
                 // Refusing the window is safer than silently dropping the
@@ -1923,27 +1964,43 @@ fn reassemble_x86_prefix_with_pinned_terminator(
         ));
     }
 
+    let gap = original_prefix_byte_size - out.len();
+    append_nop_padding(&mut out, gap, arch, |remaining| {
+        arch.nop_sequence(remaining)
+    })?;
+    out.extend_from_slice(jcc_bytes);
+    Ok(out)
+}
+
+fn append_nop_padding<F>(
+    out: &mut Vec<u8>,
+    gap: usize,
+    arch: DetectedArch,
+    mut nop_sequence: F,
+) -> Result<(), String>
+where
+    F: FnMut(usize) -> &'static [u8],
+{
     // Pad NOPs so the Jcc lands at the same offset as in the original
     // window. `nop_sequence` may return fewer than the requested bytes;
     // loop until the gap is filled. Return Err on an empty NOP slice
     // (debug-assert alone would let release builds spin forever).
-    let gap = original_prefix_byte_size - out.len();
     let mut padded = 0;
     while padded < gap {
-        let nop = arch.nop_sequence(gap - padded);
+        let remaining = gap - padded;
+        let nop = nop_sequence(remaining);
         if nop.is_empty() {
             return Err(format!(
                 "nop_sequence returned an empty slice while padding {} bytes \
                  for arch {:?}; refusing to spin forever",
-                gap - padded,
-                arch
+                remaining, arch
             ));
         }
-        out.extend_from_slice(nop);
-        padded += nop.len();
+        let take = nop.len().min(remaining);
+        out.extend_from_slice(&nop[..take]);
+        padded += take;
     }
-    out.extend_from_slice(jcc_bytes);
-    Ok(out)
+    Ok(())
 }
 
 // --- Equivalence Checking Command ---
@@ -2178,9 +2235,7 @@ fn main() {
             let cli_arch = match arch {
                 Some(a) if a == detected_arch => a,
                 Some(a) => {
-                    eprintln!(
-                        "{ARCH_MISMATCH_PREFIX} --arch {a:?} but ELF reports {detected_arch:?}"
-                    );
+                    eprintln!("{ARCH_MISMATCH_PREFIX} --arch {a} but ELF reports {detected_arch}");
                     std::process::exit(1);
                 }
                 None => detected_arch,
@@ -2284,7 +2339,7 @@ mod cli_helper_tests {
     use super::*;
     use ir::Operand;
     use isa::x86::{X86Instruction, X86Register};
-    use parser::x86::{parse_x86_operand, parse_x86_register};
+    use parser::x86::{parse_x86_operand, parse_x86_register, x86_ir_from_mnemonic};
     use search::llm::LlmTimings;
     use search::llm::ledger::UnsupportedMnemonicLedger;
     use search::result::SearchStatistics;
@@ -2306,6 +2361,19 @@ mod cli_helper_tests {
             llm_max_calls: 0,
             llm_model: "test-model".to_string(),
         }
+    }
+
+    fn r10_zeroing_target() -> [X86Instruction; 2] {
+        let zero_r10 = X86Instruction::XorReg {
+            rd: X86Register::R10,
+            rs: X86Register::R10,
+        };
+        [zero_r10, zero_r10]
+    }
+
+    fn assert_single_r10_rewrite(optimized: &[X86Instruction]) {
+        assert_eq!(optimized.len(), 1);
+        assert_eq!(optimized[0].destination(), Some(X86Register::R10));
     }
 
     fn build_minimal_elf64(text_bytes: &[u8], text_vaddr: u64, machine: u16) -> Vec<u8> {
@@ -2385,6 +2453,15 @@ mod cli_helper_tests {
     }
 
     #[test]
+    fn cli_arch_display_uses_cli_value_names() {
+        assert_eq!(CliArch::Aarch64.to_string(), "aarch64");
+        assert_eq!(CliArch::Riscv32.to_string(), "riscv32");
+        assert_eq!(CliArch::Riscv64.to_string(), "riscv64");
+        assert_eq!(CliArch::X86_64.to_string(), "x86-64");
+        assert_eq!(CliArch::X86_32.to_string(), "x86-32");
+    }
+
+    #[test]
     fn analyze_elf_binary_rejects_expected_arch_mismatch() {
         let elf_bytes = build_minimal_elf64(&[0xc3], 0x1000, elf::abi::EM_X86_64);
         let input = TempFile::new_bytes("s11-disasm-mismatch", "elf", &elf_bytes);
@@ -2392,9 +2469,14 @@ mod cli_helper_tests {
         let err = analyze_elf_binary(input.path(), true, Some(CliArch::Aarch64))
             .expect_err("mismatched expected architecture should fail");
 
+        let message = err.to_string();
+        assert_eq!(
+            message,
+            "Architecture mismatch: --arch aarch64 but ELF reports x86-64"
+        );
         assert!(
-            err.to_string().starts_with(ARCH_MISMATCH_PREFIX),
-            "diagnostic should report architecture mismatch: {err}"
+            !message.contains("Aarch64") && !message.contains("X86_64"),
+            "diagnostic should use CLI architecture names: {message}"
         );
     }
 
@@ -2405,6 +2487,32 @@ mod cli_helper_tests {
 
         analyze_elf_binary(input.path(), true, Some(CliArch::X86_64))
             .expect("matching expected architecture should disassemble");
+    }
+
+    #[test]
+    fn optimization_context_for_x86_64_backend_uses_conservative_default() {
+        let elf_bytes = build_minimal_elf64(&[0xc3], 0x1000, elf::abi::EM_X86_64);
+        let input = TempFile::new_bytes("s11-opt-context-x86-64", "elf", &elf_bytes);
+        let patcher = ElfPatcher::new(input.path()).expect("x86-64 ELF should parse");
+        let section = patcher
+            .get_text_sections()
+            .expect("x86-64 ELF should expose executable section")
+            .into_iter()
+            .next()
+            .expect("minimal ELF should contain .text");
+        let backend =
+            X86OptimizationBackend::new(DetectedArch::X86_64).expect("x86-64 backend should build");
+        let cs = backend
+            .disassembler()
+            .expect("x86-64 disassembler should build");
+
+        let context =
+            optimization_context_for_backend(backend.arch(), &patcher, &section, 0x1001, &cs);
+
+        assert!(
+            context.downstream_flags_live,
+            "non-AArch64 optimization context should stay conservative"
+        );
     }
 
     #[test]
@@ -2553,6 +2661,15 @@ mod cli_helper_tests {
             ("bfxil", "x0, x1, #8, #8"),
             ("ubfiz", "x0, x1, #4, #8"),
             ("sbfiz", "x0, x1, #4, #8"),
+            // Issue #145: 32-bit W-register forms. Capstone emits `wN` operands
+            // for these encodings; lsb+width stays < 32 to avoid the LSR/MOV
+            // alias boundary.
+            ("ubfx", "w0, w1, #8, #16"),
+            ("sbfx", "w0, w1, #8, #16"),
+            ("bfi", "w0, w1, #4, #8"),
+            ("bfxil", "w0, w1, #8, #8"),
+            ("ubfiz", "w0, w1, #4, #8"),
+            ("sbfiz", "w0, w1, #4, #8"),
             // Issue #69: branch / control-flow mnemonics. Capstone emits
             // branch targets as `#0x...` (immediate-with-hash) and renders
             // TBZ/TBNZ as `wN` when bit<32, `xN` otherwise.
@@ -2643,7 +2760,7 @@ mod cli_helper_tests {
         // Tripwire: bump in lockstep when adding/removing rows. Catches
         // accidental row deletion and forces a re-read when adding a parser
         // mnemonic without a matching test row.
-        assert_eq!(cases.len(), 148);
+        assert_eq!(cases.len(), 154);
 
         fn docs_mnemonic(mnemonic: &'static str) -> &'static str {
             if mnemonic.starts_with("b.") {
@@ -2853,6 +2970,23 @@ mod cli_helper_tests {
         }
     }
 
+    #[test]
+    fn convert_capstone_op_rejects_w_form_signed_load_destinations() {
+        for (mnem, ops) in [
+            ("ldrsb", "w0, [x1]"),
+            ("ldrsh", "w0, [x1]"),
+            ("ldrsw", "w0, [x1]"),
+        ] {
+            match convert_capstone_op(mnem, ops) {
+                ConvertOutcome::Unsupported(line) => {
+                    assert!(line.contains(mnem));
+                    assert!(line.contains("X-form"));
+                }
+                other => panic!("expected Unsupported for `{mnem} {ops}`, got {other:?}"),
+            }
+        }
+    }
+
     fn assemble_aarch64_test_bytes(instructions: &[Instruction]) -> Vec<u8> {
         AArch64Assembler::new()
             .assemble_instructions(instructions, 0x1000)
@@ -3039,6 +3173,111 @@ mod cli_helper_tests {
     }
 
     #[test]
+    fn x86_64_capstone_bridge_rejects_non_mode_width_register_aliases() {
+        let cs = capstone::Capstone::new()
+            .x86()
+            .mode(capstone::arch::x86::ArchMode::Mode64)
+            .syntax(capstone::arch::x86::ArchSyntax::Intel)
+            .build()
+            .expect("capstone init");
+
+        let add_eax = cs
+            .disasm_all(&[0x83, 0xc0, 0x00], 0x1000)
+            .expect("disassemble add eax, 0");
+        let insn = add_eax.iter().next().expect("one instruction");
+        assert_eq!(insn.mnemonic(), Some("add"));
+        assert_eq!(insn.op_str(), Some("eax, 0"));
+        let err = convert_to_x86_ir(&add_eax, parser::x86::X86ParseMode::Mode64)
+            .expect_err("x86-64 add eax, 0 must be rejected until width is modeled");
+        assert!(
+            err.contains("unsupported x86-64 register alias width"),
+            "unexpected error: {err}"
+        );
+
+        let mov_al = cs
+            .disasm_all(&[0xb0, 0x7f], 0x1000)
+            .expect("disassemble mov al, 0x7f");
+        let insn = mov_al.iter().next().expect("one instruction");
+        assert_eq!(insn.mnemonic(), Some("mov"));
+        assert_eq!(insn.op_str(), Some("al, 0x7f"));
+        let err = convert_to_x86_ir(&mov_al, parser::x86::X86ParseMode::Mode64)
+            .expect_err("x86-64 mov al, imm must be rejected until width is modeled");
+        assert!(
+            err.contains("unsupported x86-64 register alias width"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn x86_capstone_bridge_accepts_mode_width_register_aliases() {
+        let cs64 = capstone::Capstone::new()
+            .x86()
+            .mode(capstone::arch::x86::ArchMode::Mode64)
+            .syntax(capstone::arch::x86::ArchSyntax::Intel)
+            .build()
+            .expect("capstone x86-64 init");
+        let add_rax = cs64
+            .disasm_all(&[0x48, 0x83, 0xc0, 0x00], 0x1000)
+            .expect("disassemble add rax, 0");
+        let insn = add_rax.iter().next().expect("one instruction");
+        assert_eq!(insn.mnemonic(), Some("add"));
+        assert_eq!(insn.op_str(), Some("rax, 0"));
+        assert_eq!(
+            convert_to_x86_ir(&add_rax, parser::x86::X86ParseMode::Mode64).unwrap(),
+            vec![X86Instruction::AddImm {
+                rd: X86Register::RAX,
+                imm: 0,
+            }]
+        );
+
+        let cs32 = capstone::Capstone::new()
+            .x86()
+            .mode(capstone::arch::x86::ArchMode::Mode32)
+            .syntax(capstone::arch::x86::ArchSyntax::Intel)
+            .build()
+            .expect("capstone x86-32 init");
+        let add_eax = cs32
+            .disasm_all(&[0x83, 0xc0, 0x00], 0x1000)
+            .expect("disassemble add eax, 0");
+        let insn = add_eax.iter().next().expect("one instruction");
+        assert_eq!(insn.mnemonic(), Some("add"));
+        assert_eq!(insn.op_str(), Some("eax, 0"));
+        assert_eq!(
+            convert_to_x86_ir(&add_eax, parser::x86::X86ParseMode::Mode32).unwrap(),
+            vec![X86Instruction::AddImm {
+                rd: X86Register::RAX,
+                imm: 0,
+            }]
+        );
+    }
+
+    #[test]
+    fn x86_64_optimizer_rejects_narrow_register_alias_before_search() {
+        let elf_bytes = build_minimal_elf64(
+            &[0x83, 0xc0, 0x00, 0x83, 0xc0, 0x00],
+            0x1000,
+            elf::abi::EM_X86_64,
+        );
+        let input = TempFile::new_bytes("s11-x86-64-eax-alias", "elf", &elf_bytes);
+        let patcher = ElfPatcher::new(input.path()).expect("read synthetic ELF");
+        let mut opts = options_for(Algorithm::Enumerative);
+        opts.timeout = Some(Duration::from_secs(5));
+        opts.cost_metric = CostMetric::CodeSize;
+
+        let err = optimize_elf_binary(&patcher, input.path(), 0x1000, 0x1006, &opts)
+            .expect_err("narrow register aliases should be rejected before search");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("failed to parse x86 instruction 'add eax, 0'"),
+            "unexpected error: {msg}"
+        );
+        assert!(
+            msg.contains("unsupported x86-64 register alias width"),
+            "unexpected error: {msg}"
+        );
+    }
+
+    #[test]
     fn x86_helpers_cover_error_and_optimization_paths() {
         assert!(parse_x86_operand("not-an-operand").is_err());
         assert!(x86_ir_from_mnemonic("add", "rax").unwrap().is_none());
@@ -3180,21 +3419,33 @@ mod cli_helper_tests {
         opts.timeout = Some(Duration::from_secs(5));
         opts.solver_timeout = Duration::from_secs(5);
         opts.cost_metric = CostMetric::CodeSize;
-        let optimized = run_x86_enumerative(
-            &[
-                X86Instruction::MovImm {
-                    rd: X86Register::RBX,
-                    imm: 1,
-                },
-                X86Instruction::MovImm {
-                    rd: X86Register::RBX,
-                    imm: 1,
-                },
-            ],
-            64,
-            &opts,
-        )
-        .expect("two identical RBX writes can be shortened");
+        let target = vec![
+            X86Instruction::MovImm {
+                rd: X86Register::RBX,
+                imm: 1,
+            },
+            X86Instruction::MovImm {
+                rd: X86Register::RBX,
+                imm: 1,
+            },
+        ];
+        let config = build_x86_enumerative_search_config(&target, 64, &opts);
+        assert_eq!(config.x86_available_registers, vec![X86Register::RBX]);
+        assert!(
+            !config.x86_available_registers.contains(&X86Register::RAX),
+            "RAX must not be injected into the duplicate-RBX search pool"
+        );
+        assert!(
+            !config.x86_available_registers.contains(&X86Register::RDI),
+            "RDI must not be injected into the duplicate-RBX search pool"
+        );
+        assert!(
+            config.available_immediates.contains(&1),
+            "immediate pool must preserve the fixture immediate"
+        );
+
+        let optimized = run_x86_enumerative(&target, 64, &opts)
+            .expect("two identical RBX writes can be shortened");
         assert_eq!(optimized.len(), 1);
         match optimized[0] {
             X86Instruction::MovImm { rd, imm } => {
@@ -3235,6 +3486,46 @@ mod cli_helper_tests {
         .expect("two identical R10/-1 writes must collapse to one");
         assert_eq!(optimized.len(), 1);
         assert_eq!(optimized[0].destination(), Some(X86Register::R10));
+    }
+
+    /// Regression (issue #458): stochastic search must consume the
+    /// target-derived x86 register pool end-to-end, not just expose it in the
+    /// config. R10 is outside `default_x86_registers()`, so a successful
+    /// rewrite proves the search backend can synthesize high-register
+    /// candidates.
+    #[test]
+    fn x86_stochastic_finds_rewrite_for_r10_only_target() {
+        let mut opts = options_for(Algorithm::Stochastic);
+        opts.timeout = None;
+        opts.solver_timeout = Duration::from_secs(30);
+        opts.cost_metric = CostMetric::InstructionCount;
+        opts.iterations = 50_000;
+        opts.seed = Some(7);
+
+        let target = r10_zeroing_target();
+        let optimized = run_x86_stochastic(&target, 64, &opts)
+            .expect("two identical R10 zeroing writes must collapse to one");
+
+        assert_single_r10_rewrite(&optimized);
+    }
+
+    /// Regression (issue #458): symbolic search must also use the
+    /// target-derived x86 register pool when synthesizing candidates. This
+    /// closes the end-to-end gap left by config-only coverage for high x86-64
+    /// registers.
+    #[test]
+    fn x86_symbolic_finds_rewrite_for_r10_only_target() {
+        let mut opts = options_for(Algorithm::Symbolic);
+        opts.timeout = None;
+        opts.solver_timeout = Duration::from_secs(30);
+        opts.search_mode = SearchMode::Linear;
+        opts.cost_metric = CostMetric::InstructionCount;
+
+        let target = r10_zeroing_target();
+        let optimized = run_x86_symbolic(&target, 64, &opts)
+            .expect("two identical R10 zeroing writes must collapse to one");
+
+        assert_single_r10_rewrite(&optimized);
     }
 
     #[test]
@@ -3508,7 +3799,7 @@ mod cli_helper_tests {
             isa::x86::default_x86_immediates()
         );
         assert_eq!(config.x86_width, 32);
-        assert_eq!(config.x86_mode, assembler::x86::X86Mode::Mode32);
+        assert_eq!(config.x86_mode(), assembler::x86::X86Mode::Mode32);
     }
 
     #[test]
@@ -3594,7 +3885,7 @@ mod cli_helper_tests {
             isa::x86::default_x86_immediates()
         );
         assert_eq!(config.x86_width, 64);
-        assert_eq!(config.x86_mode, assembler::x86::X86Mode::Mode64);
+        assert_eq!(config.x86_mode(), assembler::x86::X86Mode::Mode64);
     }
 
     #[test]
@@ -4206,6 +4497,19 @@ mod cli_helper_tests {
         assert_eq!(&out[5..7], &original_jcc_bytes);
         // Bytes [2..5] are NOP-padding; x86-32 nop_sequence emits 0x90.
         assert_eq!(&out[2..5], &[0x90u8; 3]);
+    }
+
+    #[test]
+    fn append_nop_padding_clamps_overlong_nop_provider() {
+        let mut out = vec![0xcc];
+
+        append_nop_padding(&mut out, 3, DetectedArch::X86_64, |_| {
+            &[0x90, 0x90, 0x90, 0x90]
+        })
+        .expect("padding succeeds");
+
+        assert_eq!(out.len(), 4, "padding must not overshoot the requested gap");
+        assert_eq!(&out[1..], &[0x90, 0x90, 0x90]);
     }
 
     #[test]

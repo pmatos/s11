@@ -2,8 +2,8 @@
 //!
 //! This module implements symbolic search using Z3 for equivalence verification.
 //! The approach uses linear cost search: try sequences of length 1, 2, ... up to
-//! the target length - 1, and for each length, enumerate candidates and verify
-//! equivalence with SMT.
+//! the configured synthesis window and target length - 1, and for each length,
+//! enumerate candidates and verify equivalence with SMT.
 //!
 //! Note: Full symbolic synthesis with symbolic opcodes/operands is very complex.
 //! This implementation uses a hybrid approach: enumerate concrete candidates
@@ -17,7 +17,7 @@ use crate::search::{Algorithm, SearchAlgorithm};
 use crate::semantics::EquivalenceResult;
 use std::marker::PhantomData;
 use std::sync::atomic::Ordering;
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 /// Whether the symbolic search loop should exit at the next checkpoint.
 ///
@@ -60,7 +60,8 @@ impl<I> SymbolicSearch<I>
 where
     I: ISA + SymbolicBackend<I>,
 {
-    /// Linear cost search: try each length from 1 to target length - 1
+    /// Linear cost search: try each length from 1 to the configured window,
+    /// capped at target length - 1.
     fn linear_search(
         &mut self,
         target: &[I::Instruction],
@@ -76,10 +77,17 @@ where
         let original_cost =
             <I as SymbolicBackend<I>>::sequence_cost(target, &config.cost_metric, width);
         let mut best_solution: Option<Vec<I::Instruction>> = None;
-        let mut best_cost = original_cost;
+        let mut best_cost = config
+            .symbolic
+            .cost_bound
+            .map_or(original_cost, |bound| bound.min(original_cost));
 
         // Try sequences of increasing length
-        for length in 1..target.len() {
+        let max_len = target
+            .len()
+            .saturating_sub(1)
+            .min(config.symbolic.window_size);
+        for length in 1..=max_len {
             if config.verbose {
                 println!("Searching for equivalent sequences of length {}...", length);
             }
@@ -303,10 +311,7 @@ where
         live_out: &<I as SymbolicBackend<I>>::LiveOut,
         config: &SearchConfig,
     ) -> bool {
-        let timeout = config
-            .symbolic
-            .solver_timeout
-            .unwrap_or(Duration::from_secs(5));
+        let timeout = config.symbolic.effective_solver_timeout();
         let width = <I as SymbolicBackend<I>>::width(config);
 
         let (verdict, metrics) = <I as SymbolicBackend<I>>::check_equivalence(
@@ -422,6 +427,7 @@ mod tests {
     static TEST_EQUIVALENCE_EQUIVALENT_ON_CHECK: AtomicUsize = AtomicUsize::new(0);
     static TEST_EQUIVALENCE_FAST_FAILURE: AtomicBool = AtomicBool::new(false);
     static TEST_EQUIVALENCE_SMT_CALLED: AtomicBool = AtomicBool::new(false);
+    static TEST_RECORDED_TIMEOUT_MS: AtomicU64 = AtomicU64::new(u64::MAX);
     static TEST_SEQUENCE_COST_DELAY_MS: AtomicU64 = AtomicU64::new(0);
     static TEST_STOP_FLAG: Mutex<Option<Arc<AtomicBool>>> = Mutex::new(None);
     static SYMBOLIC_INNER_LOOP_TEST_LOCK: Mutex<()> = Mutex::new(());
@@ -447,6 +453,7 @@ mod tests {
         TEST_EQUIVALENCE_EQUIVALENT_ON_CHECK.store(0, Ordering::SeqCst);
         TEST_EQUIVALENCE_FAST_FAILURE.store(false, Ordering::SeqCst);
         TEST_EQUIVALENCE_SMT_CALLED.store(false, Ordering::SeqCst);
+        TEST_RECORDED_TIMEOUT_MS.store(u64::MAX, Ordering::SeqCst);
         TEST_SEQUENCE_COST_DELAY_MS.store(0, Ordering::SeqCst);
         let mut slot = TEST_STOP_FLAG.lock().expect("test stop flag lock poisoned");
         *slot = None;
@@ -622,9 +629,10 @@ mod tests {
             _proposal: &[TestInstruction],
             _live_out: &Self::LiveOut,
             _width: u32,
-            _timeout: Duration,
+            timeout: Duration,
         ) -> (EquivalenceResult, EquivalenceMetrics) {
             let check_number = TEST_EQUIVALENCE_CHECKS.fetch_add(1, Ordering::SeqCst) + 1;
+            TEST_RECORDED_TIMEOUT_MS.store(timeout.as_millis() as u64, Ordering::SeqCst);
             if check_number == 1 {
                 let slot = TEST_STOP_FLAG.lock().expect("test stop flag lock poisoned");
                 if let Some(flag) = slot.as_ref() {
@@ -727,6 +735,82 @@ mod tests {
             // The instruction should write to X0
             assert_eq!(optimized[0].destination(), Some(Register::X0));
         }
+    }
+
+    #[test]
+    fn symbolic_cost_bound_zero_prevents_known_mov_add_rewrite() {
+        let mut search: SymbolicSearch<AArch64> = SymbolicSearch::new();
+
+        let config = SearchConfig::default()
+            .with_symbolic(
+                SymbolicConfig::default()
+                    .with_cost_bound(0)
+                    .with_timeout(Duration::from_secs(10)),
+            )
+            .with_registers(vec![Register::X0, Register::X1, Register::X2])
+            .with_immediates(vec![-1, 0, 1, 2]);
+
+        let live_out = LiveOut::from_registers(vec![Register::X0]);
+        let target = mov_add_sequence();
+
+        let result = search.search(&target, &live_out, &config);
+
+        // cost_bound = 0 caps best_cost at min(0, original) = 0. Every AArch64
+        // instruction has cost >= 1, so no candidate sequence can be strictly
+        // cheaper than 0; the length loop prunes every candidate before any SMT
+        // query runs (candidates_evaluated == 0, smt_queries == 0).
+        assert!(!result.found_optimization);
+        assert!(result.optimized_sequence.is_none());
+        assert_eq!(result.statistics.best_cost_found, 2);
+        assert_eq!(result.statistics.candidates_evaluated, 0);
+        assert_eq!(result.statistics.smt_queries, 0);
+    }
+
+    #[test]
+    fn symbolic_cost_bound_is_exclusive() {
+        let _guard = SYMBOLIC_INNER_LOOP_TEST_LOCK
+            .lock()
+            .expect("symbolic inner-loop test lock poisoned");
+        reset_symbolic_inner_loop_test_state();
+        TEST_EQUIVALENCE_EQUIVALENT_ON_CHECK.store(1, Ordering::SeqCst);
+
+        let mut search: SymbolicSearch<TestIsa> = SymbolicSearch::new();
+        let config =
+            SearchConfig::default().with_symbolic(SymbolicConfig::default().with_cost_bound(1));
+        let target = [TestInstruction(100), TestInstruction(101)];
+
+        let result = search.search(&target, &(), &config);
+
+        assert!(!result.found_optimization);
+        assert!(result.optimized_sequence.is_none());
+        assert_eq!(result.statistics.best_cost_found, 2);
+        assert_eq!(TEST_EQUIVALENCE_CHECKS.load(Ordering::SeqCst), 0);
+        assert_eq!(result.statistics.candidates_evaluated, 0);
+    }
+
+    #[test]
+    fn symbolic_window_size_caps_candidate_lengths() {
+        let _guard = SYMBOLIC_INNER_LOOP_TEST_LOCK
+            .lock()
+            .expect("symbolic inner-loop test lock poisoned");
+        reset_symbolic_inner_loop_test_state();
+
+        let mut search: SymbolicSearch<TestIsa> = SymbolicSearch::new();
+        let config =
+            SearchConfig::default().with_symbolic(SymbolicConfig::default().with_window_size(1));
+        let target = [
+            TestInstruction(100),
+            TestInstruction(101),
+            TestInstruction(102),
+            TestInstruction(103),
+        ];
+
+        let result = search.search(&target, &(), &config);
+
+        assert!(!result.found_optimization);
+        assert!(result.optimized_sequence.is_none());
+        assert_eq!(TEST_EQUIVALENCE_CHECKS.load(Ordering::SeqCst), 1);
+        assert_eq!(result.statistics.candidates_evaluated, 1);
     }
 
     #[test]
@@ -1280,6 +1364,31 @@ mod tests {
     }
 
     #[test]
+    fn symbolic_verify_equivalence_uses_effective_solver_timeout() {
+        let _guard = SYMBOLIC_INNER_LOOP_TEST_LOCK
+            .lock()
+            .expect("symbolic inner-loop test lock poisoned");
+
+        let mut search: SymbolicSearch<TestIsa> = SymbolicSearch::new();
+        let target = [TestInstruction(1)];
+        let candidate = [TestInstruction(2)];
+
+        reset_symbolic_inner_loop_test_state();
+        let explicit_config = SearchConfig::default()
+            .with_symbolic(SymbolicConfig::default().with_timeout(Duration::from_millis(17)));
+        assert!(!search.verify_equivalence(&target, &candidate, &(), &explicit_config));
+        assert_eq!(TEST_RECORDED_TIMEOUT_MS.load(Ordering::SeqCst), 17);
+
+        reset_symbolic_inner_loop_test_state();
+        let defaulted_config = SearchConfig::default().with_symbolic(SymbolicConfig {
+            solver_timeout: None,
+            ..SymbolicConfig::default()
+        });
+        assert!(!search.verify_equivalence(&target, &candidate, &(), &defaulted_config));
+        assert_eq!(TEST_RECORDED_TIMEOUT_MS.load(Ordering::SeqCst), 30000);
+    }
+
+    #[test]
     fn symbolic_verify_does_not_count_fast_refutation_as_fast_pass() {
         let _guard = SYMBOLIC_INNER_LOOP_TEST_LOCK
             .lock()
@@ -1303,8 +1412,8 @@ mod tests {
     // ---- x86 symbolic search (issue #73 Phase D step 7) ----
 
     /// Tracer-bullet test that the generic `SymbolicSearch<X86_64>`
-    /// instantiates and runs an end-to-end synthesis on a 2-instruction
-    /// x86 target without panic.
+    /// instantiates and discovers the dead-flags collapse for a
+    /// 2-instruction x86 target.
     #[test]
     fn x86_symbolic_runs_end_to_end() {
         use crate::isa::X86_64;
@@ -1337,10 +1446,15 @@ mod tests {
 
         let result = search.search(&target, &live_out, &config);
         assert_eq!(result.statistics.algorithm, Algorithm::Symbolic);
-        // We don't assert a specific optimization was found — the test
-        // just verifies the loop runs end-to-end through the generic
-        // backend without panicking.
-        assert!(result.statistics.elapsed_time.as_nanos() > 0);
+        assert!(result.found_optimization);
+        assert_eq!(result.cost_savings(), 1);
+        assert_eq!(
+            result.optimized_sequence,
+            Some(vec![X86Instruction::MovReg {
+                rd: X86Register::RAX,
+                rs: X86Register::RBX,
+            }])
+        );
     }
 
     /// Mirror of `x86_symbolic_runs_end_to_end` for x86-32. Covers the
