@@ -57,7 +57,10 @@ Rewritable straight-line mnemonics accepted by the parser and Capstone bridge:
 - Single-source bit manipulation: `clz`, `cls`, `rbit`, `rev`, `rev32`,
   `rev16`
 - Standalone extend aliases: `uxtb`, `uxth`, `sxtb`, `sxth`, `sxtw`
-- Bit-field aliases: `ubfx`, `sbfx`, `bfi`, `bfxil`, `ubfiz`, `sbfiz`
+- Bit-field aliases are 64-bit `X`-form only: `ubfx`, `sbfx`, `bfi`,
+  `bfxil`, `ubfiz`, `sbfiz`. W-form bitfield aliases remain unsupported by
+  design for now because the current IR has no width on these instruction
+  variants.
 - Memory loads and stores (issue #68, [ADR-0007](adr/0007-memory-model.md);
   byte-addressed Z3-array memory model with sound full aliasing, whole-memory
   live-out auto-derived): `ldr`, `ldrb`, `ldrh`, `ldrsb`, `ldrsh`, `ldrsw`,

@@ -127,6 +127,19 @@ fn docs_capability_documents_w_mov_add_sub_forms() {
 }
 
 #[test]
+fn docs_capability_documents_bitfield_alias_width_scope() {
+    let matrix = normalized_doc("docs/capability.md");
+    assert!(
+        matrix.contains("bit-field aliases are 64-bit `x`-form only"),
+        "docs/capability.md must document X-form-only bitfield alias support"
+    );
+    assert!(
+        matrix.contains("w-form bitfield aliases remain unsupported"),
+        "docs/capability.md must document unsupported W-form bitfield aliases"
+    );
+}
+
+#[test]
 fn enumerative_candidate_growth_visible_in_public_docs() {
     for doc in ["README.md", "TUTORIAL.md", "docs/capability.md"] {
         let body = normalized_doc(doc);

@@ -3061,6 +3061,30 @@ mod tests {
     }
 
     #[test]
+    fn parse_bfm_like_rejects_w_form_registers() {
+        for mnemonic in ["ubfx", "sbfx", "bfi", "bfxil", "ubfiz", "sbfiz"] {
+            let line = format!("{mnemonic} w0, w1, #5, #10");
+            assert!(
+                parse_line(&line).is_err(),
+                "{line} must remain unsupported until bitfield IR tracks width"
+            );
+        }
+    }
+
+    #[test]
+    fn parse_bfm_like_rejects_mixed_w_x_registers() {
+        for mnemonic in ["ubfx", "sbfx", "bfi", "bfxil", "ubfiz", "sbfiz"] {
+            for operands in ["x0, w1", "w0, x1"] {
+                let line = format!("{mnemonic} {operands}, #5, #10");
+                assert!(
+                    parse_line(&line).is_err(),
+                    "{line} must not erase operand width into X-form IR"
+                );
+            }
+        }
+    }
+
+    #[test]
     fn parse_line_covers_all_core_mnemonics() {
         let cases = [
             ("sub x0, x1, #3", "sub x0, x1, #3"),
