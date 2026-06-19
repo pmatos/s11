@@ -16,19 +16,32 @@ use crate::isa::x86::{X86Instruction, X86Register};
 use std::collections::HashMap;
 use z3::ast::BV;
 
-/// Symbolic EFLAGS quintuple `(cf, pf, zf, sf, of)`, mirroring
-/// `Eflags` minus the unmodelled AF (see module docs).
-pub type EflagsBvs = (BV, BV, BV, BV, BV);
+/// Symbolic EFLAGS BVs, mirroring `Eflags` minus the unmodelled AF
+/// (see module docs).
+#[derive(Clone)]
+pub struct EflagsBvs {
+    pub cf: BV,
+    pub pf: BV,
+    pub zf: BV,
+    pub sf: BV,
+    pub of: BV,
+}
+
+/// Borrowed view of symbolic EFLAGS.
+#[derive(Clone, Copy)]
+pub struct EflagsBvRefs<'a> {
+    pub cf: &'a BV,
+    pub pf: &'a BV,
+    pub zf: &'a BV,
+    pub sf: &'a BV,
+    pub of: &'a BV,
+}
 
 #[derive(Clone)]
 pub struct MachineStateX86 {
     pub registers: HashMap<X86Register, BV>,
     width: u32,
-    cf: BV,
-    pf: BV,
-    zf: BV,
-    sf: BV,
-    of: BV,
+    flags: EflagsBvs,
 }
 
 impl MachineStateX86 {
@@ -43,11 +56,13 @@ impl MachineStateX86 {
         MachineStateX86 {
             registers,
             width,
-            cf: BV::new_const(format!("{}_cf", prefix), 1),
-            pf: BV::new_const(format!("{}_pf", prefix), 1),
-            zf: BV::new_const(format!("{}_zf", prefix), 1),
-            sf: BV::new_const(format!("{}_sf", prefix), 1),
-            of: BV::new_const(format!("{}_of", prefix), 1),
+            flags: EflagsBvs {
+                cf: BV::new_const(format!("{}_cf", prefix), 1),
+                pf: BV::new_const(format!("{}_pf", prefix), 1),
+                zf: BV::new_const(format!("{}_zf", prefix), 1),
+                sf: BV::new_const(format!("{}_sf", prefix), 1),
+                of: BV::new_const(format!("{}_of", prefix), 1),
+            },
         }
     }
 
@@ -65,19 +80,20 @@ impl MachineStateX86 {
         self.registers.insert(reg, value);
     }
 
-    /// Return the five flag BVs as `(cf, pf, zf, sf, of)`.
-    pub fn get_flags(&self) -> (&BV, &BV, &BV, &BV, &BV) {
-        (&self.cf, &self.pf, &self.zf, &self.sf, &self.of)
+    /// Return the five tracked flag BVs.
+    pub fn get_flags(&self) -> EflagsBvRefs<'_> {
+        EflagsBvRefs {
+            cf: &self.flags.cf,
+            pf: &self.flags.pf,
+            zf: &self.flags.zf,
+            sf: &self.flags.sf,
+            of: &self.flags.of,
+        }
     }
 
     /// Replace all five flag BVs at once.
     pub fn set_flags(&mut self, flags: EflagsBvs) {
-        let (cf, pf, zf, sf, of) = flags;
-        self.cf = cf;
-        self.pf = pf;
-        self.zf = zf;
-        self.sf = sf;
-        self.of = of;
+        self.flags = flags;
     }
 
     fn imm_bv(&self, imm: i64) -> BV {
@@ -87,6 +103,9 @@ impl MachineStateX86 {
 
 // --- symbolic EFLAGS helpers ---
 
+// z3 0.20 constructors use the thread-local context. Keep this helper
+// aligned with the AArch64 SMT module; an explicit-context refactor should
+// move both backends together.
 fn bv_one() -> BV {
     BV::from_u64(1, 1)
 }
@@ -120,16 +139,15 @@ fn is_zero_bv(value: &BV, width: u32) -> BV {
 /// the supplied flag BVs. Mirrors `Eflags::evaluate` arm-for-arm.
 pub fn x86_condition_to_smt(
     cond: crate::isa::x86::X86Condition,
-    flags: (&BV, &BV, &BV, &BV, &BV),
+    flags: EflagsBvRefs<'_>,
 ) -> z3::ast::Bool {
     use crate::isa::x86::X86Condition;
-    let (cf, pf, zf, sf, of) = flags;
     let one = bv_one();
-    let cf1 = cf.eq(&one);
-    let pf1 = pf.eq(&one);
-    let zf1 = zf.eq(&one);
-    let sf1 = sf.eq(&one);
-    let of1 = of.eq(&one);
+    let cf1 = flags.cf.eq(&one);
+    let pf1 = flags.pf.eq(&one);
+    let zf1 = flags.zf.eq(&one);
+    let sf1 = flags.sf.eq(&one);
+    let of1 = flags.of.eq(&one);
     match cond {
         X86Condition::E => zf1,
         X86Condition::NE => zf1.not(),
@@ -171,7 +189,7 @@ pub fn compute_eflags_sub(lhs: &BV, rhs: &BV, width: u32) -> EflagsBvs {
     let of_bool = z3::ast::Bool::and(&[&signs_differ, &lhs_vs_res]);
     let of = of_bool.ite(&bv_one(), &bv_zero());
     let pf = parity8_bv(&result);
-    (cf, pf, zf, sf, of)
+    EflagsBvs { cf, pf, zf, sf, of }
 }
 
 /// Symbolic flags from `lhs + rhs` at the operand width.
@@ -191,7 +209,7 @@ pub fn compute_eflags_add(lhs: &BV, rhs: &BV, width: u32) -> EflagsBvs {
     let of_bool = z3::ast::Bool::and(&[&signs_match, &lhs_vs_res]);
     let of = of_bool.ite(&bv_one(), &bv_zero());
     let pf = parity8_bv(&result);
-    (cf, pf, zf, sf, of)
+    EflagsBvs { cf, pf, zf, sf, of }
 }
 
 /// Symbolic flags from a logical op (AND/OR/XOR). CF and OF are
@@ -200,7 +218,13 @@ pub fn compute_eflags_logical(result: &BV, width: u32) -> EflagsBvs {
     let zf = is_zero_bv(result, width);
     let sf = top_bit_bv(result, width);
     let pf = parity8_bv(result);
-    (bv_zero(), pf, zf, sf, bv_zero())
+    EflagsBvs {
+        cf: bv_zero(),
+        pf,
+        zf,
+        sf,
+        of: bv_zero(),
+    }
 }
 
 /// Apply a single x86 instruction symbolically. Arithmetic / logic /
@@ -341,14 +365,14 @@ pub fn apply_sequence(
 /// reject sequences whose flag effects diverge under `flags_live=true`.
 /// AF is intentionally excluded — see module docs.
 pub fn flags_not_equal_x86(a: &MachineStateX86, b: &MachineStateX86) -> z3::ast::Bool {
-    let (a_cf, a_pf, a_zf, a_sf, a_of) = a.get_flags();
-    let (b_cf, b_pf, b_zf, b_sf, b_of) = b.get_flags();
+    let a_flags = a.get_flags();
+    let b_flags = b.get_flags();
     z3::ast::Bool::or(&[
-        &a_cf.eq(b_cf).not(),
-        &a_pf.eq(b_pf).not(),
-        &a_zf.eq(b_zf).not(),
-        &a_sf.eq(b_sf).not(),
-        &a_of.eq(b_of).not(),
+        &a_flags.cf.eq(b_flags.cf).not(),
+        &a_flags.pf.eq(b_flags.pf).not(),
+        &a_flags.zf.eq(b_flags.zf).not(),
+        &a_flags.sf.eq(b_flags.sf).not(),
+        &a_flags.of.eq(b_flags.of).not(),
     ])
 }
 
@@ -459,7 +483,7 @@ mod tests {
                 rs: X86Register::RBX,
             },
         );
-        let zf = s1.get_flags().2; // (cf, pf, zf, sf, of) — zf at index 2
+        let zf = s1.get_flags().zf;
         let zf_one = BV::from_u64(1, 1);
         let solver = Solver::new();
         // Assert: NOT (zf == 1 <=> rax == rbx). If unsat, the bi-implication holds.
@@ -487,7 +511,7 @@ mod tests {
                 rs: X86Register::RBX,
             },
         );
-        let cf = s1.get_flags().0;
+        let cf = s1.get_flags().cf;
         let cf_one = BV::from_u64(1, 1);
         let solver = Solver::new();
         let unsigned_lt = rax.bvult(&rbx);
@@ -510,7 +534,7 @@ mod tests {
         let s0 = MachineStateX86::new_symbolic("s", 64);
         let rax_init = s0.get_register(X86Register::RAX).clone();
         let rbx_init = s0.get_register(X86Register::RBX).clone();
-        let zf_init = s0.get_flags().2.clone();
+        let zf_init = s0.get_flags().zf.clone();
         let s1 = apply_instruction(
             s0,
             &X86Instruction::Cmov {
@@ -544,15 +568,15 @@ mod tests {
                 rs: X86Register::RAX,
             },
         );
-        let (cf, pf, zf, _sf, of) = s1.get_flags();
+        let flags = s1.get_flags();
         let zero = BV::from_u64(0, 1);
         let one = BV::from_u64(1, 1);
         let solver = Solver::new();
         solver.assert(z3::ast::Bool::or(&[
-            &cf.eq(&zero).not(),
-            &of.eq(&zero).not(),
-            &zf.eq(&one).not(),
-            &pf.eq(&one).not(),
+            &flags.cf.eq(&zero).not(),
+            &flags.of.eq(&zero).not(),
+            &flags.zf.eq(&one).not(),
+            &flags.pf.eq(&one).not(),
         ]));
         assert_eq!(
             solver.check(),
@@ -574,7 +598,7 @@ mod tests {
                 rs: X86Register::RBX,
             },
         );
-        let zf = s1.get_flags().2;
+        let zf = s1.get_flags().zf;
         let zero = BV::from_u64(0, 64);
         let zf_one = BV::from_u64(1, 1);
         let solver = Solver::new();
@@ -597,7 +621,7 @@ mod tests {
                 rs: X86Register::RBX,
             },
         );
-        let cf = s1.get_flags().0;
+        let cf = s1.get_flags().cf;
         let cf_one = BV::from_u64(1, 1);
         let solver = Solver::new();
         let borrow = rax_init.bvult(&rbx_init);
@@ -635,13 +659,13 @@ mod tests {
         // Build inequality disjunct over all five tracked flags and rd
         // (when the instruction has one).
         let one_bit = |b: bool| BV::from_u64(b as u64, 1);
-        let (cf_s, pf_s, zf_s, sf_s, of_s) = symbolic_post.get_flags();
+        let symbolic_flags = symbolic_post.get_flags();
         let mut diffs: Vec<z3::ast::Bool> = vec![
-            cf_s.eq(one_bit(cf_post.cf)).not(),
-            pf_s.eq(one_bit(cf_post.pf)).not(),
-            zf_s.eq(one_bit(cf_post.zf)).not(),
-            sf_s.eq(one_bit(cf_post.sf)).not(),
-            of_s.eq(one_bit(cf_post.of)).not(),
+            symbolic_flags.cf.eq(one_bit(cf_post.cf)).not(),
+            symbolic_flags.pf.eq(one_bit(cf_post.pf)).not(),
+            symbolic_flags.zf.eq(one_bit(cf_post.zf)).not(),
+            symbolic_flags.sf.eq(one_bit(cf_post.sf)).not(),
+            symbolic_flags.of.eq(one_bit(cf_post.of)).not(),
         ];
         if let Some(rd) = instr.destination() {
             let expected = BV::from_u64(concrete_post.get_register(rd).as_u64(), 64);
@@ -656,6 +680,86 @@ mod tests {
             instr,
             lhs,
             rhs
+        );
+    }
+
+    fn assert_x86_cmov_concrete_smt_parity(
+        cond: crate::isa::x86::X86Condition,
+        input_flags: crate::semantics::state::Eflags,
+        lhs: u64,
+        rhs: u64,
+    ) {
+        use crate::semantics::concrete_x86::apply_instruction_concrete_x86;
+        use crate::semantics::state::{ConcreteValue, X86ConcreteMachineState};
+
+        let instr = X86Instruction::Cmov {
+            rd: X86Register::RAX,
+            rs: X86Register::RBX,
+            cond,
+        };
+
+        let mut concrete_pre = X86ConcreteMachineState::new_zeroed(64);
+        concrete_pre.set_register(X86Register::RAX, ConcreteValue::new(lhs));
+        concrete_pre.set_register(X86Register::RBX, ConcreteValue::new(rhs));
+        concrete_pre.set_flags(input_flags);
+        let concrete_post = apply_instruction_concrete_x86(concrete_pre, &instr);
+        let expected_flags = concrete_post.get_flags();
+
+        let symbolic_pre = MachineStateX86::new_symbolic("cmov_pre", 64);
+        let solver = Solver::new();
+        solver.assert(
+            symbolic_pre
+                .get_register(X86Register::RAX)
+                .eq(BV::from_u64(lhs, 64)),
+        );
+        solver.assert(
+            symbolic_pre
+                .get_register(X86Register::RBX)
+                .eq(BV::from_u64(rhs, 64)),
+        );
+
+        let one_bit = |b: bool| BV::from_u64(b as u64, 1);
+        let EflagsBvRefs {
+            cf: cf_pre,
+            pf: pf_pre,
+            zf: zf_pre,
+            sf: sf_pre,
+            of: of_pre,
+        } = symbolic_pre.get_flags();
+        solver.assert(cf_pre.eq(one_bit(input_flags.cf)));
+        solver.assert(pf_pre.eq(one_bit(input_flags.pf)));
+        solver.assert(zf_pre.eq(one_bit(input_flags.zf)));
+        solver.assert(sf_pre.eq(one_bit(input_flags.sf)));
+        solver.assert(of_pre.eq(one_bit(input_flags.of)));
+
+        let symbolic_post = apply_instruction(symbolic_pre, &instr);
+        let EflagsBvRefs {
+            cf: cf_s,
+            pf: pf_s,
+            zf: zf_s,
+            sf: sf_s,
+            of: of_s,
+        } = symbolic_post.get_flags();
+        let expected_rd = BV::from_u64(concrete_post.get_register(X86Register::RAX).as_u64(), 64);
+        let diffs = [
+            symbolic_post
+                .get_register(X86Register::RAX)
+                .eq(&expected_rd)
+                .not(),
+            cf_s.eq(one_bit(expected_flags.cf)).not(),
+            pf_s.eq(one_bit(expected_flags.pf)).not(),
+            zf_s.eq(one_bit(expected_flags.zf)).not(),
+            sf_s.eq(one_bit(expected_flags.sf)).not(),
+            of_s.eq(one_bit(expected_flags.of)).not(),
+        ];
+        let refs: Vec<&z3::ast::Bool> = diffs.iter().collect();
+        solver.assert(z3::ast::Bool::or(&refs));
+        assert_eq!(
+            solver.check(),
+            SatResult::Unsat,
+            "CMOV concrete/SMT parity violation for {:?} with flags {:?}",
+            instr,
+            input_flags
         );
     }
 
@@ -741,13 +845,55 @@ mod tests {
     }
 
     #[test]
+    fn parity_cmov_reg_taken_and_not_taken() {
+        use crate::isa::x86::X86Condition;
+        use crate::semantics::state::Eflags;
+
+        let taken_flags = Eflags {
+            cf: true,
+            pf: false,
+            af: true,
+            zf: true,
+            sf: false,
+            of: true,
+        };
+        assert_x86_cmov_concrete_smt_parity(
+            X86Condition::E,
+            taken_flags,
+            0x1111_2222_3333_4444,
+            0xAAAA_BBBB_CCCC_DDDD,
+        );
+
+        let not_taken_flags = Eflags {
+            cf: false,
+            pf: true,
+            af: true,
+            zf: false,
+            sf: true,
+            of: false,
+        };
+        assert_x86_cmov_concrete_smt_parity(
+            X86Condition::E,
+            not_taken_flags,
+            0x1111_2222_3333_4444,
+            0xAAAA_BBBB_CCCC_DDDD,
+        );
+    }
+
+    #[test]
     fn cmov_does_not_modify_flags() {
         // Cmov must leave the five tracked flag BVs symbolically untouched.
         use crate::isa::x86::X86Condition;
         let s0 = MachineStateX86::new_symbolic("s", 64);
-        let (cf0, pf0, zf0, sf0, of0) = {
-            let (cf, pf, zf, sf, of) = s0.get_flags();
-            (cf.clone(), pf.clone(), zf.clone(), sf.clone(), of.clone())
+        let flags0 = {
+            let flags = s0.get_flags();
+            EflagsBvs {
+                cf: flags.cf.clone(),
+                pf: flags.pf.clone(),
+                zf: flags.zf.clone(),
+                sf: flags.sf.clone(),
+                of: flags.of.clone(),
+            }
         };
         let s1 = apply_instruction(
             s0,
@@ -758,14 +904,14 @@ mod tests {
             },
         );
         let solver = Solver::new();
-        let (cf1, pf1, zf1, sf1, of1) = s1.get_flags();
+        let flags1 = s1.get_flags();
         // Any flag differing means we touched flags.
         let diff = z3::ast::Bool::or(&[
-            &cf1.eq(&cf0).not(),
-            &pf1.eq(&pf0).not(),
-            &zf1.eq(&zf0).not(),
-            &sf1.eq(&sf0).not(),
-            &of1.eq(&of0).not(),
+            &flags1.cf.eq(&flags0.cf).not(),
+            &flags1.pf.eq(&flags0.pf).not(),
+            &flags1.zf.eq(&flags0.zf).not(),
+            &flags1.sf.eq(&flags0.sf).not(),
+            &flags1.of.eq(&flags0.of).not(),
         ]);
         solver.assert(&diff);
         assert_eq!(
