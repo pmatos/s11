@@ -3877,7 +3877,7 @@ mod cli_helper_tests {
         opts.seed = Some(7);
 
         let target = r10_zeroing_target();
-        let optimized = run_x86_stochastic(&target, 64, &opts)
+        let optimized = run_x86_stochastic(&target, 64, &opts, false)
             .expect("two identical R10 zeroing writes must collapse to one");
 
         assert_single_r10_rewrite(&optimized);
@@ -3896,7 +3896,7 @@ mod cli_helper_tests {
         opts.cost_metric = CostMetric::InstructionCount;
 
         let target = r10_zeroing_target();
-        let optimized = run_x86_symbolic(&target, 64, &opts)
+        let optimized = run_x86_symbolic(&target, 64, &opts, false, false)
             .expect("two identical R10 zeroing writes must collapse to one");
 
         assert_single_r10_rewrite(&optimized);
