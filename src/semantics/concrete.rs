@@ -86,7 +86,10 @@ fn eval_logical_operand(
     operand: &Operand,
     width: RegisterWidth,
 ) -> u64 {
-    eval_operand(state, operand).as_u64() & mask_for_register_width(width)
+    match width {
+        RegisterWidth::W32 => eval_w_operand(state, operand),
+        RegisterWidth::X64 => eval_operand(state, operand).as_u64(),
+    }
 }
 
 fn logical_flags(result: u64, width: RegisterWidth) -> ConditionFlags {
@@ -1210,6 +1213,65 @@ mod tests {
         };
         let new_state = apply_instruction_concrete(state, &instr);
         assert_eq!(new_state.get_register(Register::X0).as_u64(), 0xFFFF_0000);
+    }
+
+    #[test]
+    fn test_w32_logical_shifted_registers_use_low_32_bits_before_shifting() {
+        for (instr, pre_values, expected) in [
+            (
+                Instruction::And {
+                    rd: Register::X0,
+                    rn: Register::X1,
+                    rm: Operand::ShiftedRegister {
+                        reg: Register::X2,
+                        kind: ShiftKind::Lsr,
+                        amount: 1,
+                    },
+                    width: RegisterWidth::W32,
+                },
+                vec![
+                    (Register::X1, 0xFFFF_FFFF),
+                    (Register::X2, 0x0000_0001_0000_0000),
+                ],
+                0,
+            ),
+            (
+                Instruction::Orr {
+                    rd: Register::X0,
+                    rn: Register::X1,
+                    rm: Operand::ShiftedRegister {
+                        reg: Register::X2,
+                        kind: ShiftKind::Asr,
+                        amount: 31,
+                    },
+                    width: RegisterWidth::W32,
+                },
+                vec![(Register::X1, 0), (Register::X2, 0x0000_0001_8000_0000)],
+                0xFFFF_FFFF,
+            ),
+            (
+                Instruction::Eor {
+                    rd: Register::X0,
+                    rn: Register::X1,
+                    rm: Operand::ShiftedRegister {
+                        reg: Register::X2,
+                        kind: ShiftKind::Ror,
+                        amount: 1,
+                    },
+                    width: RegisterWidth::W32,
+                },
+                vec![(Register::X1, 0), (Register::X2, 0x0000_0001_0000_0000)],
+                0,
+            ),
+        ] {
+            let state = state_with(pre_values);
+            let new_state = apply_instruction_concrete(state, &instr);
+            assert_eq!(
+                new_state.get_register(Register::X0).as_u64(),
+                expected,
+                "{instr} must use W-register source semantics"
+            );
+        }
     }
 
     #[test]

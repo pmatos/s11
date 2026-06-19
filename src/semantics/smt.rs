@@ -78,10 +78,9 @@ fn register_logical_value(state: &MachineState, reg: Register, width: RegisterWi
 }
 
 fn eval_logical_operand(state: &MachineState, operand: &Operand, width: RegisterWidth) -> BV {
-    let value = state.eval_operand(operand);
     match width {
-        RegisterWidth::W32 => value.extract(31, 0),
-        RegisterWidth::X64 => value,
+        RegisterWidth::W32 => eval_w_operand(state, operand),
+        RegisterWidth::X64 => state.eval_operand(operand),
     }
 }
 
@@ -2773,6 +2772,56 @@ mod tests {
             ),
         ] {
             assert_concrete_smt_parity(&instr, &[(Register::X1, pre)], Register::X0);
+        }
+    }
+
+    #[test]
+    fn test_w32_logical_shifted_register_concrete_smt_parity() {
+        for (instr, pre_values) in [
+            (
+                Instruction::And {
+                    rd: Register::X0,
+                    rn: Register::X1,
+                    rm: Operand::ShiftedRegister {
+                        reg: Register::X2,
+                        kind: crate::ir::ShiftKind::Lsr,
+                        amount: 1,
+                    },
+                    width: RegisterWidth::W32,
+                },
+                vec![
+                    (Register::X1, 0xFFFF_FFFF),
+                    (Register::X2, 0x0000_0001_0000_0000),
+                ],
+            ),
+            (
+                Instruction::Orr {
+                    rd: Register::X0,
+                    rn: Register::X1,
+                    rm: Operand::ShiftedRegister {
+                        reg: Register::X2,
+                        kind: crate::ir::ShiftKind::Asr,
+                        amount: 31,
+                    },
+                    width: RegisterWidth::W32,
+                },
+                vec![(Register::X1, 0), (Register::X2, 0x0000_0001_8000_0000)],
+            ),
+            (
+                Instruction::Eor {
+                    rd: Register::X0,
+                    rn: Register::X1,
+                    rm: Operand::ShiftedRegister {
+                        reg: Register::X2,
+                        kind: crate::ir::ShiftKind::Ror,
+                        amount: 1,
+                    },
+                    width: RegisterWidth::W32,
+                },
+                vec![(Register::X1, 0), (Register::X2, 0x0000_0001_0000_0000)],
+            ),
+        ] {
+            assert_concrete_smt_parity(&instr, &pre_values, Register::X0);
         }
     }
 
