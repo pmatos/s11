@@ -764,14 +764,17 @@ impl InstructionGenerator<Instruction> for AArch64InstructionGenerator {
         registers: &[Register],
         immediates: &[i64],
     ) -> Instruction {
-        // 38 opcode slots: 0..=12 original, 13..=23 Tier 1, 24 = MOVZ,
-        // 25 = MOVK, 26..=31 = CLZ/CLS/RBIT/REV/REV32/REV16 as separate
-        // top-level slots, 32 = multiply-accumulate family (issue #56:
-        // 5-way sub-multiplexer for MADD/MSUB/MNEG/SMULH/UMULH), 33 =
-        // conditional-compare family (issue #57: 2-way sub-multiplexer
-        // for CCMP/CCMN), 34 = bit-field aliases (issue #61: 6-way
-        // sub-multiplexer for UBFX/SBFX/BFI/BFXIL/UBFIZ/SBFIZ), 35 = CSET,
-        // 36 = CSETM, 37 = ROR.
+        // 38 random-generation slots: 0..=12 original, 13..=23 Tier 1,
+        // 24 = MOVZ, 25 = MOVK, 26..=31 = CLZ/CLS/RBIT/REV/REV32/REV16 as
+        // separate top-level slots, 32 = multiply-accumulate family (issue
+        // #56: 5-way sub-multiplexer for MADD/MSUB/MNEG/SMULH/UMULH), 33 =
+        // conditional-compare family (issue #57: 2-way sub-multiplexer for
+        // CCMP/CCMN), 34 = bit-field aliases (issue #61: 6-way sub-multiplexer
+        // for UBFX/SBFX/BFI/BFXIL/UBFIZ/SBFIZ), 35 = CSET, 36 = CSETM,
+        // 37 = ROR.
+        // These sampler slots are independent from `opcode_id()` values; for
+        // example, CSET/CSETM/ROR are slots 35/36/37 here but opcode IDs
+        // 31/32/33.
         // See also `src/search/candidate.rs::generate_random_instruction`:
         // it is a parallel 38-slot sampler, but its slot numbers differ
         // (notably, ROR is slot 23 there and slot 37 here).
