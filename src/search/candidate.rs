@@ -137,11 +137,11 @@ pub fn generate_all_instructions(registers: &[Register], immediates: &[i64]) -> 
             //   Add/Sub: LSL/LSR/ASR (no ROR)
             //   And/Orr/Eor: LSL/LSR/ASR/ROR
             // AArch64 shifted-register encodings cannot use SP in rd/rn/rm, so
-            // pre-filter those tuples instead of allocating candidates that the
-            // later encodability pass will discard.
+            // hoist the rd/rn filter while keeping rm filtered per tuple.
             use crate::ir::ShiftKind;
+            let shifted_register_allows_rd_rn = rd != Register::SP && rn != Register::SP;
             for &rm in registers {
-                if rd != Register::SP && rn != Register::SP && rm != Register::SP {
+                if shifted_register_allows_rd_rn && rm != Register::SP {
                     for &amount in SHIFTED_OP_AMOUNTS {
                         for kind in [ShiftKind::Lsl, ShiftKind::Lsr, ShiftKind::Asr] {
                             let sr = Operand::ShiftedRegister {
@@ -2933,6 +2933,37 @@ mod tests {
             )
         });
         assert!(has_uxtb, "enumeration missing ADD with UXTB extended-reg");
+    }
+
+    #[test]
+    fn enumerate_extended_register_add_sub_allows_sp_rd_rn() {
+        let regs = vec![Register::SP, Register::X0];
+        let imms = vec![];
+        let candidates = generate_all_instructions(&regs, &imms);
+        let extended_x0_uxtb = Operand::ExtendedRegister {
+            reg: Register::X0,
+            kind: crate::ir::ExtendKind::Uxtb,
+            shift: 0,
+        };
+
+        for expected in [
+            Instruction::Add {
+                rd: Register::SP,
+                rn: Register::SP,
+                rm: extended_x0_uxtb,
+            },
+            Instruction::Sub {
+                rd: Register::SP,
+                rn: Register::SP,
+                rm: extended_x0_uxtb,
+            },
+        ] {
+            assert!(
+                candidates.contains(&expected),
+                "enumeration missing SP-bearing extended-register candidate: {}",
+                expected
+            );
+        }
     }
 
     #[test]
