@@ -261,7 +261,7 @@ impl Mutator {
                 match choice {
                     0 => *rd = self.random_register(rng),
                     1 => *rn = self.random_register(rng),
-                    _ => *rm = self.random_logical_operand(rng, *width, true),
+                    _ => *rm = self.random_logical_operand(rng, *width, true, true),
                 }
             }
             Instruction::Lsl { rd, rn, shift }
@@ -323,7 +323,7 @@ impl Mutator {
                 if rng.random_bool(0.5) {
                     *rn = self.random_register(rng);
                 } else {
-                    *rm = self.random_logical_operand(rng, *width, true);
+                    *rm = self.random_logical_operand(rng, *width, true, false);
                 }
             }
             // CCMP / CCMN: rn (register), rm (operand), nzcv (0..=15), cond.
@@ -439,7 +439,7 @@ impl Mutator {
                 match choice {
                     0 => *rd = self.random_register(rng),
                     1 => *rn = self.random_register(rng),
-                    _ => *rm = self.random_logical_operand(rng, *width, false),
+                    _ => *rm = self.random_logical_operand(rng, *width, false, false),
                 }
             }
             // CSET / CSETM: only rd and cond can change; cond from the 14
@@ -1507,11 +1507,11 @@ impl Mutator {
         rng: &mut R,
         width: RegisterWidth,
         allow_shifted: bool,
+        allow_w32_register_or_shifted: bool,
     ) -> Operand {
-        // W32-always-immediate policy: W32 logical operands are sampled as
-        // bitmask immediates only (no register/shifted operands), unlike the
-        // X64 path below which also samples registers and shifted registers.
-        if width == RegisterWidth::W32 {
+        // W32 flag-setting logical forms still sample bitmask immediates only.
+        // Non-flag-setting AND/ORR/EOR opt into the W32 register/shifted space.
+        if width == RegisterWidth::W32 && !allow_w32_register_or_shifted {
             return Operand::Immediate(self.random_logical_immediate(rng, width));
         }
 
@@ -1519,7 +1519,7 @@ impl Mutator {
             && rng.random_bool(SHIFTED_REGISTER_OPERAND_PROBABILITY)
             && !self.registers.is_empty()
         {
-            self.random_shifted_register(rng, true, RegisterWidth::X64)
+            self.random_shifted_register(rng, true, width)
         } else if rng.random_bool(0.5) {
             Operand::Register(self.random_register(rng))
         } else {
@@ -1548,10 +1548,9 @@ impl Mutator {
             Operand::ExtendedRegister { reg, .. } if width == RegisterWidth::X64 => {
                 Operand::Register(reg)
             }
-            // W32-always-immediate policy (see `random_logical_operand`): the
-            // X64 arms above preserve register/shifted/extended forms, so this
-            // catch-all only ever sees W32 operands. They are deliberately
-            // resampled as bitmask immediates rather than kept as registers.
+            // Opcode bridges keep W32 logical operands in the historical
+            // immediate-only space; W32 register/shifted sampling is limited
+            // to direct AND/ORR/EOR operand mutation.
             Operand::Register(_)
             | Operand::ShiftedRegister { .. }
             | Operand::ExtendedRegister { .. } => {
@@ -2111,6 +2110,81 @@ mod tests {
     }
 
     #[test]
+    fn mutate_operand_can_produce_w32_logical_shifted_registers() {
+        let mutator = default_mutator();
+        let starts = [
+            (
+                "AND W32",
+                Instruction::And {
+                    rd: Register::X0,
+                    rn: Register::X1,
+                    rm: Operand::Immediate(0xff),
+                    width: RegisterWidth::W32,
+                },
+            ),
+            (
+                "ORR W32",
+                Instruction::Orr {
+                    rd: Register::X0,
+                    rn: Register::X1,
+                    rm: Operand::Immediate(0xff),
+                    width: RegisterWidth::W32,
+                },
+            ),
+            (
+                "EOR W32",
+                Instruction::Eor {
+                    rd: Register::X0,
+                    rn: Register::X1,
+                    rm: Operand::Immediate(0xff),
+                    width: RegisterWidth::W32,
+                },
+            ),
+        ];
+
+        for (idx, (name, start)) in starts.into_iter().enumerate() {
+            let mut rng = StdRng::seed_from_u64(0x4730 + idx as u64);
+            let mut saw_shifted = false;
+            let mut saw_ror = false;
+
+            for _ in 0..20_000 {
+                let mut seq = vec![start];
+                mutator.mutate_operand(&mut rng, &mut seq);
+                assert!(
+                    seq[0].is_encodable_aarch64(),
+                    "{name} operand mutation produced non-encodable {}",
+                    seq[0]
+                );
+
+                let rm = match seq[0] {
+                    Instruction::And { rm, .. }
+                    | Instruction::Orr { rm, .. }
+                    | Instruction::Eor { rm, .. } => rm,
+                    other => panic!("mutate_operand changed {name} opcode: {other:?}"),
+                };
+
+                if let Operand::ShiftedRegister { kind, amount, .. } = rm {
+                    saw_shifted = true;
+                    saw_ror |= kind == crate::ir::ShiftKind::Ror;
+                    assert!(
+                        amount <= 31,
+                        "{name} W32 shifted-register proposal used amount {amount}"
+                    );
+                }
+            }
+
+            assert!(
+                saw_shifted,
+                "{name} operand mutation never sampled a shifted-register rm"
+            );
+            assert!(
+                saw_ror,
+                "{name} operand mutation never sampled a ROR shifted-register rm"
+            );
+        }
+    }
+
+    #[test]
     fn opcode_bridges_to_logical_replace_arithmetic_immediates_with_bitmasks() {
         let mutator = Mutator::new(
             vec![Register::X0, Register::X1, Register::X2],
@@ -2601,6 +2675,40 @@ mod tests {
             } = seq[0]
             {
                 panic!("W32 TST mutation must not emit shifted-register operands");
+            }
+        }
+    }
+
+    #[test]
+    fn mutate_operand_keeps_w32_flag_logicals_immediate_only() {
+        let mutator = default_mutator();
+        let starts = [
+            Instruction::Tst {
+                rn: Register::X1,
+                rm: Operand::Immediate(0xff),
+                width: RegisterWidth::W32,
+            },
+            Instruction::Ands {
+                rd: Register::X0,
+                rn: Register::X1,
+                rm: Operand::Immediate(0xff),
+                width: RegisterWidth::W32,
+            },
+        ];
+
+        for (idx, start) in starts.into_iter().enumerate() {
+            let mut rng = StdRng::seed_from_u64(0x4735 + idx as u64);
+            for _ in 0..5_000 {
+                let mut seq = vec![start];
+                mutator.mutate_operand(&mut rng, &mut seq);
+                let rm = match seq[0] {
+                    Instruction::Tst { rm, .. } | Instruction::Ands { rm, .. } => rm,
+                    other => panic!("mutate_operand changed W32 flag logical opcode: {other:?}"),
+                };
+                assert!(
+                    matches!(rm, Operand::Immediate(_)),
+                    "W32 flag logical mutation must stay immediate-only, got {seq:?}"
+                );
             }
         }
     }

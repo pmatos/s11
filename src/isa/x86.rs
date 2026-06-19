@@ -575,6 +575,20 @@ fn x86_imm32_bitpattern_ok(imm: i64) -> bool {
     x86_signed_imm32_ok(imm) || u32::try_from(imm).is_ok()
 }
 
+fn x86_mov_imm_ok(mode: crate::assembler::x86::X86Mode, imm: i64) -> bool {
+    match mode {
+        crate::assembler::x86::X86Mode::Mode64 => true,
+        crate::assembler::x86::X86Mode::Mode32 => x86_imm32_bitpattern_ok(imm),
+    }
+}
+
+fn x86_non_mov_imm_ok(mode: crate::assembler::x86::X86Mode, imm: i64) -> bool {
+    match mode {
+        crate::assembler::x86::X86Mode::Mode64 => x86_signed_imm32_ok(imm),
+        crate::assembler::x86::X86Mode::Mode32 => x86_imm32_bitpattern_ok(imm),
+    }
+}
+
 impl crate::isa::traits::FlagsAnalysis<X86Instruction> for X86_64 {
     fn modifies_flags(instr: &X86Instruction) -> bool {
         x86_modifies_flags(instr)
@@ -768,9 +782,10 @@ impl crate::isa::traits::Assembler<X86Instruction> for X86_32 {
     }
 }
 
-/// x86 mutator for stochastic search. Carries a filtered register pool
-/// (Mode32 excludes R8-R15 once at construction), an immediate pool and
-/// the four operator weights borrowed from the AArch64 `Mutator`.
+/// x86 mutator for stochastic search. Carries filtered register and
+/// immediate pools (Mode32 excludes R8-R15 once at construction, and
+/// immediates are split by MOV vs non-MOV encodability) plus the four
+/// operator weights borrowed from the AArch64 `Mutator`.
 ///
 /// **Destructive-form invariant** (`src/isa/x86.rs:150-158`): every
 /// non-MOV variant has `rd` in `source_registers()`. Mutating any
@@ -783,15 +798,18 @@ impl crate::isa::traits::Assembler<X86Instruction> for X86_32 {
 #[derive(Debug, Clone)]
 pub struct X86Mutator {
     registers: Vec<X86Register>,
-    immediates: Vec<i64>,
+    mov_immediates: Vec<i64>,
+    non_mov_immediates: Vec<i64>,
+    mode: crate::assembler::x86::X86Mode,
     weights: crate::search::config::MutationWeights,
 }
 
 impl X86Mutator {
-    /// Construct a mutator. `mode` is consumed here to filter extended
-    /// registers (Mode32 excludes R8-R15) once at construction; it is
-    /// not retained as a field. Downstream mutation therefore cannot
-    /// reintroduce extended registers.
+    /// Construct a mutator. `mode` filters extended registers (Mode32
+    /// excludes R8-R15) and immediate pools once at construction, then
+    /// remains available for opcode-bridge immediate validation.
+    /// Downstream mutation therefore cannot reintroduce extended
+    /// registers or immediates that the target opcode class cannot encode.
     pub fn new(
         registers: Vec<X86Register>,
         immediates: Vec<i64>,
@@ -805,9 +823,20 @@ impl X86Mutator {
                     || matches!(r.index(), Some(i) if i < 8)
             })
             .collect();
+        let mov_immediates = immediates
+            .iter()
+            .copied()
+            .filter(|&imm| x86_mov_imm_ok(mode, imm))
+            .collect();
+        let non_mov_immediates = immediates
+            .into_iter()
+            .filter(|&imm| x86_non_mov_imm_ok(mode, imm))
+            .collect();
         Self {
             registers,
-            immediates,
+            mov_immediates,
+            non_mov_immediates,
+            mode,
             weights,
         }
     }
@@ -820,30 +849,80 @@ impl X86Mutator {
         }
     }
 
-    fn pick_immediate<R: rand::RngExt>(&self, rng: &mut R) -> i64 {
-        if self.immediates.is_empty() {
+    fn pick_mov_immediate<R: rand::RngExt>(&self, rng: &mut R) -> i64 {
+        if self.mov_immediates.is_empty() {
             0
         } else {
-            self.immediates[rng.random_range(0..self.immediates.len())]
+            self.mov_immediates[rng.random_range(0..self.mov_immediates.len())]
         }
+    }
+
+    fn pick_non_mov_immediate<R: rand::RngExt>(&self, rng: &mut R) -> i64 {
+        if self.non_mov_immediates.is_empty() {
+            0
+        } else {
+            self.non_mov_immediates[rng.random_range(0..self.non_mov_immediates.len())]
+        }
+    }
+
+    fn keep_or_pick_mov_immediate<R: rand::RngExt>(&self, rng: &mut R, imm: i64) -> i64 {
+        if x86_mov_imm_ok(self.mode, imm) {
+            imm
+        } else {
+            self.pick_mov_immediate(rng)
+        }
+    }
+
+    fn keep_or_pick_non_mov_immediate<R: rand::RngExt>(&self, rng: &mut R, imm: i64) -> i64 {
+        if x86_non_mov_imm_ok(self.mode, imm) {
+            imm
+        } else {
+            self.pick_non_mov_immediate(rng)
+        }
+    }
+
+    fn pick_condition<R: rand::RngExt>(&self, rng: &mut R) -> X86Condition {
+        X86Condition::ALL[rng.random_range(0..X86Condition::ALL.len())]
     }
 
     fn random_instruction<R: rand::RngExt>(&self, rng: &mut R) -> Option<X86Instruction> {
         if self.registers.is_empty() {
             return None;
         }
-        let fallback_immediates;
-        let immediates: &[i64] = if self.immediates.is_empty() {
-            fallback_immediates = [0i64];
-            &fallback_immediates
+        // Rewritable variants only: 7 reg-reg + 7 reg-imm + CMOVcc.
+        // The RNG draw order/count MUST stay in lock-step with the shared
+        // free helper `generate_random_rewritable_x86_instruction`
+        // (opcode → rd → rs → imm → cond, all four drawn unconditionally)
+        // so callers that interleave the two stay deterministic. The only
+        // #593 behaviour change is *which* prefiltered pool the single imm
+        // draw indexes: opcode 1 (MOV) uses the MOVABS-capable `mov`
+        // pool, every other imm form uses the non-MOV pool.
+        let opcode = rng.random_range(0..u32::from(X86_REWRITABLE_OPCODE_COUNT));
+        let rd = self.pick_register(rng)?;
+        let rs = self.pick_register(rng)?;
+        let imm = if opcode == 1 {
+            self.pick_mov_immediate(rng)
         } else {
-            &self.immediates
+            self.pick_non_mov_immediate(rng)
         };
-        Some(generate_random_rewritable_x86_instruction(
-            rng,
-            &self.registers,
-            immediates,
-        ))
+        let cond = X86Condition::ALL[rng.random_range(0..X86Condition::ALL.len())];
+        Some(match opcode {
+            0 => X86Instruction::MovReg { rd, rs },
+            1 => X86Instruction::MovImm { rd, imm },
+            2 => X86Instruction::AddReg { rd, rs },
+            3 => X86Instruction::AddImm { rd, imm },
+            4 => X86Instruction::SubReg { rd, rs },
+            5 => X86Instruction::SubImm { rd, imm },
+            6 => X86Instruction::AndReg { rd, rs },
+            7 => X86Instruction::AndImm { rd, imm },
+            8 => X86Instruction::OrReg { rd, rs },
+            9 => X86Instruction::OrImm { rd, imm },
+            10 => X86Instruction::XorReg { rd, rs },
+            11 => X86Instruction::XorImm { rd, imm },
+            12 => X86Instruction::CmpReg { rn: rd, rs },
+            13 => X86Instruction::CmpImm { rn: rd, imm },
+            _ => X86Instruction::Cmov { rd, rs, cond },
+        })
     }
 
     fn mutate_operand<R: rand::RngExt>(&self, rng: &mut R, sequence: &mut [X86Instruction]) {
@@ -853,13 +932,13 @@ impl X86Mutator {
         let idx = rng.random_range(0..sequence.len());
         if self.registers.is_empty() {
             match &mut sequence[idx] {
-                X86Instruction::MovImm { imm, .. }
-                | X86Instruction::AddImm { imm, .. }
+                X86Instruction::MovImm { imm, .. } => *imm = self.pick_mov_immediate(rng),
+                X86Instruction::AddImm { imm, .. }
                 | X86Instruction::SubImm { imm, .. }
                 | X86Instruction::AndImm { imm, .. }
                 | X86Instruction::OrImm { imm, .. }
                 | X86Instruction::XorImm { imm, .. }
-                | X86Instruction::CmpImm { imm, .. } => *imm = self.pick_immediate(rng),
+                | X86Instruction::CmpImm { imm, .. } => *imm = self.pick_non_mov_immediate(rng),
                 X86Instruction::MovReg { .. }
                 | X86Instruction::AddReg { .. }
                 | X86Instruction::SubReg { .. }
@@ -867,8 +946,8 @@ impl X86Mutator {
                 | X86Instruction::OrReg { .. }
                 | X86Instruction::XorReg { .. }
                 | X86Instruction::CmpReg { .. }
-                | X86Instruction::Cmov { .. }
                 | X86Instruction::Jcc { .. } => {}
+                X86Instruction::Cmov { cond, .. } => *cond = self.pick_condition(rng),
             }
             return;
         }
@@ -884,7 +963,7 @@ impl X86Mutator {
                 if rng.random_bool(0.5) {
                     *rd = self.pick_register(rng).expect("register pool is non-empty");
                 } else {
-                    *imm = self.pick_immediate(rng);
+                    *imm = self.pick_mov_immediate(rng);
                 }
             }
             X86Instruction::AddReg { rd, rs }
@@ -906,7 +985,7 @@ impl X86Mutator {
                 if rng.random_bool(0.5) {
                     *rd = self.pick_register(rng).expect("register pool is non-empty");
                 } else {
-                    *imm = self.pick_immediate(rng);
+                    *imm = self.pick_non_mov_immediate(rng);
                 }
             }
             X86Instruction::CmpReg { rn, rs } => {
@@ -920,16 +999,16 @@ impl X86Mutator {
                 if rng.random_bool(0.5) {
                     *rn = self.pick_register(rng).expect("register pool is non-empty");
                 } else {
-                    *imm = self.pick_immediate(rng);
+                    *imm = self.pick_non_mov_immediate(rng);
                 }
             }
-            X86Instruction::Cmov { rd, rs, .. } => {
-                // Cond stays fixed — stochastic mutation only swaps registers
-                // for now; cycle 16+ may add condition-bridging.
-                if rng.random_bool(0.5) {
-                    *rd = self.pick_register(rng).expect("register pool is non-empty");
-                } else {
-                    *rs = self.pick_register(rng).expect("register pool is non-empty");
+            X86Instruction::Cmov { rd, rs, cond } => {
+                // Treat the condition code as a mutable operand alongside
+                // the destination and source registers.
+                match rng.random_range(0..3u32) {
+                    0 => *rd = self.pick_register(rng).expect("register pool is non-empty"),
+                    1 => *rs = self.pick_register(rng).expect("register pool is non-empty"),
+                    _ => *cond = self.pick_condition(rng),
                 }
             }
             // Jcc is a terminator; mutation never reaches it because the
@@ -975,16 +1054,34 @@ impl X86Mutator {
             | X86Instruction::AndImm { rd, imm }
             | X86Instruction::OrImm { rd, imm }
             | X86Instruction::XorImm { rd, imm } => match rng.random_range(0..6u32) {
-                0 => X86Instruction::MovImm { rd, imm },
-                1 => X86Instruction::AddImm { rd, imm },
-                2 => X86Instruction::SubImm { rd, imm },
-                3 => X86Instruction::AndImm { rd, imm },
-                4 => X86Instruction::OrImm { rd, imm },
-                _ => X86Instruction::XorImm { rd, imm },
+                0 => X86Instruction::MovImm {
+                    rd,
+                    imm: self.keep_or_pick_mov_immediate(rng, imm),
+                },
+                1 => X86Instruction::AddImm {
+                    rd,
+                    imm: self.keep_or_pick_non_mov_immediate(rng, imm),
+                },
+                2 => X86Instruction::SubImm {
+                    rd,
+                    imm: self.keep_or_pick_non_mov_immediate(rng, imm),
+                },
+                3 => X86Instruction::AndImm {
+                    rd,
+                    imm: self.keep_or_pick_non_mov_immediate(rng, imm),
+                },
+                4 => X86Instruction::OrImm {
+                    rd,
+                    imm: self.keep_or_pick_non_mov_immediate(rng, imm),
+                },
+                _ => X86Instruction::XorImm {
+                    rd,
+                    imm: self.keep_or_pick_non_mov_immediate(rng, imm),
+                },
             },
             X86Instruction::CmpReg { rn, .. } => X86Instruction::CmpImm {
                 rn,
-                imm: self.pick_immediate(rng),
+                imm: self.pick_non_mov_immediate(rng),
             },
             X86Instruction::CmpImm { rn, .. } => match self.pick_register(rng) {
                 Some(rs) => X86Instruction::CmpReg { rn, rs },
@@ -2323,7 +2420,7 @@ mod tests {
         let mutator = X86Mutator::new(
             vec![X86Register::RBX],
             // Unused by CmpImm → CmpReg (which calls pick_register, not
-            // pick_immediate); a value absent from the target makes that clear.
+            // an immediate picker); a value absent from the target makes that clear.
             vec![0],
             MutationWeights {
                 operand: 0.0,
@@ -2377,6 +2474,103 @@ mod tests {
         let mut rng = ChaCha8Rng::seed_from_u64(7);
 
         assert_eq!(mutator.mutate(&mut rng, &target), target);
+    }
+
+    #[test]
+    fn x86_mutator_cmov_operand_mutates_condition_with_empty_register_pool() {
+        use crate::isa::traits::ISAMutator;
+        use crate::search::config::MutationWeights;
+        use rand::SeedableRng;
+        use rand_chacha::ChaCha8Rng;
+
+        let mutator = X86Mutator::new(
+            Vec::new(),
+            vec![0],
+            MutationWeights {
+                operand: 1.0,
+                opcode: 0.0,
+                swap: 0.0,
+                instruction: 0.0,
+            },
+            crate::assembler::x86::X86Mode::Mode64,
+        );
+        let target = vec![X86Instruction::Cmov {
+            rd: X86Register::RAX,
+            rs: X86Register::RBX,
+            cond: X86Condition::E,
+        }];
+        let mut rng = ChaCha8Rng::seed_from_u64(7);
+        let mut changed = None;
+
+        for _ in 0..200 {
+            let mutated = mutator.mutate(&mut rng, &target);
+            match mutated.as_slice() {
+                [X86Instruction::Cmov { rd, rs, cond }]
+                    if *rd == X86Register::RAX && *rs == X86Register::RBX =>
+                {
+                    if *cond != X86Condition::E {
+                        changed = Some(*cond);
+                        break;
+                    }
+                }
+                other => panic!("unexpected CMOV mutation with empty register pool: {other:?}"),
+            }
+        }
+
+        assert!(
+            changed.is_some(),
+            "CMOV condition did not change after repeated operand mutations"
+        );
+    }
+
+    #[test]
+    fn x86_mutator_cmov_operand_reaches_all_conditions() {
+        use crate::isa::traits::ISAMutator;
+        use crate::search::config::MutationWeights;
+        use rand::SeedableRng;
+        use rand_chacha::ChaCha8Rng;
+        use std::collections::HashSet;
+
+        let pool = vec![X86Register::RAX, X86Register::RBX, X86Register::RCX];
+        let mutator = X86Mutator::new(
+            pool.clone(),
+            vec![0],
+            MutationWeights {
+                operand: 1.0,
+                opcode: 0.0,
+                swap: 0.0,
+                instruction: 0.0,
+            },
+            crate::assembler::x86::X86Mode::Mode64,
+        );
+        let mut seq = vec![X86Instruction::Cmov {
+            rd: X86Register::RAX,
+            rs: X86Register::RBX,
+            cond: X86Condition::E,
+        }];
+        let mut rng = ChaCha8Rng::seed_from_u64(11);
+        let mut observed = HashSet::from([X86Condition::E]);
+
+        for _ in 0..2_000 {
+            seq = mutator.mutate(&mut rng, &seq);
+            match seq.as_slice() {
+                [X86Instruction::Cmov { rd, rs, cond }] => {
+                    assert!(pool.contains(rd), "CMOV rd left mutator pool: {rd:?}");
+                    assert!(pool.contains(rs), "CMOV rs left mutator pool: {rs:?}");
+                    observed.insert(*cond);
+                }
+                other => panic!("CMOV operand mutation changed instruction shape: {other:?}"),
+            }
+            if observed.len() == X86Condition::ALL.len() {
+                break;
+            }
+        }
+
+        assert_eq!(
+            observed.len(),
+            X86Condition::ALL.len(),
+            "CMOV operand mutation reached only {observed:?}"
+        );
     }
 
     #[test]
@@ -2546,6 +2740,283 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn x86_mutator_mode32_filters_immediate_pool_to_encodable_bitpatterns() {
+        use crate::isa::traits::{Assembler, ISAMutator};
+        use crate::search::config::MutationWeights;
+        use rand::SeedableRng;
+        use rand_chacha::ChaCha8Rng;
+        use std::collections::BTreeSet;
+
+        let mutator = X86Mutator::new(
+            Vec::new(),
+            vec![
+                i64::from(i32::MIN) - 1,
+                i64::from(i32::MIN),
+                i64::from(i32::MAX),
+                i64::from(u32::MAX),
+                i64::from(u32::MAX) + 1,
+                i64::MAX,
+            ],
+            MutationWeights {
+                operand: 1.0,
+                opcode: 0.0,
+                swap: 0.0,
+                instruction: 0.0,
+            },
+            crate::assembler::x86::X86Mode::Mode32,
+        );
+        let mut rng = ChaCha8Rng::seed_from_u64(500);
+        let mut seq = vec![X86Instruction::AddImm {
+            rd: X86Register::RAX,
+            imm: 0,
+        }];
+        let mut seen = BTreeSet::new();
+
+        for _ in 0..1000 {
+            seq = mutator.mutate(&mut rng, &seq);
+            let [X86Instruction::AddImm { rd, imm }] = seq.as_slice() else {
+                panic!("operand-only mutation changed instruction shape: {seq:?}");
+            };
+            let instr = X86Instruction::AddImm { rd: *rd, imm: *imm };
+            assert!(
+                <X86_32 as Assembler<X86Instruction>>::can_assemble(&X86_32, &instr),
+                "Mode32 mutator emitted unencodable immediate {imm}"
+            );
+            seen.insert(*imm);
+        }
+
+        assert!(seen.contains(&i64::from(i32::MIN)));
+        assert!(seen.contains(&i64::from(i32::MAX)));
+        assert!(seen.contains(&i64::from(u32::MAX)));
+    }
+
+    #[test]
+    fn x86_mutator_mode64_splits_movabs_from_non_mov_immediate_pool() {
+        use crate::isa::traits::{Assembler, ISAMutator};
+        use crate::search::config::MutationWeights;
+        use rand::SeedableRng;
+        use rand_chacha::ChaCha8Rng;
+        use std::collections::BTreeSet;
+
+        let mutator = X86Mutator::new(
+            Vec::new(),
+            vec![
+                i64::MAX,
+                i64::from(i32::MIN),
+                i64::from(i32::MAX),
+                i64::from(i32::MAX) + 1,
+            ],
+            MutationWeights {
+                operand: 1.0,
+                opcode: 0.0,
+                swap: 0.0,
+                instruction: 0.0,
+            },
+            crate::assembler::x86::X86Mode::Mode64,
+        );
+
+        let mut mov_rng = ChaCha8Rng::seed_from_u64(501);
+        let mut mov_seq = vec![X86Instruction::MovImm {
+            rd: X86Register::RAX,
+            imm: 0,
+        }];
+        let mut saw_movabs = false;
+        for _ in 0..1000 {
+            mov_seq = mutator.mutate(&mut mov_rng, &mov_seq);
+            let [X86Instruction::MovImm { imm, .. }] = mov_seq.as_slice() else {
+                panic!("operand-only mutation changed MOV shape: {mov_seq:?}");
+            };
+            saw_movabs |= *imm == i64::MAX;
+        }
+        assert!(saw_movabs, "Mode64 MOV immediate pool lost MOVABS values");
+
+        let non_mov_forms: [ImmForm; 6] = [
+            ("add", |imm| X86Instruction::AddImm {
+                rd: X86Register::RAX,
+                imm,
+            }),
+            ("sub", |imm| X86Instruction::SubImm {
+                rd: X86Register::RAX,
+                imm,
+            }),
+            ("and", |imm| X86Instruction::AndImm {
+                rd: X86Register::RAX,
+                imm,
+            }),
+            ("or", |imm| X86Instruction::OrImm {
+                rd: X86Register::RAX,
+                imm,
+            }),
+            ("xor", |imm| X86Instruction::XorImm {
+                rd: X86Register::RAX,
+                imm,
+            }),
+            ("cmp", |imm| X86Instruction::CmpImm {
+                rn: X86Register::RAX,
+                imm,
+            }),
+        ];
+
+        for (name, form) in non_mov_forms {
+            let mut rng = ChaCha8Rng::seed_from_u64(502);
+            let mut seq = vec![form(0)];
+            let mut seen = BTreeSet::new();
+            for _ in 0..1000 {
+                seq = mutator.mutate(&mut rng, &seq);
+                let [instr] = seq.as_slice() else {
+                    panic!("operand-only mutation changed {name} sequence length: {seq:?}");
+                };
+                assert!(
+                    <X86_64 as Assembler<X86Instruction>>::can_assemble(&X86_64, instr),
+                    "Mode64 mutator emitted unencodable {name} immediate: {instr:?}"
+                );
+                let imm = match instr {
+                    X86Instruction::AddImm { imm, .. }
+                    | X86Instruction::SubImm { imm, .. }
+                    | X86Instruction::AndImm { imm, .. }
+                    | X86Instruction::OrImm { imm, .. }
+                    | X86Instruction::XorImm { imm, .. }
+                    | X86Instruction::CmpImm { imm, .. } => *imm,
+                    other => panic!("operand-only mutation changed {name} shape: {other:?}"),
+                };
+                seen.insert(imm);
+            }
+            assert!(seen.contains(&i64::from(i32::MIN)), "{name} lost i32::MIN");
+            assert!(seen.contains(&i64::from(i32::MAX)), "{name} lost i32::MAX");
+        }
+    }
+
+    #[test]
+    fn x86_mutator_mode64_operand_and_instruction_mutations_keep_non_mov_immediates_encodable() {
+        use crate::isa::traits::{Assembler, ISAMutator};
+        use crate::search::config::MutationWeights;
+        use rand::SeedableRng;
+        use rand_chacha::ChaCha8Rng;
+
+        let mutator = X86Mutator::new(
+            vec![X86Register::RAX, X86Register::RBX],
+            vec![i64::MAX, 17, i64::from(i32::MAX) + 1],
+            MutationWeights {
+                operand: 0.5,
+                opcode: 0.0,
+                swap: 0.0,
+                instruction: 0.5,
+            },
+            crate::assembler::x86::X86Mode::Mode64,
+        );
+        let mut rng = ChaCha8Rng::seed_from_u64(503);
+        let mut seq = vec![
+            X86Instruction::MovImm {
+                rd: X86Register::RAX,
+                imm: 0,
+            },
+            X86Instruction::AddImm {
+                rd: X86Register::RAX,
+                imm: 0,
+            },
+            X86Instruction::CmpImm {
+                rn: X86Register::RAX,
+                imm: 0,
+            },
+        ];
+        let mut saw_movabs = false;
+        let mut saw_non_mov_immediate = false;
+
+        for _ in 0..5000 {
+            seq = mutator.mutate(&mut rng, &seq);
+            for instr in &seq {
+                match instr {
+                    X86Instruction::MovImm { imm, .. } => {
+                        saw_movabs |= *imm == i64::MAX;
+                    }
+                    X86Instruction::AddImm { .. }
+                    | X86Instruction::SubImm { .. }
+                    | X86Instruction::AndImm { .. }
+                    | X86Instruction::OrImm { .. }
+                    | X86Instruction::XorImm { .. }
+                    | X86Instruction::CmpImm { .. } => {
+                        saw_non_mov_immediate = true;
+                        assert!(
+                            <X86_64 as Assembler<X86Instruction>>::can_assemble(&X86_64, instr),
+                            "Mode64 mutation emitted unencodable non-MOV immediate: {instr:?}"
+                        );
+                    }
+                    X86Instruction::MovReg { .. }
+                    | X86Instruction::AddReg { .. }
+                    | X86Instruction::SubReg { .. }
+                    | X86Instruction::AndReg { .. }
+                    | X86Instruction::OrReg { .. }
+                    | X86Instruction::XorReg { .. }
+                    | X86Instruction::CmpReg { .. }
+                    | X86Instruction::Cmov { .. }
+                    | X86Instruction::Jcc { .. } => {}
+                }
+            }
+        }
+
+        assert!(saw_movabs, "Mode64 MOV mutation never drew i64::MAX");
+        assert!(
+            saw_non_mov_immediate,
+            "test never observed a non-MOV immediate mutation"
+        );
+    }
+
+    #[test]
+    fn x86_mutator_mode64_opcode_mutation_replaces_movabs_immediate_for_non_mov_forms() {
+        use crate::isa::traits::{Assembler, ISAMutator};
+        use crate::search::config::MutationWeights;
+        use rand::SeedableRng;
+        use rand_chacha::ChaCha8Rng;
+
+        let mutator = X86Mutator::new(
+            vec![X86Register::RAX],
+            vec![7],
+            MutationWeights {
+                operand: 0.0,
+                opcode: 1.0,
+                swap: 0.0,
+                instruction: 0.0,
+            },
+            crate::assembler::x86::X86Mode::Mode64,
+        );
+        let target = vec![X86Instruction::MovImm {
+            rd: X86Register::RAX,
+            imm: i64::MAX,
+        }];
+        let mut rng = ChaCha8Rng::seed_from_u64(504);
+        let mut saw_non_mov_bridge = false;
+
+        for _ in 0..100 {
+            let mutated = mutator.mutate(&mut rng, &target);
+            let [instr] = mutated.as_slice() else {
+                panic!("opcode-only mutation changed sequence length: {mutated:?}");
+            };
+            match instr {
+                X86Instruction::MovImm { imm, .. } => {
+                    assert_eq!(*imm, i64::MAX, "MOVABS immediate should stay valid for MOV");
+                }
+                X86Instruction::AddImm { .. }
+                | X86Instruction::SubImm { .. }
+                | X86Instruction::AndImm { .. }
+                | X86Instruction::OrImm { .. }
+                | X86Instruction::XorImm { .. } => {
+                    saw_non_mov_bridge = true;
+                    assert!(
+                        <X86_64 as Assembler<X86Instruction>>::can_assemble(&X86_64, instr),
+                        "opcode mutation carried a MOVABS immediate into {instr:?}"
+                    );
+                }
+                other => panic!("unexpected opcode mutation from MOV immediate: {other:?}"),
+            }
+        }
+
+        assert!(
+            saw_non_mov_bridge,
+            "test never observed MOV immediate bridge to a non-MOV form"
+        );
     }
 
     #[test]

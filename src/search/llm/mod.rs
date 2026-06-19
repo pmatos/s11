@@ -177,8 +177,8 @@ impl SearchAlgorithm<crate::isa::AArch64> for LlmSearch {
                 }
             };
 
-            let Some(verify_remaining) =
-                remaining_until(started, timeout, deadline).filter(|d| *d >= MIN_SMT_TIMEOUT)
+            let Some(verify_remaining) = remaining_until(started, timeout, deadline)
+                .and_then(|remaining| verification_timeout_for_remaining(config, remaining))
             else {
                 if config.verbose {
                     eprintln!(
@@ -306,6 +306,15 @@ fn remaining_until(
     (!remaining.is_zero()).then_some(remaining)
 }
 
+fn verification_timeout_for_remaining(
+    config: &SearchConfig,
+    remaining: Duration,
+) -> Option<Duration> {
+    let solver_timeout = config.solver_timeout.unwrap_or(Duration::from_secs(5));
+    let timeout = remaining.min(solver_timeout);
+    (timeout >= MIN_SMT_TIMEOUT).then_some(timeout)
+}
+
 #[cfg(test)]
 mod tests {
     //! No-Codex unit tests of `LlmSearch::search` flow gates.
@@ -369,6 +378,16 @@ mod tests {
 
     fn cfg_no_calls() -> SearchConfig {
         SearchConfig::default().with_llm(LlmConfig::default().with_max_codex_calls(0))
+    }
+
+    #[test]
+    fn llm_verification_timeout_is_capped_by_solver_timeout() {
+        let config = SearchConfig::default().with_solver_timeout(Duration::from_millis(25));
+
+        assert_eq!(
+            verification_timeout_for_remaining(&config, Duration::from_secs(10)),
+            Some(Duration::from_millis(25))
+        );
     }
 
     #[cfg(unix)]

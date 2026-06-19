@@ -211,7 +211,7 @@ impl std::str::FromStr for SearchMode {
     }
 }
 
-/// Default timeout for each symbolic SMT query.
+/// Default timeout for each SMT solver query used by verification/synthesis.
 pub const DEFAULT_SYMBOLIC_SOLVER_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Configuration for symbolic (SMT) search
@@ -230,8 +230,6 @@ pub struct SymbolicConfig {
     pub cost_bound: Option<u64>,
     /// Search mode (linear or binary)
     pub search_mode: SearchMode,
-    /// Timeout for each SMT query
-    pub solver_timeout: Option<Duration>,
 }
 
 impl Default for SymbolicConfig {
@@ -240,7 +238,6 @@ impl Default for SymbolicConfig {
             window_size: 3,
             cost_bound: None,
             search_mode: SearchMode::Linear,
-            solver_timeout: Some(DEFAULT_SYMBOLIC_SOLVER_TIMEOUT),
         }
     }
 }
@@ -259,16 +256,6 @@ impl SymbolicConfig {
     pub fn with_search_mode(mut self, mode: SearchMode) -> Self {
         self.search_mode = mode;
         self
-    }
-
-    pub fn with_timeout(mut self, timeout: Duration) -> Self {
-        self.solver_timeout = Some(timeout);
-        self
-    }
-
-    pub fn effective_solver_timeout(&self) -> Duration {
-        self.solver_timeout
-            .unwrap_or(DEFAULT_SYMBOLIC_SOLVER_TIMEOUT)
     }
 }
 
@@ -334,6 +321,8 @@ pub struct SearchConfig {
     pub cost_metric: CostMetric,
     /// Overall timeout for the search
     pub timeout: Option<Duration>,
+    /// Timeout for each SMT solver query used by verification/synthesis.
+    pub solver_timeout: Option<Duration>,
     /// Number of worker threads (rayon) for algorithms that parallelise.
     /// `None` lets rayon pick its default (typically logical-core count).
     /// `Some(0)` is coerced to 1 thread (rayon rejects zero-thread pools).
@@ -351,6 +340,11 @@ pub struct SearchConfig {
     pub x86_available_registers: Vec<crate::isa::x86::X86Register>,
     /// x86 operand width: 64 for x86-64, 32 for x86-32.
     pub x86_width: u32,
+    /// Whether x86 symbolic code-size search may consider same-instruction-count
+    /// candidates. Direct IR callers default to true; the ELF frontend can
+    /// disable this when source operands used partial-register aliases that the
+    /// current x86 IR collapses to full-width registers.
+    pub x86_same_count_code_size_allowed: bool,
     /// Stochastic-specific configuration
     pub stochastic: StochasticConfig,
     /// Symbolic-specific configuration
@@ -374,6 +368,7 @@ impl Default for SearchConfig {
             algorithm: Algorithm::default(),
             cost_metric: CostMetric::default(),
             timeout: Some(Duration::from_secs(60)),
+            solver_timeout: Some(DEFAULT_SYMBOLIC_SOLVER_TIMEOUT),
             cores: None,
             available_registers: vec![
                 Register::X0,
@@ -388,6 +383,7 @@ impl Default for SearchConfig {
             ],
             x86_available_registers: crate::isa::x86::default_x86_registers(),
             x86_width: 64,
+            x86_same_count_code_size_allowed: true,
             stochastic: StochasticConfig::default(),
             symbolic: SymbolicConfig::default(),
             llm: LlmConfig::default(),
@@ -410,6 +406,11 @@ impl SearchConfig {
 
     pub fn with_timeout(mut self, timeout: Duration) -> Self {
         self.timeout = Some(timeout);
+        self
+    }
+
+    pub fn with_solver_timeout(mut self, timeout: Duration) -> Self {
+        self.solver_timeout = Some(timeout);
         self
     }
 
@@ -463,6 +464,11 @@ impl SearchConfig {
         self
     }
 
+    pub fn with_solver_timeout_option(mut self, timeout: Option<Duration>) -> Self {
+        self.solver_timeout = timeout;
+        self
+    }
+
     /// Set the x86 register pool (issue #73).
     pub fn with_x86_registers(mut self, registers: Vec<crate::isa::x86::X86Register>) -> Self {
         self.x86_available_registers = registers;
@@ -500,6 +506,11 @@ impl SearchConfig {
         } else {
             crate::assembler::x86::X86Mode::Mode64
         }
+    }
+
+    pub fn with_x86_same_count_code_size_allowed(mut self, allowed: bool) -> Self {
+        self.x86_same_count_code_size_allowed = allowed;
+        self
     }
 }
 
@@ -602,6 +613,18 @@ mod tests {
     }
 
     #[test]
+    fn search_config_solver_timeout_builder_round_trips() {
+        let default = SearchConfig::default();
+        assert_eq!(default.solver_timeout, Some(Duration::from_secs(30)));
+
+        let explicit = SearchConfig::default().with_solver_timeout(Duration::from_millis(250));
+        assert_eq!(explicit.solver_timeout, Some(Duration::from_millis(250)));
+
+        let unset = SearchConfig::default().with_solver_timeout_option(None);
+        assert_eq!(unset.solver_timeout, None);
+    }
+
+    #[test]
     fn search_config_derives_x86_mode_from_width() {
         assert_eq!(
             SearchConfig::default().x86_mode(),
@@ -637,34 +660,11 @@ mod tests {
         let config = SymbolicConfig::default()
             .with_window_size(5)
             .with_cost_bound(2)
-            .with_search_mode(SearchMode::Binary)
-            .with_timeout(Duration::from_millis(250));
+            .with_search_mode(SearchMode::Binary);
 
         assert_eq!(config.window_size, 5);
         assert_eq!(config.cost_bound, Some(2));
         assert_eq!(config.search_mode, SearchMode::Binary);
-        assert_eq!(config.solver_timeout, Some(Duration::from_millis(250)));
-    }
-
-    #[test]
-    fn symbolic_solver_timeout_none_uses_default_timeout() {
-        assert_eq!(
-            SymbolicConfig::default().effective_solver_timeout(),
-            Duration::from_secs(30)
-        );
-        assert_eq!(
-            SymbolicConfig::default()
-                .with_timeout(Duration::from_millis(250))
-                .effective_solver_timeout(),
-            Duration::from_millis(250)
-        );
-
-        let config = SymbolicConfig {
-            solver_timeout: None,
-            ..SymbolicConfig::default()
-        };
-
-        assert_eq!(config.effective_solver_timeout(), Duration::from_secs(30));
     }
 
     #[test]

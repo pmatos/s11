@@ -37,6 +37,20 @@ pub trait SymbolicBackend<I: ISA>: Sized {
         None
     }
 
+    /// Whether this backend may find a strict metric improvement without
+    /// reducing the number of rewritable instructions for this target/config.
+    ///
+    /// For x86 code-size search, the config flag is a binary-patching guard:
+    /// the current x86 IR collapses partial-register aliases to full-width
+    /// registers, so the ELF frontend disables same-count rewrites when the
+    /// original Capstone operands were not full-width for the binary mode.
+    fn can_improve_at_same_instruction_count(
+        _target: &[I::Instruction],
+        _config: &SearchConfig,
+    ) -> bool {
+        false
+    }
+
     /// Sum the cost of every instruction in the sequence.
     fn sequence_cost(seq: &[I::Instruction], metric: &CostMetric, width: u32) -> u64;
 
@@ -135,6 +149,14 @@ impl SymbolicBackend<crate::isa::X86_64> for crate::isa::X86_64 {
             .copied()
     }
 
+    fn can_improve_at_same_instruction_count(
+        _target: &[crate::isa::x86::X86Instruction],
+        config: &SearchConfig,
+    ) -> bool {
+        matches!(config.cost_metric, CostMetric::CodeSize)
+            && config.x86_same_count_code_size_allowed
+    }
+
     fn sequence_cost(
         seq: &[crate::isa::x86::X86Instruction],
         metric: &CostMetric,
@@ -203,6 +225,14 @@ impl SymbolicBackend<crate::isa::X86_32> for crate::isa::X86_32 {
         crate::ir::instructions::split_terminator_x86(target)
             .1
             .copied()
+    }
+
+    fn can_improve_at_same_instruction_count(
+        _target: &[crate::isa::x86::X86Instruction],
+        config: &SearchConfig,
+    ) -> bool {
+        matches!(config.cost_metric, CostMetric::CodeSize)
+            && config.x86_same_count_code_size_allowed
     }
 
     fn sequence_cost(

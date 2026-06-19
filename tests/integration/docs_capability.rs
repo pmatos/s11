@@ -71,6 +71,12 @@ fn docs_capability_documents_w_logical_immediates() {
     );
     assert!(
         matrix.contains(
+            "non-flag-setting `and`, `orr`, and `eor` also support 32-bit `w` register and shifted-register forms"
+        ),
+        "docs/capability.md must document W-register logical shifted-register support"
+    );
+    assert!(
+        matrix.contains(
             "capstone `mov wd|wsp, #imm` bitmask aliases are accepted for the `orr wd|wsp, wzr, #imm` form"
         ),
         "docs/capability.md must document Capstone MOV aliases for W logical-immediate ORR"
