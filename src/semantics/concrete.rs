@@ -86,7 +86,10 @@ fn eval_logical_operand(
     operand: &Operand,
     width: RegisterWidth,
 ) -> u64 {
-    eval_operand(state, operand).as_u64() & mask_for_register_width(width)
+    match width {
+        RegisterWidth::W32 => eval_w_operand(state, operand),
+        RegisterWidth::X64 => eval_operand(state, operand).as_u64(),
+    }
 }
 
 fn logical_flags(result: u64, width: RegisterWidth) -> ConditionFlags {
@@ -864,22 +867,19 @@ pub fn apply_sequence_concrete(
     state
 }
 
-/// Check if two concrete states are equal for the specified live-out registers,
-/// optionally including the NZCV condition flags and the whole memory map.
+/// Check if two concrete states are equal for the specified live-out contract,
+/// including the NZCV condition flags when `live_out.flags_live()` is set and
+/// the whole memory map when `memory_live` is set.
 ///
 /// `memory_live` is derived automatically by callers from whether either
 /// sequence touches memory (see ADR-0007). When set, every memory cell
 /// must agree between the two states — equivalently, the two `BTreeMap`s
 /// must be structurally equal (prune-on-write guarantees structural ==
 /// semantic equality).
-///
-/// TODO(#282): Production callers now pass `live_out.flags_live()` here; the
-/// explicit parameter is retained for direct tests and future cleanup.
 pub fn states_equal_for_live_out(
     state1: &ConcreteMachineState,
     state2: &ConcreteMachineState,
     live_out: &RegisterSet<Register>,
-    flags_live: bool,
     memory_live: bool,
 ) -> bool {
     for reg in live_out.iter() {
@@ -887,7 +887,7 @@ pub fn states_equal_for_live_out(
             return false;
         }
     }
-    if flags_live && state1.get_flags() != state2.get_flags() {
+    if live_out.flags_live() && state1.get_flags() != state2.get_flags() {
         return false;
     }
     if memory_live && state1.memory() != state2.memory() {
@@ -899,14 +899,10 @@ pub fn states_equal_for_live_out(
 /// Find the first differing register between two states for live-out registers.
 /// Flag divergence (when `flags_live` is set) is reported via the `XZR`
 /// sentinel since the function signature is register-typed.
-///
-/// TODO(#282): see `states_equal_for_live_out` — the same explicit
-/// `flags_live` parameter remains for follow-up cleanup.
 pub fn find_first_difference(
     state1: &ConcreteMachineState,
     state2: &ConcreteMachineState,
     live_out: &RegisterSet<Register>,
-    flags_live: bool,
 ) -> Option<(Register, ConcreteValue, ConcreteValue)> {
     for reg in live_out.iter() {
         let v1 = state1.get_register(*reg);
@@ -915,7 +911,7 @@ pub fn find_first_difference(
             return Some((*reg, v1, v2));
         }
     }
-    if flags_live {
+    if live_out.flags_live() {
         let f1 = state1.get_flags();
         let f2 = state2.get_flags();
         if f1 != f2 {
@@ -1220,6 +1216,65 @@ mod tests {
     }
 
     #[test]
+    fn test_w32_logical_shifted_registers_use_low_32_bits_before_shifting() {
+        for (instr, pre_values, expected) in [
+            (
+                Instruction::And {
+                    rd: Register::X0,
+                    rn: Register::X1,
+                    rm: Operand::ShiftedRegister {
+                        reg: Register::X2,
+                        kind: ShiftKind::Lsr,
+                        amount: 1,
+                    },
+                    width: RegisterWidth::W32,
+                },
+                vec![
+                    (Register::X1, 0xFFFF_FFFF),
+                    (Register::X2, 0x0000_0001_0000_0000),
+                ],
+                0,
+            ),
+            (
+                Instruction::Orr {
+                    rd: Register::X0,
+                    rn: Register::X1,
+                    rm: Operand::ShiftedRegister {
+                        reg: Register::X2,
+                        kind: ShiftKind::Asr,
+                        amount: 31,
+                    },
+                    width: RegisterWidth::W32,
+                },
+                vec![(Register::X1, 0), (Register::X2, 0x0000_0001_8000_0000)],
+                0xFFFF_FFFF,
+            ),
+            (
+                Instruction::Eor {
+                    rd: Register::X0,
+                    rn: Register::X1,
+                    rm: Operand::ShiftedRegister {
+                        reg: Register::X2,
+                        kind: ShiftKind::Ror,
+                        amount: 1,
+                    },
+                    width: RegisterWidth::W32,
+                },
+                vec![(Register::X1, 0), (Register::X2, 0x0000_0001_0000_0000)],
+                0,
+            ),
+        ] {
+            let state = state_with(pre_values);
+            let new_state = apply_instruction_concrete(state, &instr);
+            assert_eq!(
+                new_state.get_register(Register::X0).as_u64(),
+                expected,
+                "{instr} must use W-register source semantics"
+            );
+        }
+    }
+
+    #[test]
     fn test_w32_tst_uses_32_bit_flags() {
         let instr = Instruction::Tst {
             rn: Register::X1,
@@ -1378,7 +1433,7 @@ mod tests {
 
         let live_out = RegisterSet::<Register>::from_registers(vec![Register::X0]);
         assert!(states_equal_for_live_out(
-            &state1, &state2, &live_out, false, false
+            &state1, &state2, &live_out, false
         ));
     }
 
@@ -1389,7 +1444,39 @@ mod tests {
 
         let live_out = RegisterSet::<Register>::from_registers(vec![Register::X0]);
         assert!(!states_equal_for_live_out(
-            &state1, &state2, &live_out, false, false
+            &state1, &state2, &live_out, false
+        ));
+    }
+
+    #[test]
+    fn test_states_equal_for_live_out_reads_flags_from_mask() {
+        let mut state1 = state_with(vec![(Register::X0, 42)]);
+        let mut state2 = state_with(vec![(Register::X0, 42)]);
+        state1.set_flags(ConditionFlags {
+            n: true,
+            z: false,
+            c: false,
+            v: false,
+        });
+        state2.set_flags(ConditionFlags {
+            n: false,
+            z: true,
+            c: false,
+            v: false,
+        });
+
+        let live_out = RegisterSet::<Register>::from_registers(vec![Register::X0]);
+        assert!(states_equal_for_live_out(
+            &state1,
+            &state2,
+            &live_out.clone().with_flags(false),
+            false
+        ));
+        assert!(!states_equal_for_live_out(
+            &state1,
+            &state2,
+            &live_out.with_flags(true),
+            false
         ));
     }
 
@@ -1399,7 +1486,7 @@ mod tests {
         let state2 = state_with(vec![(Register::X0, 42), (Register::X1, 200)]);
 
         let live_out = RegisterSet::<Register>::from_registers(vec![Register::X0, Register::X1]);
-        let diff = find_first_difference(&state1, &state2, &live_out, false);
+        let diff = find_first_difference(&state1, &state2, &live_out);
         assert!(diff.is_some());
         let (reg, v1, v2) = diff.unwrap();
         assert_eq!(reg, Register::X1);
@@ -1413,7 +1500,7 @@ mod tests {
         let state2 = state_with(vec![(Register::X0, 42)]);
 
         let live_out = RegisterSet::<Register>::from_registers(vec![Register::X0]);
-        let diff = find_first_difference(&state1, &state2, &live_out, false);
+        let diff = find_first_difference(&state1, &state2, &live_out);
         assert!(diff.is_none());
     }
 
@@ -1436,13 +1523,10 @@ mod tests {
 
         let live_out = RegisterSet::<Register>::from_registers(vec![Register::X0]);
         assert_eq!(
-            find_first_difference(&state1, &state2, &live_out, true),
+            find_first_difference(&state1, &state2, &live_out.clone().with_flags(true)),
             Some((Register::XZR, ConcreteValue(8), ConcreteValue(4)))
         );
-        assert_eq!(
-            find_first_difference(&state1, &state2, &live_out, false),
-            None
-        );
+        assert_eq!(find_first_difference(&state1, &state2, &live_out), None);
     }
 
     #[test]
@@ -1465,7 +1549,7 @@ mod tests {
 
         let live_out = RegisterSet::<Register>::from_registers(vec![Register::X0]);
         assert!(states_equal_for_live_out(
-            &state1, &state2, &live_out, false, false
+            &state1, &state2, &live_out, false
         ));
     }
 

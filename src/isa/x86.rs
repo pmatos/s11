@@ -828,6 +828,10 @@ impl X86Mutator {
         }
     }
 
+    fn pick_condition<R: rand::RngExt>(&self, rng: &mut R) -> X86Condition {
+        X86Condition::ALL[rng.random_range(0..X86Condition::ALL.len())]
+    }
+
     fn random_instruction<R: rand::RngExt>(&self, rng: &mut R) -> Option<X86Instruction> {
         if self.registers.is_empty() {
             return None;
@@ -867,8 +871,8 @@ impl X86Mutator {
                 | X86Instruction::OrReg { .. }
                 | X86Instruction::XorReg { .. }
                 | X86Instruction::CmpReg { .. }
-                | X86Instruction::Cmov { .. }
                 | X86Instruction::Jcc { .. } => {}
+                X86Instruction::Cmov { cond, .. } => *cond = self.pick_condition(rng),
             }
             return;
         }
@@ -923,13 +927,13 @@ impl X86Mutator {
                     *imm = self.pick_immediate(rng);
                 }
             }
-            X86Instruction::Cmov { rd, rs, .. } => {
-                // Cond stays fixed — stochastic mutation only swaps registers
-                // for now; cycle 16+ may add condition-bridging.
-                if rng.random_bool(0.5) {
-                    *rd = self.pick_register(rng).expect("register pool is non-empty");
-                } else {
-                    *rs = self.pick_register(rng).expect("register pool is non-empty");
+            X86Instruction::Cmov { rd, rs, cond } => {
+                // Treat the condition code as a mutable operand alongside
+                // the destination and source registers.
+                match rng.random_range(0..3u32) {
+                    0 => *rd = self.pick_register(rng).expect("register pool is non-empty"),
+                    1 => *rs = self.pick_register(rng).expect("register pool is non-empty"),
+                    _ => *cond = self.pick_condition(rng),
                 }
             }
             // Jcc is a terminator; mutation never reaches it because the
@@ -2377,6 +2381,103 @@ mod tests {
         let mut rng = ChaCha8Rng::seed_from_u64(7);
 
         assert_eq!(mutator.mutate(&mut rng, &target), target);
+    }
+
+    #[test]
+    fn x86_mutator_cmov_operand_mutates_condition_with_empty_register_pool() {
+        use crate::isa::traits::ISAMutator;
+        use crate::search::config::MutationWeights;
+        use rand::SeedableRng;
+        use rand_chacha::ChaCha8Rng;
+
+        let mutator = X86Mutator::new(
+            Vec::new(),
+            vec![0],
+            MutationWeights {
+                operand: 1.0,
+                opcode: 0.0,
+                swap: 0.0,
+                instruction: 0.0,
+            },
+            crate::assembler::x86::X86Mode::Mode64,
+        );
+        let target = vec![X86Instruction::Cmov {
+            rd: X86Register::RAX,
+            rs: X86Register::RBX,
+            cond: X86Condition::E,
+        }];
+        let mut rng = ChaCha8Rng::seed_from_u64(7);
+        let mut changed = None;
+
+        for _ in 0..200 {
+            let mutated = mutator.mutate(&mut rng, &target);
+            match mutated.as_slice() {
+                [X86Instruction::Cmov { rd, rs, cond }]
+                    if *rd == X86Register::RAX && *rs == X86Register::RBX =>
+                {
+                    if *cond != X86Condition::E {
+                        changed = Some(*cond);
+                        break;
+                    }
+                }
+                other => panic!("unexpected CMOV mutation with empty register pool: {other:?}"),
+            }
+        }
+
+        assert!(
+            changed.is_some(),
+            "CMOV condition did not change after repeated operand mutations"
+        );
+    }
+
+    #[test]
+    fn x86_mutator_cmov_operand_reaches_all_conditions() {
+        use crate::isa::traits::ISAMutator;
+        use crate::search::config::MutationWeights;
+        use rand::SeedableRng;
+        use rand_chacha::ChaCha8Rng;
+        use std::collections::HashSet;
+
+        let pool = vec![X86Register::RAX, X86Register::RBX, X86Register::RCX];
+        let mutator = X86Mutator::new(
+            pool.clone(),
+            vec![0],
+            MutationWeights {
+                operand: 1.0,
+                opcode: 0.0,
+                swap: 0.0,
+                instruction: 0.0,
+            },
+            crate::assembler::x86::X86Mode::Mode64,
+        );
+        let mut seq = vec![X86Instruction::Cmov {
+            rd: X86Register::RAX,
+            rs: X86Register::RBX,
+            cond: X86Condition::E,
+        }];
+        let mut rng = ChaCha8Rng::seed_from_u64(11);
+        let mut observed = HashSet::from([X86Condition::E]);
+
+        for _ in 0..2_000 {
+            seq = mutator.mutate(&mut rng, &seq);
+            match seq.as_slice() {
+                [X86Instruction::Cmov { rd, rs, cond }] => {
+                    assert!(pool.contains(rd), "CMOV rd left mutator pool: {rd:?}");
+                    assert!(pool.contains(rs), "CMOV rs left mutator pool: {rs:?}");
+                    observed.insert(*cond);
+                }
+                other => panic!("CMOV operand mutation changed instruction shape: {other:?}"),
+            }
+            if observed.len() == X86Condition::ALL.len() {
+                break;
+            }
+        }
+
+        assert_eq!(
+            observed.len(),
+            X86Condition::ALL.len(),
+            "CMOV operand mutation reached only {observed:?}"
+        );
     }
 
     #[test]

@@ -89,7 +89,8 @@ and how to add a fixture.
   harness sets `spec.seed + sample_index` per record so runs are
   deterministic given the pair.
 - Phase 2 fixtures are not committed; run
-  `scripts/harvest_llvm_codegen.sh` to populate them.
+  `scripts/harvest_llvm_codegen.sh` to populate them; see
+  `benches/llvm_codegen/README.md` for refresh and review notes.
 
 ### Mutation Testing (informational, local-only)
 
