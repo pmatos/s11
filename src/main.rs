@@ -3677,7 +3677,10 @@ mod cli_helper_tests {
         assert_eq!(config.stochastic.seed, default_stochastic.seed);
         // The enumerative path keeps stochastic fields out but still honors the
         // CLI --solver-timeout for its SMT verification queries.
-        assert_eq!(config.symbolic.solver_timeout, Duration::from_millis(37));
+        assert_eq!(
+            config.symbolic.solver_timeout,
+            Some(Duration::from_millis(37))
+        );
     }
 
     #[test]
