@@ -576,6 +576,14 @@ impl X86OptimizationBackend {
         };
         Ok(Self { arch, width })
     }
+
+    fn parse_mode(&self) -> parser::x86::X86ParseMode {
+        match self.arch {
+            DetectedArch::X86_64 => parser::x86::X86ParseMode::Mode64,
+            DetectedArch::X86_32 => parser::x86::X86ParseMode::Mode32,
+            DetectedArch::Aarch64 => unreachable!("x86 backend never receives AArch64"),
+        }
+    }
 }
 
 impl ElfOptimizationBackend for X86OptimizationBackend {
@@ -609,7 +617,7 @@ impl ElfOptimizationBackend for X86OptimizationBackend {
         &self,
         instructions: &capstone::Instructions,
     ) -> Result<Vec<Self::Instruction>, String> {
-        convert_to_x86_ir(instructions)
+        convert_to_x86_ir(instructions, self.parse_mode())
     }
 
     fn validate_window_ir(&self, ir: &[Self::Instruction]) -> Result<(), String> {
@@ -1635,7 +1643,7 @@ fn validate_basic_block(ir: &[Instruction]) -> Result<(), String> {
 // (`convert_to_x86_ir`) and the length-1 enumerator used by the
 // enumerative x86 pipeline.
 
-use parser::x86::x86_ir_from_mnemonic;
+use parser::x86::{X86ParseMode, x86_ir_from_mnemonic_for_mode};
 
 /// Reject any non-terminal Jcc in an x86 optimization window. The
 /// optimizer only special-cases a trailing Jcc (peeled by
@@ -1662,12 +1670,13 @@ fn validate_x86_window_terminator_placement(ir: &[isa::x86::X86Instruction]) -> 
 
 fn convert_to_x86_ir(
     instructions: &capstone::Instructions,
+    mode: X86ParseMode,
 ) -> Result<Vec<isa::x86::X86Instruction>, String> {
     let mut out = Vec::new();
     for instruction in instructions.iter() {
         let mn = instruction.mnemonic().unwrap_or("");
         let ops = instruction.op_str().unwrap_or("");
-        match x86_ir_from_mnemonic(mn, ops) {
+        match x86_ir_from_mnemonic_for_mode(mn, ops, mode) {
             Ok(Some(ir)) => out.push(ir),
             Ok(None) => {
                 // Refusing the window is safer than silently dropping the
@@ -2291,7 +2300,7 @@ mod cli_helper_tests {
     use super::*;
     use ir::Operand;
     use isa::x86::{X86Instruction, X86Register};
-    use parser::x86::{parse_x86_operand, parse_x86_register};
+    use parser::x86::{parse_x86_operand, parse_x86_register, x86_ir_from_mnemonic};
     use search::llm::LlmTimings;
     use search::llm::ledger::UnsupportedMnemonicLedger;
     use search::result::SearchStatistics;
@@ -3074,6 +3083,111 @@ mod cli_helper_tests {
                 assert_eq!(parse_x86_register(alias).unwrap(), reg);
             }
         }
+    }
+
+    #[test]
+    fn x86_64_capstone_bridge_rejects_non_mode_width_register_aliases() {
+        let cs = capstone::Capstone::new()
+            .x86()
+            .mode(capstone::arch::x86::ArchMode::Mode64)
+            .syntax(capstone::arch::x86::ArchSyntax::Intel)
+            .build()
+            .expect("capstone init");
+
+        let add_eax = cs
+            .disasm_all(&[0x83, 0xc0, 0x00], 0x1000)
+            .expect("disassemble add eax, 0");
+        let insn = add_eax.iter().next().expect("one instruction");
+        assert_eq!(insn.mnemonic(), Some("add"));
+        assert_eq!(insn.op_str(), Some("eax, 0"));
+        let err = convert_to_x86_ir(&add_eax, parser::x86::X86ParseMode::Mode64)
+            .expect_err("x86-64 add eax, 0 must be rejected until width is modeled");
+        assert!(
+            err.contains("unsupported x86-64 register alias width"),
+            "unexpected error: {err}"
+        );
+
+        let mov_al = cs
+            .disasm_all(&[0xb0, 0x7f], 0x1000)
+            .expect("disassemble mov al, 0x7f");
+        let insn = mov_al.iter().next().expect("one instruction");
+        assert_eq!(insn.mnemonic(), Some("mov"));
+        assert_eq!(insn.op_str(), Some("al, 0x7f"));
+        let err = convert_to_x86_ir(&mov_al, parser::x86::X86ParseMode::Mode64)
+            .expect_err("x86-64 mov al, imm must be rejected until width is modeled");
+        assert!(
+            err.contains("unsupported x86-64 register alias width"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn x86_capstone_bridge_accepts_mode_width_register_aliases() {
+        let cs64 = capstone::Capstone::new()
+            .x86()
+            .mode(capstone::arch::x86::ArchMode::Mode64)
+            .syntax(capstone::arch::x86::ArchSyntax::Intel)
+            .build()
+            .expect("capstone x86-64 init");
+        let add_rax = cs64
+            .disasm_all(&[0x48, 0x83, 0xc0, 0x00], 0x1000)
+            .expect("disassemble add rax, 0");
+        let insn = add_rax.iter().next().expect("one instruction");
+        assert_eq!(insn.mnemonic(), Some("add"));
+        assert_eq!(insn.op_str(), Some("rax, 0"));
+        assert_eq!(
+            convert_to_x86_ir(&add_rax, parser::x86::X86ParseMode::Mode64).unwrap(),
+            vec![X86Instruction::AddImm {
+                rd: X86Register::RAX,
+                imm: 0,
+            }]
+        );
+
+        let cs32 = capstone::Capstone::new()
+            .x86()
+            .mode(capstone::arch::x86::ArchMode::Mode32)
+            .syntax(capstone::arch::x86::ArchSyntax::Intel)
+            .build()
+            .expect("capstone x86-32 init");
+        let add_eax = cs32
+            .disasm_all(&[0x83, 0xc0, 0x00], 0x1000)
+            .expect("disassemble add eax, 0");
+        let insn = add_eax.iter().next().expect("one instruction");
+        assert_eq!(insn.mnemonic(), Some("add"));
+        assert_eq!(insn.op_str(), Some("eax, 0"));
+        assert_eq!(
+            convert_to_x86_ir(&add_eax, parser::x86::X86ParseMode::Mode32).unwrap(),
+            vec![X86Instruction::AddImm {
+                rd: X86Register::RAX,
+                imm: 0,
+            }]
+        );
+    }
+
+    #[test]
+    fn x86_64_optimizer_rejects_narrow_register_alias_before_search() {
+        let elf_bytes = build_minimal_elf64(
+            &[0x83, 0xc0, 0x00, 0x83, 0xc0, 0x00],
+            0x1000,
+            elf::abi::EM_X86_64,
+        );
+        let input = TempFile::new_bytes("s11-x86-64-eax-alias", "elf", &elf_bytes);
+        let patcher = ElfPatcher::new(input.path()).expect("read synthetic ELF");
+        let mut opts = options_for(Algorithm::Enumerative);
+        opts.timeout = Some(Duration::from_secs(5));
+        opts.cost_metric = CostMetric::CodeSize;
+
+        let err = optimize_elf_binary(&patcher, input.path(), 0x1000, 0x1006, &opts)
+            .expect_err("narrow register aliases should be rejected before search");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("failed to parse x86 instruction 'add eax, 0'"),
+            "unexpected error: {msg}"
+        );
+        assert!(
+            msg.contains("unsupported x86-64 register alias width"),
+            "unexpected error: {msg}"
+        );
     }
 
     #[test]
