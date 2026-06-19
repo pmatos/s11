@@ -846,8 +846,8 @@ const EXTEND_KEYWORDS: [&str; 8] = [
     "uxtb", "uxth", "uxtw", "uxtx", "sxtb", "sxth", "sxtw", "sxtx",
 ];
 
-/// Returns true if the keyword names an extend kind
-/// (UXTB/UXTH/UXTW/UXTX/SXTB/SXTH/SXTW/SXTX) rather than a shift kind.
+/// Returns true if `kw` names an extend kind (ASCII-case-insensitive:
+/// UXTB/UXTH/UXTW/UXTX/SXTB/SXTH/SXTW/SXTX) rather than a shift kind.
 fn is_extend_keyword(kw: &str) -> bool {
     EXTEND_KEYWORDS
         .iter()
@@ -893,6 +893,7 @@ fn parse_memory_operand(
 
     // Parse the inner pieces.
     let inner_parts: Vec<&str> = inner.split(',').map(|s| s.trim()).collect();
+    let bracketed_form_is_bare_base = inner_parts.len() == 1;
     let base = parse_register(inner_parts[0])
         .map_err(|e| format!("invalid base register in memory operand: {}", e))?;
 
@@ -985,11 +986,12 @@ fn parse_memory_operand(
     if tokens.len() >= 2 {
         let second = tokens[1].trim();
         if let Ok(imm) = parse_immediate(second) {
-            if let AddressOperand::Imm {
-                base,
-                offset: 0,
-                mode: IndexMode::Offset,
-            } = addr
+            if bracketed_form_is_bare_base
+                && let AddressOperand::Imm {
+                    base,
+                    offset: 0,
+                    mode: IndexMode::Offset,
+                } = addr
             {
                 addr = AddressOperand::Imm {
                     base,
@@ -1129,6 +1131,26 @@ fn parse_single_reg_mem(
     Ok(builder(rt, addr, width))
 }
 
+fn parse_signed_load_mem(
+    mnem: &str,
+    operands: &[&str],
+    width: crate::ir::types::AccessWidth,
+) -> Result<Instruction, String> {
+    if operands.len() >= 2 {
+        let (_, dst_width) = parse_sized_register(operands[0])
+            .map_err(|e| format!("{}: invalid Xt: {}", mnem, e))?;
+        if dst_width != RegisterWidth::X64 {
+            return Err(format!("{} signed-load destination must be X-form", mnem));
+        }
+    }
+
+    parse_single_reg_mem(mnem, operands, width, |rt, addr, w| Instruction::Ldrs {
+        rt,
+        addr,
+        width: w,
+    })
+}
+
 /// Parse a pair memory instruction (LDP/STP/LDPSW). The destination
 /// pair is the first two operands; the remaining tokens form the
 /// address operand. `signed=true` only for LDPSW.
@@ -1176,6 +1198,8 @@ fn parse_pair_mem(
         }
         crate::ir::types::AddressOperand::Imm { .. } => {}
     }
+    let width = crate::ir::types::PairAccessWidth::try_from(width)
+        .map_err(|e| format!("{}: {}", mnem, e))?;
     if is_load {
         Ok(Instruction::Ldp {
             rt1,
@@ -1553,7 +1577,10 @@ fn parse_ccmn(operands: &[&str]) -> Result<Instruction, String> {
 
 /// Parse a bit-field-manipulation instruction operand list:
 /// `rd, rn, #lsb, #width`. Used by UBFX/SBFX/BFI/BFXIL/UBFIZ/SBFIZ.
-fn parse_bfm_like(operands: &[&str], mnem: &str) -> Result<(Register, Register, u8, u8), String> {
+fn parse_bfm_like(
+    operands: &[&str],
+    mnem: &str,
+) -> Result<(Register, Register, u8, u8, RegisterWidth), String> {
     if operands.len() != 4 {
         return Err(format!(
             "{} requires 4 operands, got {}",
@@ -1561,25 +1588,35 @@ fn parse_bfm_like(operands: &[&str], mnem: &str) -> Result<(Register, Register, 
             operands.len()
         ));
     }
-    let rd = parse_register(operands[0])?;
-    let rn = parse_register(operands[1])?;
+    // rd and rn must use matching widths; the width selects X (64) vs W (32)
+    // and bounds the lsb/width immediates accordingly.
+    let (rd, rn, reg_width) = parse_same_width_registers(mnem, operands)?;
+    let bound = reg_width.bit_width() as i64;
     let lsb_raw = parse_immediate(operands[2])?;
-    if !(0..=63).contains(&lsb_raw) {
-        return Err(format!("{} lsb {} out of range (0..=63)", mnem, lsb_raw));
+    if !(0..bound).contains(&lsb_raw) {
+        return Err(format!(
+            "{} lsb {} out of range (0..={})",
+            mnem,
+            lsb_raw,
+            bound - 1
+        ));
     }
     let width_raw = parse_immediate(operands[3])?;
-    if !(1..=64).contains(&width_raw) {
+    if !(1..=bound).contains(&width_raw) {
         return Err(format!(
-            "{} width {} out of range (1..=64)",
-            mnem, width_raw
+            "{} width {} out of range (1..={})",
+            mnem, width_raw, bound
         ));
     }
     let lsb = lsb_raw as u8;
     let width = width_raw as u8;
-    if (lsb as u16 + width as u16) > 64 {
-        return Err(format!("{} lsb {} + width {} exceeds 64", mnem, lsb, width));
+    if (lsb as u16 + width as u16) > bound as u16 {
+        return Err(format!(
+            "{} lsb {} + width {} exceeds {}",
+            mnem, lsb, width, bound
+        ));
     }
-    Ok((rd, rn, lsb, width))
+    Ok((rd, rn, lsb, width, reg_width))
 }
 
 fn parse_ccmp_like(
@@ -1878,22 +1915,58 @@ pub fn parse_line(line: &str) -> Result<LineResult, ParseLineError> {
         "ccmp" => parse_ccmp(&operands).map_err(ParseLineError::Other)?,
         "ccmn" => parse_ccmn(&operands).map_err(ParseLineError::Other)?,
         "ubfx" => parse_bfm_like(&operands, "ubfx")
-            .map(|(rd, rn, lsb, width)| Instruction::Ubfx { rd, rn, lsb, width })
+            .map(|(rd, rn, lsb, width, reg_width)| Instruction::Ubfx {
+                rd,
+                rn,
+                lsb,
+                width,
+                reg_width,
+            })
             .map_err(ParseLineError::Other)?,
         "sbfx" => parse_bfm_like(&operands, "sbfx")
-            .map(|(rd, rn, lsb, width)| Instruction::Sbfx { rd, rn, lsb, width })
+            .map(|(rd, rn, lsb, width, reg_width)| Instruction::Sbfx {
+                rd,
+                rn,
+                lsb,
+                width,
+                reg_width,
+            })
             .map_err(ParseLineError::Other)?,
         "bfi" => parse_bfm_like(&operands, "bfi")
-            .map(|(rd, rn, lsb, width)| Instruction::Bfi { rd, rn, lsb, width })
+            .map(|(rd, rn, lsb, width, reg_width)| Instruction::Bfi {
+                rd,
+                rn,
+                lsb,
+                width,
+                reg_width,
+            })
             .map_err(ParseLineError::Other)?,
         "bfxil" => parse_bfm_like(&operands, "bfxil")
-            .map(|(rd, rn, lsb, width)| Instruction::Bfxil { rd, rn, lsb, width })
+            .map(|(rd, rn, lsb, width, reg_width)| Instruction::Bfxil {
+                rd,
+                rn,
+                lsb,
+                width,
+                reg_width,
+            })
             .map_err(ParseLineError::Other)?,
         "ubfiz" => parse_bfm_like(&operands, "ubfiz")
-            .map(|(rd, rn, lsb, width)| Instruction::Ubfiz { rd, rn, lsb, width })
+            .map(|(rd, rn, lsb, width, reg_width)| Instruction::Ubfiz {
+                rd,
+                rn,
+                lsb,
+                width,
+                reg_width,
+            })
             .map_err(ParseLineError::Other)?,
         "sbfiz" => parse_bfm_like(&operands, "sbfiz")
-            .map(|(rd, rn, lsb, width)| Instruction::Sbfiz { rd, rn, lsb, width })
+            .map(|(rd, rn, lsb, width, reg_width)| Instruction::Sbfiz {
+                rd,
+                rn,
+                lsb,
+                width,
+                reg_width,
+            })
             .map_err(ParseLineError::Other)?,
         "csel" => parse_csel(&operands).map_err(ParseLineError::Other)?,
         "csinc" => parse_csinc(&operands).map_err(ParseLineError::Other)?,
@@ -1988,27 +2061,12 @@ pub fn parse_line(line: &str) -> Result<LineResult, ParseLineError> {
             |rt, addr, w| Instruction::Ldr { rt, addr, width: w },
         )
         .map_err(ParseLineError::Other)?,
-        "ldrsb" => parse_single_reg_mem(
-            "ldrsb",
-            &operands,
-            crate::ir::types::AccessWidth::Byte,
-            |rt, addr, w| Instruction::Ldrs { rt, addr, width: w },
-        )
-        .map_err(ParseLineError::Other)?,
-        "ldrsh" => parse_single_reg_mem(
-            "ldrsh",
-            &operands,
-            crate::ir::types::AccessWidth::Half,
-            |rt, addr, w| Instruction::Ldrs { rt, addr, width: w },
-        )
-        .map_err(ParseLineError::Other)?,
-        "ldrsw" => parse_single_reg_mem(
-            "ldrsw",
-            &operands,
-            crate::ir::types::AccessWidth::Word,
-            |rt, addr, w| Instruction::Ldrs { rt, addr, width: w },
-        )
-        .map_err(ParseLineError::Other)?,
+        "ldrsb" => parse_signed_load_mem("ldrsb", &operands, crate::ir::types::AccessWidth::Byte)
+            .map_err(ParseLineError::Other)?,
+        "ldrsh" => parse_signed_load_mem("ldrsh", &operands, crate::ir::types::AccessWidth::Half)
+            .map_err(ParseLineError::Other)?,
+        "ldrsw" => parse_signed_load_mem("ldrsw", &operands, crate::ir::types::AccessWidth::Word)
+            .map_err(ParseLineError::Other)?,
         "str" => parse_single_reg_mem("str", &operands, ldr_width(&operands), |rt, addr, w| {
             Instruction::Str { rt, addr, width: w }
         })
@@ -2098,7 +2156,7 @@ pub fn parse_assembly_string(
 
     if instructions.is_empty() {
         return Err(ParseError::new(
-            0,
+            1,
             "no instructions found in file",
             source_name,
         ));
@@ -2706,9 +2764,16 @@ mod tests {
 
     #[test]
     fn test_parse_assembly_string_empty() {
-        let asm = "// just a comment\n.text\n";
-        let result = parse_assembly_string(asm, "test".to_string());
-        assert!(result.is_err());
+        let empty_err = parse_assembly_string("", "test".to_string()).unwrap_err();
+        assert_eq!(empty_err.line_number, 1);
+        assert_eq!(empty_err.message, "no instructions found in file");
+        assert_eq!(empty_err.line_content, "test");
+
+        let skipped_err =
+            parse_assembly_string("// just a comment\n.text\n", "test".to_string()).unwrap_err();
+        assert_eq!(skipped_err.line_number, 1);
+        assert_eq!(skipped_err.message, "no instructions found in file");
+        assert_eq!(skipped_err.line_content, "test");
     }
 
     /// Round-trip Display → parser for every Tier 1 mnemonic.
@@ -2933,9 +2998,63 @@ mod tests {
                 rn: Register::X1,
                 lsb: 5,
                 width: 10,
+                reg_width: crate::ir::RegisterWidth::X64
             }
         );
         assert_eq!(format!("{}", parsed), "ubfx x0, x1, #5, #10");
+    }
+
+    #[test]
+    fn parse_bitfield_w_roundtrip() {
+        // Each W-form mnemonic round-trips: parse `w` operands, build a W32
+        // variant, and Display back to `w` operands.
+        for mnem in ["ubfx", "sbfx", "bfi", "bfxil", "ubfiz", "sbfiz"] {
+            let text = format!("{mnem} w0, w1, #5, #10");
+            let parsed = match parse_line(&text).unwrap() {
+                LineResult::Instruction(instr) => instr,
+                LineResult::Skip => panic!("unexpected skip"),
+            };
+            assert_eq!(
+                parsed.destination(),
+                Some(Register::X0),
+                "{mnem} W destination"
+            );
+            assert_eq!(format!("{parsed}"), text, "{mnem} W round-trip Display");
+        }
+    }
+
+    #[test]
+    fn parse_bitfield_w_builds_w32_variant() {
+        let parsed = match parse_line("ubfx w0, w1, #5, #10").unwrap() {
+            LineResult::Instruction(instr) => instr,
+            LineResult::Skip => panic!("unexpected skip"),
+        };
+        assert_eq!(
+            parsed,
+            Instruction::Ubfx {
+                rd: Register::X0,
+                rn: Register::X1,
+                lsb: 5,
+                width: 10,
+                reg_width: crate::ir::RegisterWidth::W32,
+            }
+        );
+    }
+
+    #[test]
+    fn parse_bitfield_rejects_mixed_widths() {
+        assert!(parse_line("ubfx w0, x1, #5, #10").is_err());
+        assert!(parse_line("ubfx x0, w1, #5, #10").is_err());
+    }
+
+    #[test]
+    fn parse_bitfield_w_rejects_out_of_range() {
+        // lsb=32 is valid for X but not W.
+        assert!(parse_line("ubfx w0, w1, #32, #1").is_err());
+        // lsb+width > 32 rejected for W.
+        assert!(parse_line("sbfx w0, w1, #16, #17").is_err());
+        // width=33 rejected for W.
+        assert!(parse_line("bfi w0, w1, #0, #33").is_err());
     }
 
     #[test]
@@ -2951,6 +3070,7 @@ mod tests {
                 rn: Register::X1,
                 lsb: 5,
                 width: 10,
+                reg_width: crate::ir::RegisterWidth::X64
             }
         );
         assert_eq!(format!("{}", parsed), "sbfx x0, x1, #5, #10");
@@ -2969,6 +3089,7 @@ mod tests {
                 rn: Register::X1,
                 lsb: 5,
                 width: 10,
+                reg_width: crate::ir::RegisterWidth::X64
             }
         );
         assert_eq!(format!("{}", parsed), "bfi x0, x1, #5, #10");
@@ -2987,6 +3108,7 @@ mod tests {
                 rn: Register::X1,
                 lsb: 5,
                 width: 10,
+                reg_width: crate::ir::RegisterWidth::X64
             }
         );
         assert_eq!(format!("{}", parsed), "bfxil x0, x1, #5, #10");
@@ -3005,6 +3127,7 @@ mod tests {
                 rn: Register::X1,
                 lsb: 5,
                 width: 10,
+                reg_width: crate::ir::RegisterWidth::X64
             }
         );
         assert_eq!(format!("{}", parsed), "ubfiz x0, x1, #5, #10");
@@ -3023,6 +3146,7 @@ mod tests {
                 rn: Register::X1,
                 lsb: 5,
                 width: 10,
+                reg_width: crate::ir::RegisterWidth::X64
             }
         );
         assert_eq!(format!("{}", parsed), "sbfiz x0, x1, #5, #10");
@@ -3399,6 +3523,62 @@ mod tests {
     }
 
     #[test]
+    fn parse_standalone_extend_round_trips_zero_registers() {
+        // Issue #428: keep zero-register spellings stable
+        // across Display -> parse_line -> Display for standalone extends.
+        let cases = [
+            (
+                Instruction::Uxtb {
+                    rd: Register::XZR,
+                    rn: Register::XZR,
+                },
+                "uxtb wzr, wzr",
+            ),
+            (
+                Instruction::Uxth {
+                    rd: Register::XZR,
+                    rn: Register::XZR,
+                },
+                "uxth wzr, wzr",
+            ),
+            (
+                Instruction::Sxtb {
+                    rd: Register::XZR,
+                    rn: Register::XZR,
+                },
+                "sxtb xzr, wzr",
+            ),
+            (
+                Instruction::Sxth {
+                    rd: Register::XZR,
+                    rn: Register::XZR,
+                },
+                "sxth xzr, wzr",
+            ),
+            (
+                Instruction::Sxtw {
+                    rd: Register::XZR,
+                    rn: Register::XZR,
+                },
+                "sxtw xzr, wzr",
+            ),
+        ];
+
+        for (expected, expected_text) in cases {
+            assert_eq!(expected.to_string(), expected_text);
+
+            let parsed = match parse_line(expected_text)
+                .unwrap_or_else(|e| panic!("{expected_text}: {e}"))
+            {
+                LineResult::Instruction(instr) => instr,
+                LineResult::Skip => panic!("unexpected skip for {expected_text}"),
+            };
+            assert_eq!(parsed, expected, "parse mismatch for {expected_text}");
+            assert_eq!(parsed.to_string(), expected_text);
+        }
+    }
+
+    #[test]
     fn parse_sxt_rejects_w_destination() {
         // Issue #60 follow-up (Codex P1 on the rebased branch): `sxtb w0, w1`
         // is the 32-bit-Wd-write form architecturally — distinct from the
@@ -3749,6 +3929,34 @@ mod tests {
     }
 
     #[test]
+    fn parse_line_rejects_w_form_signed_load_destinations() {
+        for (line, mnemonic) in [
+            ("ldrsb w0, [x1]", "ldrsb"),
+            ("ldrsh w0, [x1]", "ldrsh"),
+            ("ldrsw w0, [x1]", "ldrsw"),
+            ("ldrsb w0, [x1, #1]!", "ldrsb"),
+            ("ldrsh w0, [x1], #2", "ldrsh"),
+            ("ldrsb w0, [x1, x2]", "ldrsb"),
+            ("ldrsb w0, [x1, w2, sxtw]", "ldrsb"),
+        ] {
+            match parse_line(line) {
+                Err(ParseLineError::Other(msg)) => {
+                    assert!(msg.contains(mnemonic), "{line} error should name mnemonic");
+                    assert!(msg.contains("X-form"), "{line} error should name X-form");
+                }
+                other => panic!("expected W-form signed-load rejection for {line}, got {other:?}"),
+            }
+        }
+
+        for line in ["ldrsb x0, [x1]", "ldrsh x0, [x1]", "ldrsw x0, [x1]"] {
+            assert!(
+                matches!(parse_line(line), Ok(LineResult::Instruction(_))),
+                "X-form signed load should remain accepted: {line}"
+            );
+        }
+    }
+
+    #[test]
     fn memory_op_round_trips_across_all_addressing_modes() {
         // Immediate-offset, including bare-base and negative offsets.
         assert_mem_round_trip("ldr x0, [x1]");
@@ -3781,6 +3989,32 @@ mod tests {
         assert_mem_round_trip("ldp x0, x1, [sp], #16");
         assert_mem_round_trip("stp x29, x30, [sp, #-16]!");
         assert_mem_round_trip("ldpsw x0, x1, [sp]");
+    }
+
+    #[test]
+    fn parse_single_reg_memory_rejects_unencodable_immediate_offsets() {
+        for text in [
+            "ldr x0, [x1, #32768]",
+            "str x0, [x1, #256]!",
+            "str x0, [x1], #256",
+            "ldrsw x0, [x1, #-257]",
+        ] {
+            let err = parse_line(text).expect_err("unencodable memory offset should be rejected");
+            let msg = err.to_string();
+            assert!(
+                msg.contains("instruction cannot be encoded in AArch64"),
+                "{text}: error should come from encodability gate, got {msg}"
+            );
+        }
+
+        for text in [
+            "ldr x0, [x1, #32760]",
+            "str x0, [x1, #-256]!",
+            "str x0, [x1], #255",
+            "ldr x0, [x1, #255]",
+        ] {
+            parse_line(text).unwrap_or_else(|err| panic!("{text}: expected parse, got {err}"));
+        }
     }
 
     #[test]
@@ -3817,6 +4051,39 @@ mod tests {
                 width: AccessWidth::Extended,
             }
         );
+    }
+
+    #[test]
+    fn parse_post_index_rejects_explicit_zero_bracket_offset() {
+        for text in ["ldr x0, [x1, #0], #8", "ldp x0, x1, [sp, #0], #16"] {
+            let err = parse_line(text).expect_err("post-index requires bare base");
+
+            assert!(
+                err.to_string()
+                    .contains("post-index requires bare `[Xn]` base form"),
+                "{text}: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn parse_ldr_zero_post_index_remains_valid() {
+        use crate::ir::types::{AccessWidth, AddressOperand, IndexMode};
+        let instr = parse_one("ldr x0, [x1], #0");
+
+        assert_eq!(
+            instr,
+            Instruction::Ldr {
+                rt: Register::X0,
+                addr: AddressOperand::Imm {
+                    base: Register::X1,
+                    offset: 0,
+                    mode: IndexMode::PostIndex,
+                },
+                width: AccessWidth::Extended,
+            }
+        );
+        assert_eq!(format!("{}", instr), "ldr x0, [x1], #0");
     }
 
     #[test]
@@ -4000,7 +4267,7 @@ mod tests {
 
     #[test]
     fn parse_ldp_yields_two_register_load() {
-        use crate::ir::types::{AccessWidth, AddressOperand, IndexMode};
+        use crate::ir::types::{AddressOperand, IndexMode, PairAccessWidth};
         let instr = parse_one("ldp x0, x1, [sp, #16]");
         assert_eq!(
             instr,
@@ -4012,7 +4279,7 @@ mod tests {
                     offset: 16,
                     mode: IndexMode::Offset,
                 },
-                width: AccessWidth::Extended,
+                width: PairAccessWidth::Extended,
                 signed: false,
             }
         );
@@ -4027,7 +4294,7 @@ mod tests {
                 width,
                 ..
             } => {
-                assert_eq!(width, crate::ir::types::AccessWidth::Word);
+                assert_eq!(width, crate::ir::types::PairAccessWidth::Word);
             }
             _ => panic!("expected Ldp with signed=true"),
         }

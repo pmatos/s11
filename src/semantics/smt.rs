@@ -30,6 +30,10 @@ fn bv_swap_bytes(value: &BV, width: u32) -> BV {
     result
 }
 
+fn bv_shift_mask(width: u32) -> BV {
+    BV::from_u64((width - 1) as u64, width)
+}
+
 /// `width`-bit ROR composed as `(value lshr n) | (value shl (width - n))`.
 /// Caller is responsible for masking `n` to `log2(width)` bits when needed
 /// (immediate callers with `n` already in `0..width` may skip the mask).
@@ -39,7 +43,7 @@ fn bv_swap_bytes(value: &BV, width: u32) -> BV {
 /// bit-width zeroes the value). So `hi = 0` and the result is just
 /// `value lshr 0 = value`.
 fn bv_ror(value: &BV, n: &BV, width: u32) -> BV {
-    let mask = BV::from_u64((width - 1) as u64, width);
+    let mask = bv_shift_mask(width);
     let n_masked = n.bvand(&mask);
     let width_const = BV::from_u64(width as u64, width);
     let complement = width_const.bvsub(&n_masked);
@@ -104,6 +108,22 @@ fn zero_extend_to_state_width(value: BV, value_width: u32, state_width: u32) -> 
     } else {
         value.zero_ext(state_width - value_width)
     }
+}
+
+// Store a bit-field op's 64-bit result BV into `rd`, honouring the register
+// width. For the W form, the low 32 bits hold the architectural result and bits
+// [63:32] are zeroed (ARM ARM: writing a W register clears the upper half).
+fn store_bitfield_result(
+    state: &mut MachineState,
+    rd: Register,
+    result: BV,
+    reg_width: RegisterWidth,
+) {
+    let stored = match reg_width {
+        RegisterWidth::W32 => zero_extend_to_state_width(result.extract(31, 0), 32, state.width()),
+        RegisterWidth::X64 => result,
+    };
+    state.set_register(rd, stored);
 }
 
 /// Count leading zeros of a `width`-bit BV with a binary-search decomposition.
@@ -391,6 +411,9 @@ impl MachineState {
             Operand::Immediate(imm) => BV::from_i64(*imm, self.width),
             Operand::ShiftedRegister { reg, kind, amount } => {
                 let value = self.get_register(*reg).clone();
+                // `amount` is the compile-time modifier on a shifted-register
+                // operand and is bounded by parsing/encodability. Runtime
+                // masking belongs to register-form LSL/LSR/ASR shift operands.
                 let amt = BV::from_u64(*amount as u64, self.width);
                 match kind {
                     crate::ir::ShiftKind::Lsl => value.bvshl(&amt),
@@ -645,21 +668,21 @@ pub fn apply_instruction(mut state: MachineState, instruction: &Instruction) -> 
             // (concrete.rs masks with `& 63`). Z3's `bvshl` zeroes the result
             // when the shift amount is >= width, so we must mask first to
             // keep SMT and concrete in agreement (issue #241).
-            let mask = BV::from_u64((width - 1) as u64, width);
+            let mask = bv_shift_mask(width);
             let shift_amount = state.eval_operand(shift).bvand(&mask);
             let result = value.bvshl(&shift_amount);
             state.set_register(*rd, result);
         }
         Instruction::Lsr { rd, rn, shift } => {
             let value = state.get_register(*rn).clone();
-            let mask = BV::from_u64((width - 1) as u64, width);
+            let mask = bv_shift_mask(width);
             let shift_amount = state.eval_operand(shift).bvand(&mask);
             let result = value.bvlshr(&shift_amount);
             state.set_register(*rd, result);
         }
         Instruction::Asr { rd, rn, shift } => {
             let value = state.get_register(*rn).clone();
-            let mask = BV::from_u64((width - 1) as u64, width);
+            let mask = bv_shift_mask(width);
             let shift_amount = state.eval_operand(shift).bvand(&mask);
             let result = value.bvashr(&shift_amount);
             state.set_register(*rd, result);
@@ -1036,7 +1059,13 @@ pub fn apply_instruction(mut state: MachineState, instruction: &Instruction) -> 
         }
         // UBFX rd, rn, #lsb, #width: extract bits [lsb+width-1:lsb] of rn,
         // zero-extend the result into rd.
-        Instruction::Ubfx { rd, rn, lsb, width } => {
+        Instruction::Ubfx {
+            rd,
+            rn,
+            lsb,
+            width,
+            reg_width,
+        } => {
             let value = state.get_register(*rn).clone();
             let hi = (*lsb as u32) + (*width as u32) - 1;
             let lo = *lsb as u32;
@@ -1047,11 +1076,17 @@ pub fn apply_instruction(mut state: MachineState, instruction: &Instruction) -> 
             } else {
                 extracted.zero_ext(64 - *width as u32)
             };
-            state.set_register(*rd, result);
+            store_bitfield_result(&mut state, *rd, result, *reg_width);
         }
         // SBFX rd, rn, #lsb, #width: extract bits [lsb+width-1:lsb] of rn,
         // sign-extend into rd.
-        Instruction::Sbfx { rd, rn, lsb, width } => {
+        Instruction::Sbfx {
+            rd,
+            rn,
+            lsb,
+            width,
+            reg_width,
+        } => {
             let value = state.get_register(*rn).clone();
             let hi = (*lsb as u32) + (*width as u32) - 1;
             let lo = *lsb as u32;
@@ -1061,11 +1096,17 @@ pub fn apply_instruction(mut state: MachineState, instruction: &Instruction) -> 
             } else {
                 extracted.sign_ext(64 - *width as u32)
             };
-            state.set_register(*rd, result);
+            store_bitfield_result(&mut state, *rd, result, *reg_width);
         }
         // BFI rd, rn, #lsb, #width: insert low `width` bits of rn at position
         // lsb of rd, preserving the other bits of rd.
-        Instruction::Bfi { rd, rn, lsb, width } => {
+        Instruction::Bfi {
+            rd,
+            rn,
+            lsb,
+            width,
+            reg_width,
+        } => {
             let dest = state.get_register(*rd).clone();
             let src = state.get_register(*rn).clone();
             let low_mask_const = if *width == 64 {
@@ -1079,11 +1120,17 @@ pub fn apply_instruction(mut state: MachineState, instruction: &Instruction) -> 
             let shift = BV::from_u64(*lsb as u64, 64);
             let inserted = src.bvand(&low_mask).bvshl(&shift);
             let cleared = dest.bvand(&clear_mask);
-            state.set_register(*rd, cleared.bvor(&inserted));
+            store_bitfield_result(&mut state, *rd, cleared.bvor(&inserted), *reg_width);
         }
         // BFXIL rd, rn, #lsb, #width: extract bits [lsb+width-1:lsb] of rn,
         // place at [width-1:0] of rd preserving rd[63:width].
-        Instruction::Bfxil { rd, rn, lsb, width } => {
+        Instruction::Bfxil {
+            rd,
+            rn,
+            lsb,
+            width,
+            reg_width,
+        } => {
             let dest = state.get_register(*rd).clone();
             let src = state.get_register(*rn).clone();
             let low_mask_const = if *width == 64 {
@@ -1097,11 +1144,17 @@ pub fn apply_instruction(mut state: MachineState, instruction: &Instruction) -> 
             // (rn >> lsb) & low_mask
             let extracted = src.bvlshr(&shift).bvand(&low_mask);
             let cleared = dest.bvand(&clear_mask);
-            state.set_register(*rd, cleared.bvor(&extracted));
+            store_bitfield_result(&mut state, *rd, cleared.bvor(&extracted), *reg_width);
         }
         // UBFIZ rd, rn, #lsb, #width: low `width` bits of rn, zero-extend,
         // shift left by lsb → rd (other bits zero).
-        Instruction::Ubfiz { rd, rn, lsb, width } => {
+        Instruction::Ubfiz {
+            rd,
+            rn,
+            lsb,
+            width,
+            reg_width,
+        } => {
             let value = state.get_register(*rn).clone();
             let field = value.extract(*width as u32 - 1, 0);
             let widened = if *width == 64 {
@@ -1110,11 +1163,17 @@ pub fn apply_instruction(mut state: MachineState, instruction: &Instruction) -> 
                 field.zero_ext(64 - *width as u32)
             };
             let shift = BV::from_u64(*lsb as u64, 64);
-            state.set_register(*rd, widened.bvshl(&shift));
+            store_bitfield_result(&mut state, *rd, widened.bvshl(&shift), *reg_width);
         }
         // SBFIZ rd, rn, #lsb, #width: low `width` bits of rn, sign-extended
         // to 64, then shifted left by lsb → rd.
-        Instruction::Sbfiz { rd, rn, lsb, width } => {
+        Instruction::Sbfiz {
+            rd,
+            rn,
+            lsb,
+            width,
+            reg_width,
+        } => {
             let value = state.get_register(*rn).clone();
             let field = value.extract(*width as u32 - 1, 0);
             let widened = if *width == 64 {
@@ -1123,7 +1182,7 @@ pub fn apply_instruction(mut state: MachineState, instruction: &Instruction) -> 
                 field.sign_ext(64 - *width as u32)
             };
             let shift = BV::from_u64(*lsb as u64, 64);
-            state.set_register(*rd, widened.bvshl(&shift));
+            store_bitfield_result(&mut state, *rd, widened.bvshl(&shift), *reg_width);
         }
         // Branches / terminators: callers must strip terminators before
         // apply_sequence. The equivalence layer handles them via
@@ -1178,6 +1237,7 @@ pub fn apply_instruction(mut state: MachineState, instruction: &Instruction) -> 
             signed,
         } => {
             let (effective, writeback) = state.eval_address(addr);
+            let access_width = (*width).as_access_width();
             let bytes = width.bytes();
             let raw1 = state.select_n(&effective, bytes);
             let offset = BV::from_u64(bytes as u64, 64);
@@ -1185,13 +1245,13 @@ pub fn apply_instruction(mut state: MachineState, instruction: &Instruction) -> 
             let raw2 = state.select_n(&effective2, bytes);
             let (v1, v2) = if *signed {
                 (
-                    ldr_sign_extend(&raw1, *width, state.width),
-                    ldr_sign_extend(&raw2, *width, state.width),
+                    ldr_sign_extend(&raw1, access_width, state.width),
+                    ldr_sign_extend(&raw2, access_width, state.width),
                 )
             } else {
                 (
-                    ldr_zero_extend(&raw1, *width, state.width),
-                    ldr_zero_extend(&raw2, *width, state.width),
+                    ldr_zero_extend(&raw1, access_width, state.width),
+                    ldr_zero_extend(&raw2, access_width, state.width),
                 )
             };
             state.set_register(*rt1, v1);
@@ -1228,6 +1288,10 @@ pub fn apply_instruction(mut state: MachineState, instruction: &Instruction) -> 
 /// Zero-extend the low `width.bytes() * 8` bits of `raw` to `target_width`.
 fn ldr_zero_extend(raw: &BV, width: AccessWidth, target_width: u32) -> BV {
     let raw_bits = width.bytes() * 8;
+    assert!(
+        raw_bits <= target_width,
+        "raw load width {raw_bits} exceeds target register width {target_width}"
+    );
     let pad = target_width - raw_bits;
     if pad == 0 {
         raw.clone()
@@ -1239,6 +1303,10 @@ fn ldr_zero_extend(raw: &BV, width: AccessWidth, target_width: u32) -> BV {
 /// Sign-extend the low `width.bytes() * 8` bits of `raw` to `target_width`.
 fn ldr_sign_extend(raw: &BV, width: AccessWidth, target_width: u32) -> BV {
     let raw_bits = width.bytes() * 8;
+    assert!(
+        raw_bits <= target_width,
+        "raw load width {raw_bits} exceeds target register width {target_width}"
+    );
     let pad = target_width - raw_bits;
     if pad == 0 {
         raw.clone()
@@ -1294,9 +1362,8 @@ pub fn states_not_equal(state1: &MachineState, state2: &MachineState) -> z3::ast
 /// registers, optionally including the NZCV flag bits and the whole memory
 /// image (see ADR-0007).
 ///
-/// TODO(#282): The explicit `flags_live` parameter duplicates
-/// `live_out.flags_live()` for every non-stochastic caller. Tracked for
-/// cleanup in issue #282.
+/// TODO(#282): Production equivalence callers pass `live_out.flags_live()`
+/// here; the explicit parameter remains for direct tests and future cleanup.
 pub fn states_not_equal_for_live_out(
     state1: &MachineState,
     state2: &MachineState,
@@ -2742,10 +2809,10 @@ mod tests {
 
     #[test]
     fn test_lsl_imm_concrete_smt_parity() {
-        // LSL is width-sensitive: concrete (concrete.rs:84-88) masks the shift
-        // amount with `& 63` before applying. After the issue-#241 fix the
-        // SMT lowering masks the shift operand with `width - 1` too, so the
-        // two paths agree for all shift values including >= 64.
+        // LSL is width-sensitive: concrete semantics mask the shift amount
+        // with `& 63` before applying. Immediate shifts >= 64 are rejected by
+        // parser/encodability paths, but these IR-only samples verify internal
+        // concrete/SMT parity for the same issue-#241 mask rule.
         let values: &[u64] = &[
             0,
             1,
@@ -2768,7 +2835,9 @@ mod tests {
 
     #[test]
     fn test_lsr_imm_concrete_smt_parity() {
-        // Mirror of LSL but logical right shift (no sign extension).
+        // Mirror of LSL but logical right shift (no sign extension). The
+        // extended immediate samples are IR-only; normal AArch64 input rejects
+        // them before optimization.
         let values: &[u64] = &[
             0,
             1,
@@ -3928,10 +3997,10 @@ mod tests {
 
     #[test]
     fn test_asr_imm_concrete_smt_parity() {
-        // ASR is sign-sensitive: concrete (concrete.rs:96-101) routes through
-        // `as_i64() >> shift` then back to u64; SMT uses Z3 `bvashr` which
-        // sign-preserves. Negative inputs (MSB set) must keep the sign bit.
-        // Shifts >= 64 exercise the issue-#241 mask path.
+        // ASR is sign-sensitive: concrete semantics route through signed
+        // shifting; SMT uses Z3 `bvashr`, which sign-preserves. Immediate
+        // shifts >= 64 are IR-only parity cases that exercise the issue-#241
+        // mask path; parser/encodability reject them in normal input.
         let values: &[u64] = &[
             0,
             1,
@@ -3954,6 +4023,24 @@ mod tests {
     }
 
     // ---- Memory ops (issue #68 step 7) ----
+
+    #[test]
+    #[should_panic(expected = "raw load width 64 exceeds target register width 32")]
+    fn ldr_zero_extend_rejects_raw_width_above_target() {
+        use crate::ir::types::AccessWidth;
+
+        let raw = BV::from_u64(0, 64);
+        let _ = ldr_zero_extend(&raw, AccessWidth::Extended, 32);
+    }
+
+    #[test]
+    #[should_panic(expected = "raw load width 64 exceeds target register width 32")]
+    fn ldr_sign_extend_rejects_raw_width_above_target() {
+        use crate::ir::types::AccessWidth;
+
+        let raw = BV::from_u64(0, 64);
+        let _ = ldr_sign_extend(&raw, AccessWidth::Extended, 32);
+    }
 
     /// `STR x0, [x1]; LDR x2, [x1]` must yield `x2 == x0` under Z3 array
     /// extensionality, even with arbitrary aliasing of `x1` against other
