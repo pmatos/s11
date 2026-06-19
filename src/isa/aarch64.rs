@@ -4,7 +4,7 @@
 
 #![allow(dead_code)]
 
-use crate::ir::instructions::MOVW_LEGAL_SHIFTS;
+use crate::ir::instructions::{AARCH64_RANDOM_SHIFT_IMMEDIATES, MOVW_LEGAL_SHIFTS};
 use crate::ir::types::Condition;
 use crate::ir::{Instruction, Operand, Register, RegisterWidth};
 use crate::isa::traits::{ISA, InstructionGenerator, InstructionType, OperandType, RegisterType};
@@ -778,7 +778,7 @@ impl InstructionGenerator<Instruction> for AArch64InstructionGenerator {
             7..=9 => {
                 let use_imm = rng.random_bool(0.5);
                 let shift = if use_imm {
-                    let amounts = [0i64, 1, 2, 4, 8, 16, 32];
+                    let amounts = AARCH64_RANDOM_SHIFT_IMMEDIATES;
                     Operand::Immediate(amounts[rng.random_range(0..amounts.len())])
                 } else {
                     Operand::Register(pick_reg(rng))
@@ -1043,7 +1043,7 @@ impl InstructionGenerator<Instruction> for AArch64InstructionGenerator {
             },
             37 => {
                 let shift = if rng.random_bool(0.5) {
-                    let amounts = [0i64, 1, 2, 4, 8, 16, 32];
+                    let amounts = AARCH64_RANDOM_SHIFT_IMMEDIATES;
                     Operand::Immediate(amounts[rng.random_range(0..amounts.len())])
                 } else {
                     Operand::Register(pick_reg(rng))
@@ -1803,7 +1803,7 @@ fn mutate_shift_operand<R: RngExt>(
     operand: Operand,
     registers: &[Register],
 ) -> Operand {
-    let shift_amounts: [i64; 7] = [0, 1, 2, 4, 8, 16, 32];
+    let shift_amounts = AARCH64_RANDOM_SHIFT_IMMEDIATES;
     match operand {
         Operand::Register(_)
         | Operand::ShiftedRegister { .. }
@@ -2567,6 +2567,45 @@ mod tests {
         }
     }
 
+    #[test]
+    fn random_shift_immediates_never_sample_zero() {
+        let generator = AArch64InstructionGenerator;
+        let regs = vec![Register::X0, Register::X1, Register::X2];
+        let imms = vec![0, 1, 2, 16, 32];
+        let mut rng = ChaCha8Rng::seed_from_u64(0x263);
+        let mut seen = BTreeSet::new();
+
+        for _ in 0..50_000 {
+            let instr = generator.generate_random(&mut rng, &regs, &imms);
+            let sampled = match instr {
+                Instruction::Lsl {
+                    shift: Operand::Immediate(amount),
+                    ..
+                } => Some(("lsl", amount)),
+                Instruction::Lsr {
+                    shift: Operand::Immediate(amount),
+                    ..
+                } => Some(("lsr", amount)),
+                Instruction::Asr {
+                    shift: Operand::Immediate(amount),
+                    ..
+                } => Some(("asr", amount)),
+                Instruction::Ror {
+                    shift: Operand::Immediate(amount),
+                    ..
+                } => Some(("ror", amount)),
+                _ => None,
+            };
+
+            if let Some((mnemonic, amount)) = sampled {
+                assert_ne!(amount, 0, "random {mnemonic} sampled immediate shift #0");
+                seen.insert(mnemonic);
+            }
+        }
+
+        assert_eq!(seen, BTreeSet::from(["asr", "lsl", "lsr", "ror"]));
+    }
+
     /// Termination guard for the CCMP/CCMN random-generator arm:
     /// before the slot-28 rewrite this test would have hung in release
     /// builds because `pick_non_sp` retried forever on a `[SP]`-only
@@ -2718,6 +2757,32 @@ mod tests {
                 id,
                 N,
                 count,
+            );
+        }
+    }
+
+    #[test]
+    fn mutate_shift_operand_never_samples_zero_immediate() {
+        let regs = vec![Register::X0, Register::X1, Register::X2];
+
+        for (seed, operand) in [
+            (0x2630, Operand::Immediate(1)),
+            (0x2631, Operand::Register(Register::X1)),
+        ] {
+            let mut rng = ChaCha8Rng::seed_from_u64(seed);
+            let mut saw_immediate = false;
+
+            for _ in 0..2_000 {
+                let mutated = super::mutate_shift_operand(&mut rng, operand, &regs);
+                if let Operand::Immediate(amount) = mutated {
+                    assert_ne!(amount, 0, "mutate_shift_operand sampled shift #0");
+                    saw_immediate = true;
+                }
+            }
+
+            assert!(
+                saw_immediate,
+                "mutate_shift_operand never returned an immediate"
             );
         }
     }

@@ -14,7 +14,7 @@
 
 #![allow(dead_code)]
 
-use crate::ir::instructions::MOVW_LEGAL_SHIFTS;
+use crate::ir::instructions::{AARCH64_RANDOM_SHIFT_IMMEDIATES, MOVW_LEGAL_SHIFTS};
 use crate::ir::types::Condition;
 use crate::ir::{ExtendKind, Instruction, Operand, Register, RegisterWidth};
 use crate::search::candidate::generate_random_instruction;
@@ -1354,7 +1354,7 @@ impl Mutator {
 
     fn random_shift_operand<R: RngExt>(&self, rng: &mut R) -> Operand {
         if rng.random_bool(0.7) {
-            let shifts = [0, 1, 2, 4, 8, 16, 32];
+            let shifts = AARCH64_RANDOM_SHIFT_IMMEDIATES;
             Operand::Immediate(shifts[rng.random_range(0..shifts.len())])
         } else if !self.registers.is_empty() {
             Operand::Register(self.random_register(rng))
@@ -1576,6 +1576,26 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn random_shift_operand_never_samples_zero_immediate() {
+        let mutator = default_mutator();
+        let mut rng = ChaCha8Rng::seed_from_u64(0x263);
+        let mut saw_immediate = false;
+
+        for _ in 0..2_000 {
+            let operand = mutator.random_shift_operand(&mut rng);
+            if let Operand::Immediate(amount) = operand {
+                assert_ne!(amount, 0, "random_shift_operand sampled shift #0");
+                saw_immediate = true;
+            }
+        }
+
+        assert!(
+            saw_immediate,
+            "random_shift_operand never returned an immediate"
+        );
     }
 
     #[test]

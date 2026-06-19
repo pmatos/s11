@@ -1,6 +1,6 @@
 //! Instruction generation utilities for search algorithms
 
-use crate::ir::instructions::MOVW_LEGAL_SHIFTS;
+use crate::ir::instructions::{AARCH64_RANDOM_SHIFT_IMMEDIATES, MOVW_LEGAL_SHIFTS};
 use crate::ir::{Instruction, Operand, Register, RegisterWidth, ShiftKind};
 use crate::isa::{AArch64, Assembler, InstructionType};
 
@@ -1196,7 +1196,7 @@ fn random_operand<R: rand::RngExt>(
 fn random_shift_operand<R: rand::RngExt>(rng: &mut R, registers: &[Register]) -> Operand {
     if rng.random_bool(0.7) {
         // Prefer immediate shifts
-        let shifts = [0, 1, 2, 4, 8, 16, 32];
+        let shifts = AARCH64_RANDOM_SHIFT_IMMEDIATES;
         Operand::Immediate(shifts[rng.random_range(0..shifts.len())])
     } else if !registers.is_empty() {
         Operand::Register(registers[rng.random_range(0..registers.len())])
@@ -2253,6 +2253,50 @@ mod tests {
                 assert!(regs.contains(&dest));
             }
         }
+    }
+
+    #[test]
+    fn generate_random_instruction_never_samples_zero_shift_immediates() {
+        use rand::SeedableRng;
+        use rand_chacha::ChaCha8Rng;
+
+        let regs = default_registers();
+        let imms = default_immediates();
+        let mut rng = ChaCha8Rng::seed_from_u64(0x263);
+        let mut seen = std::collections::BTreeSet::new();
+
+        for _ in 0..50_000 {
+            let instr = generate_random_instruction(&mut rng, &regs, &imms);
+            let sampled = match instr {
+                Instruction::Lsl {
+                    shift: Operand::Immediate(amount),
+                    ..
+                } => Some(("lsl", amount)),
+                Instruction::Lsr {
+                    shift: Operand::Immediate(amount),
+                    ..
+                } => Some(("lsr", amount)),
+                Instruction::Asr {
+                    shift: Operand::Immediate(amount),
+                    ..
+                } => Some(("asr", amount)),
+                Instruction::Ror {
+                    shift: Operand::Immediate(amount),
+                    ..
+                } => Some(("ror", amount)),
+                _ => None,
+            };
+
+            if let Some((mnemonic, amount)) = sampled {
+                assert_ne!(amount, 0, "random {mnemonic} sampled immediate shift #0");
+                seen.insert(mnemonic);
+            }
+        }
+
+        assert_eq!(
+            seen,
+            std::collections::BTreeSet::from(["asr", "lsl", "lsr", "ror"])
+        );
     }
 
     #[test]

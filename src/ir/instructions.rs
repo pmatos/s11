@@ -13,6 +13,10 @@ use std::fmt;
 /// out of sync across the codebase.
 pub const MOVW_LEGAL_SHIFTS: [u8; 4] = [0, 16, 32, 48];
 
+/// Representative nonzero immediate shifts sampled by AArch64 random and
+/// mutation helpers for LSL/LSR/ASR/ROR.
+pub(crate) const AARCH64_RANDOM_SHIFT_IMMEDIATES: [i64; 6] = [1, 2, 4, 8, 16, 32];
+
 pub(crate) fn logical_imm32_value(imm: i64) -> Option<u32> {
     if imm >= 0 {
         u32::try_from(imm).ok()
