@@ -2859,28 +2859,45 @@ mod tests {
     }
 
     /// Regression test for issue #93: ANDS/CSET/CSETM/ROR used to share
-    /// slot 23 via a 4-way sub-multiplexer, giving each ~1/120 vs ~1/30
-    /// for the rest of the old 30-slot table. Each should now hold its
-    /// own top-level slot so the sampler is roughly uniform across the
-    /// new 33-slot table (~1/33). With N = 30_000 ChaCha8-seeded draws
-    /// each is expected near 909 hits; the old sub-mux would give ~250.
-    /// The 600 threshold sits ~10σ below the new expected and ~22σ above
-    /// the old.
+    /// slot 23 via a 4-way sub-multiplexer, giving each ~1/152 vs ~1/38
+    /// for singleton top-level slots. Each should now hold its own slot.
+    /// With N = 30_000 ChaCha8-seeded draws each singleton-slot opcode is
+    /// expected near 789 hits; the old sub-mux would give ~197. The lower
+    /// threshold catches under-sampling, while the wide 3x upper bound catches
+    /// accidental over-weighting without treating every opcode family as
+    /// uniformly distributed.
     #[test]
     fn slot_23_sub_multiplexer_removed_for_issue_93() {
-        use std::collections::HashMap;
+        use std::collections::BTreeMap;
         let generator = AArch64InstructionGenerator;
         let regs = vec![Register::X0, Register::X1, Register::X2];
         let imms = vec![0, 1, 2, 16, 32];
         let mut rng = ChaCha8Rng::seed_from_u64(0x9300);
-        let mut counts: HashMap<u8, u32> = HashMap::new();
+        let mut counts: BTreeMap<u8, u32> = BTreeMap::new();
         const N: u32 = 30_000;
+        const TOP_LEVEL_SLOT_COUNT: u32 = 38;
+        const EXPECTED_TOP_LEVEL_COUNT: u32 = N / TOP_LEVEL_SLOT_COUNT;
+        const MAX_REASONABLE_TOP_LEVEL_COUNT: u32 = 3 * N / TOP_LEVEL_SLOT_COUNT;
         for _ in 0..N {
             let id = generator
                 .generate_random(&mut rng, &regs, &imms)
                 .opcode_id();
             *counts.entry(id).or_default() += 1;
         }
+
+        for (&id, &count) in &counts {
+            assert!(
+                count <= MAX_REASONABLE_TOP_LEVEL_COUNT,
+                "expected opcode id {} to stay <= {} samples in {} draws; got {} (single top-level expected {}, {} slots)",
+                id,
+                MAX_REASONABLE_TOP_LEVEL_COUNT,
+                N,
+                count,
+                EXPECTED_TOP_LEVEL_COUNT,
+                TOP_LEVEL_SLOT_COUNT,
+            );
+        }
+
         for instr in [
             Instruction::Ands {
                 rd: Register::X0,
@@ -2911,6 +2928,17 @@ mod tests {
                 id,
                 N,
                 count,
+            );
+            assert!(
+                count <= MAX_REASONABLE_TOP_LEVEL_COUNT,
+                "expected <= {} samples for {} (id {}) in {} draws, got {} (single top-level expected {}, {} slots)",
+                MAX_REASONABLE_TOP_LEVEL_COUNT,
+                instr,
+                id,
+                N,
+                count,
+                EXPECTED_TOP_LEVEL_COUNT,
+                TOP_LEVEL_SLOT_COUNT,
             );
         }
     }
