@@ -561,6 +561,48 @@ mod tests {
     }
 
     #[test]
+    fn test_four_workers_with_symbolic_reports_one_symbolic_three_stochastic() {
+        let target = mov_add_sequence();
+        let live_out = LiveOut::from_registers(vec![Register::X0]);
+
+        // Keep the symbolic worker's solver budget tight so it terminates
+        // quickly under Z3 on this trivial target.
+        let symbolic_cfg = SymbolicConfig::default().with_timeout(Duration::from_millis(250));
+        let search_config = SearchConfig::default()
+            .with_registers(vec![Register::X0, Register::X1])
+            .with_immediates(vec![0, 1, 2])
+            .with_stochastic(StochasticConfig::default().with_iterations(200))
+            .with_symbolic(symbolic_cfg);
+
+        let parallel_config = ParallelConfig::default()
+            .with_workers(4)
+            .with_symbolic(true)
+            .with_seed(42)
+            .with_timeout(Duration::from_secs(10));
+
+        let result = run_parallel_search(&target, &live_out, &search_config, &parallel_config);
+
+        assert_eq!(result.worker_statistics.len(), 4);
+        let mut pairs: Vec<(usize, Algorithm)> = result
+            .worker_statistics
+            .iter()
+            .map(|(id, alg, _)| (*id, *alg))
+            .collect();
+        pairs.sort_by_key(|(id, _)| *id);
+        assert_eq!(
+            pairs,
+            vec![
+                (0, Algorithm::Symbolic),
+                (1, Algorithm::Stochastic),
+                (2, Algorithm::Stochastic),
+                (3, Algorithm::Stochastic),
+            ],
+            "expected worker 0 = Symbolic and workers 1-3 = Stochastic, got {:?}",
+            pairs,
+        );
+    }
+
+    #[test]
     fn test_single_worker_with_symbolic_is_stochastic() {
         let target = mov_add_sequence();
         let live_out = LiveOut::from_registers(vec![Register::X0]);
