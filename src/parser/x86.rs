@@ -450,7 +450,7 @@ pub fn parse_x86_assembly_string(
     }
     if instructions.is_empty() {
         return Err(ParseError::new(
-            0,
+            1,
             "no instructions found in input",
             source_name,
         ));
@@ -793,8 +793,16 @@ mod tests {
 
     #[test]
     fn assembly_string_rejects_empty_input() {
-        assert!(parse_x86_assembly_string("", "t".to_string()).is_err());
-        assert!(parse_x86_assembly_string("   \n\n; only comments\n", "t".to_string()).is_err());
+        let empty_err = parse_x86_assembly_string("", "t".to_string()).unwrap_err();
+        assert_eq!(empty_err.line_number, 1);
+        assert_eq!(empty_err.message, "no instructions found in input");
+        assert_eq!(empty_err.line_content, "t");
+
+        let skipped_err =
+            parse_x86_assembly_string("   \n\n; only comments\n", "t".to_string()).unwrap_err();
+        assert_eq!(skipped_err.line_number, 1);
+        assert_eq!(skipped_err.message, "no instructions found in input");
+        assert_eq!(skipped_err.line_content, "t");
     }
 
     #[test]

@@ -2181,7 +2181,7 @@ pub fn parse_assembly_string(
 
     if instructions.is_empty() {
         return Err(ParseError::new(
-            0,
+            1,
             "no instructions found in file",
             source_name,
         ));
@@ -2775,9 +2775,16 @@ mod tests {
 
     #[test]
     fn test_parse_assembly_string_empty() {
-        let asm = "// just a comment\n.text\n";
-        let result = parse_assembly_string(asm, "test".to_string());
-        assert!(result.is_err());
+        let empty_err = parse_assembly_string("", "test".to_string()).unwrap_err();
+        assert_eq!(empty_err.line_number, 1);
+        assert_eq!(empty_err.message, "no instructions found in file");
+        assert_eq!(empty_err.line_content, "test");
+
+        let skipped_err =
+            parse_assembly_string("// just a comment\n.text\n", "test".to_string()).unwrap_err();
+        assert_eq!(skipped_err.line_number, 1);
+        assert_eq!(skipped_err.message, "no instructions found in file");
+        assert_eq!(skipped_err.line_content, "test");
     }
 
     /// Round-trip Display → parser for every Tier 1 mnemonic.
