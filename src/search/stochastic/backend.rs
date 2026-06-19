@@ -42,6 +42,18 @@ pub trait StochasticBackend<I: ISA>: Sized {
     /// immediates, mutation weights, mode-where-applicable).
     fn make_mutator(config: &SearchConfig) -> I::Mutator;
 
+    /// Registers to randomize during stochastic fast validation.
+    ///
+    /// Defaults to the configured mutation pool. Backends may extend this
+    /// when a target can read registers outside that pool.
+    fn validation_registers(
+        configured: &[I::Register],
+        _target: &[I::Instruction],
+        _live_out: &Self::LiveOut,
+    ) -> Vec<I::Register> {
+        configured.to_vec()
+    }
+
     /// Random test inputs covering `regs`. The width parameter sizes
     /// x86 register-write masking; AArch64 ignores it.
     fn make_test_inputs(regs: &[I::Register], width: u32, count: usize) -> Vec<Self::State>;
@@ -52,17 +64,9 @@ pub trait StochasticBackend<I: ISA>: Sized {
     fn apply_sequence(state: Self::State, seq: &[I::Instruction]) -> Self::State;
     /// Compare two states over the live-out contract.
     ///
-    /// **Invariant:** any `flags_live` bit on the mask is honoured by the
-    /// equivalence-checking layer (`semantics::equivalence`), not here.
-    /// Implementations of this trait method **must** treat the comparison as
-    /// register-only — the pre-SMT flag-writer guard upstream rejects
-    /// flag-divergent candidates before stochastic comparison runs. If the
-    /// call path is ever rearranged so stochastic compares states without
-    /// passing through the upstream guard, this invariant has to be revisited.
-    ///
-    /// AArch64 preserves this exception by routing through
-    /// `concrete::states_equal_for_live_out_ignoring_flags`; ordinary
-    /// concrete comparisons read `live_out.flags_live()` directly.
+    /// Implementations should honor the observable state carried by their
+    /// live-out mask. Stochastic validation is a prefilter; the full
+    /// equivalence checker remains authoritative.
     fn states_equal(s1: &Self::State, s2: &Self::State, live_out: &Self::LiveOut) -> bool;
 
     /// Sum the cost of every instruction in the sequence.
@@ -127,6 +131,30 @@ impl StochasticBackend<crate::isa::AArch64> for crate::isa::AArch64 {
         )
     }
 
+    fn validation_registers(
+        configured: &[crate::ir::Register],
+        target: &[crate::ir::Instruction],
+        live_out: &Self::LiveOut,
+    ) -> Vec<crate::ir::Register> {
+        let mut regs = std::collections::HashSet::new();
+
+        for reg in configured {
+            regs.insert(*reg);
+        }
+        for reg in live_out.iter() {
+            regs.insert(*reg);
+        }
+        for instr in target {
+            for reg in instr.source_registers() {
+                regs.insert(reg);
+            }
+        }
+
+        let mut regs: Vec<_> = regs.into_iter().collect();
+        regs.sort_by_key(|reg| reg.index().unwrap_or(u8::MAX));
+        regs
+    }
+
     fn make_test_inputs(
         regs: &[crate::ir::Register],
         _width: u32,
@@ -150,16 +178,12 @@ impl StochasticBackend<crate::isa::AArch64> for crate::isa::AArch64 {
     }
 
     fn states_equal(s1: &Self::State, s2: &Self::State, live_out: &Self::LiveOut) -> bool {
-        // Ignore flags deliberately: the over-approximate flag-writer guard in
-        // equivalence.rs pre-SMT already handles flag divergence before
-        // stochastic comparison is reached. The mask may carry
-        // `flags_live = true`, but it is honoured upstream, not here.
-        // `memory_live = false` here for the same reason — equivalence.rs
-        // force-enables it via `touches_memory()` before calling this path.
-        // Mirrors mcmc.rs's existing call site.
-        crate::semantics::concrete::states_equal_for_live_out_ignoring_flags(
-            s1, s2, live_out, false,
-        )
+        // Honor the flag liveness carried by the mask: `states_equal_for_live_out`
+        // derives it from `live_out.flags_live()`. Stochastic validation is still
+        // a register/flag prefilter; the full equivalence path force-enables
+        // memory comparison when either sequence touches memory, so
+        // `memory_live = false` here.
+        crate::semantics::concrete::states_equal_for_live_out(s1, s2, live_out, false)
     }
 
     fn sequence_cost(seq: &[crate::ir::Instruction], metric: &CostMetric, _width: u32) -> u64 {
@@ -462,7 +486,7 @@ mod tests {
     use crate::isa::x86::{X86Instruction, X86Register};
     use crate::semantics::live_out::LiveOut;
     use crate::semantics::live_out::X86LiveOut;
-    use crate::semantics::state::{ConcreteMachineState, ConcreteValue, ConditionFlags};
+    use crate::semantics::state::{ConcreteMachineState, ConditionFlags};
 
     #[test]
     fn aarch64_backend_honors_flags_dead_live_out_mask() {
@@ -504,27 +528,48 @@ mod tests {
     }
 
     #[test]
-    fn aarch64_backend_states_equal_ignores_flags_even_when_mask_flags_live() {
-        let mut state1 = ConcreteMachineState::new_zeroed();
+    fn aarch64_validation_registers_include_target_sources() {
+        let target = vec![
+            Instruction::MovReg {
+                rd: Register::X0,
+                rn: Register::X1,
+            },
+            Instruction::Add {
+                rd: Register::X0,
+                rn: Register::X0,
+                rm: Operand::Immediate(1),
+            },
+        ];
+        let live_out = LiveOut::from_registers(vec![Register::X0]);
+
+        let regs = <AArch64 as StochasticBackend<AArch64>>::validation_registers(
+            &[Register::X0],
+            &target,
+            &live_out,
+        );
+
+        assert_eq!(regs, vec![Register::X0, Register::X1]);
+    }
+
+    #[test]
+    fn aarch64_fast_state_comparison_honors_flags_live() {
+        let state1 = ConcreteMachineState::new_zeroed();
         let mut state2 = ConcreteMachineState::new_zeroed();
-        state1.set_register(Register::X0, ConcreteValue(42));
-        state2.set_register(Register::X0, ConcreteValue(42));
-        state1.set_flags(ConditionFlags {
+        state2.set_flags(ConditionFlags {
             n: true,
             z: false,
             c: false,
             v: false,
         });
-        state2.set_flags(ConditionFlags {
-            n: false,
-            z: true,
-            c: false,
-            v: false,
-        });
-        let live_out = LiveOut::from_registers(vec![Register::X0]).with_flags(true);
+        let live_out = LiveOut::from_registers(vec![Register::X0]);
 
         assert!(<AArch64 as StochasticBackend<AArch64>>::states_equal(
-            &state1, &state2, &live_out
+            &state1, &state2, &live_out,
+        ));
+        assert!(!<AArch64 as StochasticBackend<AArch64>>::states_equal(
+            &state1,
+            &state2,
+            &live_out.with_flags(true),
         ));
     }
 
