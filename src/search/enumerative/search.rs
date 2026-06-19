@@ -256,6 +256,8 @@ where
     I: ISA + EnumerativeBackend<I>,
 {
     let Some(smt_timeout) = candidate_solver_timeout(config, start) else {
+        // No millisecond-granularity SMT budget remains for this candidate, so
+        // stop the whole parallel enumerative search rather than just this arm.
         shared.stop.store(true, Ordering::Relaxed);
         return false;
     };
@@ -415,6 +417,8 @@ fn candidate_solver_timeout_for_elapsed(
         None => solver_timeout,
     };
 
+    // Z3 timeouts are configured in whole milliseconds; a sub-millisecond
+    // remainder cannot be represented usefully, so treat it as exhausted.
     (timeout.as_millis() > 0).then_some(timeout)
 }
 
@@ -1692,6 +1696,8 @@ mod tests {
         let live_out = LiveOut::from_registers(vec![Register::X0]);
         let config = SearchConfig::default().with_timeout(std::time::Duration::from_millis(1));
         let shared = SharedState::<AArch64>::new(u64::MAX);
+        // Exactly 1ms elapsed under a 1ms search timeout leaves ZERO
+        // remaining; `as_millis() == 0` then disables the candidate SMT call.
         let expired_start = std::time::Instant::now() - std::time::Duration::from_millis(1);
 
         assert!(!verify_candidate::<AArch64>(
