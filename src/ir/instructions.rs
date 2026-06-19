@@ -1368,7 +1368,10 @@ fn address_source_registers(addr: &AddressOperand) -> Vec<Register> {
 /// address modes the index register cannot be SP — the Rm field encodes
 /// X0..X30 / XZR, not SP (`register_to_dynasm(SP)` returns None); (f)
 /// memory `Ext` modes only accept UXTW/SXTW/UXTX/SXTX with shift 0 or the
-/// access-size scale shift.
+/// access-size scale shift; (g) offset-mode immediates must fit either the
+/// unsigned scaled LDR/STR range or the signed 9-bit LDUR/STUR fallback,
+/// while pre/post-index immediates must fit the signed 9-bit writeback
+/// field.
 fn is_encodable_ldr_like(rt: Register, addr: &AddressOperand, width: AccessWidth) -> bool {
     if !is_x_or_xzr(rt) {
         return false;
@@ -1402,7 +1405,20 @@ fn is_encodable_ldr_like(rt: Register, addr: &AddressOperand, width: AccessWidth
                 return false;
             }
         }
-        AddressOperand::Imm { .. } => {}
+        AddressOperand::Imm {
+            offset,
+            mode: IndexMode::Offset,
+            ..
+        } => {
+            if !single_reg_offset_mode_imm_encodable(*offset, width) {
+                return false;
+            }
+        }
+        AddressOperand::Imm { offset, .. } => {
+            if !single_reg_signed_9_offset_encodable(*offset) {
+                return false;
+            }
+        }
     }
     if width == AccessWidth::Extended {
         // The caller decides whether Extended is valid (LDR allows it, but
@@ -1412,6 +1428,23 @@ fn is_encodable_ldr_like(rt: Register, addr: &AddressOperand, width: AccessWidth
         // layers on the narrower rule.
     }
     true
+}
+
+fn single_reg_offset_mode_imm_encodable(offset: i64, width: AccessWidth) -> bool {
+    single_reg_scaled_offset_encodable(offset, width)
+        || single_reg_signed_9_offset_encodable(offset)
+}
+
+fn single_reg_scaled_offset_encodable(offset: i64, width: AccessWidth) -> bool {
+    if offset < 0 {
+        return false;
+    }
+    let scale = i64::from(width.bytes());
+    offset % scale == 0 && offset <= 4095 * scale
+}
+
+fn single_reg_signed_9_offset_encodable(offset: i64) -> bool {
+    (-256..=255).contains(&offset)
 }
 
 /// Encodability gate for the LDP / STP family. See `is_encodable_ldr_like`
@@ -2461,6 +2494,67 @@ mod tests {
 
     // ---- is_encodable_aarch64 rules for memory ops ----
 
+    fn single_reg_imm_addr(offset: i64, mode: IndexMode) -> AddressOperand {
+        AddressOperand::Imm {
+            base: Register::X1,
+            offset,
+            mode,
+        }
+    }
+
+    fn single_reg_imm_instructions(
+        width: AccessWidth,
+        offset: i64,
+        mode: IndexMode,
+    ) -> Vec<Instruction> {
+        single_reg_instructions(width, single_reg_imm_addr(offset, mode))
+    }
+
+    fn single_reg_instructions(width: AccessWidth, addr: AddressOperand) -> Vec<Instruction> {
+        let mut instructions = vec![
+            Instruction::Ldr {
+                rt: Register::X0,
+                addr,
+                width,
+            },
+            Instruction::Str {
+                rt: Register::X0,
+                addr,
+                width,
+            },
+        ];
+        if width != AccessWidth::Extended {
+            instructions.push(Instruction::Ldrs {
+                rt: Register::X0,
+                addr,
+                width,
+            });
+        }
+        instructions
+    }
+
+    fn assert_single_reg_encodable(width: AccessWidth, addr: AddressOperand) {
+        for instruction in single_reg_instructions(width, addr) {
+            assert!(
+                instruction.is_encodable_aarch64(),
+                "{instruction:?} should be encodable"
+            );
+        }
+    }
+
+    fn assert_single_reg_imm_encodable(width: AccessWidth, offset: i64, mode: IndexMode) {
+        assert_single_reg_encodable(width, single_reg_imm_addr(offset, mode));
+    }
+
+    fn assert_single_reg_imm_not_encodable(width: AccessWidth, offset: i64, mode: IndexMode) {
+        for instruction in single_reg_imm_instructions(width, offset, mode) {
+            assert!(
+                !instruction.is_encodable_aarch64(),
+                "{instruction:?} should be rejected"
+            );
+        }
+    }
+
     #[test]
     fn ldr_rejects_xzr_base() {
         let ldr = Instruction::Ldr {
@@ -2527,6 +2621,78 @@ mod tests {
             width: AccessWidth::Extended,
         };
         assert!(ldr.is_encodable_aarch64());
+    }
+
+    #[test]
+    fn single_reg_memory_offset_mode_checks_scaled_and_unscaled_immediates() {
+        for (width, max_scaled) in [
+            (AccessWidth::Byte, 4095),
+            (AccessWidth::Half, 8190),
+            (AccessWidth::Word, 16380),
+            (AccessWidth::Extended, 32760),
+        ] {
+            assert_single_reg_imm_encodable(width, max_scaled, IndexMode::Offset);
+            assert_single_reg_imm_encodable(width, -256, IndexMode::Offset);
+            assert_single_reg_imm_encodable(width, 255, IndexMode::Offset);
+            assert_single_reg_imm_encodable(width, 256, IndexMode::Offset);
+
+            assert_single_reg_imm_not_encodable(
+                width,
+                max_scaled + i64::from(width.bytes()),
+                IndexMode::Offset,
+            );
+            assert_single_reg_imm_not_encodable(width, -257, IndexMode::Offset);
+        }
+
+        assert_single_reg_imm_not_encodable(AccessWidth::Half, 257, IndexMode::Offset);
+        assert_single_reg_imm_not_encodable(AccessWidth::Word, 258, IndexMode::Offset);
+        assert_single_reg_imm_not_encodable(AccessWidth::Extended, 257, IndexMode::Offset);
+    }
+
+    #[test]
+    fn single_reg_memory_writeback_modes_check_signed_9_bit_immediates() {
+        for mode in [IndexMode::PreIndex, IndexMode::PostIndex] {
+            for width in [
+                AccessWidth::Byte,
+                AccessWidth::Half,
+                AccessWidth::Word,
+                AccessWidth::Extended,
+            ] {
+                assert_single_reg_imm_encodable(width, -256, mode);
+                assert_single_reg_imm_encodable(width, 255, mode);
+
+                assert_single_reg_imm_not_encodable(width, -257, mode);
+                assert_single_reg_imm_not_encodable(width, 256, mode);
+            }
+        }
+    }
+
+    #[test]
+    fn single_reg_memory_non_immediate_modes_remain_encodable() {
+        use crate::ir::types::ExtendKind;
+
+        for addr in [
+            AddressOperand::Reg {
+                base: Register::X1,
+                idx: Register::X2,
+                shift: 0,
+            },
+            AddressOperand::Ext {
+                base: Register::X1,
+                idx: Register::X2,
+                kind: ExtendKind::Uxtx,
+                shift: 0,
+            },
+        ] {
+            for width in [
+                AccessWidth::Byte,
+                AccessWidth::Half,
+                AccessWidth::Word,
+                AccessWidth::Extended,
+            ] {
+                assert_single_reg_encodable(width, addr);
+            }
+        }
     }
 
     #[test]

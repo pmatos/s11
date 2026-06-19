@@ -102,14 +102,16 @@ where
         // Pull register / immediate pools out of the config via the backend.
         let regs = <I as StochasticBackend<I>>::registers_from_config(config);
         let imms = <I as StochasticBackend<I>>::immediates_from_config(config);
+        let validation_regs =
+            <I as StochasticBackend<I>>::validation_registers(&regs, target, live_out);
 
         // Generate test cases: random + edge.
         let test_inputs = <I as StochasticBackend<I>>::make_test_inputs(
-            &regs,
+            &validation_regs,
             width,
             config.stochastic.test_count,
         );
-        let edge_inputs = <I as StochasticBackend<I>>::make_edge_inputs(&regs, width);
+        let edge_inputs = <I as StochasticBackend<I>>::make_edge_inputs(&validation_regs, width);
 
         // Precompute target outputs.
         let target_outputs: Vec<_> = test_inputs
@@ -240,6 +242,7 @@ where
 
             self.statistics.candidates_passed_fast += 1;
 
+            let mut smt_refuted = false;
             if proposal_cost < best_cost {
                 self.statistics.smt_queries += 1;
 
@@ -251,21 +254,34 @@ where
                     smt_timeout,
                 );
                 self.statistics.smt_elapsed += metrics.smt_elapsed;
-                if let EquivalenceResult::Equivalent = verdict {
-                    self.statistics.smt_equivalent += 1;
-                    self.statistics.improvements_found += 1;
+                match verdict {
+                    EquivalenceResult::Equivalent => {
+                        self.statistics.smt_equivalent += 1;
+                        self.statistics.improvements_found += 1;
 
-                    best_equivalent = Some(proposal.clone());
-                    best_cost = proposal_cost;
-                    self.statistics.best_cost_found = best_cost;
+                        best_equivalent = Some(proposal.clone());
+                        best_cost = proposal_cost;
+                        self.statistics.best_cost_found = best_cost;
 
-                    if config.verbose {
-                        println!(
-                            "Found improvement at iteration {}: cost {} -> {}",
-                            iteration, original_cost, best_cost
-                        );
+                        if config.verbose {
+                            println!(
+                                "Found improvement at iteration {}: cost {} -> {}",
+                                iteration, original_cost, best_cost
+                            );
+                        }
                     }
+                    EquivalenceResult::NotEquivalent | EquivalenceResult::NotEquivalentFast(_) => {
+                        smt_refuted = true;
+                    }
+                    // SMT timeout / inconclusive: we cannot prove the proposal
+                    // incorrect, so leave the Metropolis decision below intact
+                    // rather than vetoing exploration.
+                    EquivalenceResult::Unknown(_) => {}
                 }
+            }
+
+            if smt_refuted {
+                continue;
             }
 
             if acceptance.accept(&mut rng, current_cost, proposal_cost) {
@@ -316,7 +332,13 @@ pub fn evaluate_with_tests(
 
     for (input, target_output) in test_inputs.iter().zip(target_outputs.iter()) {
         let proposal_output = apply_sequence_concrete(input.clone(), proposal);
-        if !states_equal_for_live_out(&proposal_output, target_output, live_out, false, false) {
+        if !states_equal_for_live_out(
+            &proposal_output,
+            target_output,
+            live_out,
+            live_out.flags_live(),
+            false,
+        ) {
             passes_all = false;
             break;
         }
@@ -524,6 +546,8 @@ mod tests {
     std::thread_local! {
         static RECORDED_SMT_TIMEOUT_MS: std::cell::Cell<Option<u64>> =
             const { std::cell::Cell::new(None) };
+        static PROBE_EQUIVALENCE_RESULT: std::cell::RefCell<EquivalenceResult> =
+            const { std::cell::RefCell::new(EquivalenceResult::Equivalent) };
     }
 
     impl StochasticBackend<TimeoutProbeIsa> for TimeoutProbeIsa {
@@ -582,10 +606,8 @@ mod tests {
             timeout: Duration,
         ) -> (EquivalenceResult, crate::semantics::EquivalenceMetrics) {
             RECORDED_SMT_TIMEOUT_MS.with(|recorded| recorded.set(Some(timeout.as_millis() as u64)));
-            (
-                EquivalenceResult::Equivalent,
-                crate::semantics::EquivalenceMetrics::default(),
-            )
+            let verdict = PROBE_EQUIVALENCE_RESULT.with(|result| result.borrow().clone());
+            (verdict, crate::semantics::EquivalenceMetrics::default())
         }
 
         fn random_sequence<R: rand::RngExt>(
@@ -605,6 +627,8 @@ mod tests {
 
     fn run_timeout_probe_search(symbolic_config: SymbolicConfig) -> Option<u64> {
         RECORDED_SMT_TIMEOUT_MS.with(|recorded| recorded.set(None));
+        PROBE_EQUIVALENCE_RESULT
+            .with(|result| *result.borrow_mut() = EquivalenceResult::Equivalent);
 
         let mut search: StochasticSearch<TimeoutProbeIsa> = StochasticSearch::new();
         let config = SearchConfig::default()
@@ -620,6 +644,30 @@ mod tests {
         assert_eq!(result.statistics.smt_queries, 1);
 
         RECORDED_SMT_TIMEOUT_MS.with(|recorded| recorded.get())
+    }
+
+    #[test]
+    fn stochastic_search_does_not_accept_smt_refuted_cheaper_proposal() {
+        RECORDED_SMT_TIMEOUT_MS.with(|recorded| recorded.set(None));
+        PROBE_EQUIVALENCE_RESULT
+            .with(|result| *result.borrow_mut() = EquivalenceResult::NotEquivalent);
+
+        let mut search: StochasticSearch<TimeoutProbeIsa> = StochasticSearch::new();
+        let config = SearchConfig::default().with_stochastic(
+            StochasticConfig::default()
+                .with_iterations(1)
+                .with_test_count(0)
+                .with_seed(1),
+        );
+        let target = [TimeoutProbeInstruction(1), TimeoutProbeInstruction(2)];
+
+        let result = search.search(&target, &(), &config);
+
+        assert_eq!(result.statistics.smt_queries, 1);
+        assert_eq!(result.statistics.smt_equivalent, 0);
+        assert_eq!(result.statistics.improvements_found, 0);
+        assert!(!result.found_optimization);
+        assert_eq!(result.statistics.accepted_proposals, 0);
     }
 
     #[test]
