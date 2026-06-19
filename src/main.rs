@@ -2359,6 +2359,19 @@ mod cli_helper_tests {
         }
     }
 
+    fn r10_zeroing_target() -> [X86Instruction; 2] {
+        let zero_r10 = X86Instruction::XorReg {
+            rd: X86Register::R10,
+            rs: X86Register::R10,
+        };
+        [zero_r10, zero_r10]
+    }
+
+    fn assert_single_r10_rewrite(optimized: &[X86Instruction]) {
+        assert_eq!(optimized.len(), 1);
+        assert_eq!(optimized[0].destination(), Some(X86Register::R10));
+    }
+
     fn build_minimal_elf64(text_bytes: &[u8], text_vaddr: u64, machine: u16) -> Vec<u8> {
         let elf_header_size = 64usize;
         let shentsize = 64usize;
@@ -3469,6 +3482,46 @@ mod cli_helper_tests {
         .expect("two identical R10/-1 writes must collapse to one");
         assert_eq!(optimized.len(), 1);
         assert_eq!(optimized[0].destination(), Some(X86Register::R10));
+    }
+
+    /// Regression (issue #458): stochastic search must consume the
+    /// target-derived x86 register pool end-to-end, not just expose it in the
+    /// config. R10 is outside `default_x86_registers()`, so a successful
+    /// rewrite proves the search backend can synthesize high-register
+    /// candidates.
+    #[test]
+    fn x86_stochastic_finds_rewrite_for_r10_only_target() {
+        let mut opts = options_for(Algorithm::Stochastic);
+        opts.timeout = None;
+        opts.solver_timeout = Duration::from_secs(30);
+        opts.cost_metric = CostMetric::InstructionCount;
+        opts.iterations = 50_000;
+        opts.seed = Some(7);
+
+        let target = r10_zeroing_target();
+        let optimized = run_x86_stochastic(&target, 64, &opts)
+            .expect("two identical R10 zeroing writes must collapse to one");
+
+        assert_single_r10_rewrite(&optimized);
+    }
+
+    /// Regression (issue #458): symbolic search must also use the
+    /// target-derived x86 register pool when synthesizing candidates. This
+    /// closes the end-to-end gap left by config-only coverage for high x86-64
+    /// registers.
+    #[test]
+    fn x86_symbolic_finds_rewrite_for_r10_only_target() {
+        let mut opts = options_for(Algorithm::Symbolic);
+        opts.timeout = None;
+        opts.solver_timeout = Duration::from_secs(30);
+        opts.search_mode = SearchMode::Linear;
+        opts.cost_metric = CostMetric::InstructionCount;
+
+        let target = r10_zeroing_target();
+        let optimized = run_x86_symbolic(&target, 64, &opts)
+            .expect("two identical R10 zeroing writes must collapse to one");
+
+        assert_single_r10_rewrite(&optimized);
     }
 
     #[test]
