@@ -474,6 +474,7 @@ trait ElfOptimizationBackend {
     fn run_search(
         &self,
         ir: &[Self::Instruction],
+        capstone_instructions: &capstone::Instructions,
         options: &OptimizationOptions,
         context: OptimizationContext,
     ) -> Result<Option<Vec<Self::Instruction>>, Box<dyn std::error::Error>>;
@@ -522,6 +523,7 @@ impl ElfOptimizationBackend for AArch64OptimizationBackend {
     fn run_search(
         &self,
         ir: &[Self::Instruction],
+        _capstone_instructions: &capstone::Instructions,
         options: &OptimizationOptions,
         context: OptimizationContext,
     ) -> Result<Option<Vec<Self::Instruction>>, Box<dyn std::error::Error>> {
@@ -606,6 +608,7 @@ impl ElfOptimizationBackend for X86OptimizationBackend {
     fn run_search(
         &self,
         ir: &[Self::Instruction],
+        capstone_instructions: &capstone::Instructions,
         options: &OptimizationOptions,
         context: OptimizationContext,
     ) -> Result<Option<Vec<Self::Instruction>>, Box<dyn std::error::Error>> {
@@ -616,9 +619,16 @@ impl ElfOptimizationBackend for X86OptimizationBackend {
             Algorithm::Stochastic => {
                 run_x86_stochastic(ir, self.width, options, context.downstream_flags_live)
             }
-            Algorithm::Symbolic => {
-                run_x86_symbolic(ir, self.width, options, context.downstream_flags_live)
-            }
+            Algorithm::Symbolic => run_x86_symbolic(
+                ir,
+                self.width,
+                options,
+                context.downstream_flags_live,
+                x86_capstone_window_uses_only_full_width_register_operands(
+                    capstone_instructions,
+                    self.width,
+                ),
+            ),
             Algorithm::Hybrid | Algorithm::Llm => {
                 // Rejected upstream at the CLI layer; defensive check here
                 // in case a programmatic caller bypasses it.
@@ -807,8 +817,12 @@ fn optimize_elf_binary_with_backend<B: ElfOptimizationBackend>(
         optimization_context_for_backend(backend.arch(), patcher, &section, end_addr, &cs);
 
     // Run optimization based on selected algorithm
-    let optimized_instructions =
-        backend.run_search(&ir_instructions, options, optimization_context)?;
+    let optimized_instructions = backend.run_search(
+        &ir_instructions,
+        &instructions,
+        options,
+        optimization_context,
+    )?;
 
     // Use optimized instructions if found, otherwise use original
     let final_instructions = optimized_instructions
@@ -952,6 +966,7 @@ fn build_x86_symbolic_search_config(
     target: &[isa::x86::X86Instruction],
     width: u32,
     options: &OptimizationOptions,
+    same_count_code_size_allowed: bool,
 ) -> SearchConfig {
     let symbolic_config = SymbolicConfig::default()
         .with_search_mode(options.search_mode)
@@ -965,6 +980,7 @@ fn build_x86_symbolic_search_config(
         .with_x86_registers(x86_registers_from_target(target))
         .with_immediates(isa::x86::default_x86_immediates())
         .with_x86_width(width)
+        .with_x86_same_count_code_size_allowed(same_count_code_size_allowed)
 }
 
 /// Run optimization using the selected algorithm.
@@ -1716,7 +1732,7 @@ fn validate_basic_block(ir: &[Instruction]) -> Result<(), String> {
 // (`convert_to_x86_ir`) and the length-1 enumerator used by the
 // enumerative x86 pipeline.
 
-use parser::x86::x86_ir_from_mnemonic;
+use parser::x86::{parse_x86_register_with_width, x86_ir_from_mnemonic};
 
 /// Reject any non-terminal Jcc in an x86 optimization window. The
 /// optimizer only special-cases a trailing Jcc (peeled by
@@ -1739,6 +1755,24 @@ fn validate_x86_window_terminator_placement(ir: &[isa::x86::X86Instruction]) -> 
         }
     }
     Ok(())
+}
+
+fn x86_capstone_window_uses_only_full_width_register_operands(
+    instructions: &capstone::Instructions,
+    width: u32,
+) -> bool {
+    instructions.iter().all(|instruction| {
+        instruction
+            .op_str()
+            .unwrap_or("")
+            .split(',')
+            .all(
+                |operand| match parse_x86_register_with_width(operand.trim()) {
+                    Ok((_reg, alias_width)) => alias_width == width,
+                    Err(_) => true,
+                },
+            )
+    })
 }
 
 fn convert_to_x86_ir(
@@ -1946,11 +1980,13 @@ fn run_x86_symbolic(
     width: u32,
     options: &OptimizationOptions,
     downstream_flags_live: bool,
+    same_count_code_size_allowed: bool,
 ) -> Option<Vec<isa::x86::X86Instruction>> {
     use search::SearchAlgorithm;
     use search::symbolic::SymbolicSearch;
 
-    let config = build_x86_symbolic_search_config(target, width, options);
+    let config =
+        build_x86_symbolic_search_config(target, width, options, same_count_code_size_allowed);
     let live_out = x86_live_out_for_optimization(target, downstream_flags_live);
 
     let (optimized, statistics) = if width == 32 {
@@ -3219,6 +3255,53 @@ mod cli_helper_tests {
         }
     }
 
+    fn x86_disassembled_operands_are_full_width_for_test(
+        bytes: &[u8],
+        mode: capstone::arch::x86::ArchMode,
+        width: u32,
+    ) -> bool {
+        let cs = Capstone::new()
+            .x86()
+            .mode(mode)
+            .syntax(capstone::arch::x86::ArchSyntax::Intel)
+            .build()
+            .unwrap();
+        let instructions = cs.disasm_all(bytes, 0x1000).unwrap();
+        x86_capstone_window_uses_only_full_width_register_operands(&instructions, width)
+    }
+
+    #[test]
+    fn x86_full_width_operand_detector() {
+        let mode64 = capstone::arch::x86::ArchMode::Mode64;
+        let mode32 = capstone::arch::x86::ArchMode::Mode32;
+
+        assert!(!x86_disassembled_operands_are_full_width_for_test(
+            &[0x66, 0xb8, 0x00, 0x00],
+            mode64,
+            64
+        ));
+        assert!(!x86_disassembled_operands_are_full_width_for_test(
+            &[0xb0, 0x00],
+            mode64,
+            64
+        ));
+        assert!(!x86_disassembled_operands_are_full_width_for_test(
+            &[0xb8, 0x00, 0x00, 0x00, 0x00],
+            mode64,
+            64
+        ));
+        assert!(x86_disassembled_operands_are_full_width_for_test(
+            &[0x48, 0xc7, 0xc0, 0x00, 0x00, 0x00, 0x00],
+            mode64,
+            64
+        ));
+        assert!(x86_disassembled_operands_are_full_width_for_test(
+            &[0xb8, 0x00, 0x00, 0x00, 0x00],
+            mode32,
+            32
+        ));
+    }
+
     #[test]
     fn x86_helpers_cover_error_and_optimization_paths() {
         assert!(parse_x86_operand("not-an-operand").is_err());
@@ -3289,14 +3372,61 @@ mod cli_helper_tests {
             imm: 0,
         }];
 
-        let flags_dead = run_x86_symbolic(&target, 64, &opts, false)
+        let flags_dead = run_x86_symbolic(&target, 64, &opts, false, true)
             .expect("flags-dead one-instruction MOV can use an x86 code-size rewrite");
         assert_eq!(flags_dead.len(), 1);
         assert_ne!(flags_dead, target.to_vec());
 
         assert!(
-            run_x86_symbolic(&target, 64, &opts, true).is_none(),
+            run_x86_symbolic(&target, 64, &opts, false, false).is_none(),
+            "the ELF frontend can disable same-count symbolic code-size rewrites when source operand widths are unsafe"
+        );
+
+        assert!(
+            run_x86_symbolic(&target, 64, &opts, true, true).is_none(),
             "a same-count code-size rewrite must preserve EFLAGS when the following code reads them"
+        );
+    }
+
+    #[test]
+    fn x86_symbolic_backend_gates_same_count_code_size_from_capstone_operands() {
+        let backend = X86OptimizationBackend::new(DetectedArch::X86_64).unwrap();
+        let cs = backend.disassembler().unwrap();
+        let mut opts = options_for(Algorithm::Symbolic);
+        opts.timeout = Some(Duration::from_secs(5));
+        opts.solver_timeout = Duration::from_secs(5);
+        opts.cost_metric = CostMetric::CodeSize;
+        let context = OptimizationContext {
+            downstream_flags_live: false,
+        };
+
+        let partial_instructions = cs.disasm_all(&[0x66, 0xb8, 0x00, 0x00], 0x1000).unwrap();
+        let partial_ir = backend.convert_ir(&partial_instructions).unwrap();
+        assert_eq!(
+            partial_ir,
+            vec![X86Instruction::MovImm {
+                rd: X86Register::RAX,
+                imm: 0
+            }]
+        );
+        assert!(
+            backend
+                .run_search(&partial_ir, &partial_instructions, &opts, context)
+                .unwrap()
+                .is_none(),
+            "x86-64 symbolic search must not same-count rewrite a partial-width source operand"
+        );
+
+        let full_instructions = cs
+            .disasm_all(&[0x48, 0xc7, 0xc0, 0x00, 0x00, 0x00, 0x00], 0x1000)
+            .unwrap();
+        let full_ir = backend.convert_ir(&full_instructions).unwrap();
+        assert!(
+            backend
+                .run_search(&full_ir, &full_instructions, &opts, context)
+                .unwrap()
+                .is_some(),
+            "full-width x86-64 operands should keep the same-count code-size rewrite"
         );
     }
 
@@ -3766,7 +3896,7 @@ mod cli_helper_tests {
                 imm: 0,
             },
         ];
-        let config = build_x86_symbolic_search_config(&target, 64, &opts);
+        let config = build_x86_symbolic_search_config(&target, 64, &opts, true);
 
         assert_eq!(config.x86_available_registers, vec![X86Register::R12]);
         assert!(
@@ -3800,6 +3930,7 @@ mod cli_helper_tests {
                 ],
                 64,
                 &opts,
+                true,
             )
             .x86_available_registers
             .is_empty(),
@@ -3819,6 +3950,11 @@ mod cli_helper_tests {
         );
         assert_eq!(config.x86_width, 64);
         assert_eq!(config.x86_mode, assembler::x86::X86Mode::Mode64);
+        assert!(config.x86_same_count_code_size_allowed);
+        assert!(
+            !build_x86_symbolic_search_config(&target, 64, &opts, false)
+                .x86_same_count_code_size_allowed
+        );
     }
 
     #[test]

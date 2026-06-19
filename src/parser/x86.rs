@@ -47,23 +47,80 @@ pub fn parse_x86_condition(suffix: &str) -> Result<X86Condition, String> {
 /// intentionally excluded because the minimal x86 IR models the
 /// low-byte/REX alias set.
 pub fn parse_x86_register(reg_str: &str) -> Result<X86Register, String> {
+    parse_x86_register_with_width(reg_str).map(|(reg, _width)| reg)
+}
+
+/// Parse a single x86 register name and report the textual alias width.
+///
+/// This is syntax metadata only: the returned register is still the
+/// canonical minimal-IR register, while the width preserves whether the
+/// source text named `rax`, `eax`, `ax`, or `al`.
+pub fn parse_x86_register_with_width(reg_str: &str) -> Result<(X86Register, u32), String> {
     match reg_str.trim().to_lowercase().as_str() {
-        "rax" | "eax" | "ax" | "al" => Ok(X86Register::RAX),
-        "rcx" | "ecx" | "cx" | "cl" => Ok(X86Register::RCX),
-        "rdx" | "edx" | "dx" | "dl" => Ok(X86Register::RDX),
-        "rbx" | "ebx" | "bx" | "bl" => Ok(X86Register::RBX),
-        "rsp" | "esp" | "sp" | "spl" => Ok(X86Register::RSP),
-        "rbp" | "ebp" | "bp" | "bpl" => Ok(X86Register::RBP),
-        "rsi" | "esi" | "si" | "sil" => Ok(X86Register::RSI),
-        "rdi" | "edi" | "di" | "dil" => Ok(X86Register::RDI),
-        "r8" | "r8d" | "r8w" | "r8b" => Ok(X86Register::R8),
-        "r9" | "r9d" | "r9w" | "r9b" => Ok(X86Register::R9),
-        "r10" | "r10d" | "r10w" | "r10b" => Ok(X86Register::R10),
-        "r11" | "r11d" | "r11w" | "r11b" => Ok(X86Register::R11),
-        "r12" | "r12d" | "r12w" | "r12b" => Ok(X86Register::R12),
-        "r13" | "r13d" | "r13w" | "r13b" => Ok(X86Register::R13),
-        "r14" | "r14d" | "r14w" | "r14b" => Ok(X86Register::R14),
-        "r15" | "r15d" | "r15w" | "r15b" => Ok(X86Register::R15),
+        "rax" => Ok((X86Register::RAX, 64)),
+        "eax" => Ok((X86Register::RAX, 32)),
+        "ax" => Ok((X86Register::RAX, 16)),
+        "al" => Ok((X86Register::RAX, 8)),
+        "rcx" => Ok((X86Register::RCX, 64)),
+        "ecx" => Ok((X86Register::RCX, 32)),
+        "cx" => Ok((X86Register::RCX, 16)),
+        "cl" => Ok((X86Register::RCX, 8)),
+        "rdx" => Ok((X86Register::RDX, 64)),
+        "edx" => Ok((X86Register::RDX, 32)),
+        "dx" => Ok((X86Register::RDX, 16)),
+        "dl" => Ok((X86Register::RDX, 8)),
+        "rbx" => Ok((X86Register::RBX, 64)),
+        "ebx" => Ok((X86Register::RBX, 32)),
+        "bx" => Ok((X86Register::RBX, 16)),
+        "bl" => Ok((X86Register::RBX, 8)),
+        "rsp" => Ok((X86Register::RSP, 64)),
+        "esp" => Ok((X86Register::RSP, 32)),
+        "sp" => Ok((X86Register::RSP, 16)),
+        "spl" => Ok((X86Register::RSP, 8)),
+        "rbp" => Ok((X86Register::RBP, 64)),
+        "ebp" => Ok((X86Register::RBP, 32)),
+        "bp" => Ok((X86Register::RBP, 16)),
+        "bpl" => Ok((X86Register::RBP, 8)),
+        "rsi" => Ok((X86Register::RSI, 64)),
+        "esi" => Ok((X86Register::RSI, 32)),
+        "si" => Ok((X86Register::RSI, 16)),
+        "sil" => Ok((X86Register::RSI, 8)),
+        "rdi" => Ok((X86Register::RDI, 64)),
+        "edi" => Ok((X86Register::RDI, 32)),
+        "di" => Ok((X86Register::RDI, 16)),
+        "dil" => Ok((X86Register::RDI, 8)),
+        "r8" => Ok((X86Register::R8, 64)),
+        "r8d" => Ok((X86Register::R8, 32)),
+        "r8w" => Ok((X86Register::R8, 16)),
+        "r8b" => Ok((X86Register::R8, 8)),
+        "r9" => Ok((X86Register::R9, 64)),
+        "r9d" => Ok((X86Register::R9, 32)),
+        "r9w" => Ok((X86Register::R9, 16)),
+        "r9b" => Ok((X86Register::R9, 8)),
+        "r10" => Ok((X86Register::R10, 64)),
+        "r10d" => Ok((X86Register::R10, 32)),
+        "r10w" => Ok((X86Register::R10, 16)),
+        "r10b" => Ok((X86Register::R10, 8)),
+        "r11" => Ok((X86Register::R11, 64)),
+        "r11d" => Ok((X86Register::R11, 32)),
+        "r11w" => Ok((X86Register::R11, 16)),
+        "r11b" => Ok((X86Register::R11, 8)),
+        "r12" => Ok((X86Register::R12, 64)),
+        "r12d" => Ok((X86Register::R12, 32)),
+        "r12w" => Ok((X86Register::R12, 16)),
+        "r12b" => Ok((X86Register::R12, 8)),
+        "r13" => Ok((X86Register::R13, 64)),
+        "r13d" => Ok((X86Register::R13, 32)),
+        "r13w" => Ok((X86Register::R13, 16)),
+        "r13b" => Ok((X86Register::R13, 8)),
+        "r14" => Ok((X86Register::R14, 64)),
+        "r14d" => Ok((X86Register::R14, 32)),
+        "r14w" => Ok((X86Register::R14, 16)),
+        "r14b" => Ok((X86Register::R14, 8)),
+        "r15" => Ok((X86Register::R15, 64)),
+        "r15d" => Ok((X86Register::R15, 32)),
+        "r15w" => Ok((X86Register::R15, 16)),
+        "r15b" => Ok((X86Register::R15, 8)),
         _ => Err(format!("Unknown x86 register: {}", reg_str)),
     }
 }
@@ -309,6 +366,29 @@ mod tests {
         assert_eq!(parse_x86_register("r10").unwrap(), X86Register::R10);
         assert_eq!(parse_x86_register("r10d").unwrap(), X86Register::R10);
         assert!(parse_x86_register("zmm0").is_err());
+    }
+
+    #[test]
+    fn parse_register_reports_alias_widths() {
+        let cases = [
+            ("rax", X86Register::RAX, 64),
+            ("r8", X86Register::R8, 64),
+            ("eax", X86Register::RAX, 32),
+            ("r8d", X86Register::R8, 32),
+            ("ax", X86Register::RAX, 16),
+            ("r8w", X86Register::R8, 16),
+            ("al", X86Register::RAX, 8),
+            ("r8b", X86Register::R8, 8),
+        ];
+
+        for (alias, expected_register, expected_width) in cases {
+            assert_eq!(
+                parse_x86_register_with_width(alias).unwrap(),
+                (expected_register, expected_width),
+                "{alias}"
+            );
+        }
+        assert!(parse_x86_register_with_width("zmm0").is_err());
     }
 
     #[test]
