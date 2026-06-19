@@ -3273,10 +3273,12 @@ mod tests {
     /// for singleton top-level slots. Each should now hold its own slot so
     /// the sampler is roughly uniform across the current 48-slot table.
     /// With N = 48_000 ChaCha8-seeded draws each singleton-slot opcode is
-    /// expected near 1000 hits; the old sub-mux would give ~250. The lower
-    /// 750 threshold catches under-sampling, while the wide 3x upper bound
-    /// catches accidental over-weighting without treating every opcode family
-    /// as uniformly distributed.
+    /// expected near 1000 hits; the old sub-mux would give ~250. The
+    /// MIN_EXPECTED = 750 threshold sits ~8σ below the new expected and ~32σ
+    /// above the old sub-mux baseline, so it catches under-sampling without
+    /// flaking, while the wide 3x upper bound catches accidental
+    /// over-weighting without treating every opcode family as uniformly
+    /// distributed.
     #[test]
     fn ands_cset_csetm_ror_sampling_uniformity() {
         use std::collections::BTreeMap;
@@ -3286,6 +3288,7 @@ mod tests {
         let mut rng = ChaCha8Rng::seed_from_u64(0x9300);
         let mut counts: BTreeMap<u8, u32> = BTreeMap::new();
         const N: u32 = 48_000;
+        const MIN_EXPECTED: u32 = 750;
         const TOP_LEVEL_SLOT_COUNT: u32 = 48;
         const EXPECTED_TOP_LEVEL_COUNT: u32 = N / TOP_LEVEL_SLOT_COUNT;
         const MAX_REASONABLE_TOP_LEVEL_COUNT: u32 = 3 * N / TOP_LEVEL_SLOT_COUNT;
@@ -3333,8 +3336,9 @@ mod tests {
             let id = instr.opcode_id();
             let count = counts.get(&id).copied().unwrap_or(0);
             assert!(
-                count >= 750,
-                "expected >= 750 samples for {} (id {}) in {} draws, got {}",
+                count >= MIN_EXPECTED,
+                "expected >= {} samples for {} (id {}) in {} draws, got {}",
+                MIN_EXPECTED,
                 instr,
                 id,
                 N,
