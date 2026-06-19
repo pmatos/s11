@@ -893,11 +893,20 @@ impl X86Mutator {
         // The RNG draw order/count MUST stay in lock-step with the shared
         // free helper `generate_random_rewritable_x86_instruction`
         // (opcode → rd → rs → imm → cond, all four drawn unconditionally)
-        // so callers that interleave the two stay deterministic. The only
+        // so callers that interleave the two stay deterministic. Two
+        // helper behaviours must be mirrored exactly: (1) the trailing
+        // CMOV opcode slot is dropped unless the pool holds a distinct
+        // register pair (a self-CMOV is a no-op), and (2) CMOV draws its
+        // source via an extra `pick_register_except` so `rs != rd`. The
         // #593 behaviour change is *which* prefiltered pool the single imm
         // draw indexes: opcode 1 (MOV) uses the MOVABS-capable `mov`
         // pool, every other imm form uses the non-MOV pool.
-        let opcode = rng.random_range(0..u32::from(X86_REWRITABLE_OPCODE_COUNT));
+        let opcode_count = if has_distinct_register_pair(&self.registers) {
+            X86_REWRITABLE_OPCODE_COUNT
+        } else {
+            X86_REWRITABLE_OPCODE_COUNT - 1
+        };
+        let opcode = rng.random_range(0..u32::from(opcode_count));
         let rd = self.pick_register(rng)?;
         let rs = self.pick_register(rng)?;
         let imm = if opcode == 1 {
@@ -921,7 +930,12 @@ impl X86Mutator {
             11 => X86Instruction::XorImm { rd, imm },
             12 => X86Instruction::CmpReg { rn: rd, rs },
             13 => X86Instruction::CmpImm { rn: rd, imm },
-            _ => X86Instruction::Cmov { rd, rs, cond },
+            _ => X86Instruction::Cmov {
+                rd,
+                rs: pick_register_except(rng, &self.registers, rd)
+                    .expect("CMOV opcode requires a distinct register pair"),
+                cond,
+            },
         })
     }
 
