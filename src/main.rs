@@ -3668,7 +3668,7 @@ mod cli_helper_tests {
             isa::x86::default_x86_immediates()
         );
         assert_eq!(config.x86_width, 32);
-        assert_eq!(config.x86_mode, assembler::x86::X86Mode::Mode32);
+        assert_eq!(config.x86_mode(), assembler::x86::X86Mode::Mode32);
     }
 
     #[test]
@@ -3754,7 +3754,7 @@ mod cli_helper_tests {
             isa::x86::default_x86_immediates()
         );
         assert_eq!(config.x86_width, 64);
-        assert_eq!(config.x86_mode, assembler::x86::X86Mode::Mode64);
+        assert_eq!(config.x86_mode(), assembler::x86::X86Mode::Mode64);
     }
 
     #[test]
