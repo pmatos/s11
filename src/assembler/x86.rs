@@ -878,16 +878,36 @@ mod tests {
     }
 
     #[test]
-    fn cmove_x86_32_round_trips() {
-        check_x86_32(
-            X86Instruction::Cmov {
-                rd: X86Register::RAX,
-                rs: X86Register::RBX,
-                cond: X86Condition::E,
-            },
-            "cmove",
-            &["eax", "ebx"],
-        );
+    fn all_cmov_suffixes_round_trip_x86_32() {
+        let cases = [
+            (X86Condition::E, "cmove"),
+            (X86Condition::NE, "cmovne"),
+            (X86Condition::B, "cmovb"),
+            (X86Condition::AE, "cmovae"),
+            (X86Condition::BE, "cmovbe"),
+            (X86Condition::A, "cmova"),
+            (X86Condition::L, "cmovl"),
+            (X86Condition::GE, "cmovge"),
+            (X86Condition::LE, "cmovle"),
+            (X86Condition::G, "cmovg"),
+            (X86Condition::S, "cmovs"),
+            (X86Condition::NS, "cmovns"),
+            (X86Condition::O, "cmovo"),
+            (X86Condition::NO, "cmovno"),
+            (X86Condition::P, "cmovp"),
+            (X86Condition::NP, "cmovnp"),
+        ];
+        for (cond, mn) in cases {
+            check_x86_32(
+                X86Instruction::Cmov {
+                    rd: X86Register::RAX,
+                    rs: X86Register::RBX,
+                    cond,
+                },
+                mn,
+                &["eax", "ebx"],
+            );
+        }
     }
 
     // --- Jcc short-form encoding ---
@@ -938,15 +958,33 @@ mod tests {
     }
 
     #[test]
-    fn je_x86_32_round_trips() {
-        let mut asm = X86Assembler::new_32();
-        let bytes = asm
-            .assemble_instructions(&[X86Instruction::Jcc {
-                cond: X86Condition::E,
-            }])
-            .expect("encode je 32-bit");
-        let disasm = disasm_x86_32(&bytes);
-        assert_eq!(disasm.len(), 1);
-        assert_eq!(disasm[0].0, "je");
+    fn all_jcc_suffixes_round_trip_x86_32() {
+        let cases = [
+            (X86Condition::E, "je"),
+            (X86Condition::NE, "jne"),
+            (X86Condition::B, "jb"),
+            (X86Condition::AE, "jae"),
+            (X86Condition::BE, "jbe"),
+            (X86Condition::A, "ja"),
+            (X86Condition::L, "jl"),
+            (X86Condition::GE, "jge"),
+            (X86Condition::LE, "jle"),
+            (X86Condition::G, "jg"),
+            (X86Condition::S, "js"),
+            (X86Condition::NS, "jns"),
+            (X86Condition::O, "jo"),
+            (X86Condition::NO, "jno"),
+            (X86Condition::P, "jp"),
+            (X86Condition::NP, "jnp"),
+        ];
+        for (cond, mn) in cases {
+            let mut asm = X86Assembler::new_32();
+            let bytes = asm
+                .assemble_instructions(&[X86Instruction::Jcc { cond }])
+                .unwrap_or_else(|e| panic!("encode {}: {}", mn, e));
+            let disasm = disasm_x86_32(&bytes);
+            assert_eq!(disasm.len(), 1, "expected one instr for {}", mn);
+            assert_eq!(disasm[0].0, mn);
+        }
     }
 }
