@@ -2669,10 +2669,10 @@ mod tests {
     /// slot 23 via a 4-way sub-multiplexer, giving each ~1/120 vs ~1/30
     /// for the rest of the old 30-slot table. Each should now hold its
     /// own top-level slot so the sampler is roughly uniform across the
-    /// new 33-slot table (~1/33). With N = 30_000 ChaCha8-seeded draws
-    /// each is expected near 909 hits; the old sub-mux would give ~250.
-    /// The 600 threshold sits ~10σ below the new expected and ~22σ above
-    /// the old.
+    /// current 38-slot table (~1/38). With N = 30_000 ChaCha8-seeded draws
+    /// each is expected near 789 hits; the old sub-mux would give ~250,
+    /// with the old branch measuring about 241 ANDS hits for this seed.
+    /// MIN_EXPECTED sits ~6.8σ below the new expected and ~22σ above the old.
     #[test]
     fn slot_23_sub_multiplexer_removed_for_issue_93() {
         use std::collections::HashMap;
@@ -2682,6 +2682,7 @@ mod tests {
         let mut rng = ChaCha8Rng::seed_from_u64(0x9300);
         let mut counts: HashMap<u8, u32> = HashMap::new();
         const N: u32 = 30_000;
+        const MIN_EXPECTED: u32 = 600;
         for _ in 0..N {
             let id = generator
                 .generate_random(&mut rng, &regs, &imms)
@@ -2712,8 +2713,9 @@ mod tests {
             let id = instr.opcode_id();
             let count = counts.get(&id).copied().unwrap_or(0);
             assert!(
-                count >= 600,
-                "expected >= 600 samples for {} (id {}) in {} draws, got {}",
+                count >= MIN_EXPECTED,
+                "expected >= {} samples for {} (id {}) in {} draws, got {}",
+                MIN_EXPECTED,
                 instr,
                 id,
                 N,
