@@ -1036,6 +1036,26 @@ fn build_hybrid_search_config(
         .with_timeout_option(options.timeout)
 }
 
+/// Shared base `SearchConfig` for the x86 stochastic/symbolic/enumerative
+/// builders. Sets the fields they configure identically — cost metric, overall
+/// and SMT solver timeouts, verbosity, the target-derived register pool, the
+/// default immediate pool, and operand width — so each builder only layers on
+/// its algorithm-specific pieces.
+fn build_x86_base_search_config(
+    target: &[isa::x86::X86Instruction],
+    width: u32,
+    options: &OptimizationOptions,
+) -> SearchConfig {
+    SearchConfig::default()
+        .with_cost_metric(options.cost_metric)
+        .with_solver_timeout(options.solver_timeout)
+        .with_timeout_option(options.timeout)
+        .with_verbose(options.verbose)
+        .with_x86_registers(x86_registers_from_target(target))
+        .with_immediates(isa::x86::default_x86_immediates())
+        .with_x86_width(width)
+}
+
 fn build_x86_stochastic_search_config(
     target: &[isa::x86::X86Instruction],
     width: u32,
@@ -1046,15 +1066,7 @@ fn build_x86_stochastic_search_config(
         .with_iterations(options.iterations)
         .with_seed_option(options.seed);
 
-    SearchConfig::default()
-        .with_stochastic(stochastic_config)
-        .with_solver_timeout(options.solver_timeout)
-        .with_cost_metric(options.cost_metric)
-        .with_timeout_option(options.timeout)
-        .with_verbose(options.verbose)
-        .with_x86_registers(x86_registers_from_target(target))
-        .with_immediates(isa::x86::default_x86_immediates())
-        .with_x86_width(width)
+    build_x86_base_search_config(target, width, options).with_stochastic(stochastic_config)
 }
 
 fn build_x86_symbolic_search_config(
@@ -1068,15 +1080,8 @@ fn build_x86_symbolic_search_config(
 ) -> SearchConfig {
     let symbolic_config = SymbolicConfig::default().with_search_mode(options.search_mode);
 
-    SearchConfig::default()
+    build_x86_base_search_config(target, width, options)
         .with_symbolic(symbolic_config)
-        .with_solver_timeout(options.solver_timeout)
-        .with_cost_metric(options.cost_metric)
-        .with_timeout_option(options.timeout)
-        .with_verbose(options.verbose)
-        .with_x86_registers(x86_registers_from_target(target))
-        .with_immediates(isa::x86::default_x86_immediates())
-        .with_x86_width(width)
         .with_x86_same_count_code_size_allowed(same_count_code_size_allowed)
 }
 
@@ -1988,8 +1993,10 @@ fn x86_live_out_for_optimization(
 
 /// Build the search config for the x86 *enumerative* path. Like stochastic and
 /// symbolic search, enumerative search draws candidates from the target's own
-/// registers; it additionally derives immediates from the target and honours
-/// --cores now that the trait-backed search is rayon-parallel.
+/// registers via the shared x86 base; it additionally derives immediates from
+/// the target and honours --cores now that the trait-backed search is
+/// rayon-parallel. It reuses the stochastic builder so it inherits the same
+/// solver timeout (`--solver-timeout`) wiring.
 fn build_x86_enumerative_search_config(
     target: &[isa::x86::X86Instruction],
     width: u32,
@@ -4174,6 +4181,60 @@ mod cli_helper_tests {
             config.available_immediates.contains(&-1),
             "immediate pool must include -1"
         );
+    }
+
+    #[test]
+    fn build_x86_enumerative_search_config_reuses_stochastic_base_and_overrides() {
+        let mut opts = options_for(Algorithm::Enumerative);
+        opts.timeout = Some(Duration::from_millis(31));
+        opts.solver_timeout = Duration::from_millis(37);
+        opts.beta = 7.25;
+        opts.iterations = 987;
+        opts.seed = Some(123);
+        opts.cost_metric = CostMetric::Latency;
+        opts.verbose = true;
+        opts.cores = Some(4);
+
+        let target = vec![
+            X86Instruction::MovImm {
+                rd: X86Register::R11,
+                imm: -5,
+            },
+            X86Instruction::AddReg {
+                rd: X86Register::R12,
+                rs: X86Register::R11,
+            },
+            X86Instruction::CmpImm {
+                rn: X86Register::R10,
+                imm: 3,
+            },
+        ];
+        let config = build_x86_enumerative_search_config(&target, 32, &opts);
+
+        assert_eq!(
+            config.x86_available_registers,
+            vec![X86Register::R11, X86Register::R12]
+        );
+        // The enumerative builder layers a target-derived immediate pool over the
+        // stochastic base, so the operand immediates appear here.
+        assert!(config.available_immediates.contains(&-5));
+        assert!(config.available_immediates.contains(&3));
+        assert_eq!(config.cores, Some(4));
+        assert_eq!(config.cost_metric, CostMetric::Latency);
+        assert_eq!(config.timeout, Some(Duration::from_millis(31)));
+        assert!(config.verbose);
+        assert_eq!(config.x86_width, 32);
+        assert_eq!(config.x86_mode(), assembler::x86::X86Mode::Mode32);
+
+        // The enumerative builder reuses the stochastic builder, so the
+        // stochastic fields are populated from the CLI options. They are inert
+        // for enumerative search (it never reads `config.stochastic`), but the
+        // shared base means the config still honors --solver-timeout for SMT
+        // verification queries.
+        assert_eq!(config.stochastic.beta, 7.25);
+        assert_eq!(config.stochastic.iterations, 987);
+        assert_eq!(config.stochastic.seed, Some(123));
+        assert_eq!(config.solver_timeout, Some(Duration::from_millis(37)));
     }
 
     #[test]
