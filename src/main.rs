@@ -2583,6 +2583,15 @@ mod cli_helper_tests {
             ("bfxil", "x0, x1, #8, #8"),
             ("ubfiz", "x0, x1, #4, #8"),
             ("sbfiz", "x0, x1, #4, #8"),
+            // Issue #145: 32-bit W-register forms. Capstone emits `wN` operands
+            // for these encodings; lsb+width stays < 32 to avoid the LSR/MOV
+            // alias boundary.
+            ("ubfx", "w0, w1, #8, #16"),
+            ("sbfx", "w0, w1, #8, #16"),
+            ("bfi", "w0, w1, #4, #8"),
+            ("bfxil", "w0, w1, #8, #8"),
+            ("ubfiz", "w0, w1, #4, #8"),
+            ("sbfiz", "w0, w1, #4, #8"),
             // Issue #69: branch / control-flow mnemonics. Capstone emits
             // branch targets as `#0x...` (immediate-with-hash) and renders
             // TBZ/TBNZ as `wN` when bit<32, `xN` otherwise.
@@ -2673,7 +2682,7 @@ mod cli_helper_tests {
         // Tripwire: bump in lockstep when adding/removing rows. Catches
         // accidental row deletion and forces a re-read when adding a parser
         // mnemonic without a matching test row.
-        assert_eq!(cases.len(), 148);
+        assert_eq!(cases.len(), 154);
 
         fn docs_mnemonic(mnemonic: &'static str) -> &'static str {
             if mnemonic.starts_with("b.") {

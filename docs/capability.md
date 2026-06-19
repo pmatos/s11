@@ -57,7 +57,9 @@ Rewritable straight-line mnemonics accepted by the parser and Capstone bridge:
 - Single-source bit manipulation: `clz`, `cls`, `rbit`, `rev`, `rev32`,
   `rev16`
 - Standalone extend aliases: `uxtb`, `uxth`, `sxtb`, `sxth`, `sxtw`
-- Bit-field aliases: `ubfx`, `sbfx`, `bfi`, `bfxil`, `ubfiz`, `sbfiz`
+- Bit-field aliases: `ubfx`, `sbfx`, `bfi`, `bfxil`, `ubfiz`, `sbfiz` — each
+  supports both 64-bit `X` and 32-bit `W` register forms (the W form zeroes the
+  destination's upper 32 bits per the ARM ARM).
 - Memory loads and stores (issue #68, [ADR-0007](adr/0007-memory-model.md);
   byte-addressed Z3-array memory model with sound full aliasing, whole-memory
   live-out auto-derived): `ldr`, `ldrb`, `ldrh`, `ldrsb`, `ldrsh`, `ldrsw`,

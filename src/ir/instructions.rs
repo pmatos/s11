@@ -449,45 +449,53 @@ pub enum Instruction {
         rd: Register,
         rn: Register,
     },
-    // Bit-field manipulation (64-bit, aliases of UBFM/SBFM/BFM per ARM ARM C6.2).
+    // Bit-field manipulation (aliases of UBFM/SBFM/BFM per ARM ARM C6.2).
     // `lsb` is the bit position of the least-significant bit of the field in the
-    // source; `width` is the field width. Constraint: lsb ∈ [0..=63],
-    // width ∈ [1..=64-lsb]. Enforced in `is_encodable_aarch64`.
+    // source; `width` is the field width. `reg_width` selects the X (64-bit) or
+    // W (32-bit) form. Constraints (enforced in `is_encodable_aarch64`):
+    //   X64: lsb ∈ [0..=63], width ∈ [1..=64-lsb]
+    //   W32: lsb ∈ [0..=31], width ∈ [1..=32-lsb]; the result zeroes bits [63:32].
     Ubfx {
         rd: Register,
         rn: Register,
         lsb: u8,
         width: u8,
+        reg_width: RegisterWidth,
     },
     Sbfx {
         rd: Register,
         rn: Register,
         lsb: u8,
         width: u8,
+        reg_width: RegisterWidth,
     },
     Bfi {
         rd: Register,
         rn: Register,
         lsb: u8,
         width: u8,
+        reg_width: RegisterWidth,
     },
     Bfxil {
         rd: Register,
         rn: Register,
         lsb: u8,
         width: u8,
+        reg_width: RegisterWidth,
     },
     Ubfiz {
         rd: Register,
         rn: Register,
         lsb: u8,
         width: u8,
+        reg_width: RegisterWidth,
     },
     Sbfiz {
         rd: Register,
         rn: Register,
         lsb: u8,
         width: u8,
+        reg_width: RegisterWidth,
     },
 
     // Branches / control flow (terminators only — never appear in the
@@ -1067,19 +1075,58 @@ impl Instruction {
             | Instruction::Sxtw { rd, rn }
             | Instruction::Uxtb { rd, rn }
             | Instruction::Uxth { rd, rn } => is_x_or_xzr(*rd) && is_x_or_xzr(*rn),
-            // Bit-field aliases of UBFM/SBFM/BFM. Constraint: lsb ∈ [0..=63],
-            // width ∈ [1..=64-lsb]. SP rejected in rd and rn.
-            Instruction::Ubfx { rd, rn, lsb, width }
-            | Instruction::Sbfx { rd, rn, lsb, width }
-            | Instruction::Bfi { rd, rn, lsb, width }
-            | Instruction::Bfxil { rd, rn, lsb, width }
-            | Instruction::Ubfiz { rd, rn, lsb, width }
-            | Instruction::Sbfiz { rd, rn, lsb, width } => {
+            // Bit-field aliases of UBFM/SBFM/BFM. SP rejected in rd and rn.
+            // Constraint depends on the register width:
+            //   X64: lsb ∈ [0..=63], width ∈ [1..=64-lsb]
+            //   W32: lsb ∈ [0..=31], width ∈ [1..=32-lsb]
+            Instruction::Ubfx {
+                rd,
+                rn,
+                lsb,
+                width,
+                reg_width,
+            }
+            | Instruction::Sbfx {
+                rd,
+                rn,
+                lsb,
+                width,
+                reg_width,
+            }
+            | Instruction::Bfi {
+                rd,
+                rn,
+                lsb,
+                width,
+                reg_width,
+            }
+            | Instruction::Bfxil {
+                rd,
+                rn,
+                lsb,
+                width,
+                reg_width,
+            }
+            | Instruction::Ubfiz {
+                rd,
+                rn,
+                lsb,
+                width,
+                reg_width,
+            }
+            | Instruction::Sbfiz {
+                rd,
+                rn,
+                lsb,
+                width,
+                reg_width,
+            } => {
+                let bound = reg_width.bit_width() as u16;
                 is_x_or_xzr(*rd)
                     && is_x_or_xzr(*rn)
-                    && *lsb <= 63
+                    && (*lsb as u16) < bound
                     && *width >= 1
-                    && (*lsb as u16 + *width as u16) <= 64
+                    && (*lsb as u16 + *width as u16) <= bound
             }
 
             // Branches: encodability is checked against PC-relative range at
@@ -1655,24 +1702,90 @@ impl fmt::Display for Instruction {
                 RegisterWidth::W32.register_name(*rd),
                 RegisterWidth::W32.register_name(*rn)
             ),
-            Instruction::Ubfx { rd, rn, lsb, width } => {
-                write!(f, "ubfx {}, {}, #{}, #{}", rd, rn, lsb, width)
-            }
-            Instruction::Sbfx { rd, rn, lsb, width } => {
-                write!(f, "sbfx {}, {}, #{}, #{}", rd, rn, lsb, width)
-            }
-            Instruction::Bfi { rd, rn, lsb, width } => {
-                write!(f, "bfi {}, {}, #{}, #{}", rd, rn, lsb, width)
-            }
-            Instruction::Bfxil { rd, rn, lsb, width } => {
-                write!(f, "bfxil {}, {}, #{}, #{}", rd, rn, lsb, width)
-            }
-            Instruction::Ubfiz { rd, rn, lsb, width } => {
-                write!(f, "ubfiz {}, {}, #{}, #{}", rd, rn, lsb, width)
-            }
-            Instruction::Sbfiz { rd, rn, lsb, width } => {
-                write!(f, "sbfiz {}, {}, #{}, #{}", rd, rn, lsb, width)
-            }
+            Instruction::Ubfx {
+                rd,
+                rn,
+                lsb,
+                width,
+                reg_width,
+            } => write!(
+                f,
+                "ubfx {}, {}, #{}, #{}",
+                reg_width.register_name(*rd),
+                reg_width.register_name(*rn),
+                lsb,
+                width
+            ),
+            Instruction::Sbfx {
+                rd,
+                rn,
+                lsb,
+                width,
+                reg_width,
+            } => write!(
+                f,
+                "sbfx {}, {}, #{}, #{}",
+                reg_width.register_name(*rd),
+                reg_width.register_name(*rn),
+                lsb,
+                width
+            ),
+            Instruction::Bfi {
+                rd,
+                rn,
+                lsb,
+                width,
+                reg_width,
+            } => write!(
+                f,
+                "bfi {}, {}, #{}, #{}",
+                reg_width.register_name(*rd),
+                reg_width.register_name(*rn),
+                lsb,
+                width
+            ),
+            Instruction::Bfxil {
+                rd,
+                rn,
+                lsb,
+                width,
+                reg_width,
+            } => write!(
+                f,
+                "bfxil {}, {}, #{}, #{}",
+                reg_width.register_name(*rd),
+                reg_width.register_name(*rn),
+                lsb,
+                width
+            ),
+            Instruction::Ubfiz {
+                rd,
+                rn,
+                lsb,
+                width,
+                reg_width,
+            } => write!(
+                f,
+                "ubfiz {}, {}, #{}, #{}",
+                reg_width.register_name(*rd),
+                reg_width.register_name(*rn),
+                lsb,
+                width
+            ),
+            Instruction::Sbfiz {
+                rd,
+                rn,
+                lsb,
+                width,
+                reg_width,
+            } => write!(
+                f,
+                "sbfiz {}, {}, #{}, #{}",
+                reg_width.register_name(*rd),
+                reg_width.register_name(*rn),
+                lsb,
+                width
+            ),
 
             Instruction::B { target } => write!(f, "b {}", target),
             Instruction::BCond { target, cond } => write!(f, "b.{} {}", cond, target),
@@ -1806,6 +1919,7 @@ mod tests {
             rn: Register::X1,
             lsb: 5,
             width: 10,
+            reg_width: crate::ir::RegisterWidth::X64,
         };
         assert_eq!(format!("{}", ubfx), "ubfx x0, x1, #5, #10");
     }
@@ -3996,6 +4110,7 @@ mod tests {
                 rn: Register::X1,
                 lsb,
                 width,
+                reg_width: crate::ir::RegisterWidth::X64,
             };
             assert!(
                 instr.is_encodable_aarch64(),
@@ -4012,6 +4127,7 @@ mod tests {
                 rn: Register::X1,
                 lsb: 0,
                 width: 8,
+                reg_width: crate::ir::RegisterWidth::X64
             }
             .is_encodable_aarch64()
         );
@@ -4023,6 +4139,7 @@ mod tests {
                 rn: Register::SP,
                 lsb: 0,
                 width: 8,
+                reg_width: crate::ir::RegisterWidth::X64
             }
             .is_encodable_aarch64()
         );
@@ -4034,6 +4151,7 @@ mod tests {
                 rn: Register::X1,
                 lsb: 0,
                 width: 8,
+                reg_width: crate::ir::RegisterWidth::X64
             }
             .is_encodable_aarch64()
         );
@@ -4045,6 +4163,7 @@ mod tests {
                 rn: Register::X1,
                 lsb: 0,
                 width: 0,
+                reg_width: crate::ir::RegisterWidth::X64
             }
             .is_encodable_aarch64()
         );
@@ -4056,6 +4175,7 @@ mod tests {
                 rn: Register::X1,
                 lsb: 60,
                 width: 10,
+                reg_width: crate::ir::RegisterWidth::X64
             }
             .is_encodable_aarch64()
         );
@@ -4067,6 +4187,74 @@ mod tests {
                 rn: Register::X1,
                 lsb: 63,
                 width: 1,
+                reg_width: crate::ir::RegisterWidth::X64
+            }
+            .is_encodable_aarch64()
+        );
+    }
+
+    #[test]
+    fn test_is_encodable_bitfield_w_form() {
+        use crate::ir::RegisterWidth::W32;
+        // Valid W combinations: lsb ∈ [0..=31], width ∈ [1..=32-lsb].
+        for (lsb, width) in [(0u8, 1u8), (0, 32), (5, 10), (16, 16), (31, 1)] {
+            let instr = Instruction::Ubfx {
+                rd: Register::X0,
+                rn: Register::X1,
+                lsb,
+                width,
+                reg_width: W32,
+            };
+            assert!(
+                instr.is_encodable_aarch64(),
+                "valid W (lsb={lsb}, width={width}) must be encodable"
+            );
+        }
+
+        // lsb=32 is out of range for the W form (valid only for X).
+        assert!(
+            !Instruction::Ubfx {
+                rd: Register::X0,
+                rn: Register::X1,
+                lsb: 32,
+                width: 1,
+                reg_width: W32,
+            }
+            .is_encodable_aarch64()
+        );
+
+        // lsb+width > 32 rejected for the W form.
+        assert!(
+            !Instruction::Sbfx {
+                rd: Register::X0,
+                rn: Register::X1,
+                lsb: 16,
+                width: 17,
+                reg_width: W32,
+            }
+            .is_encodable_aarch64()
+        );
+
+        // width=0 still rejected for W.
+        assert!(
+            !Instruction::Bfi {
+                rd: Register::X0,
+                rn: Register::X1,
+                lsb: 0,
+                width: 0,
+                reg_width: W32,
+            }
+            .is_encodable_aarch64()
+        );
+
+        // width=32 only valid at lsb=0 for the W form.
+        assert!(
+            !Instruction::Ubfiz {
+                rd: Register::X0,
+                rn: Register::X1,
+                lsb: 1,
+                width: 32,
+                reg_width: W32,
             }
             .is_encodable_aarch64()
         );

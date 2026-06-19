@@ -681,11 +681,12 @@ impl InstructionGenerator<Instruction> for AArch64InstructionGenerator {
             }
         }
 
-        // Bit-field aliases (issue #61: UBFX/SBFX/BFI/BFXIL/UBFIZ/SBFIZ).
-        // Sparse (lsb, width) sampling to keep the enumerative budget bounded.
-        // Filter SP from both rd and rn (matches is_encodable_aarch64). 2D
-        // constraint lsb + width <= 64 enforced via the if-guard. Mirrors the
-        // sampling tables in `src/search/candidate.rs::generate_all_instructions`.
+        // Bit-field aliases (issue #61: UBFX/SBFX/BFI/BFXIL/UBFIZ/SBFIZ) in both
+        // X (64-bit) and W (32-bit) forms (issue #145). Sparse (lsb, width)
+        // sampling to keep the enumerative budget bounded; SP filtered from rd
+        // and rn (matches is_encodable_aarch64). The shared sample tables are
+        // filtered per width against the bound (lsb < bound, lsb+width <= bound).
+        // Mirrors `src/search/candidate.rs::generate_all_instructions`.
         const BITFIELD_LSB_SAMPLES: [u8; 5] = [0, 1, 16, 32, 63];
         const BITFIELD_WIDTH_SAMPLES: [u8; 6] = [1, 4, 8, 16, 32, 64];
         for &rd in registers {
@@ -696,17 +697,59 @@ impl InstructionGenerator<Instruction> for AArch64InstructionGenerator {
                 if rn == Register::SP {
                     continue;
                 }
-                for &lsb in &BITFIELD_LSB_SAMPLES {
-                    for &width in &BITFIELD_WIDTH_SAMPLES {
-                        if (lsb as u16 + width as u16) > 64 {
+                for reg_width in [RegisterWidth::X64, RegisterWidth::W32] {
+                    let bound = reg_width.bit_width() as u16;
+                    for &lsb in &BITFIELD_LSB_SAMPLES {
+                        if lsb as u16 >= bound {
                             continue;
                         }
-                        instructions.push(Instruction::Ubfx { rd, rn, lsb, width });
-                        instructions.push(Instruction::Sbfx { rd, rn, lsb, width });
-                        instructions.push(Instruction::Bfi { rd, rn, lsb, width });
-                        instructions.push(Instruction::Bfxil { rd, rn, lsb, width });
-                        instructions.push(Instruction::Ubfiz { rd, rn, lsb, width });
-                        instructions.push(Instruction::Sbfiz { rd, rn, lsb, width });
+                        for &width in &BITFIELD_WIDTH_SAMPLES {
+                            if width as u16 > bound || (lsb as u16 + width as u16) > bound {
+                                continue;
+                            }
+                            instructions.push(Instruction::Ubfx {
+                                rd,
+                                rn,
+                                lsb,
+                                width,
+                                reg_width,
+                            });
+                            instructions.push(Instruction::Sbfx {
+                                rd,
+                                rn,
+                                lsb,
+                                width,
+                                reg_width,
+                            });
+                            instructions.push(Instruction::Bfi {
+                                rd,
+                                rn,
+                                lsb,
+                                width,
+                                reg_width,
+                            });
+                            instructions.push(Instruction::Bfxil {
+                                rd,
+                                rn,
+                                lsb,
+                                width,
+                                reg_width,
+                            });
+                            instructions.push(Instruction::Ubfiz {
+                                rd,
+                                rn,
+                                lsb,
+                                width,
+                                reg_width,
+                            });
+                            instructions.push(Instruction::Sbfiz {
+                                rd,
+                                rn,
+                                lsb,
+                                width,
+                                reg_width,
+                            });
+                        }
                     }
                 }
             }
@@ -991,8 +1034,14 @@ impl InstructionGenerator<Instruction> for AArch64InstructionGenerator {
                 let pick_non_sp = |rng: &mut R| non_sp[rng.random_range(0..non_sp.len())];
                 let bf_rd = pick_non_sp(rng);
                 let bf_rn = pick_non_sp(rng);
-                let lsb = (rng.random::<u32>() & 0x3F) as u8;
-                let max_w = 64 - lsb as u32;
+                let reg_width = if rng.random_bool(0.5) {
+                    RegisterWidth::W32
+                } else {
+                    RegisterWidth::X64
+                };
+                let bound = reg_width.bit_width() as u32;
+                let lsb = (rng.random::<u32>() % bound) as u8;
+                let max_w = bound - lsb as u32;
                 let width = ((rng.random::<u32>() % max_w) + 1) as u8;
                 match rng.random_range(0..6) {
                     0 => Instruction::Ubfx {
@@ -1000,36 +1049,42 @@ impl InstructionGenerator<Instruction> for AArch64InstructionGenerator {
                         rn: bf_rn,
                         lsb,
                         width,
+                        reg_width,
                     },
                     1 => Instruction::Sbfx {
                         rd: bf_rd,
                         rn: bf_rn,
                         lsb,
                         width,
+                        reg_width,
                     },
                     2 => Instruction::Bfi {
                         rd: bf_rd,
                         rn: bf_rn,
                         lsb,
                         width,
+                        reg_width,
                     },
                     3 => Instruction::Bfxil {
                         rd: bf_rd,
                         rn: bf_rn,
                         lsb,
                         width,
+                        reg_width,
                     },
                     4 => Instruction::Ubfiz {
                         rd: bf_rd,
                         rn: bf_rn,
                         lsb,
                         width,
+                        reg_width,
                     },
                     _ => Instruction::Sbfiz {
                         rd: bf_rd,
                         rn: bf_rn,
                         lsb,
                         width,
+                        reg_width,
                     },
                 }
             }
@@ -1214,41 +1269,83 @@ impl InstructionGenerator<Instruction> for AArch64InstructionGenerator {
                     Instruction::Sxtw { rn, .. } => Instruction::Sxtw { rd: new_rd, rn },
                     Instruction::Uxtb { rn, .. } => Instruction::Uxtb { rd: new_rd, rn },
                     Instruction::Uxth { rn, .. } => Instruction::Uxth { rd: new_rd, rn },
-                    Instruction::Ubfx { rn, lsb, width, .. } => Instruction::Ubfx {
+                    Instruction::Ubfx {
+                        rn,
+                        lsb,
+                        width,
+                        reg_width,
+                        ..
+                    } => Instruction::Ubfx {
                         rd: new_rd,
                         rn,
                         lsb,
                         width,
+                        reg_width,
                     },
-                    Instruction::Sbfx { rn, lsb, width, .. } => Instruction::Sbfx {
+                    Instruction::Sbfx {
+                        rn,
+                        lsb,
+                        width,
+                        reg_width,
+                        ..
+                    } => Instruction::Sbfx {
                         rd: new_rd,
                         rn,
                         lsb,
                         width,
+                        reg_width,
                     },
-                    Instruction::Bfi { rn, lsb, width, .. } => Instruction::Bfi {
+                    Instruction::Bfi {
+                        rn,
+                        lsb,
+                        width,
+                        reg_width,
+                        ..
+                    } => Instruction::Bfi {
                         rd: new_rd,
                         rn,
                         lsb,
                         width,
+                        reg_width,
                     },
-                    Instruction::Bfxil { rn, lsb, width, .. } => Instruction::Bfxil {
+                    Instruction::Bfxil {
+                        rn,
+                        lsb,
+                        width,
+                        reg_width,
+                        ..
+                    } => Instruction::Bfxil {
                         rd: new_rd,
                         rn,
                         lsb,
                         width,
+                        reg_width,
                     },
-                    Instruction::Ubfiz { rn, lsb, width, .. } => Instruction::Ubfiz {
+                    Instruction::Ubfiz {
+                        rn,
+                        lsb,
+                        width,
+                        reg_width,
+                        ..
+                    } => Instruction::Ubfiz {
                         rd: new_rd,
                         rn,
                         lsb,
                         width,
+                        reg_width,
                     },
-                    Instruction::Sbfiz { rn, lsb, width, .. } => Instruction::Sbfiz {
+                    Instruction::Sbfiz {
+                        rn,
+                        lsb,
+                        width,
+                        reg_width,
+                        ..
+                    } => Instruction::Sbfiz {
                         rd: new_rd,
                         rn,
                         lsb,
                         width,
+                        reg_width,
                     },
                     // Branches have no rd; identity-mutate.
                     Instruction::B { target } => Instruction::B { target },
@@ -1683,41 +1780,83 @@ impl InstructionGenerator<Instruction> for AArch64InstructionGenerator {
                         rd,
                         rn: registers[rng.random_range(0..registers.len())],
                     },
-                    Instruction::Ubfx { rd, lsb, width, .. } => Instruction::Ubfx {
+                    Instruction::Ubfx {
+                        rd,
+                        lsb,
+                        width,
+                        reg_width,
+                        ..
+                    } => Instruction::Ubfx {
                         rd,
                         rn: registers[rng.random_range(0..registers.len())],
                         lsb,
                         width,
+                        reg_width,
                     },
-                    Instruction::Sbfx { rd, lsb, width, .. } => Instruction::Sbfx {
+                    Instruction::Sbfx {
+                        rd,
+                        lsb,
+                        width,
+                        reg_width,
+                        ..
+                    } => Instruction::Sbfx {
                         rd,
                         rn: registers[rng.random_range(0..registers.len())],
                         lsb,
                         width,
+                        reg_width,
                     },
-                    Instruction::Bfi { rd, lsb, width, .. } => Instruction::Bfi {
+                    Instruction::Bfi {
+                        rd,
+                        lsb,
+                        width,
+                        reg_width,
+                        ..
+                    } => Instruction::Bfi {
                         rd,
                         rn: registers[rng.random_range(0..registers.len())],
                         lsb,
                         width,
+                        reg_width,
                     },
-                    Instruction::Bfxil { rd, lsb, width, .. } => Instruction::Bfxil {
+                    Instruction::Bfxil {
+                        rd,
+                        lsb,
+                        width,
+                        reg_width,
+                        ..
+                    } => Instruction::Bfxil {
                         rd,
                         rn: registers[rng.random_range(0..registers.len())],
                         lsb,
                         width,
+                        reg_width,
                     },
-                    Instruction::Ubfiz { rd, lsb, width, .. } => Instruction::Ubfiz {
+                    Instruction::Ubfiz {
+                        rd,
+                        lsb,
+                        width,
+                        reg_width,
+                        ..
+                    } => Instruction::Ubfiz {
                         rd,
                         rn: registers[rng.random_range(0..registers.len())],
                         lsb,
                         width,
+                        reg_width,
                     },
-                    Instruction::Sbfiz { rd, lsb, width, .. } => Instruction::Sbfiz {
+                    Instruction::Sbfiz {
+                        rd,
+                        lsb,
+                        width,
+                        reg_width,
+                        ..
+                    } => Instruction::Sbfiz {
                         rd,
                         rn: registers[rng.random_range(0..registers.len())],
                         lsb,
                         width,
+                        reg_width,
                     },
                     // Branches: no source operand mutation; identity.
                     Instruction::B { target } => Instruction::B { target },
@@ -2100,36 +2239,42 @@ mod tests {
                 rn: Register::X1,
                 lsb: 8,
                 width: 16,
+                reg_width: crate::ir::RegisterWidth::X64,
             },
             Instruction::Sbfx {
                 rd: Register::X0,
                 rn: Register::X1,
                 lsb: 8,
                 width: 16,
+                reg_width: crate::ir::RegisterWidth::X64,
             },
             Instruction::Bfi {
                 rd: Register::X0,
                 rn: Register::X1,
                 lsb: 4,
                 width: 8,
+                reg_width: crate::ir::RegisterWidth::X64,
             },
             Instruction::Bfxil {
                 rd: Register::X0,
                 rn: Register::X1,
                 lsb: 4,
                 width: 8,
+                reg_width: crate::ir::RegisterWidth::X64,
             },
             Instruction::Ubfiz {
                 rd: Register::X0,
                 rn: Register::X1,
                 lsb: 4,
                 width: 8,
+                reg_width: crate::ir::RegisterWidth::X64,
             },
             Instruction::Sbfiz {
                 rd: Register::X0,
                 rn: Register::X1,
                 lsb: 4,
                 width: 8,
+                reg_width: crate::ir::RegisterWidth::X64,
             },
         ]
     }
@@ -2410,6 +2555,51 @@ mod tests {
             .collect();
         assert_eq!(seen.len(), all_instruction_families().len());
         assert_eq!(seen.len(), generator.opcode_count() as usize);
+    }
+
+    #[test]
+    fn generate_all_emits_encodable_w_bitfield() {
+        let generator = AArch64InstructionGenerator;
+        let regs = vec![Register::X0, Register::X1];
+        let imms = vec![0, 1];
+        let all = generator.generate_all(&regs, &imms);
+        let w_bitfields: Vec<&Instruction> = all
+            .iter()
+            .filter(|i| {
+                matches!(
+                    i,
+                    Instruction::Ubfx {
+                        reg_width: RegisterWidth::W32,
+                        ..
+                    } | Instruction::Sbfx {
+                        reg_width: RegisterWidth::W32,
+                        ..
+                    } | Instruction::Bfi {
+                        reg_width: RegisterWidth::W32,
+                        ..
+                    } | Instruction::Bfxil {
+                        reg_width: RegisterWidth::W32,
+                        ..
+                    } | Instruction::Ubfiz {
+                        reg_width: RegisterWidth::W32,
+                        ..
+                    } | Instruction::Sbfiz {
+                        reg_width: RegisterWidth::W32,
+                        ..
+                    }
+                )
+            })
+            .collect();
+        assert!(
+            !w_bitfields.is_empty(),
+            "trait generator must emit W-form bit-field instructions"
+        );
+        for instr in w_bitfields {
+            assert!(
+                instr.is_encodable_aarch64(),
+                "trait generator produced un-encodable W bit-field: {instr}"
+            );
+        }
     }
 
     #[test]

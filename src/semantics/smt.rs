@@ -107,6 +107,22 @@ fn zero_extend_to_state_width(value: BV, value_width: u32, state_width: u32) -> 
     }
 }
 
+// Store a bit-field op's 64-bit result BV into `rd`, honouring the register
+// width. For the W form, the low 32 bits hold the architectural result and bits
+// [63:32] are zeroed (ARM ARM: writing a W register clears the upper half).
+fn store_bitfield_result(
+    state: &mut MachineState,
+    rd: Register,
+    result: BV,
+    reg_width: RegisterWidth,
+) {
+    let stored = match reg_width {
+        RegisterWidth::W32 => zero_extend_to_state_width(result.extract(31, 0), 32, state.width()),
+        RegisterWidth::X64 => result,
+    };
+    state.set_register(rd, stored);
+}
+
 /// Count leading zeros of a `width`-bit BV with a binary-search decomposition.
 ///
 /// The result remains `width` bits wide, while the selected chunk halves on
@@ -1043,7 +1059,13 @@ pub fn apply_instruction(mut state: MachineState, instruction: &Instruction) -> 
         }
         // UBFX rd, rn, #lsb, #width: extract bits [lsb+width-1:lsb] of rn,
         // zero-extend the result into rd.
-        Instruction::Ubfx { rd, rn, lsb, width } => {
+        Instruction::Ubfx {
+            rd,
+            rn,
+            lsb,
+            width,
+            reg_width,
+        } => {
             let value = state.get_register(*rn).clone();
             let hi = (*lsb as u32) + (*width as u32) - 1;
             let lo = *lsb as u32;
@@ -1054,11 +1076,17 @@ pub fn apply_instruction(mut state: MachineState, instruction: &Instruction) -> 
             } else {
                 extracted.zero_ext(64 - *width as u32)
             };
-            state.set_register(*rd, result);
+            store_bitfield_result(&mut state, *rd, result, *reg_width);
         }
         // SBFX rd, rn, #lsb, #width: extract bits [lsb+width-1:lsb] of rn,
         // sign-extend into rd.
-        Instruction::Sbfx { rd, rn, lsb, width } => {
+        Instruction::Sbfx {
+            rd,
+            rn,
+            lsb,
+            width,
+            reg_width,
+        } => {
             let value = state.get_register(*rn).clone();
             let hi = (*lsb as u32) + (*width as u32) - 1;
             let lo = *lsb as u32;
@@ -1068,11 +1096,17 @@ pub fn apply_instruction(mut state: MachineState, instruction: &Instruction) -> 
             } else {
                 extracted.sign_ext(64 - *width as u32)
             };
-            state.set_register(*rd, result);
+            store_bitfield_result(&mut state, *rd, result, *reg_width);
         }
         // BFI rd, rn, #lsb, #width: insert low `width` bits of rn at position
         // lsb of rd, preserving the other bits of rd.
-        Instruction::Bfi { rd, rn, lsb, width } => {
+        Instruction::Bfi {
+            rd,
+            rn,
+            lsb,
+            width,
+            reg_width,
+        } => {
             let dest = state.get_register(*rd).clone();
             let src = state.get_register(*rn).clone();
             let low_mask_const = if *width == 64 {
@@ -1086,11 +1120,17 @@ pub fn apply_instruction(mut state: MachineState, instruction: &Instruction) -> 
             let shift = BV::from_u64(*lsb as u64, 64);
             let inserted = src.bvand(&low_mask).bvshl(&shift);
             let cleared = dest.bvand(&clear_mask);
-            state.set_register(*rd, cleared.bvor(&inserted));
+            store_bitfield_result(&mut state, *rd, cleared.bvor(&inserted), *reg_width);
         }
         // BFXIL rd, rn, #lsb, #width: extract bits [lsb+width-1:lsb] of rn,
         // place at [width-1:0] of rd preserving rd[63:width].
-        Instruction::Bfxil { rd, rn, lsb, width } => {
+        Instruction::Bfxil {
+            rd,
+            rn,
+            lsb,
+            width,
+            reg_width,
+        } => {
             let dest = state.get_register(*rd).clone();
             let src = state.get_register(*rn).clone();
             let low_mask_const = if *width == 64 {
@@ -1104,11 +1144,17 @@ pub fn apply_instruction(mut state: MachineState, instruction: &Instruction) -> 
             // (rn >> lsb) & low_mask
             let extracted = src.bvlshr(&shift).bvand(&low_mask);
             let cleared = dest.bvand(&clear_mask);
-            state.set_register(*rd, cleared.bvor(&extracted));
+            store_bitfield_result(&mut state, *rd, cleared.bvor(&extracted), *reg_width);
         }
         // UBFIZ rd, rn, #lsb, #width: low `width` bits of rn, zero-extend,
         // shift left by lsb → rd (other bits zero).
-        Instruction::Ubfiz { rd, rn, lsb, width } => {
+        Instruction::Ubfiz {
+            rd,
+            rn,
+            lsb,
+            width,
+            reg_width,
+        } => {
             let value = state.get_register(*rn).clone();
             let field = value.extract(*width as u32 - 1, 0);
             let widened = if *width == 64 {
@@ -1117,11 +1163,17 @@ pub fn apply_instruction(mut state: MachineState, instruction: &Instruction) -> 
                 field.zero_ext(64 - *width as u32)
             };
             let shift = BV::from_u64(*lsb as u64, 64);
-            state.set_register(*rd, widened.bvshl(&shift));
+            store_bitfield_result(&mut state, *rd, widened.bvshl(&shift), *reg_width);
         }
         // SBFIZ rd, rn, #lsb, #width: low `width` bits of rn, sign-extended
         // to 64, then shifted left by lsb → rd.
-        Instruction::Sbfiz { rd, rn, lsb, width } => {
+        Instruction::Sbfiz {
+            rd,
+            rn,
+            lsb,
+            width,
+            reg_width,
+        } => {
             let value = state.get_register(*rn).clone();
             let field = value.extract(*width as u32 - 1, 0);
             let widened = if *width == 64 {
@@ -1130,7 +1182,7 @@ pub fn apply_instruction(mut state: MachineState, instruction: &Instruction) -> 
                 field.sign_ext(64 - *width as u32)
             };
             let shift = BV::from_u64(*lsb as u64, 64);
-            state.set_register(*rd, widened.bvshl(&shift));
+            store_bitfield_result(&mut state, *rd, widened.bvshl(&shift), *reg_width);
         }
         // Branches / terminators: callers must strip terminators before
         // apply_sequence. The equivalence layer handles them via
