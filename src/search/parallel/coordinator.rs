@@ -905,7 +905,7 @@ mod tests {
         let pruned_sum: u64 = result
             .worker_statistics
             .iter()
-            .map(|(_, _, stats)| stats.candidates_pruned_by_cost)
+            .map(|(_, stats)| stats.candidates_pruned_by_cost)
             .sum();
         assert!(
             pruned_sum > 0,
