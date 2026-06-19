@@ -129,7 +129,8 @@ pub struct SearchStatistics {
     pub candidates_evaluated: u64,
     /// Number of candidates that passed fast (concrete) validation
     pub candidates_passed_fast: u64,
-    /// Number of SMT queries made
+    /// Number of SMT solver queries that reached Z3 `solver.check()`.
+    /// Fast-path refutations and other pre-SMT exits are not counted.
     pub smt_queries: u64,
     /// Cumulative wall-clock time spent inside Z3 `solver.check()` calls,
     /// aggregated across every SMT-reaching candidate during the search.
