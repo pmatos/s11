@@ -1185,7 +1185,7 @@ fn random_operand<R: rand::RngExt>(
     if rng.random_bool(0.5) && !registers.is_empty() {
         Operand::Register(registers[rng.random_range(0..registers.len())])
     } else if !immediates.is_empty() {
-        Operand::Immediate(immediates[rng.random_range(0..immediates.len())])
+        Operand::Immediate(immediates[rng.random_range(0..immediates.len())].rem_euclid(0x1000))
     } else if !registers.is_empty() {
         Operand::Register(registers[rng.random_range(0..registers.len())])
     } else {
@@ -1385,6 +1385,25 @@ mod tests {
         ];
         words.extend(tail);
         BudgetedRng::new(words)
+    }
+
+    #[test]
+    fn random_operand_clamps_immediates_to_imm12_range() {
+        let immediates = [0, 1, 0xFFF, 0x1000, 8192, 0x1_0000, 1_000_000, -1];
+
+        for (index, &raw_imm) in immediates.iter().enumerate() {
+            let mut rng = BudgetedRng::new(vec![
+                0,
+                0,
+                word_for_range(immediates.len() as u32, index as u32),
+            ]);
+            let operand = random_operand(&mut rng, &[], &immediates);
+            assert_eq!(
+                operand,
+                Operand::Immediate(raw_imm.rem_euclid(0x1000)),
+                "immediate table value {raw_imm} must be clamped to imm12"
+            );
+        }
     }
 
     #[test]
@@ -2314,6 +2333,124 @@ mod tests {
                 assert_eq!(rn, Register::X0);
             }
             other => panic!("expected bit-field instruction, got {other:?}"),
+        }
+    }
+
+    fn rng_for_arith_immediate_slot(slot: u32, imm_count: u32, imm_index: u32) -> BudgetedRng {
+        BudgetedRng::new(vec![
+            word_for_range(3, 0),
+            word_for_range(38, slot),
+            word_for_range(3, 0),
+            u32::MAX,
+            u32::MAX,
+            word_for_range(imm_count, imm_index),
+        ])
+    }
+
+    fn rng_for_compare_immediate_slot(choice: u32, imm_count: u32, imm_index: u32) -> BudgetedRng {
+        BudgetedRng::new(vec![
+            word_for_range(3, 0),
+            word_for_range(38, 36),
+            word_for_range(3, 0),
+            word_for_range(3, choice),
+            u32::MAX,
+            u32::MAX,
+            word_for_range(imm_count, imm_index),
+        ])
+    }
+
+    fn assert_imm12_arith_or_compare(instr: &Instruction, raw_imm: i64) {
+        let imm = match instr {
+            Instruction::Add {
+                rm: Operand::Immediate(imm),
+                ..
+            }
+            | Instruction::Sub {
+                rm: Operand::Immediate(imm),
+                ..
+            }
+            | Instruction::Adds {
+                rm: Operand::Immediate(imm),
+                ..
+            }
+            | Instruction::Subs {
+                rm: Operand::Immediate(imm),
+                ..
+            }
+            | Instruction::Cmp {
+                rm: Operand::Immediate(imm),
+                ..
+            }
+            | Instruction::Cmn {
+                rm: Operand::Immediate(imm),
+                ..
+            } => *imm,
+            other => panic!("expected immediate arithmetic/compare instruction, got {other:?}"),
+        };
+
+        assert_eq!(imm, raw_imm.rem_euclid(0x1000));
+        assert!(
+            instr.is_encodable_aarch64(),
+            "random arithmetic/compare instruction must be encodable: {instr}"
+        );
+    }
+
+    #[test]
+    fn generate_random_instruction_clamps_arith_compare_immediates_to_imm12() {
+        let regs = [Register::X0, Register::X1, Register::X2];
+        let imms = [0, 1, 0xFFF, 0x1000, 8192, 0x1_0000, 1_000_000, -1];
+        let imm_count = imms.len() as u32;
+
+        for slot in [2, 3, 18, 19] {
+            for (imm_index, &raw_imm) in imms.iter().enumerate() {
+                let mut rng = rng_for_arith_immediate_slot(slot, imm_count, imm_index as u32);
+                let instr = generate_random_instruction(&mut rng, &regs, &imms);
+                assert_imm12_arith_or_compare(&instr, raw_imm);
+            }
+        }
+
+        for choice in [0, 1] {
+            for (imm_index, &raw_imm) in imms.iter().enumerate() {
+                let mut rng = rng_for_compare_immediate_slot(choice, imm_count, imm_index as u32);
+                let instr = generate_random_instruction(&mut rng, &regs, &imms);
+                assert_imm12_arith_or_compare(&instr, raw_imm);
+            }
+        }
+    }
+
+    #[test]
+    fn generate_random_instruction_keeps_ccmp_immediates_in_imm5_range() {
+        let regs = [Register::X0, Register::X1, Register::X2];
+        let imms = [0, 31, 32, 0xFFF, 0x1000, 1_000_000, -1];
+        let imm_count = imms.len() as u32;
+
+        for (imm_index, &raw_imm) in imms.iter().enumerate() {
+            let mut rng = BudgetedRng::new(vec![
+                word_for_range(3, 0),
+                word_for_range(38, 32),
+                word_for_range(3, 0),
+                u32::MAX,
+                u32::MAX,
+                word_for_range(imm_count, imm_index as u32),
+            ]);
+            let instr = generate_random_instruction(&mut rng, &regs, &imms);
+            let imm = match instr {
+                Instruction::Ccmp {
+                    rm: Operand::Immediate(imm),
+                    ..
+                }
+                | Instruction::Ccmn {
+                    rm: Operand::Immediate(imm),
+                    ..
+                } => imm,
+                other => panic!("expected immediate-form CCMP/CCMN, got {other:?}"),
+            };
+
+            assert_eq!(imm, raw_imm.rem_euclid(32));
+            assert!(
+                instr.is_encodable_aarch64(),
+                "random CCMP/CCMN instruction must be encodable: {instr}"
+            );
         }
     }
 
