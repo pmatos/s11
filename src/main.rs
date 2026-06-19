@@ -2404,6 +2404,32 @@ mod cli_helper_tests {
     }
 
     #[test]
+    fn optimization_context_for_x86_64_backend_uses_conservative_default() {
+        let elf_bytes = build_minimal_elf64(&[0xc3], 0x1000, elf::abi::EM_X86_64);
+        let input = TempFile::new_bytes("s11-opt-context-x86-64", "elf", &elf_bytes);
+        let patcher = ElfPatcher::new(input.path()).expect("x86-64 ELF should parse");
+        let section = patcher
+            .get_text_sections()
+            .expect("x86-64 ELF should expose executable section")
+            .into_iter()
+            .next()
+            .expect("minimal ELF should contain .text");
+        let backend =
+            X86OptimizationBackend::new(DetectedArch::X86_64).expect("x86-64 backend should build");
+        let cs = backend
+            .disassembler()
+            .expect("x86-64 disassembler should build");
+
+        let context =
+            optimization_context_for_backend(backend.arch(), &patcher, &section, 0x1001, &cs);
+
+        assert!(
+            context.downstream_flags_live,
+            "non-AArch64 optimization context should stay conservative"
+        );
+    }
+
+    #[test]
     fn opt_help_mentions_enumerative_candidate_pool_growth() {
         use clap::CommandFactory;
 
