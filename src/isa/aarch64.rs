@@ -3161,7 +3161,7 @@ mod tests {
     /// catches accidental over-weighting without treating every opcode family
     /// as uniformly distributed.
     #[test]
-    fn slot_23_sub_multiplexer_removed_for_issue_93() {
+    fn ands_cset_csetm_ror_sampling_uniformity() {
         use std::collections::BTreeMap;
         let generator = AArch64InstructionGenerator;
         let regs = vec![Register::X0, Register::X1, Register::X2];
