@@ -2000,14 +2000,14 @@ mod tests {
             rt1: Register::X0,
             rt2: Register::X2,
             addr,
-            width: AccessWidth::Extended,
+            width: PairAccessWidth::Extended,
             signed: false,
         };
         let stp = Instruction::Stp {
             rt1: Register::X0,
             rt2: Register::X2,
             addr,
-            width: AccessWidth::Extended,
+            width: PairAccessWidth::Extended,
         };
 
         for instr in [ldr, ldrs, str_, ldp, stp] {
