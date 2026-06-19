@@ -45,7 +45,6 @@ fn is_plain_x(reg: Register) -> bool {
 /// Helper for `Instruction::destinations` on single-register memory ops: the
 /// data register is always written, and PreIndex/PostIndex modes additionally
 /// write the base register through writeback. See ADR-0007.
-#[allow(dead_code)]
 fn writeback_destinations(rt: Register, addr: &AddressOperand) -> Vec<Register> {
     match addr {
         AddressOperand::Imm {
@@ -64,7 +63,6 @@ fn writeback_destinations(rt: Register, addr: &AddressOperand) -> Vec<Register> 
 
 /// Helper for `Instruction::destinations` on LDP-family ops: two register
 /// destinations plus the writeback base when applicable. See ADR-0007.
-#[allow(dead_code)]
 fn pair_load_destinations(rt1: Register, rt2: Register, addr: &AddressOperand) -> Vec<Register> {
     match addr {
         AddressOperand::Imm {
@@ -84,7 +82,6 @@ fn pair_load_destinations(rt1: Register, rt2: Register, addr: &AddressOperand) -
 /// Helper for `Instruction::destinations` on store ops: `rt` is read (not
 /// written), so the only destination is the writeback base — and only in
 /// PreIndex / PostIndex modes. See ADR-0007.
-#[allow(dead_code)]
 fn store_destinations(addr: &AddressOperand) -> Vec<Register> {
     match addr {
         AddressOperand::Imm {
