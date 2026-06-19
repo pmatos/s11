@@ -214,9 +214,16 @@ impl std::str::FromStr for SearchMode {
 /// Configuration for symbolic (SMT) search
 #[derive(Debug, Clone)]
 pub struct SymbolicConfig {
-    /// Maximum window size for synthesis
+    /// Maximum number of synthesized non-terminator instructions to consider.
+    ///
+    /// A value of 0 disables candidate search. If the target ends in a fixed
+    /// terminator, that terminator is appended after synthesis and does not
+    /// count against this window.
     pub window_size: usize,
-    /// Initial cost bound (None = use target cost)
+    /// Exclusive initial cost bound.
+    ///
+    /// Candidate sequences must be strictly cheaper than this bound and the
+    /// original target cost. `None` uses the original target cost.
     pub cost_bound: Option<u64>,
     /// Search mode (linear or binary)
     pub search_mode: SearchMode,

@@ -377,6 +377,18 @@ impl EquivalenceBackend for AArch64 {
         let memory_touched = crate::validation::live_out::touches_memory(seq1)
             || crate::validation::live_out::touches_memory(seq2);
         if memory_touched {
+            if config.fast_only {
+                // This carve-out fires once per equivalence check, and a search
+                // pass invokes the check per candidate/window. Emit the warning
+                // at most once per process so multi-window `opt --fast-only` runs
+                // don't flood stderr with identical lines (ADR-0007).
+                static FAST_ONLY_WARNED: std::sync::Once = std::sync::Once::new();
+                FAST_ONLY_WARNED.call_once(|| {
+                    eprintln!(
+                        "[s11] warning: --fast-only disabled for memory-bearing window (see ADR-0007)"
+                    );
+                });
+            }
             config.memory_live = true;
             config.fast_only = false;
         }
@@ -2496,6 +2508,62 @@ mod tests {
             check_equivalence(&adds, &add),
             EquivalenceResult::NotEquivalent,
             "Unmasked entry point includes NZCV in comparison"
+        );
+    }
+
+    #[test]
+    fn test_adc_not_equivalent_to_add_because_carry_in_is_live() {
+        // ADC reads the carry flag as a live-in; ADD ignores it. They must
+        // NOT be certified equivalent, because for carry-in = 1 the results
+        // differ. This is the soundness guard that the SMT layer treats the
+        // initial carry as a free symbolic input (the fast path only probes
+        // carry-in = 0).
+        let adc = vec![Instruction::Adc {
+            rd: Register::X0,
+            rn: Register::X1,
+            rm: Register::X2,
+        }];
+        let add = vec![Instruction::Add {
+            rd: Register::X0,
+            rn: Register::X1,
+            rm: Operand::Register(Register::X2),
+        }];
+        assert_eq!(
+            check_equivalence(&adc, &add),
+            EquivalenceResult::NotEquivalent,
+            "ADC must not be equal to ADD: it depends on carry-in"
+        );
+        // ADC is equivalent to itself.
+        assert_eq!(
+            check_equivalence(&adc, &adc),
+            EquivalenceResult::Equivalent,
+            "ADC must be equivalent to itself"
+        );
+    }
+
+    #[test]
+    fn test_sbc_not_equivalent_to_sub_because_borrow_in_is_live() {
+        // SBC = rn - rm - (1 - carry); it reads the carry/borrow flag, unlike
+        // SUB. They must not be certified equivalent.
+        let sbc = vec![Instruction::Sbc {
+            rd: Register::X0,
+            rn: Register::X1,
+            rm: Register::X2,
+        }];
+        let sub = vec![Instruction::Sub {
+            rd: Register::X0,
+            rn: Register::X1,
+            rm: Operand::Register(Register::X2),
+        }];
+        assert_eq!(
+            check_equivalence(&sbc, &sub),
+            EquivalenceResult::NotEquivalent,
+            "SBC must not be equal to SUB: it depends on borrow-in"
+        );
+        assert_eq!(
+            check_equivalence(&sbc, &sbc),
+            EquivalenceResult::Equivalent,
+            "SBC must be equivalent to itself"
         );
     }
 

@@ -17,7 +17,7 @@ use crate::search::SearchAlgorithm;
 use crate::search::config::SearchConfig;
 use crate::search::result::{SearchResult, SearchStatistics};
 use crate::semantics::live_out::LiveOut;
-use crate::validation::live_out::{compute_live_in_registers, flags_live_out};
+use crate::validation::live_out::compute_live_in_registers;
 
 use self::codex::invoke_codex;
 use self::ledger::UnsupportedMnemonicLedger;
@@ -114,23 +114,11 @@ impl SearchAlgorithm<crate::isa::AArch64> for LlmSearch {
         let mut timings = LlmTimings::default();
         let started = Instant::now();
 
-        // Per ADR-0002 (as amended by ADR-0006): the equivalence pipeline
-        // now models NZCV, but the LLM flow still refuses flag-live-out
-        // targets as a conservative pre-Codex gate. Removing this is a
-        // deliberate policy decision, not a bug.
-        if flags_live_out(target) {
-            eprintln!(
-                "llm-search: target has flags live-out — the LLM flow does \
-                 not process flag-live-out targets (conservative policy per \
-                 ADR-0002 as amended by ADR-0006). Refusing."
-            );
-            stats.elapsed_time = started.elapsed();
-            self.last_stats = stats.clone();
-            self.last_ledger = ledger;
-            self.last_timings = timings;
-            return SearchResult::no_optimization(target.to_vec(), stats);
-        }
-
+        // Per ADR-0008: the LLM flow no longer statically refuses flag-live-out
+        // targets. It relies on the same equivalence check as every other
+        // generator — the verifier pins `with_flags(true)` (see `outcome.rs`),
+        // so a candidate that drops a needed flag-setter is rejected by
+        // equivalence rather than pre-refused. This supersedes ADR-0002.
         let live_in = compute_live_in_registers(target);
         let prompt = build_prompt(target, &live_in, live_out);
         let timeout = config.timeout.unwrap_or(Duration::from_secs(60));
@@ -210,6 +198,7 @@ impl SearchAlgorithm<crate::isa::AArch64> for LlmSearch {
                 timings.verify_time += verify_elapsed;
                 if m.smt_called {
                     timings.smt_calls += 1;
+                    stats.smt_queries += 1;
                     if let Some(bytes) = m.smt_formula_bytes {
                         timings.smt_formula_bytes_total += bytes;
                         if bytes > timings.smt_formula_bytes_max {
@@ -228,7 +217,6 @@ impl SearchAlgorithm<crate::isa::AArch64> for LlmSearch {
                             seq.len()
                         );
                     }
-                    stats.smt_queries += 1;
                     stats.smt_equivalent += 1;
                     stats.candidates_passed_fast += 1;
                     stats.improvements_found += 1;
@@ -272,13 +260,11 @@ impl SearchAlgorithm<crate::isa::AArch64> for LlmSearch {
                     }
                 }
                 IterationOutcome::EquivFail => {
-                    stats.smt_queries += 1;
                     if config.verbose {
                         eprintln!("llm-search: equiv-fail on call {}", call_idx);
                     }
                 }
                 IterationOutcome::EquivUnknown => {
-                    stats.smt_queries += 1;
                     if config.verbose {
                         eprintln!("llm-search: equiv-unknown on call {}", call_idx);
                     }
@@ -385,9 +371,16 @@ mod tests {
         SearchConfig::default().with_llm(LlmConfig::default().with_max_codex_calls(0))
     }
 
+    #[cfg(unix)]
     #[test]
-    fn flags_live_out_target_is_refused_without_calling_codex() {
-        // Target ends in a flag-writer; per ADR-0002 the LLM flow refuses.
+    fn flags_live_out_target_is_no_longer_refused_and_reaches_codex() {
+        // Per ADR-0008 the static refusal is gone: a flag-live-out target (one
+        // ending in CMP) must now be processed like any other. The fake codex
+        // proposes `mov x0, x1`, which drops the flag-setter; because the LLM
+        // verifier pins `with_flags(true)`, equivalence rejects it — so no
+        // optimization is reported, but codex WAS invoked (the key signal that
+        // the pre-refusal is gone).
+        let fake = FakeCodex::new(&assembly_answer_writer_script("mov x0, x1"));
         let target = vec![
             Instruction::Add {
                 rd: Register::X0,
@@ -401,25 +394,17 @@ mod tests {
         ];
 
         let mut search = LlmSearch::new();
-        let result = search.search(&target, &live_out_x0(), &cfg_no_calls());
+        let result = search.search(&target, &live_out_x0(), &cfg_with_fake_codex(&fake, 1));
 
         assert!(
             !result.found_optimization,
-            "flags-live-out target must be refused, not optimized"
+            "a flag-dropping candidate must be rejected by equivalence"
         );
-        assert!(
-            result.optimized_sequence.is_none(),
-            "no optimized sequence expected on refusal"
-        );
-
-        let timings = search.timings();
         assert_eq!(
-            timings.codex_calls, 0,
-            "refusal must short-circuit before any codex invocation"
+            search.timings().codex_calls,
+            1,
+            "flag-live-out target must reach codex, not be statically refused"
         );
-        assert_eq!(timings.smt_calls, 0);
-        assert_eq!(timings.verifications, 0);
-        assert!(search.ledger().is_empty());
     }
 
     #[test]
@@ -479,6 +464,8 @@ mod tests {
 
         let stats = search.statistics();
         assert_eq!(stats.candidates_evaluated, 1);
+        assert_eq!(stats.smt_queries, 1);
+        assert_eq!(stats.smt_equivalent, 1);
         assert_eq!(stats.improvements_found, 1);
         assert_eq!(stats.best_cost_found, 1);
 
@@ -564,7 +551,7 @@ mod tests {
         assert_eq!(search.timings().codex_calls, 1);
         assert_eq!(search.timings().verifications, 1);
         assert_eq!(search.timings().smt_calls, 0);
-        assert_eq!(search.statistics().smt_queries, 1);
+        assert_eq!(search.statistics().smt_queries, 0);
     }
 
     #[cfg(unix)]

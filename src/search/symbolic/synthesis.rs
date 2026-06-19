@@ -2,8 +2,8 @@
 //!
 //! This module implements symbolic search using Z3 for equivalence verification.
 //! The approach uses linear cost search: try sequences of length 1, 2, ... up to
-//! the target length - 1, and for each length, enumerate candidates and verify
-//! equivalence with SMT.
+//! the configured synthesis window and target length - 1, and for each length,
+//! enumerate candidates and verify equivalence with SMT.
 //!
 //! Note: Full symbolic synthesis with symbolic opcodes/operands is very complex.
 //! This implementation uses a hybrid approach: enumerate concrete candidates
@@ -60,7 +60,8 @@ impl<I> SymbolicSearch<I>
 where
     I: ISA + SymbolicBackend<I>,
 {
-    /// Linear cost search: try each length from 1 to target length - 1
+    /// Linear cost search: try each length from 1 to the configured window,
+    /// capped at target length - 1.
     fn linear_search(
         &mut self,
         target: &[I::Instruction],
@@ -76,10 +77,17 @@ where
         let original_cost =
             <I as SymbolicBackend<I>>::sequence_cost(target, &config.cost_metric, width);
         let mut best_solution: Option<Vec<I::Instruction>> = None;
-        let mut best_cost = original_cost;
+        let mut best_cost = config
+            .symbolic
+            .cost_bound
+            .map_or(original_cost, |bound| bound.min(original_cost));
 
         // Try sequences of increasing length
-        for length in 1..target.len() {
+        let max_len = target
+            .len()
+            .saturating_sub(1)
+            .min(config.symbolic.window_size);
+        for length in 1..=max_len {
             if config.verbose {
                 println!("Searching for equivalent sequences of length {}...", length);
             }
@@ -309,22 +317,20 @@ where
             .unwrap_or(Duration::from_secs(5));
         let width = <I as SymbolicBackend<I>>::width(config);
 
-        self.statistics.smt_queries += 1;
-
         let (verdict, metrics) = <I as SymbolicBackend<I>>::check_equivalence(
             target, candidate, live_out, width, timeout,
         );
         self.statistics.smt_elapsed += metrics.smt_elapsed;
+        // `smt_called` means the candidate survived the fast concrete
+        // pre-filter and reached Z3, regardless of the solver verdict.
+        if metrics.smt_called {
+            self.statistics.smt_queries += 1;
+            self.statistics.candidates_passed_fast += 1;
+        }
         match verdict {
             EquivalenceResult::Equivalent => {
                 self.statistics.smt_equivalent += 1;
-                self.statistics.candidates_passed_fast += 1;
                 true
-            }
-            EquivalenceResult::NotEquivalentFast(_) => {
-                // Failed fast test, no SMT query needed
-                self.statistics.smt_queries -= 1; // Don't count as SMT query
-                false
             }
             _ => false,
         }
@@ -415,12 +421,15 @@ mod tests {
     use crate::semantics::EquivalenceMetrics;
     use crate::semantics::cost::CostMetric;
     use crate::semantics::live_out::LiveOut;
+    use crate::semantics::state::ConcreteMachineState;
     use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
     use std::sync::{Arc, Mutex};
     use std::time::Duration;
 
     static TEST_EQUIVALENCE_CHECKS: AtomicUsize = AtomicUsize::new(0);
     static TEST_EQUIVALENCE_EQUIVALENT_ON_CHECK: AtomicUsize = AtomicUsize::new(0);
+    static TEST_EQUIVALENCE_FAST_FAILURE: AtomicBool = AtomicBool::new(false);
+    static TEST_EQUIVALENCE_SMT_CALLED: AtomicBool = AtomicBool::new(false);
     static TEST_SEQUENCE_COST_DELAY_MS: AtomicU64 = AtomicU64::new(0);
     static TEST_STOP_FLAG: Mutex<Option<Arc<AtomicBool>>> = Mutex::new(None);
     static SYMBOLIC_INNER_LOOP_TEST_LOCK: Mutex<()> = Mutex::new(());
@@ -444,6 +453,8 @@ mod tests {
     fn reset_symbolic_inner_loop_test_state() {
         TEST_EQUIVALENCE_CHECKS.store(0, Ordering::SeqCst);
         TEST_EQUIVALENCE_EQUIVALENT_ON_CHECK.store(0, Ordering::SeqCst);
+        TEST_EQUIVALENCE_FAST_FAILURE.store(false, Ordering::SeqCst);
+        TEST_EQUIVALENCE_SMT_CALLED.store(false, Ordering::SeqCst);
         TEST_SEQUENCE_COST_DELAY_MS.store(0, Ordering::SeqCst);
         let mut slot = TEST_STOP_FLAG.lock().expect("test stop flag lock poisoned");
         *slot = None;
@@ -629,13 +640,20 @@ mod tests {
                 }
             }
             std::thread::sleep(Duration::from_millis(1));
+            let metrics = EquivalenceMetrics {
+                smt_called: TEST_EQUIVALENCE_SMT_CALLED.load(Ordering::SeqCst),
+                ..EquivalenceMetrics::default()
+            };
             if check_number == TEST_EQUIVALENCE_EQUIVALENT_ON_CHECK.load(Ordering::SeqCst) {
-                return (EquivalenceResult::Equivalent, EquivalenceMetrics::default());
+                return (EquivalenceResult::Equivalent, metrics);
             }
-            (
-                EquivalenceResult::NotEquivalent,
-                EquivalenceMetrics::default(),
-            )
+            if TEST_EQUIVALENCE_FAST_FAILURE.load(Ordering::SeqCst) {
+                return (
+                    EquivalenceResult::NotEquivalentFast(ConcreteMachineState::new_zeroed()),
+                    metrics,
+                );
+            }
+            (EquivalenceResult::NotEquivalent, metrics)
         }
 
         fn width(_config: &SearchConfig) -> u32 {
@@ -717,6 +735,82 @@ mod tests {
             // The instruction should write to X0
             assert_eq!(optimized[0].destination(), Some(Register::X0));
         }
+    }
+
+    #[test]
+    fn symbolic_cost_bound_zero_prevents_known_mov_add_rewrite() {
+        let mut search: SymbolicSearch<AArch64> = SymbolicSearch::new();
+
+        let config = SearchConfig::default()
+            .with_symbolic(
+                SymbolicConfig::default()
+                    .with_cost_bound(0)
+                    .with_timeout(Duration::from_secs(10)),
+            )
+            .with_registers(vec![Register::X0, Register::X1, Register::X2])
+            .with_immediates(vec![-1, 0, 1, 2]);
+
+        let live_out = LiveOut::from_registers(vec![Register::X0]);
+        let target = mov_add_sequence();
+
+        let result = search.search(&target, &live_out, &config);
+
+        // cost_bound = 0 caps best_cost at min(0, original) = 0. Every AArch64
+        // instruction has cost >= 1, so no candidate sequence can be strictly
+        // cheaper than 0; the length loop prunes every candidate before any SMT
+        // query runs (candidates_evaluated == 0, smt_queries == 0).
+        assert!(!result.found_optimization);
+        assert!(result.optimized_sequence.is_none());
+        assert_eq!(result.statistics.best_cost_found, 2);
+        assert_eq!(result.statistics.candidates_evaluated, 0);
+        assert_eq!(result.statistics.smt_queries, 0);
+    }
+
+    #[test]
+    fn symbolic_cost_bound_is_exclusive() {
+        let _guard = SYMBOLIC_INNER_LOOP_TEST_LOCK
+            .lock()
+            .expect("symbolic inner-loop test lock poisoned");
+        reset_symbolic_inner_loop_test_state();
+        TEST_EQUIVALENCE_EQUIVALENT_ON_CHECK.store(1, Ordering::SeqCst);
+
+        let mut search: SymbolicSearch<TestIsa> = SymbolicSearch::new();
+        let config =
+            SearchConfig::default().with_symbolic(SymbolicConfig::default().with_cost_bound(1));
+        let target = [TestInstruction(100), TestInstruction(101)];
+
+        let result = search.search(&target, &(), &config);
+
+        assert!(!result.found_optimization);
+        assert!(result.optimized_sequence.is_none());
+        assert_eq!(result.statistics.best_cost_found, 2);
+        assert_eq!(TEST_EQUIVALENCE_CHECKS.load(Ordering::SeqCst), 0);
+        assert_eq!(result.statistics.candidates_evaluated, 0);
+    }
+
+    #[test]
+    fn symbolic_window_size_caps_candidate_lengths() {
+        let _guard = SYMBOLIC_INNER_LOOP_TEST_LOCK
+            .lock()
+            .expect("symbolic inner-loop test lock poisoned");
+        reset_symbolic_inner_loop_test_state();
+
+        let mut search: SymbolicSearch<TestIsa> = SymbolicSearch::new();
+        let config =
+            SearchConfig::default().with_symbolic(SymbolicConfig::default().with_window_size(1));
+        let target = [
+            TestInstruction(100),
+            TestInstruction(101),
+            TestInstruction(102),
+            TestInstruction(103),
+        ];
+
+        let result = search.search(&target, &(), &config);
+
+        assert!(!result.found_optimization);
+        assert!(result.optimized_sequence.is_none());
+        assert_eq!(TEST_EQUIVALENCE_CHECKS.load(Ordering::SeqCst), 1);
+        assert_eq!(result.statistics.candidates_evaluated, 1);
     }
 
     #[test]
@@ -1138,6 +1232,48 @@ mod tests {
         }];
 
         assert!(!search.verify_equivalence(&target, &candidate, &live_out, &config));
+    }
+
+    #[test]
+    fn symbolic_verify_counts_smt_counterexample_as_fast_pass() {
+        let _guard = SYMBOLIC_INNER_LOOP_TEST_LOCK
+            .lock()
+            .expect("symbolic inner-loop test lock poisoned");
+        reset_symbolic_inner_loop_test_state();
+        TEST_EQUIVALENCE_SMT_CALLED.store(true, Ordering::SeqCst);
+
+        let mut search: SymbolicSearch<TestIsa> = SymbolicSearch::new();
+        let config = SearchConfig::default().with_timeout_option(None);
+        let target = [TestInstruction(1)];
+        let candidate = [TestInstruction(2)];
+
+        assert!(!search.verify_equivalence(&target, &candidate, &(), &config));
+
+        let stats = search.statistics();
+        assert_eq!(stats.smt_queries, 1);
+        assert_eq!(stats.candidates_passed_fast, 1);
+        assert_eq!(stats.smt_equivalent, 0);
+    }
+
+    #[test]
+    fn symbolic_verify_does_not_count_fast_refutation_as_fast_pass() {
+        let _guard = SYMBOLIC_INNER_LOOP_TEST_LOCK
+            .lock()
+            .expect("symbolic inner-loop test lock poisoned");
+        reset_symbolic_inner_loop_test_state();
+        TEST_EQUIVALENCE_FAST_FAILURE.store(true, Ordering::SeqCst);
+
+        let mut search: SymbolicSearch<TestIsa> = SymbolicSearch::new();
+        let config = SearchConfig::default().with_timeout_option(None);
+        let target = [TestInstruction(1)];
+        let candidate = [TestInstruction(2)];
+
+        assert!(!search.verify_equivalence(&target, &candidate, &(), &config));
+
+        let stats = search.statistics();
+        assert_eq!(stats.smt_queries, 0);
+        assert_eq!(stats.candidates_passed_fast, 0);
+        assert_eq!(stats.smt_equivalent, 0);
     }
 
     // ---- x86 symbolic search (issue #73 Phase D step 7) ----
