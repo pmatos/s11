@@ -484,9 +484,13 @@ trait ElfOptimizationBackend {
 
     fn validate_window_ir(&self, ir: &[Self::Instruction]) -> Result<(), String>;
 
+    /// Run the selected search. `capstone_instructions` preserves source
+    /// operand spelling for backends whose IR collapses aliases; backends
+    /// that do not need that syntax metadata can ignore it.
     fn run_search(
         &self,
         ir: &[Self::Instruction],
+        capstone_instructions: &capstone::Instructions,
         options: &OptimizationOptions,
         context: OptimizationContext,
     ) -> Result<Option<Vec<Self::Instruction>>, Box<dyn std::error::Error>>;
@@ -535,6 +539,7 @@ impl ElfOptimizationBackend for AArch64OptimizationBackend {
     fn run_search(
         &self,
         ir: &[Self::Instruction],
+        _capstone_instructions: &capstone::Instructions,
         options: &OptimizationOptions,
         context: OptimizationContext,
     ) -> Result<Option<Vec<Self::Instruction>>, Box<dyn std::error::Error>> {
@@ -627,13 +632,27 @@ impl ElfOptimizationBackend for X86OptimizationBackend {
     fn run_search(
         &self,
         ir: &[Self::Instruction],
+        capstone_instructions: &capstone::Instructions,
         options: &OptimizationOptions,
-        _context: OptimizationContext,
+        context: OptimizationContext,
     ) -> Result<Option<Vec<Self::Instruction>>, Box<dyn std::error::Error>> {
         let optimized = match options.algorithm {
-            Algorithm::Enumerative => run_x86_enumerative(ir, self.width, options),
-            Algorithm::Stochastic => run_x86_stochastic(ir, self.width, options),
-            Algorithm::Symbolic => run_x86_symbolic(ir, self.width, options),
+            Algorithm::Enumerative => {
+                run_x86_enumerative(ir, self.width, options, context.downstream_flags_live)
+            }
+            Algorithm::Stochastic => {
+                run_x86_stochastic(ir, self.width, options, context.downstream_flags_live)
+            }
+            Algorithm::Symbolic => run_x86_symbolic(
+                ir,
+                self.width,
+                options,
+                context.downstream_flags_live,
+                x86_capstone_window_uses_only_full_width_register_operands(
+                    capstone_instructions,
+                    self.width,
+                ),
+            ),
             Algorithm::Hybrid | Algorithm::Llm => {
                 // Rejected upstream at the CLI layer; defensive check here
                 // in case a programmatic caller bypasses it.
@@ -843,8 +862,12 @@ fn optimize_elf_binary_with_backend<B: ElfOptimizationBackend>(
         optimization_context_for_backend(backend.arch(), patcher, &section, end_addr, &cs);
 
     // Run optimization based on selected algorithm
-    let optimized_instructions =
-        backend.run_search(&ir_instructions, options, optimization_context)?;
+    let optimized_instructions = backend.run_search(
+        &ir_instructions,
+        &instructions,
+        options,
+        optimization_context,
+    )?;
 
     // Use optimized instructions if found, otherwise use original
     let final_instructions = optimized_instructions
@@ -998,6 +1021,10 @@ fn build_x86_symbolic_search_config(
     target: &[isa::x86::X86Instruction],
     width: u32,
     options: &OptimizationOptions,
+    // Binary-patching guard: direct IR callers can allow same-count CodeSize
+    // search, but the ELF frontend disables it when Capstone exposed
+    // partial-register operands that the x86 IR cannot model.
+    same_count_code_size_allowed: bool,
 ) -> SearchConfig {
     let symbolic_config = SymbolicConfig::default().with_search_mode(options.search_mode);
 
@@ -1010,6 +1037,7 @@ fn build_x86_symbolic_search_config(
         .with_x86_registers(x86_registers_from_target(target))
         .with_immediates(isa::x86::default_x86_immediates())
         .with_x86_width(width)
+        .with_x86_same_count_code_size_allowed(same_count_code_size_allowed)
 }
 
 /// Run optimization using the selected algorithm.
@@ -1633,6 +1661,86 @@ fn aarch64_downstream_flags_live_from_section(
     aarch64_downstream_flags_live_from_bytes(cs, &bytes, end_addr)
 }
 
+fn x86_downstream_flags_live_from_bytes<I>(cs: &Capstone, bytes: &[u8], start_addr: u64) -> bool
+where
+    I: isa::FlagsAnalysis<isa::x86::X86Instruction>,
+{
+    if bytes.is_empty() {
+        return true;
+    }
+
+    let mut remaining = bytes;
+    let mut address = start_addr;
+
+    while !remaining.is_empty() {
+        let Ok(instructions) = cs.disasm_count(remaining, address, 1) else {
+            return true;
+        };
+        let Some(instruction) = instructions.iter().next() else {
+            return true;
+        };
+        let instruction_len = instruction.bytes().len();
+        if instruction_len == 0 || instruction_len > remaining.len() {
+            return true;
+        }
+
+        let mnemonic = instruction.mnemonic().unwrap_or("");
+        let op_str = instruction.op_str().unwrap_or("");
+        match x86_ir_from_mnemonic(mnemonic, op_str) {
+            Ok(Some(instr)) => {
+                if <I as isa::FlagsAnalysis<isa::x86::X86Instruction>>::reads_flags(&instr) {
+                    return true;
+                }
+                if <I as isa::FlagsAnalysis<isa::x86::X86Instruction>>::modifies_flags(&instr) {
+                    return false;
+                }
+                if instr.is_terminator() {
+                    return true;
+                }
+            }
+            Ok(None) if mnemonic.eq_ignore_ascii_case("nop") => {}
+            Ok(None) => return true,
+            Err(_) => return true,
+        }
+
+        remaining = &remaining[instruction_len..];
+        address += instruction_len as u64;
+    }
+
+    false
+}
+
+fn x86_downstream_flags_live_from_section(
+    arch: DetectedArch,
+    patcher: &ElfPatcher,
+    section: &TextSection,
+    end_addr: u64,
+    cs: &Capstone,
+) -> bool {
+    let section_end = section.virtual_addr + section.size;
+    if end_addr >= section_end {
+        return true;
+    }
+
+    let suffix_window = AddressWindow {
+        start: end_addr,
+        end: section_end,
+    };
+    let Ok(bytes) = patcher.get_instructions_in_window(&suffix_window) else {
+        return true;
+    };
+
+    match arch {
+        DetectedArch::X86_64 => {
+            x86_downstream_flags_live_from_bytes::<isa::X86_64>(cs, &bytes, end_addr)
+        }
+        DetectedArch::X86_32 => {
+            x86_downstream_flags_live_from_bytes::<isa::X86_32>(cs, &bytes, end_addr)
+        }
+        DetectedArch::Aarch64 => true,
+    }
+}
+
 fn optimization_context_for_backend(
     arch: DetectedArch,
     patcher: &ElfPatcher,
@@ -1644,6 +1752,14 @@ fn optimization_context_for_backend(
         return OptimizationContext {
             downstream_flags_live: aarch64_downstream_flags_live_from_section(
                 patcher, section, end_addr, cs,
+            ),
+        };
+    }
+
+    if matches!(arch, DetectedArch::X86_64 | DetectedArch::X86_32) {
+        return OptimizationContext {
+            downstream_flags_live: x86_downstream_flags_live_from_section(
+                arch, patcher, section, end_addr, cs,
             ),
         };
     }
@@ -1680,7 +1796,10 @@ fn validate_basic_block(ir: &[Instruction]) -> Result<(), String> {
 // (`convert_to_x86_ir`) and the length-1 enumerator used by the
 // enumerative x86 pipeline.
 
-use parser::x86::{X86ParseMode, x86_ir_from_mnemonic_for_mode};
+use parser::x86::{
+    X86ParseMode, parse_x86_register_with_width, x86_ir_from_mnemonic,
+    x86_ir_from_mnemonic_for_mode,
+};
 
 /// Reject any non-terminal Jcc in an x86 optimization window. The
 /// optimizer only special-cases a trailing Jcc (peeled by
@@ -1703,6 +1822,29 @@ fn validate_x86_window_terminator_placement(ir: &[isa::x86::X86Instruction]) -> 
         }
     }
     Ok(())
+}
+
+fn x86_capstone_window_uses_only_full_width_register_operands(
+    instructions: &capstone::Instructions,
+    width: u32,
+) -> bool {
+    instructions.iter().all(|instruction| {
+        instruction
+            .op_str()
+            .unwrap_or("")
+            .split(',')
+            .all(
+                |operand| match parse_x86_register_with_width(operand.trim()) {
+                    Ok((_reg, alias_width)) => alias_width == width,
+                    // Non-register syntax (immediates, memory operands,
+                    // unsupported forms) does not participate in this direct
+                    // register-width guard. Supported instructions naming an
+                    // unknown register such as `ah` are rejected by
+                    // `convert_to_x86_ir` before this helper is used.
+                    Err(_) => true,
+                },
+            )
+    })
 }
 
 fn convert_to_x86_ir(
@@ -1795,6 +1937,15 @@ fn x86_enumerative_immediates_from_target(target: &[isa::x86::X86Instruction]) -
     imms
 }
 
+fn x86_live_out_for_optimization(
+    target: &[isa::x86::X86Instruction],
+    downstream_flags_live: bool,
+) -> semantics::live_out::X86LiveOut {
+    let live_out = validation::live_out::x86_live_out_from_target(target);
+    let flags_live = live_out.flags_live() || downstream_flags_live;
+    live_out.with_flags(flags_live)
+}
+
 /// Build the search config for the x86 *enumerative* path. Like stochastic and
 /// symbolic search, enumerative search draws candidates from the target's own
 /// registers; it additionally derives immediates from the target and honours
@@ -1814,12 +1965,12 @@ fn run_x86_enumerative(
     target: &[isa::x86::X86Instruction],
     width: u32,
     options: &OptimizationOptions,
+    downstream_flags_live: bool,
 ) -> Option<Vec<isa::x86::X86Instruction>> {
     use search::SearchAlgorithm;
-    use validation::live_out::x86_live_out_from_target;
 
     let config = build_x86_enumerative_search_config(target, width, options);
-    let live_out = x86_live_out_from_target(target);
+    let live_out = x86_live_out_for_optimization(target, downstream_flags_live);
 
     let (optimized, statistics) = if width == 32 {
         let mut search: EnumerativeSearch<isa::X86_32> = EnumerativeSearch::new();
@@ -1855,16 +2006,16 @@ fn run_x86_stochastic(
     target: &[isa::x86::X86Instruction],
     width: u32,
     options: &OptimizationOptions,
+    downstream_flags_live: bool,
 ) -> Option<Vec<isa::x86::X86Instruction>> {
     use search::SearchAlgorithm;
     use search::stochastic::StochasticSearch;
-    use validation::live_out::x86_live_out_from_target;
 
     let config = build_x86_stochastic_search_config(target, width, options);
     if config.x86_available_registers.is_empty() {
         return None;
     }
-    let live_out = x86_live_out_from_target(target);
+    let live_out = x86_live_out_for_optimization(target, downstream_flags_live);
 
     // Extract (optimized, statistics) in each width branch separately:
     // the two `SearchResultFor<X86_64>` / `SearchResultFor<X86_32>`
@@ -1901,13 +2052,15 @@ fn run_x86_symbolic(
     target: &[isa::x86::X86Instruction],
     width: u32,
     options: &OptimizationOptions,
+    downstream_flags_live: bool,
+    same_count_code_size_allowed: bool,
 ) -> Option<Vec<isa::x86::X86Instruction>> {
     use search::SearchAlgorithm;
     use search::symbolic::SymbolicSearch;
-    use validation::live_out::x86_live_out_from_target;
 
-    let config = build_x86_symbolic_search_config(target, width, options);
-    let live_out = x86_live_out_from_target(target);
+    let config =
+        build_x86_symbolic_search_config(target, width, options, same_count_code_size_allowed);
+    let live_out = x86_live_out_for_optimization(target, downstream_flags_live);
 
     let (optimized, statistics) = if width == 32 {
         let mut search: SymbolicSearch<isa::X86_32> = SymbolicSearch::new();
@@ -3058,6 +3211,21 @@ mod cli_helper_tests {
             .expect("test capstone should build")
     }
 
+    fn assemble_x86_64_test_bytes(instructions: &[X86Instruction]) -> Vec<u8> {
+        assembler::x86::X86Assembler::new_64()
+            .assemble_instructions(instructions)
+            .expect("test instruction should assemble")
+    }
+
+    fn x86_64_test_capstone() -> Capstone {
+        Capstone::new()
+            .x86()
+            .mode(capstone::arch::x86::ArchMode::Mode64)
+            .syntax(capstone::arch::x86::ArchSyntax::Intel)
+            .build()
+            .expect("test capstone should build")
+    }
+
     #[test]
     fn downstream_flags_live_scan_marks_dead_when_first_flag_event_writes() {
         let bytes = assemble_aarch64_test_bytes(&[
@@ -3136,6 +3304,73 @@ mod cli_helper_tests {
 
         assert!(aarch64_downstream_flags_live_from_bytes(
             &cs, &bytes, 0x1000
+        ));
+    }
+
+    #[test]
+    fn x86_downstream_flags_live_scan_marks_live_when_first_flag_event_reads() {
+        use isa::x86::X86Condition;
+
+        let bytes = assemble_x86_64_test_bytes(&[X86Instruction::Jcc {
+            cond: X86Condition::E,
+        }]);
+        let cs = x86_64_test_capstone();
+
+        assert!(x86_downstream_flags_live_from_bytes::<isa::X86_64>(
+            &cs, &bytes, 0x1000
+        ));
+    }
+
+    #[test]
+    fn x86_downstream_flags_live_scan_marks_dead_when_first_flag_event_writes() {
+        let bytes = assemble_x86_64_test_bytes(&[
+            X86Instruction::CmpReg {
+                rn: X86Register::RAX,
+                rs: X86Register::RBX,
+            },
+            X86Instruction::MovImm {
+                rd: X86Register::RAX,
+                imm: 0,
+            },
+        ]);
+        let cs = x86_64_test_capstone();
+
+        assert!(!x86_downstream_flags_live_from_bytes::<isa::X86_64>(
+            &cs, &bytes, 0x1000
+        ));
+    }
+
+    #[test]
+    fn x86_downstream_flags_live_scan_marks_dead_for_known_non_flag_suffix() {
+        let bytes = assemble_x86_64_test_bytes(&[X86Instruction::MovImm {
+            rd: X86Register::RAX,
+            imm: 0,
+        }]);
+        let cs = x86_64_test_capstone();
+
+        assert!(!x86_downstream_flags_live_from_bytes::<isa::X86_64>(
+            &cs, &bytes, 0x1000
+        ));
+    }
+
+    #[test]
+    fn x86_downstream_flags_live_scan_is_conservative_for_unknown_context() {
+        let cs = x86_64_test_capstone();
+
+        assert!(x86_downstream_flags_live_from_bytes::<isa::X86_64>(
+            &cs,
+            &[],
+            0x1000
+        ));
+        assert!(x86_downstream_flags_live_from_bytes::<isa::X86_64>(
+            &cs,
+            &[0xff],
+            0x1000
+        ));
+        assert!(x86_downstream_flags_live_from_bytes::<isa::X86_64>(
+            &cs,
+            &[0xc3],
+            0x1000
         ));
     }
 
@@ -3229,6 +3464,53 @@ mod cli_helper_tests {
                 assert_eq!(parse_x86_register(alias).unwrap(), reg);
             }
         }
+    }
+
+    fn x86_disassembled_operands_are_full_width_for_test(
+        bytes: &[u8],
+        mode: capstone::arch::x86::ArchMode,
+        width: u32,
+    ) -> bool {
+        let cs = Capstone::new()
+            .x86()
+            .mode(mode)
+            .syntax(capstone::arch::x86::ArchSyntax::Intel)
+            .build()
+            .unwrap();
+        let instructions = cs.disasm_all(bytes, 0x1000).unwrap();
+        x86_capstone_window_uses_only_full_width_register_operands(&instructions, width)
+    }
+
+    #[test]
+    fn x86_full_width_operand_detector() {
+        let mode64 = capstone::arch::x86::ArchMode::Mode64;
+        let mode32 = capstone::arch::x86::ArchMode::Mode32;
+
+        assert!(!x86_disassembled_operands_are_full_width_for_test(
+            &[0x66, 0xb8, 0x00, 0x00],
+            mode64,
+            64
+        ));
+        assert!(!x86_disassembled_operands_are_full_width_for_test(
+            &[0xb0, 0x00],
+            mode64,
+            64
+        ));
+        assert!(!x86_disassembled_operands_are_full_width_for_test(
+            &[0xb8, 0x00, 0x00, 0x00, 0x00],
+            mode64,
+            64
+        ));
+        assert!(x86_disassembled_operands_are_full_width_for_test(
+            &[0x48, 0xc7, 0xc0, 0x00, 0x00, 0x00, 0x00],
+            mode64,
+            64
+        ));
+        assert!(x86_disassembled_operands_are_full_width_for_test(
+            &[0xb8, 0x00, 0x00, 0x00, 0x00],
+            mode32,
+            32
+        ));
     }
 
     #[test]
@@ -3341,12 +3623,13 @@ mod cli_helper_tests {
         assert!(parse_x86_operand("not-an-operand").is_err());
         assert!(x86_ir_from_mnemonic("add", "rax").unwrap().is_none());
         assert!(x86_ir_from_mnemonic("add", "rax, nope").is_err());
+        assert!(x86_ir_from_mnemonic("mov", "ah, 0").is_err());
 
         let mut opts = options_for(Algorithm::Enumerative);
         opts.timeout = Some(Duration::from_secs(5));
         opts.solver_timeout = Duration::from_secs(5);
         opts.cost_metric = CostMetric::CodeSize;
-        assert!(run_x86_enumerative(&[], 64, &opts).is_none());
+        assert!(run_x86_enumerative(&[], 64, &opts, false).is_none());
         assert!(
             run_x86_enumerative(
                 &[X86Instruction::MovImm {
@@ -3354,7 +3637,8 @@ mod cli_helper_tests {
                     imm: 1,
                 }],
                 64,
-                &opts
+                &opts,
+                false,
             )
             .is_none()
         );
@@ -3371,9 +3655,101 @@ mod cli_helper_tests {
             ],
             64,
             &opts,
+            false,
         )
         .expect("two identical writes can be shortened");
         assert_eq!(optimized.len(), 1);
+    }
+
+    #[test]
+    fn x86_live_out_for_optimization_includes_downstream_flags() {
+        let mov_only = [X86Instruction::MovImm {
+            rd: X86Register::RAX,
+            imm: 0,
+        }];
+
+        assert!(!x86_live_out_for_optimization(&mov_only, false).flags_live());
+        assert!(x86_live_out_for_optimization(&mov_only, true).flags_live());
+
+        let flag_writer = [X86Instruction::XorReg {
+            rd: X86Register::RAX,
+            rs: X86Register::RAX,
+        }];
+        assert!(x86_live_out_for_optimization(&flag_writer, false).flags_live());
+    }
+
+    #[test]
+    fn x86_symbolic_code_size_preserves_downstream_flags_live() {
+        let mut opts = options_for(Algorithm::Symbolic);
+        opts.timeout = Some(Duration::from_secs(5));
+        opts.solver_timeout = Duration::from_secs(5);
+        opts.cost_metric = CostMetric::CodeSize;
+        let target = [X86Instruction::MovImm {
+            rd: X86Register::RAX,
+            imm: 0,
+        }];
+
+        let flags_dead = run_x86_symbolic(&target, 64, &opts, false, true)
+            .expect("flags-dead one-instruction MOV can use an x86 code-size rewrite");
+        assert_eq!(flags_dead.len(), 1);
+        assert_ne!(flags_dead, target.to_vec());
+
+        assert!(
+            run_x86_symbolic(&target, 64, &opts, false, false).is_none(),
+            "the ELF frontend can disable same-count symbolic code-size rewrites when source operand widths are unsafe"
+        );
+
+        assert!(
+            run_x86_symbolic(&target, 64, &opts, true, true).is_none(),
+            "a same-count code-size rewrite must preserve EFLAGS when the following code reads them"
+        );
+    }
+
+    #[test]
+    fn x86_symbolic_backend_gates_same_count_code_size_from_capstone_operands() {
+        let backend = X86OptimizationBackend::new(DetectedArch::X86_64).unwrap();
+        let cs = backend.disassembler().unwrap();
+        let mut opts = options_for(Algorithm::Symbolic);
+        opts.timeout = Some(Duration::from_secs(5));
+        opts.solver_timeout = Duration::from_secs(5);
+        opts.cost_metric = CostMetric::CodeSize;
+        let context = OptimizationContext {
+            downstream_flags_live: false,
+        };
+
+        // 66 b8 00 00 = mov ax, 0. The Capstone bridge now rejects
+        // partial-width register aliases outright, so a window whose
+        // source operands are not mode-width never reaches search and the
+        // binary-patching hazard the same-count gate guards against cannot
+        // occur through the ELF frontend.
+        let partial_instructions = cs.disasm_all(&[0x66, 0xb8, 0x00, 0x00], 0x1000).unwrap();
+        assert!(
+            backend.convert_ir(&partial_instructions).is_err(),
+            "x86-64 conversion must reject a partial-width source operand"
+        );
+
+        // 66 83 e0 00 = and ax, 0; 74 00 = je +0. The partial-width AND in
+        // the rewritable prefix is likewise rejected before search.
+        let partial_with_jcc_instructions = cs
+            .disasm_all(&[0x66, 0x83, 0xe0, 0x00, 0x74, 0x00], 0x1000)
+            .unwrap();
+        assert!(
+            backend.convert_ir(&partial_with_jcc_instructions).is_err(),
+            "x86-64 conversion must reject a partial-width prefix before a pinned Jcc"
+        );
+
+        // 48 c7 c0 00 00 00 00 = mov rax, 0
+        let full_instructions = cs
+            .disasm_all(&[0x48, 0xc7, 0xc0, 0x00, 0x00, 0x00, 0x00], 0x1000)
+            .unwrap();
+        let full_ir = backend.convert_ir(&full_instructions).unwrap();
+        assert!(
+            backend
+                .run_search(&full_ir, &full_instructions, &opts, context)
+                .unwrap()
+                .is_some(),
+            "full-width x86-64 operands should keep the same-count code-size rewrite"
+        );
     }
 
     #[test]
@@ -3453,6 +3829,7 @@ mod cli_helper_tests {
             ],
             64,
             &opts,
+            false,
         )
         .expect("redundant prefix + Jcc must be optimizable");
         // Expect: [MovImm RBX, 1, Jcc E].
@@ -3503,7 +3880,7 @@ mod cli_helper_tests {
             "immediate pool must preserve the fixture immediate"
         );
 
-        let optimized = run_x86_enumerative(&target, 64, &opts)
+        let optimized = run_x86_enumerative(&target, 64, &opts, false)
             .expect("two identical RBX writes can be shortened");
         assert_eq!(optimized.len(), 1);
         match optimized[0] {
@@ -3541,6 +3918,7 @@ mod cli_helper_tests {
             ],
             64,
             &opts,
+            false,
         )
         .expect("two identical R10/-1 writes must collapse to one");
         assert_eq!(optimized.len(), 1);
@@ -3562,7 +3940,7 @@ mod cli_helper_tests {
         opts.seed = Some(7);
 
         let target = r10_zeroing_target();
-        let optimized = run_x86_stochastic(&target, 64, &opts)
+        let optimized = run_x86_stochastic(&target, 64, &opts, false)
             .expect("two identical R10 zeroing writes must collapse to one");
 
         assert_single_r10_rewrite(&optimized);
@@ -3581,7 +3959,7 @@ mod cli_helper_tests {
         opts.cost_metric = CostMetric::InstructionCount;
 
         let target = r10_zeroing_target();
-        let optimized = run_x86_symbolic(&target, 64, &opts)
+        let optimized = run_x86_symbolic(&target, 64, &opts, false, false)
             .expect("two identical R10 zeroing writes must collapse to one");
 
         assert_single_r10_rewrite(&optimized);
@@ -3911,7 +4289,7 @@ mod cli_helper_tests {
                 imm: 0,
             },
         ];
-        let config = build_x86_symbolic_search_config(&target, 64, &opts);
+        let config = build_x86_symbolic_search_config(&target, 64, &opts, true);
 
         assert_eq!(config.x86_available_registers, vec![X86Register::R12]);
         assert!(
@@ -3945,6 +4323,7 @@ mod cli_helper_tests {
                 ],
                 64,
                 &opts,
+                true,
             )
             .x86_available_registers
             .is_empty(),
@@ -3961,6 +4340,11 @@ mod cli_helper_tests {
         );
         assert_eq!(config.x86_width, 64);
         assert_eq!(config.x86_mode(), assembler::x86::X86Mode::Mode64);
+        assert!(config.x86_same_count_code_size_allowed);
+        assert!(
+            !build_x86_symbolic_search_config(&target, 64, &opts, false)
+                .x86_same_count_code_size_allowed
+        );
     }
 
     #[test]

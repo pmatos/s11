@@ -340,6 +340,11 @@ pub struct SearchConfig {
     pub x86_available_registers: Vec<crate::isa::x86::X86Register>,
     /// x86 operand width: 64 for x86-64, 32 for x86-32.
     pub x86_width: u32,
+    /// Whether x86 symbolic code-size search may consider same-instruction-count
+    /// candidates. Direct IR callers default to true; the ELF frontend can
+    /// disable this when source operands used partial-register aliases that the
+    /// current x86 IR collapses to full-width registers.
+    pub x86_same_count_code_size_allowed: bool,
     /// Stochastic-specific configuration
     pub stochastic: StochasticConfig,
     /// Symbolic-specific configuration
@@ -378,6 +383,7 @@ impl Default for SearchConfig {
             ],
             x86_available_registers: crate::isa::x86::default_x86_registers(),
             x86_width: 64,
+            x86_same_count_code_size_allowed: true,
             stochastic: StochasticConfig::default(),
             symbolic: SymbolicConfig::default(),
             llm: LlmConfig::default(),
@@ -500,6 +506,11 @@ impl SearchConfig {
         } else {
             crate::assembler::x86::X86Mode::Mode64
         }
+    }
+
+    pub fn with_x86_same_count_code_size_allowed(mut self, allowed: bool) -> Self {
+        self.x86_same_count_code_size_allowed = allowed;
+        self
     }
 }
 
