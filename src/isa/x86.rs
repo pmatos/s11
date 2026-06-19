@@ -886,49 +886,37 @@ impl X86Mutator {
             return None;
         }
         // Rewritable variants only: 7 reg-reg + 7 reg-imm + CMOVcc.
-        // Immediates are drawn from the encodability-split pools (MOV vs
-        // non-MOV) rather than the shared free helper, which only takes a
-        // single immediate pool.
+        // The RNG draw order/count MUST stay in lock-step with the shared
+        // free helper `generate_random_rewritable_x86_instruction`
+        // (opcode → rd → rs → imm → cond, all four drawn unconditionally)
+        // so callers that interleave the two stay deterministic. The only
+        // #593 behaviour change is *which* prefiltered pool the single imm
+        // draw indexes: opcode 1 (MOV) uses the MOVABS-capable `mov`
+        // pool, every other imm form uses the non-MOV pool.
         let opcode = rng.random_range(0..u32::from(X86_REWRITABLE_OPCODE_COUNT));
         let rd = self.pick_register(rng)?;
         let rs = self.pick_register(rng)?;
+        let imm = if opcode == 1 {
+            self.pick_mov_immediate(rng)
+        } else {
+            self.pick_non_mov_immediate(rng)
+        };
         let cond = X86Condition::ALL[rng.random_range(0..X86Condition::ALL.len())];
         Some(match opcode {
             0 => X86Instruction::MovReg { rd, rs },
-            1 => X86Instruction::MovImm {
-                rd,
-                imm: self.pick_mov_immediate(rng),
-            },
+            1 => X86Instruction::MovImm { rd, imm },
             2 => X86Instruction::AddReg { rd, rs },
-            3 => X86Instruction::AddImm {
-                rd,
-                imm: self.pick_non_mov_immediate(rng),
-            },
+            3 => X86Instruction::AddImm { rd, imm },
             4 => X86Instruction::SubReg { rd, rs },
-            5 => X86Instruction::SubImm {
-                rd,
-                imm: self.pick_non_mov_immediate(rng),
-            },
+            5 => X86Instruction::SubImm { rd, imm },
             6 => X86Instruction::AndReg { rd, rs },
-            7 => X86Instruction::AndImm {
-                rd,
-                imm: self.pick_non_mov_immediate(rng),
-            },
+            7 => X86Instruction::AndImm { rd, imm },
             8 => X86Instruction::OrReg { rd, rs },
-            9 => X86Instruction::OrImm {
-                rd,
-                imm: self.pick_non_mov_immediate(rng),
-            },
+            9 => X86Instruction::OrImm { rd, imm },
             10 => X86Instruction::XorReg { rd, rs },
-            11 => X86Instruction::XorImm {
-                rd,
-                imm: self.pick_non_mov_immediate(rng),
-            },
+            11 => X86Instruction::XorImm { rd, imm },
             12 => X86Instruction::CmpReg { rn: rd, rs },
-            13 => X86Instruction::CmpImm {
-                rn: rd,
-                imm: self.pick_non_mov_immediate(rng),
-            },
+            13 => X86Instruction::CmpImm { rn: rd, imm },
             _ => X86Instruction::Cmov { rd, rs, cond },
         })
     }
