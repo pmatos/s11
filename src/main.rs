@@ -3669,7 +3669,7 @@ mod cli_helper_tests {
         assert_eq!(config.timeout, Some(Duration::from_millis(31)));
         assert!(config.verbose);
         assert_eq!(config.x86_width, 32);
-        assert_eq!(config.x86_mode, assembler::x86::X86Mode::Mode32);
+        assert_eq!(config.x86_mode(), assembler::x86::X86Mode::Mode32);
 
         let default_stochastic = StochasticConfig::default();
         assert_eq!(config.stochastic.beta, default_stochastic.beta);
