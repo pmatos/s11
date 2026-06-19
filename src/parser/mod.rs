@@ -3536,6 +3536,62 @@ mod tests {
     }
 
     #[test]
+    fn parse_standalone_extend_round_trips_zero_registers() {
+        // Issue #428: keep zero-register spellings stable
+        // across Display -> parse_line -> Display for standalone extends.
+        let cases = [
+            (
+                Instruction::Uxtb {
+                    rd: Register::XZR,
+                    rn: Register::XZR,
+                },
+                "uxtb wzr, wzr",
+            ),
+            (
+                Instruction::Uxth {
+                    rd: Register::XZR,
+                    rn: Register::XZR,
+                },
+                "uxth wzr, wzr",
+            ),
+            (
+                Instruction::Sxtb {
+                    rd: Register::XZR,
+                    rn: Register::XZR,
+                },
+                "sxtb xzr, wzr",
+            ),
+            (
+                Instruction::Sxth {
+                    rd: Register::XZR,
+                    rn: Register::XZR,
+                },
+                "sxth xzr, wzr",
+            ),
+            (
+                Instruction::Sxtw {
+                    rd: Register::XZR,
+                    rn: Register::XZR,
+                },
+                "sxtw xzr, wzr",
+            ),
+        ];
+
+        for (expected, expected_text) in cases {
+            assert_eq!(expected.to_string(), expected_text);
+
+            let parsed = match parse_line(expected_text)
+                .unwrap_or_else(|e| panic!("{expected_text}: {e}"))
+            {
+                LineResult::Instruction(instr) => instr,
+                LineResult::Skip => panic!("unexpected skip for {expected_text}"),
+            };
+            assert_eq!(parsed, expected, "parse mismatch for {expected_text}");
+            assert_eq!(parsed.to_string(), expected_text);
+        }
+    }
+
+    #[test]
     fn parse_sxt_rejects_w_destination() {
         // Issue #60 follow-up (Codex P1 on the rebased branch): `sxtb w0, w1`
         // is the 32-bit-Wd-write form architecturally — distinct from the
