@@ -557,23 +557,29 @@ fn parse_eon(operands: &[&str]) -> Result<Instruction, String> {
 
 /// Parse ADDS instruction
 fn parse_adds(operands: &[&str]) -> Result<Instruction, String> {
-    if operands.len() != 3 {
-        return Err(format!("adds requires 3 operands, got {}", operands.len()));
+    if operands.len() != 3 && operands.len() != 4 {
+        return Err(format!(
+            "adds requires 3 or 4 operands, got {}",
+            operands.len()
+        ));
     }
     let rd = parse_register(operands[0])?;
     let rn = parse_register(operands[1])?;
-    let rm = parse_operand(operands[2])?;
+    let rm = parse_rm_3op("adds", operands)?;
     Ok(Instruction::Adds { rd, rn, rm })
 }
 
 /// Parse SUBS instruction
 fn parse_subs(operands: &[&str]) -> Result<Instruction, String> {
-    if operands.len() != 3 {
-        return Err(format!("subs requires 3 operands, got {}", operands.len()));
+    if operands.len() != 3 && operands.len() != 4 {
+        return Err(format!(
+            "subs requires 3 or 4 operands, got {}",
+            operands.len()
+        ));
     }
     let rd = parse_register(operands[0])?;
     let rn = parse_register(operands[1])?;
-    let rm = parse_operand(operands[2])?;
+    let rm = parse_rm_3op("subs", operands)?;
     Ok(Instruction::Subs { rd, rn, rm })
 }
 
@@ -2180,6 +2186,39 @@ mod tests {
         );
         // round-trip via Display
         assert_eq!(format!("{}", instr), "add x0, x1, x2, lsl #3");
+    }
+
+    #[test]
+    fn test_parse_shifted_register_flag_setting_arith() {
+        let instr = parse_one("adds x0, x1, x2, lsl #3");
+        assert_eq!(
+            instr,
+            Instruction::Adds {
+                rd: Register::X0,
+                rn: Register::X1,
+                rm: Operand::ShiftedRegister {
+                    reg: Register::X2,
+                    kind: ShiftKind::Lsl,
+                    amount: 3,
+                },
+            }
+        );
+        assert_eq!(format!("{}", instr), "adds x0, x1, x2, lsl #3");
+
+        let instr = parse_one("subs x3, x4, x5, asr #5");
+        assert_eq!(
+            instr,
+            Instruction::Subs {
+                rd: Register::X3,
+                rn: Register::X4,
+                rm: Operand::ShiftedRegister {
+                    reg: Register::X5,
+                    kind: ShiftKind::Asr,
+                    amount: 5,
+                },
+            }
+        );
+        assert_eq!(format!("{}", instr), "subs x3, x4, x5, asr #5");
     }
 
     #[test]

@@ -391,8 +391,15 @@ impl Mutator {
                 match choice {
                     0 => *rd = self.random_register(rng),
                     1 => *rn = self.random_register(rng),
-                    // Same 12-bit clamp as Add/Sub (issue #87).
-                    _ => *rm = Self::clamp_imm12(self.random_operand(rng)),
+                    // Same 12-bit clamp and non-ROR shifted-register coverage
+                    // as Add/Sub, without the extended-register branch.
+                    _ => {
+                        *rm = Self::clamp_imm12(self.random_arith_operand_no_extended(
+                            rng,
+                            false,
+                            RegisterWidth::X64,
+                        ));
+                    }
                 }
             }
             // ADC/ADCS/SBC/SBCS are register-only (rd, rn, rm all registers).
@@ -1285,6 +1292,23 @@ impl Mutator {
         }
     }
 
+    /// Random rm operand for flag-setting arithmetic. ADDS/SUBS support the
+    /// shifted-register arithmetic form, but this issue intentionally leaves
+    /// their extended-register form unsupported.
+    fn random_arith_operand_no_extended<R: RngExt>(
+        &self,
+        rng: &mut R,
+        allow_ror: bool,
+        width: RegisterWidth,
+    ) -> Operand {
+        let choice: f64 = rng.random();
+        if choice < SHIFTED_REGISTER_OPERAND_PROBABILITY && !self.registers.is_empty() {
+            self.random_shifted_register(rng, allow_ror, width)
+        } else {
+            self.random_operand(rng)
+        }
+    }
+
     fn random_shifted_register<R: RngExt>(
         &self,
         rng: &mut R,
@@ -2099,6 +2123,72 @@ mod tests {
             produced_shifted,
             "mutate_operand on Add must occasionally produce ShiftedRegister rm"
         );
+    }
+
+    #[test]
+    fn test_mutate_operand_can_produce_shifted_register_for_flag_setting_arith() {
+        let mutator = default_mutator();
+        let starts = [
+            (
+                "ADDS",
+                Instruction::Adds {
+                    rd: Register::X0,
+                    rn: Register::X1,
+                    rm: Operand::Register(Register::X2),
+                },
+            ),
+            (
+                "SUBS",
+                Instruction::Subs {
+                    rd: Register::X0,
+                    rn: Register::X1,
+                    rm: Operand::Register(Register::X2),
+                },
+            ),
+        ];
+
+        for (idx, (name, start)) in starts.into_iter().enumerate() {
+            let mut rng = ChaCha8Rng::seed_from_u64(0x2790 + idx as u64);
+            let mut saw_shifted = false;
+
+            for _ in 0..5000 {
+                let mut seq = vec![start];
+                mutator.mutate_operand(&mut rng, &mut seq);
+
+                let rm = match seq[0] {
+                    Instruction::Adds { rm, .. } | Instruction::Subs { rm, .. } => rm,
+                    other => panic!("mutate_operand changed {name} opcode: {other:?}"),
+                };
+
+                match rm {
+                    Operand::ShiftedRegister { kind, .. } => {
+                        assert_ne!(
+                            kind,
+                            crate::ir::ShiftKind::Ror,
+                            "{name} shifted-register rm must not use ROR"
+                        );
+                        assert!(
+                            seq[0].is_encodable_aarch64(),
+                            "mutated {name} must remain encodable: {}",
+                            seq[0]
+                        );
+                        saw_shifted = true;
+                        break;
+                    }
+                    Operand::ExtendedRegister { .. } => {
+                        panic!(
+                            "mutate_operand on {name} must not emit unsupported ExtendedRegister rm"
+                        )
+                    }
+                    _ => {}
+                }
+            }
+
+            assert!(
+                saw_shifted,
+                "mutate_operand on {name} did not produce ShiftedRegister rm"
+            );
+        }
     }
 
     #[test]

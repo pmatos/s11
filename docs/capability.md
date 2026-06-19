@@ -43,6 +43,8 @@ Rewritable straight-line mnemonics accepted by the parser and Capstone bridge:
   - Non-flag-setting `add` and `sub` support both 64-bit `X` and 32-bit `W`
     register/immediate/shifted-register forms. W extended-register arithmetic
     remains out of scope for now.
+  - X-form `adds` and `subs` support register, immediate, and non-ROR
+    shifted-register forms.
 - Logical and inverted-logical forms: `and`, `ands`, `orr`, `eor`, `bic`,
   `bics`, `orn`, `eon`
   - Logical-immediate forms for `and`, `ands`, `orr`, `eor`, and `tst`
