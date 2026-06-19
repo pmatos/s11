@@ -580,6 +580,18 @@ pub enum Instruction {
 }
 
 impl Instruction {
+    /// Returns true for instructions that read from or write to memory.
+    pub fn is_memory_op(&self) -> bool {
+        matches!(
+            self,
+            Instruction::Ldr { .. }
+                | Instruction::Ldrs { .. }
+                | Instruction::Str { .. }
+                | Instruction::Ldp { .. }
+                | Instruction::Stp { .. }
+        )
+    }
+
     /// Registers this instruction writes (in canonical order). Empty for
     /// pure flag-setters and branches; one entry for single-destination
     /// arithmetic and logical ops; two entries for LDP and writeback
@@ -1961,6 +1973,62 @@ mod tests {
             rm: Operand::Register(Register::X1),
         };
         assert!(cmp.destinations().is_empty());
+    }
+
+    #[test]
+    fn instruction_is_memory_op_classifies_aarch64_memory_variants() {
+        let addr = AddressOperand::Imm {
+            base: Register::X1,
+            offset: 8,
+            mode: IndexMode::Offset,
+        };
+        let ldr = Instruction::Ldr {
+            rt: Register::X0,
+            addr,
+            width: AccessWidth::Extended,
+        };
+        let ldrs = Instruction::Ldrs {
+            rt: Register::X0,
+            addr,
+            width: AccessWidth::Word,
+        };
+        let str_ = Instruction::Str {
+            rt: Register::X0,
+            addr,
+            width: AccessWidth::Extended,
+        };
+        let ldp = Instruction::Ldp {
+            rt1: Register::X0,
+            rt2: Register::X2,
+            addr,
+            width: AccessWidth::Extended,
+            signed: false,
+        };
+        let stp = Instruction::Stp {
+            rt1: Register::X0,
+            rt2: Register::X2,
+            addr,
+            width: AccessWidth::Extended,
+        };
+
+        for instr in [ldr, ldrs, str_, ldp, stp] {
+            assert!(instr.is_memory_op(), "{instr:?}");
+        }
+
+        let add = Instruction::Add {
+            rd: Register::X0,
+            rn: Register::X1,
+            rm: Operand::Register(Register::X2),
+        };
+        let cmp = Instruction::Cmp {
+            rn: Register::X0,
+            rm: Operand::Register(Register::X1),
+        };
+        let ret = Instruction::Ret { rn: Register::X30 };
+
+        for instr in [add, cmp, ret] {
+            assert!(!instr.is_memory_op(), "{instr:?}");
+        }
     }
 
     #[test]
