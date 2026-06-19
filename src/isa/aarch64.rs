@@ -1827,6 +1827,7 @@ fn mutate_shift_operand<R: RngExt>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ir::types::{AccessWidth, AddressOperand, IndexMode, LabelId};
     use rand::SeedableRng;
     use rand_chacha::ChaCha8Rng;
     use std::collections::BTreeSet;
@@ -2134,6 +2135,92 @@ mod tests {
         ]
     }
 
+    fn non_enumerated_instruction_families() -> Vec<Instruction> {
+        let target = LabelId(0x1000);
+        let addr = AddressOperand::Imm {
+            base: Register::X1,
+            offset: 0,
+            mode: IndexMode::Offset,
+        };
+
+        vec![
+            Instruction::B { target },
+            Instruction::BCond {
+                target,
+                cond: Condition::EQ,
+            },
+            Instruction::Ret { rn: Register::X30 },
+            Instruction::Cbz {
+                rn: Register::X0,
+                target,
+            },
+            Instruction::Cbnz {
+                rn: Register::X0,
+                target,
+            },
+            Instruction::Tbz {
+                rt: Register::X0,
+                bit: 3,
+                target,
+            },
+            Instruction::Tbnz {
+                rt: Register::X0,
+                bit: 3,
+                target,
+            },
+            Instruction::Bl { target },
+            Instruction::Br { rn: Register::X16 },
+            Instruction::Ldr {
+                rt: Register::X0,
+                addr,
+                width: AccessWidth::Extended,
+            },
+            Instruction::Ldrs {
+                rt: Register::X0,
+                addr,
+                width: AccessWidth::Word,
+            },
+            Instruction::Str {
+                rt: Register::X0,
+                addr,
+                width: AccessWidth::Extended,
+            },
+            Instruction::Ldp {
+                rt1: Register::X0,
+                rt2: Register::X2,
+                addr,
+                width: AccessWidth::Extended,
+                signed: false,
+            },
+            Instruction::Stp {
+                rt1: Register::X0,
+                rt2: Register::X2,
+                addr,
+                width: AccessWidth::Extended,
+            },
+            Instruction::Adc {
+                rd: Register::X0,
+                rn: Register::X1,
+                rm: Register::X2,
+            },
+            Instruction::Adcs {
+                rd: Register::X0,
+                rn: Register::X1,
+                rm: Register::X2,
+            },
+            Instruction::Sbc {
+                rd: Register::X0,
+                rn: Register::X1,
+                rm: Register::X2,
+            },
+            Instruction::Sbcs {
+                rd: Register::X0,
+                rn: Register::X1,
+                rm: Register::X2,
+            },
+        ]
+    }
+
     #[test]
     fn test_aarch64_isa_metadata() {
         let isa = AArch64;
@@ -2410,6 +2497,23 @@ mod tests {
             .collect();
         assert_eq!(seen.len(), all_instruction_families().len());
         assert_eq!(seen.len(), generator.opcode_count() as usize);
+    }
+
+    #[test]
+    fn non_enumerated_instruction_families_stay_above_opcode_count() {
+        let generator = AArch64InstructionGenerator;
+        let opcode_count = generator.opcode_count();
+
+        for instr in non_enumerated_instruction_families() {
+            let id = instr.opcode_id();
+            assert!(
+                id >= opcode_count,
+                "non-enumerated opcode {} has id {} below opcode_count {}",
+                instr,
+                id,
+                opcode_count
+            );
+        }
     }
 
     #[test]
