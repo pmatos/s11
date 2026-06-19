@@ -1702,7 +1702,9 @@ fn ldrs_mnemonic(width: AccessWidth) -> &'static str {
         AccessWidth::Byte => "ldrsb",
         AccessWidth::Half => "ldrsh",
         AccessWidth::Word => "ldrsw",
-        AccessWidth::Extended => "ldrsw", // Should be rejected by is_encodable
+        AccessWidth::Extended => {
+            unreachable!("LDRS Extended width rejected by is_encodable_aarch64")
+        }
     }
 }
 
@@ -1881,6 +1883,21 @@ mod tests {
             width: AccessWidth::Word,
         };
         assert_eq!(format!("{}", ldrs), "ldrsw x0, [x1]");
+    }
+
+    #[test]
+    #[should_panic(expected = "LDRS Extended width rejected by is_encodable_aarch64")]
+    fn ldrs_extended_width_display_panics() {
+        let ldrs = Instruction::Ldrs {
+            rt: Register::X0,
+            addr: AddressOperand::Imm {
+                base: Register::X1,
+                offset: 0,
+                mode: IndexMode::Offset,
+            },
+            width: AccessWidth::Extended,
+        };
+        let _ = format!("{}", ldrs);
     }
 
     #[test]
