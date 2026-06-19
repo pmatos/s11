@@ -894,11 +894,8 @@ mod tests {
     // ---- x86 stochastic search (issue #73 Phase C step 5) ----
 
     /// Tracer-bullet test that the generic `StochasticSearch<X86_64>`
-    /// instantiates, runs an MCMC loop end-to-end on a 2-instruction
-    /// x86 target, and finishes without panic. The target is the
-    /// canonical zeroing fusion `mov rax, 0; add rax, rbx` — the
-    /// search should at minimum *not crash*, and the iteration counter
-    /// should advance.
+    /// instantiates and discovers the dead-flags collapse for a
+    /// 2-instruction x86 target.
     #[test]
     fn x86_stochastic_runs_end_to_end() {
         use crate::isa::X86_64;
@@ -930,13 +927,20 @@ mod tests {
         ];
 
         let result = search.search(&target, &live_out, &config);
-        let stats = result.statistics;
+        let stats = &result.statistics;
 
         assert_eq!(stats.algorithm, Algorithm::Stochastic);
         assert_eq!(stats.iterations, 500);
-        // The search may or may not find an optimisation in 500
-        // iterations; we only require that the loop made progress.
         assert!(stats.candidates_evaluated > 0);
+        assert!(result.found_optimization);
+        assert_eq!(result.cost_savings(), 1);
+        assert_eq!(
+            result.optimized_sequence,
+            Some(vec![X86Instruction::MovReg {
+                rd: X86Register::RAX,
+                rs: X86Register::RBX,
+            }])
+        );
     }
 
     /// Mirror of `x86_stochastic_runs_end_to_end` for x86-32 (Mode32 /

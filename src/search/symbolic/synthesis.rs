@@ -1279,8 +1279,8 @@ mod tests {
     // ---- x86 symbolic search (issue #73 Phase D step 7) ----
 
     /// Tracer-bullet test that the generic `SymbolicSearch<X86_64>`
-    /// instantiates and runs an end-to-end synthesis on a 2-instruction
-    /// x86 target without panic.
+    /// instantiates and discovers the dead-flags collapse for a
+    /// 2-instruction x86 target.
     #[test]
     fn x86_symbolic_runs_end_to_end() {
         use crate::isa::X86_64;
@@ -1313,10 +1313,15 @@ mod tests {
 
         let result = search.search(&target, &live_out, &config);
         assert_eq!(result.statistics.algorithm, Algorithm::Symbolic);
-        // We don't assert a specific optimization was found — the test
-        // just verifies the loop runs end-to-end through the generic
-        // backend without panicking.
-        assert!(result.statistics.elapsed_time.as_nanos() > 0);
+        assert!(result.found_optimization);
+        assert_eq!(result.cost_savings(), 1);
+        assert_eq!(
+            result.optimized_sequence,
+            Some(vec![X86Instruction::MovReg {
+                rd: X86Register::RAX,
+                rs: X86Register::RBX,
+            }])
+        );
     }
 
     /// Mirror of `x86_symbolic_runs_end_to_end` for x86-32. Covers the
