@@ -919,6 +919,20 @@ fn build_hybrid_search_config(
         .with_timeout_option(options.timeout)
 }
 
+fn build_x86_base_search_config(
+    target: &[isa::x86::X86Instruction],
+    width: u32,
+    options: &OptimizationOptions,
+) -> SearchConfig {
+    SearchConfig::default()
+        .with_cost_metric(options.cost_metric)
+        .with_timeout_option(options.timeout)
+        .with_verbose(options.verbose)
+        .with_x86_registers(x86_registers_from_target(target))
+        .with_immediates(isa::x86::default_x86_immediates())
+        .with_x86_width(width)
+}
+
 fn build_x86_stochastic_search_config(
     target: &[isa::x86::X86Instruction],
     width: u32,
@@ -931,15 +945,9 @@ fn build_x86_stochastic_search_config(
 
     let symbolic_config = SymbolicConfig::default().with_timeout(options.solver_timeout);
 
-    SearchConfig::default()
+    build_x86_base_search_config(target, width, options)
         .with_stochastic(stochastic_config)
         .with_symbolic(symbolic_config)
-        .with_cost_metric(options.cost_metric)
-        .with_timeout_option(options.timeout)
-        .with_verbose(options.verbose)
-        .with_x86_registers(x86_registers_from_target(target))
-        .with_immediates(isa::x86::default_x86_immediates())
-        .with_x86_width(width)
 }
 
 fn build_x86_symbolic_search_config(
@@ -951,14 +959,7 @@ fn build_x86_symbolic_search_config(
         .with_search_mode(options.search_mode)
         .with_timeout(options.solver_timeout);
 
-    SearchConfig::default()
-        .with_symbolic(symbolic_config)
-        .with_cost_metric(options.cost_metric)
-        .with_timeout_option(options.timeout)
-        .with_verbose(options.verbose)
-        .with_x86_registers(x86_registers_from_target(target))
-        .with_immediates(isa::x86::default_x86_immediates())
-        .with_x86_width(width)
+    build_x86_base_search_config(target, width, options).with_symbolic(symbolic_config)
 }
 
 /// Run optimization using the selected algorithm.
@@ -1738,14 +1739,15 @@ fn x86_enumerative_immediates_from_target(target: &[isa::x86::X86Instruction]) -
 
 /// Build the search config for the x86 *enumerative* path. Like stochastic and
 /// symbolic search, enumerative search draws candidates from the target's own
-/// registers; it additionally derives immediates from the target and honours
-/// --cores now that the trait-backed search is rayon-parallel.
+/// registers via the shared x86 base; it additionally derives immediates from
+/// the target and honours --cores now that the trait-backed search is
+/// rayon-parallel.
 fn build_x86_enumerative_search_config(
     target: &[isa::x86::X86Instruction],
     width: u32,
     options: &OptimizationOptions,
 ) -> SearchConfig {
-    build_x86_stochastic_search_config(target, width, options)
+    build_x86_base_search_config(target, width, options)
         .with_immediates(x86_enumerative_immediates_from_target(target))
         .with_cores(options.cores)
 }
@@ -3329,6 +3331,57 @@ mod cli_helper_tests {
         assert!(
             config.available_immediates.contains(&-1),
             "immediate pool must include -1"
+        );
+    }
+
+    #[test]
+    fn build_x86_enumerative_search_config_does_not_inherit_stochastic_options() {
+        let mut opts = options_for(Algorithm::Enumerative);
+        opts.timeout = Some(Duration::from_millis(31));
+        opts.solver_timeout = Duration::from_millis(37);
+        opts.beta = 7.25;
+        opts.iterations = 987;
+        opts.seed = Some(123);
+        opts.cost_metric = CostMetric::Latency;
+        opts.verbose = true;
+        opts.cores = Some(4);
+
+        let target = vec![
+            X86Instruction::MovImm {
+                rd: X86Register::R11,
+                imm: -5,
+            },
+            X86Instruction::AddReg {
+                rd: X86Register::R12,
+                rs: X86Register::R11,
+            },
+            X86Instruction::CmpImm {
+                rn: X86Register::R10,
+                imm: 3,
+            },
+        ];
+        let config = build_x86_enumerative_search_config(&target, 32, &opts);
+
+        assert_eq!(
+            config.x86_available_registers,
+            vec![X86Register::R11, X86Register::R12]
+        );
+        assert!(config.available_immediates.contains(&-5));
+        assert!(config.available_immediates.contains(&3));
+        assert_eq!(config.cores, Some(4));
+        assert_eq!(config.cost_metric, CostMetric::Latency);
+        assert_eq!(config.timeout, Some(Duration::from_millis(31)));
+        assert!(config.verbose);
+        assert_eq!(config.x86_width, 32);
+        assert_eq!(config.x86_mode, assembler::x86::X86Mode::Mode32);
+
+        let default_stochastic = StochasticConfig::default();
+        assert_eq!(config.stochastic.beta, default_stochastic.beta);
+        assert_eq!(config.stochastic.iterations, default_stochastic.iterations);
+        assert_eq!(config.stochastic.seed, default_stochastic.seed);
+        assert_eq!(
+            config.symbolic.solver_timeout,
+            SymbolicConfig::default().solver_timeout
         );
     }
 
