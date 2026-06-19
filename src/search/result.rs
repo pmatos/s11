@@ -125,8 +125,12 @@ pub struct SearchStatistics {
     pub algorithm: Algorithm,
     /// Total time spent searching
     pub elapsed_time: Duration,
-    /// Number of candidates evaluated
+    /// Number of candidates constructed and considered by the search.
+    /// This includes candidates later rejected by a cost/best-bound gate.
     pub candidates_evaluated: u64,
+    /// Number of evaluated candidates rejected before verification because
+    /// they were not cheaper than the current best solution.
+    pub candidates_pruned_by_cost: u64,
     /// Number of candidates that passed fast (concrete) validation
     pub candidates_passed_fast: u64,
     /// Number of SMT solver queries that reached Z3 `solver.check()`.
@@ -209,6 +213,12 @@ impl SearchStatistics {
             "Candidates evaluated: {}\n",
             self.candidates_evaluated
         ));
+        if self.candidates_pruned_by_cost > 0 {
+            s.push_str(&format!(
+                "Candidates pruned by cost: {}\n",
+                self.candidates_pruned_by_cost
+            ));
+        }
         s.push_str(&format!(
             "Throughput: {:.0} candidates/sec\n",
             self.throughput()
@@ -381,6 +391,7 @@ mod tests {
         stats.start_timer();
         stats.elapsed_time = Duration::from_millis(500);
         stats.candidates_evaluated = 100;
+        stats.candidates_pruned_by_cost = 7;
         stats.candidates_passed_fast = 25;
         stats.smt_queries = 10;
         stats.smt_equivalent = 2;
@@ -392,6 +403,7 @@ mod tests {
 
         let summary = stats.format_summary();
         assert!(summary.contains("Algorithm: stochastic"));
+        assert!(summary.contains("Candidates pruned by cost: 7"));
         assert!(summary.contains("Fast pass rate"));
         assert!(summary.contains("SMT queries"));
         assert!(summary.contains("Acceptance rate"));

@@ -235,6 +235,7 @@ fn run_coordinator(
     total_stats.elapsed_time = elapsed;
     for (_, s) in &worker_stats {
         total_stats.candidates_evaluated += s.candidates_evaluated;
+        total_stats.candidates_pruned_by_cost += s.candidates_pruned_by_cost;
         total_stats.candidates_passed_fast += s.candidates_passed_fast;
         total_stats.smt_queries += s.smt_queries;
         total_stats.smt_elapsed += s.smt_elapsed;
@@ -899,6 +900,20 @@ mod tests {
             result.total_statistics.improvements_found > 0,
             "expected aggregated improvements_found > 0, got {}",
             result.total_statistics.improvements_found,
+        );
+
+        let pruned_sum: u64 = result
+            .worker_statistics
+            .iter()
+            .map(|(_, stats)| stats.candidates_pruned_by_cost)
+            .sum();
+        assert!(
+            pruned_sum > 0,
+            "expected at least one worker to record cost-pruned candidates",
+        );
+        assert_eq!(
+            result.total_statistics.candidates_pruned_by_cost, pruned_sum,
+            "total_statistics must aggregate cost-pruned candidates from every worker",
         );
 
         // Original-cost and best-cost fields must be populated from the

@@ -893,7 +893,11 @@ impl X86Mutator {
         // The RNG draw order/count MUST stay in lock-step with the shared
         // free helper `generate_random_rewritable_x86_instruction`
         // (opcode → rd → rs → imm → cond, all four drawn unconditionally)
-        // so callers that interleave the two stay deterministic. The only
+        // so callers that interleave the two stay deterministic. Two
+        // helper behaviours must be mirrored exactly: (1) the trailing
+        // CMOV opcode slot is dropped unless the pool holds a distinct
+        // register pair (a self-CMOV is a no-op), and (2) CMOV draws its
+        // source via an extra `pick_register_except` so `rs != rd`. The
         // #593 behaviour change is *which* prefiltered pool the single imm
         // draw indexes: opcode 1 (MOV) uses the MOVABS-capable `mov`
         // pool, every other imm form uses the non-MOV pool.
