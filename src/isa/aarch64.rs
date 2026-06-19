@@ -1977,7 +1977,7 @@ fn mutate_shift_operand<R: RngExt>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ir::types::{AccessWidth, AddressOperand, IndexMode, LabelId};
+    use crate::ir::types::{AccessWidth, AddressOperand, IndexMode, LabelId, PairAccessWidth};
     use rand::SeedableRng;
     use rand_chacha::ChaCha8Rng;
     use std::collections::{BTreeMap, BTreeSet};
@@ -2345,14 +2345,14 @@ mod tests {
                 rt1: Register::X0,
                 rt2: Register::X2,
                 addr,
-                width: AccessWidth::Extended,
+                width: PairAccessWidth::Extended,
                 signed: false,
             },
             Instruction::Stp {
                 rt1: Register::X0,
                 rt2: Register::X2,
                 addr,
-                width: AccessWidth::Extended,
+                width: PairAccessWidth::Extended,
             },
             Instruction::Adc {
                 rd: Register::X0,
