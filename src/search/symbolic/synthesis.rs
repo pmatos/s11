@@ -17,7 +17,7 @@ use crate::search::{Algorithm, SearchAlgorithm};
 use crate::semantics::EquivalenceResult;
 use std::marker::PhantomData;
 use std::sync::atomic::Ordering;
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 /// Whether the symbolic search loop should exit at the next checkpoint.
 ///
@@ -311,10 +311,7 @@ where
         live_out: &<I as SymbolicBackend<I>>::LiveOut,
         config: &SearchConfig,
     ) -> bool {
-        let timeout = config
-            .symbolic
-            .solver_timeout
-            .unwrap_or(Duration::from_secs(5));
+        let timeout = config.symbolic.effective_solver_timeout();
         let width = <I as SymbolicBackend<I>>::width(config);
 
         let (verdict, metrics) = <I as SymbolicBackend<I>>::check_equivalence(
@@ -430,6 +427,7 @@ mod tests {
     static TEST_EQUIVALENCE_EQUIVALENT_ON_CHECK: AtomicUsize = AtomicUsize::new(0);
     static TEST_EQUIVALENCE_FAST_FAILURE: AtomicBool = AtomicBool::new(false);
     static TEST_EQUIVALENCE_SMT_CALLED: AtomicBool = AtomicBool::new(false);
+    static TEST_RECORDED_TIMEOUT_MS: AtomicU64 = AtomicU64::new(u64::MAX);
     static TEST_SEQUENCE_COST_DELAY_MS: AtomicU64 = AtomicU64::new(0);
     static TEST_STOP_FLAG: Mutex<Option<Arc<AtomicBool>>> = Mutex::new(None);
     static SYMBOLIC_INNER_LOOP_TEST_LOCK: Mutex<()> = Mutex::new(());
@@ -455,6 +453,7 @@ mod tests {
         TEST_EQUIVALENCE_EQUIVALENT_ON_CHECK.store(0, Ordering::SeqCst);
         TEST_EQUIVALENCE_FAST_FAILURE.store(false, Ordering::SeqCst);
         TEST_EQUIVALENCE_SMT_CALLED.store(false, Ordering::SeqCst);
+        TEST_RECORDED_TIMEOUT_MS.store(u64::MAX, Ordering::SeqCst);
         TEST_SEQUENCE_COST_DELAY_MS.store(0, Ordering::SeqCst);
         let mut slot = TEST_STOP_FLAG.lock().expect("test stop flag lock poisoned");
         *slot = None;
@@ -630,9 +629,10 @@ mod tests {
             _proposal: &[TestInstruction],
             _live_out: &Self::LiveOut,
             _width: u32,
-            _timeout: Duration,
+            timeout: Duration,
         ) -> (EquivalenceResult, EquivalenceMetrics) {
             let check_number = TEST_EQUIVALENCE_CHECKS.fetch_add(1, Ordering::SeqCst) + 1;
+            TEST_RECORDED_TIMEOUT_MS.store(timeout.as_millis() as u64, Ordering::SeqCst);
             if check_number == 1 {
                 let slot = TEST_STOP_FLAG.lock().expect("test stop flag lock poisoned");
                 if let Some(flag) = slot.as_ref() {
@@ -1253,6 +1253,31 @@ mod tests {
         assert_eq!(stats.smt_queries, 1);
         assert_eq!(stats.candidates_passed_fast, 1);
         assert_eq!(stats.smt_equivalent, 0);
+    }
+
+    #[test]
+    fn symbolic_verify_equivalence_uses_effective_solver_timeout() {
+        let _guard = SYMBOLIC_INNER_LOOP_TEST_LOCK
+            .lock()
+            .expect("symbolic inner-loop test lock poisoned");
+
+        let mut search: SymbolicSearch<TestIsa> = SymbolicSearch::new();
+        let target = [TestInstruction(1)];
+        let candidate = [TestInstruction(2)];
+
+        reset_symbolic_inner_loop_test_state();
+        let explicit_config = SearchConfig::default()
+            .with_symbolic(SymbolicConfig::default().with_timeout(Duration::from_millis(17)));
+        assert!(!search.verify_equivalence(&target, &candidate, &(), &explicit_config));
+        assert_eq!(TEST_RECORDED_TIMEOUT_MS.load(Ordering::SeqCst), 17);
+
+        reset_symbolic_inner_loop_test_state();
+        let defaulted_config = SearchConfig::default().with_symbolic(SymbolicConfig {
+            solver_timeout: None,
+            ..SymbolicConfig::default()
+        });
+        assert!(!search.verify_equivalence(&target, &candidate, &(), &defaulted_config));
+        assert_eq!(TEST_RECORDED_TIMEOUT_MS.load(Ordering::SeqCst), 30000);
     }
 
     #[test]

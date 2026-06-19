@@ -211,6 +211,9 @@ impl std::str::FromStr for SearchMode {
     }
 }
 
+/// Default timeout for each symbolic SMT query.
+pub const DEFAULT_SYMBOLIC_SOLVER_TIMEOUT: Duration = Duration::from_secs(30);
+
 /// Configuration for symbolic (SMT) search
 #[derive(Debug, Clone)]
 pub struct SymbolicConfig {
@@ -237,7 +240,7 @@ impl Default for SymbolicConfig {
             window_size: 3,
             cost_bound: None,
             search_mode: SearchMode::Linear,
-            solver_timeout: Some(Duration::from_secs(30)),
+            solver_timeout: Some(DEFAULT_SYMBOLIC_SOLVER_TIMEOUT),
         }
     }
 }
@@ -261,6 +264,11 @@ impl SymbolicConfig {
     pub fn with_timeout(mut self, timeout: Duration) -> Self {
         self.solver_timeout = Some(timeout);
         self
+    }
+
+    pub fn effective_solver_timeout(&self) -> Duration {
+        self.solver_timeout
+            .unwrap_or(DEFAULT_SYMBOLIC_SOLVER_TIMEOUT)
     }
 }
 
@@ -636,6 +644,27 @@ mod tests {
         assert_eq!(config.cost_bound, Some(2));
         assert_eq!(config.search_mode, SearchMode::Binary);
         assert_eq!(config.solver_timeout, Some(Duration::from_millis(250)));
+    }
+
+    #[test]
+    fn symbolic_solver_timeout_none_uses_default_timeout() {
+        assert_eq!(
+            SymbolicConfig::default().effective_solver_timeout(),
+            Duration::from_secs(30)
+        );
+        assert_eq!(
+            SymbolicConfig::default()
+                .with_timeout(Duration::from_millis(250))
+                .effective_solver_timeout(),
+            Duration::from_millis(250)
+        );
+
+        let config = SymbolicConfig {
+            solver_timeout: None,
+            ..SymbolicConfig::default()
+        };
+
+        assert_eq!(config.effective_solver_timeout(), Duration::from_secs(30));
     }
 
     #[test]
