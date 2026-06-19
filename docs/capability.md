@@ -57,7 +57,9 @@ Rewritable straight-line mnemonics accepted by the parser and Capstone bridge:
 - Single-source bit manipulation: `clz`, `cls`, `rbit`, `rev`, `rev32`,
   `rev16`
 - Standalone extend aliases: `uxtb`, `uxth`, `sxtb`, `sxth`, `sxtw`
-- Bit-field aliases: `ubfx`, `sbfx`, `bfi`, `bfxil`, `ubfiz`, `sbfiz`
+- Bit-field aliases: `ubfx`, `sbfx`, `bfi`, `bfxil`, `ubfiz`, `sbfiz` — each
+  supports both 64-bit `X` and 32-bit `W` register forms (the W form zeroes the
+  destination's upper 32 bits per the ARM ARM).
 - Memory loads and stores (issue #68, [ADR-0007](adr/0007-memory-model.md);
   byte-addressed Z3-array memory model with sound full aliasing, whole-memory
   live-out auto-derived): `ldr`, `ldrb`, `ldrh`, `ldrsb`, `ldrsh`, `ldrsw`,
@@ -67,6 +69,11 @@ Rewritable straight-line mnemonics accepted by the parser and Capstone bridge:
   instructions accept immediate-offset, pre-index, and post-index addressing
   only; `ldp`/`stp` cover `W` and `X` pairs, and `ldpsw` loads sign-extended
   word pairs.
+  Unsized `ldr` / `str` infer `W` vs `X` width from the data register spelling.
+  Zero-extending `ldrb` / `ldrh` loads and `strb` / `strh` stores use scoped
+  `W`/`X` register slots.
+  `ldrsb` / `ldrsh` / `ldrsw` signed loads currently accept only X-form
+  destinations because the current `Ldrs` IR models X-form sign-extension.
 
 Fixed control-flow terminators:
 
@@ -92,6 +99,13 @@ Rewritable straight-line mnemonic families:
 The data-movement/arithmetic/logical/comparison families have register and
 immediate forms where the x86 IR models them. `cmov<cond>` has register
 operands and reads EFLAGS without modifying them.
+
+The x86 IR does not yet carry operand width. To avoid rewriting partial-width
+operations as full-width operations, the binary optimization path currently
+accepts only mode-width register aliases: `rax`/`r8`-style 64-bit names for
+x86-64, and `eax`-style 32-bit i386 names for x86-32. x86-64 `eax`/`ax`/`al`
+forms, x86-32 `ax`/`al` forms, and x86-32 extended-register aliases such as
+`r8d` are rejected until operand width is represented end to end.
 
 Fixed control-flow terminators:
 

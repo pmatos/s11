@@ -298,6 +298,9 @@ pub fn check_equivalence(seq1: &[Instruction], seq2: &[Instruction]) -> Equivale
 /// Optional per-call metrics from the equivalence pipeline.
 #[derive(Debug, Default, Clone)]
 pub struct EquivalenceMetrics {
+    /// Whether a pre-SMT flag-writer guard rejected the candidate before
+    /// concrete or symbolic equivalence checking.
+    pub flag_guard_rejected: bool,
     /// Whether the SMT solver was actually invoked. False when fast-path
     /// refuted the candidate, when fast_only is set, or when the candidate
     /// was rejected before reaching SMT for any other reason.
@@ -769,7 +772,13 @@ where
     I::adjust_config_for_sequences(&mut effective_config, prefix1, prefix2, terminator1);
 
     if let Some(early) = I::pre_smt_guard_for(prefix1, prefix2, &effective_config) {
-        return (early, metrics);
+        return (
+            early,
+            EquivalenceMetrics {
+                flag_guard_rejected: true,
+                ..metrics
+            },
+        );
     }
 
     if let Some(fast) = I::run_fast_path_for(prefix1, prefix2, &effective_config) {
@@ -792,6 +801,7 @@ where
             smt_called: true,
             smt_formula_bytes,
             smt_elapsed,
+            ..EquivalenceMetrics::default()
         },
     )
 }
@@ -2502,6 +2512,17 @@ mod tests {
             EquivalenceResult::NotEquivalent,
             "Dropping a flag-writer must not be certified as equivalent when flags are live"
         );
+        let (metrics_result, metrics) =
+            check_equivalence_with_config_metrics(&adds, &add, &cfg_flags_live);
+        assert_eq!(metrics_result, EquivalenceResult::NotEquivalent);
+        assert!(
+            metrics.flag_guard_rejected,
+            "Metrics should identify pre-SMT flag-guard rejections"
+        );
+        assert!(!metrics.smt_called);
+        assert!(metrics.smt_formula_bytes.is_none());
+        assert_eq!(metrics.smt_elapsed, Duration::ZERO);
+
         // The unmasked path always treats NZCV as part of full state, so it
         // also rejects.
         assert_eq!(
@@ -2629,12 +2650,16 @@ mod tests {
         );
         // Mirror the assertion for the metrics-returning entry point, which
         // shares the same pre_smt_guard plumbing.
-        let (metrics_result, _metrics) =
+        let (metrics_result, metrics) =
             check_equivalence_with_config_metrics(&target, &candidate, &cfg_flags_dead);
         assert_eq!(
             metrics_result,
             EquivalenceResult::Equivalent,
             "Metrics entry point also accepts flag-only divergence when flags are dead"
+        );
+        assert!(
+            !metrics.flag_guard_rejected,
+            "Flag guard metric should remain false when flags are dead"
         );
     }
 
@@ -2823,6 +2848,7 @@ mod tests {
             rn: Register::X1,
             lsb,
             width,
+            reg_width: crate::ir::RegisterWidth::X64,
         }];
 
         let expanded = vec![
@@ -2875,6 +2901,7 @@ mod tests {
                 rn: Register::X1,
                 lsb: lsb as u8,
                 width,
+                reg_width: crate::ir::RegisterWidth::X64,
             }];
 
             let lsr_lsl_asr = vec![
@@ -2922,6 +2949,7 @@ mod tests {
             rn: Register::X1,
             lsb: lsb as u8,
             width,
+            reg_width: crate::ir::RegisterWidth::X64,
         }];
 
         let lsr_and = vec![
@@ -2953,6 +2981,127 @@ mod tests {
         }
     }
 
+    /// Acceptance (#145): the SMT lowering of a W-form bit-field op zeroes bits
+    /// [63:32]. SBFX is the discriminating case (the X form fills the upper half
+    /// with the sign). `SBFX W0,W1,#0,#8` must equal `SBFX X2,X1,#0,#8; MOV W0,W2`
+    /// (the W MOV zeroes the upper half). This only holds when the W SMT lowering
+    /// narrows the result to 32 bits before storing.
+    #[test]
+    fn test_sbfx_w_form_zeroes_upper_half_smt() {
+        let lhs = vec![Instruction::Sbfx {
+            rd: Register::X0,
+            rn: Register::X1,
+            lsb: 0,
+            width: 8,
+            reg_width: crate::ir::RegisterWidth::W32,
+        }];
+        let rhs = vec![
+            Instruction::Sbfx {
+                rd: Register::X2,
+                rn: Register::X1,
+                lsb: 0,
+                width: 8,
+                reg_width: crate::ir::RegisterWidth::X64,
+            },
+            Instruction::MovRegW {
+                rd: Register::X0,
+                rn: Register::X2,
+            },
+        ];
+        let config = EquivalenceConfig::with_live_out(LiveOut::from_registers(vec![Register::X0]));
+        assert_eq!(
+            check_equivalence_with_config(&lhs, &rhs, &config),
+            EquivalenceResult::Equivalent
+        );
+    }
+
+    /// Acceptance (#145): a W-form UBFX equals an LSR/AND mask sequence whose
+    /// final AND is a W op (so the result is a 32-bit value zero-extended to 64).
+    #[test]
+    fn test_ubfx_w_form_equivalent_to_lsr_w_and_mask() {
+        let lsb = 4i64;
+        let width = 8u8;
+        let mask = (1i64 << width) - 1;
+
+        let ubfx_w = vec![Instruction::Ubfx {
+            rd: Register::X0,
+            rn: Register::X1,
+            lsb: lsb as u8,
+            width,
+            reg_width: crate::ir::RegisterWidth::W32,
+        }];
+
+        let lsr_and = vec![
+            Instruction::Lsr {
+                rd: Register::X2,
+                rn: Register::X1,
+                shift: Operand::Immediate(lsb),
+            },
+            Instruction::And {
+                rd: Register::X0,
+                rn: Register::X2,
+                rm: Operand::Immediate(mask),
+                width: crate::ir::RegisterWidth::W32,
+            },
+        ];
+
+        let config = EquivalenceConfig::with_live_out(LiveOut::from_registers(vec![Register::X0]));
+        assert_eq!(
+            check_equivalence_with_config(&ubfx_w, &lsr_and, &config),
+            EquivalenceResult::Equivalent
+        );
+    }
+
+    /// Acceptance (#145): a sequence mixing X-form and W-form bit-field ops is
+    /// handled by the equivalence checker. The mixed sequence (X-form UBFX then
+    /// W-form SBFX) equals the all-X expansion where the W result is reproduced
+    /// by an X-form SBFX followed by a W MOV that zeroes bits [63:32].
+    #[test]
+    fn cross_width_mixed_bitfield_sequence_survives_equivalence() {
+        use crate::ir::RegisterWidth::{W32, X64};
+        let mixed = vec![
+            Instruction::Ubfx {
+                rd: Register::X2,
+                rn: Register::X1,
+                lsb: 8,
+                width: 16,
+                reg_width: X64,
+            },
+            Instruction::Sbfx {
+                rd: Register::X0,
+                rn: Register::X2,
+                lsb: 0,
+                width: 8,
+                reg_width: W32,
+            },
+        ];
+        let expanded = vec![
+            Instruction::Ubfx {
+                rd: Register::X2,
+                rn: Register::X1,
+                lsb: 8,
+                width: 16,
+                reg_width: X64,
+            },
+            Instruction::Sbfx {
+                rd: Register::X0,
+                rn: Register::X2,
+                lsb: 0,
+                width: 8,
+                reg_width: X64,
+            },
+            Instruction::MovRegW {
+                rd: Register::X0,
+                rn: Register::X0,
+            },
+        ];
+        let config = EquivalenceConfig::with_live_out(LiveOut::from_registers(vec![Register::X0]));
+        assert_eq!(
+            check_equivalence_with_config(&mixed, &expanded, &config),
+            EquivalenceResult::Equivalent
+        );
+    }
+
     /// SMT proves `BFXIL rd,rn,#lsb,#width` ≡ {
     ///   LSR tmp,rn,#lsb; AND tmp,tmp,#low_mask;
     ///   AND clear,rd,#!low_mask; ORR rd,clear,tmp
@@ -2969,6 +3118,7 @@ mod tests {
                 rn: Register::X1,
                 lsb: lsb as u8,
                 width,
+                reg_width: crate::ir::RegisterWidth::X64,
             }];
 
             let expanded = vec![
@@ -3024,6 +3174,7 @@ mod tests {
                 rn: Register::X1,
                 lsb: lsb as u8,
                 width,
+                reg_width: crate::ir::RegisterWidth::X64,
             }];
 
             let and_lsl = vec![
@@ -3067,6 +3218,7 @@ mod tests {
                 rn: Register::X1,
                 lsb: lsb as u8,
                 width,
+                reg_width: crate::ir::RegisterWidth::X64,
             }];
 
             let lsl_asr_lsl = vec![
@@ -3131,6 +3283,93 @@ mod tests {
             Instruction::Csel {
                 rd: Register::X0,
                 rn: Register::XZR,
+                rm: Register::X0,
+                cond: Condition::CS,
+            },
+        ];
+        let config = EquivalenceConfig::with_live_out(LiveOut::from_registers(vec![Register::X0]));
+        let result = check_equivalence_with_config(&target, &candidate, &config);
+        assert!(
+            matches!(
+                result,
+                EquivalenceResult::NotEquivalent | EquivalenceResult::NotEquivalentFast(_)
+            ),
+            "expected NotEquivalent or NotEquivalentFast for shift-mask divergence, got {:?}",
+            result
+        );
+    }
+
+    /// Issue #241 regression: variable LSR also masks the shift register before
+    /// applying Z3's `bvlshr`. Without the mask, this target would match a
+    /// candidate that forces x0 to zero whenever x2 >= 64.
+    #[test]
+    fn test_lsr_reg_shift_amount_masked_for_equivalence() {
+        use crate::ir::types::Condition;
+
+        let target = vec![Instruction::Lsr {
+            rd: Register::X0,
+            rn: Register::X1,
+            shift: Operand::Register(Register::X2),
+        }];
+        let candidate = vec![
+            Instruction::Lsr {
+                rd: Register::X0,
+                rn: Register::X1,
+                shift: Operand::Register(Register::X2),
+            },
+            Instruction::Cmp {
+                rn: Register::X2,
+                rm: Operand::Immediate(64),
+            },
+            Instruction::Csel {
+                rd: Register::X0,
+                rn: Register::XZR,
+                rm: Register::X0,
+                cond: Condition::CS,
+            },
+        ];
+        let config = EquivalenceConfig::with_live_out(LiveOut::from_registers(vec![Register::X0]));
+        let result = check_equivalence_with_config(&target, &candidate, &config);
+        assert!(
+            matches!(
+                result,
+                EquivalenceResult::NotEquivalent | EquivalenceResult::NotEquivalentFast(_)
+            ),
+            "expected NotEquivalent or NotEquivalentFast for shift-mask divergence, got {:?}",
+            result
+        );
+    }
+
+    /// Issue #241 regression: variable ASR masks the shift register before
+    /// applying Z3's `bvashr`. The candidate models the unmasked overshift case
+    /// by selecting the sign-fill value (`asr x1, #63`) when x2 >= 64.
+    #[test]
+    fn test_asr_reg_shift_amount_masked_for_equivalence() {
+        use crate::ir::types::Condition;
+
+        let target = vec![Instruction::Asr {
+            rd: Register::X0,
+            rn: Register::X1,
+            shift: Operand::Register(Register::X2),
+        }];
+        let candidate = vec![
+            Instruction::Asr {
+                rd: Register::X0,
+                rn: Register::X1,
+                shift: Operand::Register(Register::X2),
+            },
+            Instruction::Cmp {
+                rn: Register::X2,
+                rm: Operand::Immediate(64),
+            },
+            Instruction::Asr {
+                rd: Register::X3,
+                rn: Register::X1,
+                shift: Operand::Immediate(63),
+            },
+            Instruction::Csel {
+                rd: Register::X0,
+                rn: Register::X3,
                 rm: Register::X0,
                 cond: Condition::CS,
             },
