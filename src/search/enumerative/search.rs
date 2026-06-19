@@ -1237,116 +1237,116 @@ mod tests {
             .with_timeout_option(None)
     }
 
-    #[derive(Clone)]
-    struct InnerTimeoutIsa;
-
-    #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-    struct InnerTimeoutInstruction(u8);
-
-    impl std::fmt::Display for InnerTimeoutInstruction {
-        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-            write!(f, "probe{}", self.0)
-        }
-    }
-
-    impl InstructionType for InnerTimeoutInstruction {
-        type Register = Register;
-        type Operand = Operand;
-
-        fn destination(&self) -> Option<Self::Register> {
-            Some(Register::X0)
-        }
-
-        fn source_registers(&self) -> Vec<Self::Register> {
-            Vec::new()
-        }
-
-        fn opcode_id(&self) -> u8 {
-            self.0
-        }
-
-        fn mnemonic(&self) -> &'static str {
-            "probe"
-        }
-    }
-
-    struct InnerTimeoutMutator;
-
-    impl ISAMutator<InnerTimeoutInstruction> for InnerTimeoutMutator {
-        fn mutate<R: rand::RngExt>(
-            &self,
-            _rng: &mut R,
-            sequence: &[InnerTimeoutInstruction],
-        ) -> Vec<InnerTimeoutInstruction> {
-            sequence.to_vec()
-        }
-    }
-
-    impl ISA for InnerTimeoutIsa {
-        type Register = Register;
-        type Operand = Operand;
-        type Instruction = InnerTimeoutInstruction;
-        type Width = U64;
-        type Flags = ();
-        type Mutator = InnerTimeoutMutator;
-
-        fn name(&self) -> &'static str {
-            "InnerTimeout"
-        }
-
-        fn register_count(&self) -> usize {
-            1
-        }
-
-        fn instruction_size(&self) -> Option<usize> {
-            Some(1)
-        }
-
-        fn general_registers(&self) -> Vec<Self::Register> {
-            vec![Register::X0]
-        }
-
-        fn zero_register(&self) -> Option<Self::Register> {
-            Some(Register::XZR)
-        }
-    }
-
-    static INNER_TIMEOUT_COST_CALLS: AtomicUsize = AtomicUsize::new(0);
-
-    impl EnumerativeBackend<InnerTimeoutIsa> for InnerTimeoutIsa {
-        type LiveOut = ();
-
-        fn registers_from_config(_config: &SearchConfig) -> Vec<Register> {
-            vec![Register::X0]
-        }
-
-        fn immediates_from_config(_config: &SearchConfig) -> Vec<i64> {
-            vec![0]
-        }
-
-        fn enumerate_all(_regs: &[Register], _imms: &[i64]) -> Vec<InnerTimeoutInstruction> {
-            vec![InnerTimeoutInstruction(0), InnerTimeoutInstruction(1)]
-        }
-
-        fn sequence_cost(_seq: &[InnerTimeoutInstruction], _config: &SearchConfig) -> u64 {
-            INNER_TIMEOUT_COST_CALLS.fetch_add(1, Ordering::Relaxed);
-            std::thread::sleep(std::time::Duration::from_millis(50));
-            1
-        }
-
-        fn check_equivalence(
-            _target: &[InnerTimeoutInstruction],
-            _candidate: &[InnerTimeoutInstruction],
-            _live_out: &Self::LiveOut,
-            _smt_timeout: Duration,
-        ) -> (EquivalenceResult, EquivalenceMetrics) {
-            panic!("cost pruning should prevent equivalence checks")
-        }
-    }
-
     #[test]
     fn run_length_two_sets_stop_when_inner_deadline_expires() {
-        INNER_TIMEOUT_COST_CALLS.store(0, Ordering::Relaxed);
+        #[derive(Clone)]
+        struct InnerTimeoutIsa;
+
+        #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+        struct InnerTimeoutInstruction(u8);
+
+        impl fmt::Display for InnerTimeoutInstruction {
+            fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+                write!(f, "probe{}", self.0)
+            }
+        }
+
+        impl InstructionType for InnerTimeoutInstruction {
+            type Register = Register;
+            type Operand = Operand;
+
+            fn destination(&self) -> Option<Self::Register> {
+                Some(Register::X0)
+            }
+
+            fn source_registers(&self) -> Vec<Self::Register> {
+                Vec::new()
+            }
+
+            fn opcode_id(&self) -> u8 {
+                self.0
+            }
+
+            fn mnemonic(&self) -> &'static str {
+                "probe"
+            }
+        }
+
+        struct InnerTimeoutMutator;
+
+        impl ISAMutator<InnerTimeoutInstruction> for InnerTimeoutMutator {
+            fn mutate<R: rand::RngExt>(
+                &self,
+                _rng: &mut R,
+                sequence: &[InnerTimeoutInstruction],
+            ) -> Vec<InnerTimeoutInstruction> {
+                sequence.to_vec()
+            }
+        }
+
+        impl ISA for InnerTimeoutIsa {
+            type Register = Register;
+            type Operand = Operand;
+            type Instruction = InnerTimeoutInstruction;
+            type Width = U64;
+            type Flags = ();
+            type Mutator = InnerTimeoutMutator;
+
+            fn name(&self) -> &'static str {
+                "InnerTimeout"
+            }
+
+            fn register_count(&self) -> usize {
+                1
+            }
+
+            fn instruction_size(&self) -> Option<usize> {
+                Some(1)
+            }
+
+            fn general_registers(&self) -> Vec<Self::Register> {
+                vec![Register::X0]
+            }
+
+            fn zero_register(&self) -> Option<Self::Register> {
+                Some(Register::XZR)
+            }
+        }
+
+        static COST_CALLS: AtomicUsize = AtomicUsize::new(0);
+
+        impl EnumerativeBackend<InnerTimeoutIsa> for InnerTimeoutIsa {
+            type LiveOut = ();
+
+            fn registers_from_config(_config: &SearchConfig) -> Vec<Register> {
+                vec![Register::X0]
+            }
+
+            fn immediates_from_config(_config: &SearchConfig) -> Vec<i64> {
+                vec![0]
+            }
+
+            fn enumerate_all(_regs: &[Register], _imms: &[i64]) -> Vec<InnerTimeoutInstruction> {
+                vec![InnerTimeoutInstruction(0), InnerTimeoutInstruction(1)]
+            }
+
+            fn sequence_cost(_seq: &[InnerTimeoutInstruction], _config: &SearchConfig) -> u64 {
+                COST_CALLS.fetch_add(1, Ordering::Relaxed);
+                std::thread::sleep(std::time::Duration::from_millis(50));
+                1
+            }
+
+            fn check_equivalence(
+                _target: &[InnerTimeoutInstruction],
+                _candidate: &[InnerTimeoutInstruction],
+                _live_out: &Self::LiveOut,
+                _smt_timeout: Duration,
+            ) -> (EquivalenceResult, EquivalenceMetrics) {
+                panic!("cost pruning should prevent equivalence checks")
+            }
+        }
+
+        COST_CALLS.store(0, Ordering::Relaxed);
 
         let config = SearchConfig::default().with_timeout(std::time::Duration::from_millis(25));
         let target = vec![InnerTimeoutInstruction(9), InnerTimeoutInstruction(8)];
@@ -1377,7 +1377,7 @@ mod tests {
             "inner loop should set stop after the timeout expires"
         );
         assert_eq!(
-            INNER_TIMEOUT_COST_CALLS.load(Ordering::Relaxed),
+            COST_CALLS.load(Ordering::Relaxed),
             1,
             "timeout should be checked before evaluating the second inner candidate"
         );
