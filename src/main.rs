@@ -2849,6 +2849,23 @@ mod cli_helper_tests {
         }
     }
 
+    #[test]
+    fn convert_capstone_op_rejects_w_form_signed_load_destinations() {
+        for (mnem, ops) in [
+            ("ldrsb", "w0, [x1]"),
+            ("ldrsh", "w0, [x1]"),
+            ("ldrsw", "w0, [x1]"),
+        ] {
+            match convert_capstone_op(mnem, ops) {
+                ConvertOutcome::Unsupported(line) => {
+                    assert!(line.contains(mnem));
+                    assert!(line.contains("X-form"));
+                }
+                other => panic!("expected Unsupported for `{mnem} {ops}`, got {other:?}"),
+            }
+        }
+    }
+
     fn assemble_aarch64_test_bytes(instructions: &[Instruction]) -> Vec<u8> {
         AArch64Assembler::new()
             .assemble_instructions(instructions, 0x1000)

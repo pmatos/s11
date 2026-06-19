@@ -1131,6 +1131,26 @@ fn parse_single_reg_mem(
     Ok(builder(rt, addr, width))
 }
 
+fn parse_signed_load_mem(
+    mnem: &str,
+    operands: &[&str],
+    width: crate::ir::types::AccessWidth,
+) -> Result<Instruction, String> {
+    if operands.len() >= 2 {
+        let (_, dst_width) = parse_sized_register(operands[0])
+            .map_err(|e| format!("{}: invalid Xt: {}", mnem, e))?;
+        if dst_width != RegisterWidth::X64 {
+            return Err(format!("{} signed-load destination must be X-form", mnem));
+        }
+    }
+
+    parse_single_reg_mem(mnem, operands, width, |rt, addr, w| Instruction::Ldrs {
+        rt,
+        addr,
+        width: w,
+    })
+}
+
 /// Parse a pair memory instruction (LDP/STP/LDPSW). The destination
 /// pair is the first two operands; the remaining tokens form the
 /// address operand. `signed=true` only for LDPSW.
@@ -2017,27 +2037,12 @@ pub fn parse_line(line: &str) -> Result<LineResult, ParseLineError> {
             |rt, addr, w| Instruction::Ldr { rt, addr, width: w },
         )
         .map_err(ParseLineError::Other)?,
-        "ldrsb" => parse_single_reg_mem(
-            "ldrsb",
-            &operands,
-            crate::ir::types::AccessWidth::Byte,
-            |rt, addr, w| Instruction::Ldrs { rt, addr, width: w },
-        )
-        .map_err(ParseLineError::Other)?,
-        "ldrsh" => parse_single_reg_mem(
-            "ldrsh",
-            &operands,
-            crate::ir::types::AccessWidth::Half,
-            |rt, addr, w| Instruction::Ldrs { rt, addr, width: w },
-        )
-        .map_err(ParseLineError::Other)?,
-        "ldrsw" => parse_single_reg_mem(
-            "ldrsw",
-            &operands,
-            crate::ir::types::AccessWidth::Word,
-            |rt, addr, w| Instruction::Ldrs { rt, addr, width: w },
-        )
-        .map_err(ParseLineError::Other)?,
+        "ldrsb" => parse_signed_load_mem("ldrsb", &operands, crate::ir::types::AccessWidth::Byte)
+            .map_err(ParseLineError::Other)?,
+        "ldrsh" => parse_signed_load_mem("ldrsh", &operands, crate::ir::types::AccessWidth::Half)
+            .map_err(ParseLineError::Other)?,
+        "ldrsw" => parse_signed_load_mem("ldrsw", &operands, crate::ir::types::AccessWidth::Word)
+            .map_err(ParseLineError::Other)?,
         "str" => parse_single_reg_mem("str", &operands, ldr_width(&operands), |rt, addr, w| {
             Instruction::Str { rt, addr, width: w }
         })
@@ -3761,6 +3766,34 @@ mod tests {
     fn assert_mem_round_trip(text: &str) {
         let instr = parse_one(text);
         assert_eq!(format!("{}", instr), text, "round-trip mismatch");
+    }
+
+    #[test]
+    fn parse_line_rejects_w_form_signed_load_destinations() {
+        for (line, mnemonic) in [
+            ("ldrsb w0, [x1]", "ldrsb"),
+            ("ldrsh w0, [x1]", "ldrsh"),
+            ("ldrsw w0, [x1]", "ldrsw"),
+            ("ldrsb w0, [x1, #1]!", "ldrsb"),
+            ("ldrsh w0, [x1], #2", "ldrsh"),
+            ("ldrsb w0, [x1, x2]", "ldrsb"),
+            ("ldrsb w0, [x1, w2, sxtw]", "ldrsb"),
+        ] {
+            match parse_line(line) {
+                Err(ParseLineError::Other(msg)) => {
+                    assert!(msg.contains(mnemonic), "{line} error should name mnemonic");
+                    assert!(msg.contains("X-form"), "{line} error should name X-form");
+                }
+                other => panic!("expected W-form signed-load rejection for {line}, got {other:?}"),
+            }
+        }
+
+        for line in ["ldrsb x0, [x1]", "ldrsh x0, [x1]", "ldrsw x0, [x1]"] {
+            assert!(
+                matches!(parse_line(line), Ok(LineResult::Instruction(_))),
+                "X-form signed load should remain accepted: {line}"
+            );
+        }
     }
 
     #[test]

@@ -67,6 +67,11 @@ Rewritable straight-line mnemonics accepted by the parser and Capstone bridge:
   instructions accept immediate-offset, pre-index, and post-index addressing
   only; `ldp`/`stp` cover `W` and `X` pairs, and `ldpsw` loads sign-extended
   word pairs.
+  Unsized `ldr` / `str` infer `W` vs `X` width from the data register spelling.
+  Zero-extending `ldrb` / `ldrh` loads and `strb` / `strh` stores use scoped
+  `W`/`X` register slots.
+  `ldrsb` / `ldrsh` / `ldrsw` signed loads currently accept only X-form
+  destinations because the current `Ldrs` IR models X-form sign-extension.
 
 Fixed control-flow terminators:
 
