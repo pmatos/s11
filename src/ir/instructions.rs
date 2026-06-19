@@ -991,14 +991,20 @@ impl Instruction {
                 | Operand::ExtendedRegister { .. } => false,
             },
 
-            // ADDS/SUBS: imm 0..=0xFFF (same as ADD/SUB). ShiftedRegister form is
-            // out of scope for issue #59.
+            // ADDS/SUBS: register, imm 0..=0xFFF, or shifted-register
+            // (LSL/LSR/ASR only — ROR not encodable for arithmetic shifted-register form).
             Instruction::Adds { rd, rn, rm } | Instruction::Subs { rd, rn, rm } => match rm {
                 Operand::Register(reg) => is_x_or_xzr(*rd) && is_x_or_xzr(*rn) && is_x_or_xzr(*reg),
                 Operand::Immediate(imm) => {
                     *imm >= 0 && *imm <= 0xFFF && is_x_or_xzr(*rd) && is_xsp(*rn)
                 }
-                Operand::ShiftedRegister { .. } => false,
+                Operand::ShiftedRegister { reg, kind, amount } => {
+                    *kind != ShiftKind::Ror
+                        && *amount <= 63
+                        && is_x_or_xzr(*reg)
+                        && is_x_or_xzr(*rd)
+                        && is_x_or_xzr(*rn)
+                }
                 Operand::ExtendedRegister { .. } => false,
             },
             // ADC/ADCS/SBC/SBCS: register-only form, always encodable.
@@ -3123,7 +3129,7 @@ mod tests {
 
     #[test]
     fn test_is_encodable_shifted_register_arith_rejects_ror() {
-        // Add/Sub/Cmp/Cmn: LSL/LSR/ASR allowed; ROR rejected.
+        // Add/Sub/Adds/Subs/Cmp/Cmn: LSL/LSR/ASR allowed; ROR rejected.
         let mk_add = |kind| Instruction::Add {
             rd: Register::X0,
             rn: Register::X1,
@@ -3137,6 +3143,110 @@ mod tests {
         assert!(mk_add(ShiftKind::Lsr).is_encodable_aarch64());
         assert!(mk_add(ShiftKind::Asr).is_encodable_aarch64());
         assert!(!mk_add(ShiftKind::Ror).is_encodable_aarch64());
+
+        let mk_sub = |kind| Instruction::Sub {
+            rd: Register::X0,
+            rn: Register::X1,
+            rm: Operand::ShiftedRegister {
+                reg: Register::X2,
+                kind,
+                amount: 3,
+            },
+        };
+        assert!(mk_sub(ShiftKind::Lsl).is_encodable_aarch64());
+        assert!(!mk_sub(ShiftKind::Ror).is_encodable_aarch64());
+
+        let mk_adds = |kind, amount| Instruction::Adds {
+            rd: Register::X0,
+            rn: Register::X1,
+            rm: Operand::ShiftedRegister {
+                reg: Register::X2,
+                kind,
+                amount,
+            },
+        };
+        assert!(mk_adds(ShiftKind::Lsl, 3).is_encodable_aarch64());
+        assert!(mk_adds(ShiftKind::Lsr, 3).is_encodable_aarch64());
+        assert!(mk_adds(ShiftKind::Asr, 3).is_encodable_aarch64());
+        assert!(!mk_adds(ShiftKind::Ror, 3).is_encodable_aarch64());
+        assert!(!mk_adds(ShiftKind::Lsl, 64).is_encodable_aarch64());
+
+        let mk_subs = |kind, amount| Instruction::Subs {
+            rd: Register::X3,
+            rn: Register::X4,
+            rm: Operand::ShiftedRegister {
+                reg: Register::X5,
+                kind,
+                amount,
+            },
+        };
+        assert!(mk_subs(ShiftKind::Lsl, 3).is_encodable_aarch64());
+        assert!(mk_subs(ShiftKind::Lsr, 3).is_encodable_aarch64());
+        assert!(mk_subs(ShiftKind::Asr, 3).is_encodable_aarch64());
+        assert!(!mk_subs(ShiftKind::Ror, 3).is_encodable_aarch64());
+        assert!(!mk_subs(ShiftKind::Lsl, 64).is_encodable_aarch64());
+
+        for instr in [
+            Instruction::Adds {
+                rd: Register::SP,
+                rn: Register::X1,
+                rm: Operand::ShiftedRegister {
+                    reg: Register::X2,
+                    kind: ShiftKind::Lsl,
+                    amount: 1,
+                },
+            },
+            Instruction::Adds {
+                rd: Register::X0,
+                rn: Register::SP,
+                rm: Operand::ShiftedRegister {
+                    reg: Register::X2,
+                    kind: ShiftKind::Lsl,
+                    amount: 1,
+                },
+            },
+            Instruction::Adds {
+                rd: Register::X0,
+                rn: Register::X1,
+                rm: Operand::ShiftedRegister {
+                    reg: Register::SP,
+                    kind: ShiftKind::Lsl,
+                    amount: 1,
+                },
+            },
+            Instruction::Subs {
+                rd: Register::SP,
+                rn: Register::X4,
+                rm: Operand::ShiftedRegister {
+                    reg: Register::X5,
+                    kind: ShiftKind::Lsl,
+                    amount: 1,
+                },
+            },
+            Instruction::Subs {
+                rd: Register::X3,
+                rn: Register::SP,
+                rm: Operand::ShiftedRegister {
+                    reg: Register::X5,
+                    kind: ShiftKind::Lsl,
+                    amount: 1,
+                },
+            },
+            Instruction::Subs {
+                rd: Register::X3,
+                rn: Register::X4,
+                rm: Operand::ShiftedRegister {
+                    reg: Register::SP,
+                    kind: ShiftKind::Lsl,
+                    amount: 1,
+                },
+            },
+        ] {
+            assert!(
+                !instr.is_encodable_aarch64(),
+                "SP must be rejected in shifted-register flag-setting arithmetic: {instr}"
+            );
+        }
 
         let mk_cmp = |kind| Instruction::Cmp {
             rn: Register::X1,

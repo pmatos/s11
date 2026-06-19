@@ -745,12 +745,12 @@ pub fn generate_random_instruction<R: rand::RngExt>(
         },
         2 => {
             let rn = pick_reg(rng);
-            let rm = random_operand(rng, registers, immediates);
+            let rm = random_arith_rm_operand(rng, registers, immediates);
             Instruction::Add { rd, rn, rm }
         }
         3 => {
             let rn = pick_reg(rng);
-            let rm = random_operand(rng, registers, immediates);
+            let rm = random_arith_rm_operand(rng, registers, immediates);
             Instruction::Sub { rd, rn, rm }
         }
         // AND / ORR / EOR are deliberately register-only here. The assembler
@@ -847,12 +847,12 @@ pub fn generate_random_instruction<R: rand::RngExt>(
         }
         18 => {
             let rn = pick_reg(rng);
-            let rm = random_operand(rng, registers, immediates);
+            let rm = random_arith_rm_operand(rng, registers, immediates);
             Instruction::Adds { rd, rn, rm }
         }
         19 => {
             let rn = pick_reg(rng);
-            let rm = random_operand(rng, registers, immediates);
+            let rm = random_arith_rm_operand(rng, registers, immediates);
             Instruction::Subs { rd, rn, rm }
         }
         20 => {
@@ -1268,6 +1268,22 @@ fn random_operand<R: rand::RngExt>(
     }
 }
 
+fn random_arith_rm_operand<R: rand::RngExt>(
+    rng: &mut R,
+    registers: &[Register],
+    immediates: &[i64],
+) -> Operand {
+    let non_sp = non_sp_registers(registers);
+    if !non_sp.is_empty() && rng.random_range(0..3) == 2 {
+        random_compare_shifted_operand(rng, &non_sp, false)
+    } else {
+        match random_operand(rng, registers, immediates) {
+            Operand::Immediate(imm) => Operand::Immediate(imm.rem_euclid(0x1000)),
+            other => other,
+        }
+    }
+}
+
 fn random_shift_operand<R: rand::RngExt>(rng: &mut R, registers: &[Register]) -> Operand {
     if rng.random_bool(0.7) {
         // Prefer immediate shifts
@@ -1461,6 +1477,18 @@ mod tests {
         ];
         words.extend(tail);
         BudgetedRng::new(words)
+    }
+
+    fn rng_for_shifted_arith_slot(slot: u32, kind_index: u32) -> BudgetedRng {
+        BudgetedRng::new(vec![
+            word_for_range(2, 0),
+            word_for_range(48, slot),
+            word_for_range(2, 0),
+            word_for_range(3, 2),
+            word_for_range(2, 1),
+            word_for_range(3, kind_index),
+            word_for_range(SHIFTED_OP_AMOUNTS.len() as u32, 0),
+        ])
     }
 
     #[test]
@@ -1816,6 +1844,41 @@ mod tests {
             }
         );
         assert!(tst_imm.is_encodable_aarch64());
+    }
+
+    #[test]
+    fn generate_random_instruction_samples_shifted_arith_forms() {
+        let regs = [Register::X0, Register::X1];
+        let cases = [
+            (2, 0, "ADD"),
+            (3, 1, "SUB"),
+            (18, 2, "ADDS"),
+            (19, 0, "SUBS"),
+        ];
+
+        for (slot, kind_index, name) in cases {
+            let mut rng = rng_for_shifted_arith_slot(slot, kind_index);
+            let instr = generate_random_instruction(&mut rng, &regs, &[0x1234]);
+            let rm = match instr {
+                Instruction::Add { rm, .. }
+                | Instruction::Sub { rm, .. }
+                | Instruction::Adds { rm, .. }
+                | Instruction::Subs { rm, .. } => rm,
+                other => panic!("slot {slot} should generate {name}, got {other:?}"),
+            };
+
+            match rm {
+                Operand::ShiftedRegister { kind, amount, .. } => {
+                    assert_ne!(kind, ShiftKind::Ror, "{name} must not sample ROR");
+                    assert_eq!(amount, 1);
+                }
+                other => panic!("{name} should sample shifted-register rm, got {other:?}"),
+            }
+            assert!(
+                instr.is_encodable_aarch64(),
+                "{name} shifted-register candidate must be encodable: {instr}"
+            );
+        }
     }
 
     #[test]
@@ -2559,12 +2622,21 @@ mod tests {
     }
 
     fn rng_for_arith_immediate_slot(slot: u32, imm_count: u32, imm_index: u32) -> BudgetedRng {
+        // ADD/SUB/ADDS/SUBS (slots 2, 3, 18, 19) consume, in order: `rd`, the
+        // opcode slot, `rn`, then `random_arith_rm_operand`. The latter first
+        // draws a 0..3 shape selector (2 = shifted register, issue #279) and,
+        // when that is not 2, falls through to `random_operand`, whose
+        // `random_bool(0.5)` register/immediate coin pulls a u64 (two words).
+        // Drive shape != 2 and bias the coin toward the immediate branch so the
+        // imm12 clamp is exercised. The high word governs the 0.5 split, so
+        // `u32::MAX, u32::MAX` selects the immediate (non-register) arm.
         BudgetedRng::new(vec![
-            word_for_range(3, 0),
+            word_for_range(3, 0), // rd register pick
             word_for_range(48, slot),
-            word_for_range(3, 0),
-            u32::MAX,
-            u32::MAX,
+            word_for_range(3, 0), // rn register pick
+            word_for_range(3, 0), // shape selector: != 2 → not shifted
+            u32::MAX,             // random_bool low word
+            u32::MAX,             // random_bool high word → false → immediate
             word_for_range(imm_count, imm_index),
         ])
     }

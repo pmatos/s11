@@ -241,8 +241,6 @@ where
 
             let mut smt_refuted = false;
             if proposal_cost < best_cost {
-                self.statistics.smt_queries += 1;
-
                 let (verdict, metrics) = <I as StochasticBackend<I>>::check_equivalence(
                     target,
                     &proposal,
@@ -251,6 +249,9 @@ where
                     smt_timeout,
                 );
                 self.statistics.smt_elapsed += metrics.smt_elapsed;
+                if metrics.smt_called {
+                    self.statistics.smt_queries += 1;
+                }
                 match verdict {
                     EquivalenceResult::Equivalent => {
                         self.statistics.smt_equivalent += 1;
@@ -355,6 +356,8 @@ mod tests {
     use crate::semantics::cost::CostMetric;
     use crate::semantics::live_out::LiveOut;
     use crate::semantics::state::{ConcreteValue, ConditionFlags};
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering as AtomicOrdering};
+    use std::sync::{Mutex as TestMutex, MutexGuard};
     use std::time::Duration;
 
     fn mov_add_sequence() -> Vec<Instruction> {
@@ -541,8 +544,23 @@ mod tests {
     std::thread_local! {
         static RECORDED_SMT_TIMEOUT_MS: std::cell::Cell<Option<u64>> =
             const { std::cell::Cell::new(None) };
-        static PROBE_EQUIVALENCE_RESULT: std::cell::RefCell<EquivalenceResult> =
-            const { std::cell::RefCell::new(EquivalenceResult::Equivalent) };
+    }
+
+    const TIMEOUT_PROBE_NOT_EQUIVALENT: usize = 0;
+    const TIMEOUT_PROBE_EQUIVALENT: usize = 1;
+
+    static TIMEOUT_PROBE_TEST_LOCK: TestMutex<()> = TestMutex::new(());
+    static TIMEOUT_PROBE_VERDICT: AtomicUsize = AtomicUsize::new(TIMEOUT_PROBE_EQUIVALENT);
+    static TIMEOUT_PROBE_SMT_CALLED: AtomicBool = AtomicBool::new(true);
+
+    fn set_timeout_probe_result(verdict: usize, smt_called: bool) -> MutexGuard<'static, ()> {
+        let guard = TIMEOUT_PROBE_TEST_LOCK
+            .lock()
+            .expect("timeout probe test lock poisoned");
+        TIMEOUT_PROBE_VERDICT.store(verdict, AtomicOrdering::SeqCst);
+        TIMEOUT_PROBE_SMT_CALLED.store(smt_called, AtomicOrdering::SeqCst);
+        RECORDED_SMT_TIMEOUT_MS.with(|recorded| recorded.set(None));
+        guard
     }
 
     impl StochasticBackend<TimeoutProbeIsa> for TimeoutProbeIsa {
@@ -601,8 +619,17 @@ mod tests {
             timeout: Duration,
         ) -> (EquivalenceResult, crate::semantics::EquivalenceMetrics) {
             RECORDED_SMT_TIMEOUT_MS.with(|recorded| recorded.set(Some(timeout.as_millis() as u64)));
-            let verdict = PROBE_EQUIVALENCE_RESULT.with(|result| result.borrow().clone());
-            (verdict, crate::semantics::EquivalenceMetrics::default())
+            let metrics = crate::semantics::EquivalenceMetrics {
+                smt_called: TIMEOUT_PROBE_SMT_CALLED.load(AtomicOrdering::SeqCst),
+                ..crate::semantics::EquivalenceMetrics::default()
+            };
+            (
+                match TIMEOUT_PROBE_VERDICT.load(AtomicOrdering::SeqCst) {
+                    TIMEOUT_PROBE_EQUIVALENT => EquivalenceResult::Equivalent,
+                    _ => EquivalenceResult::NotEquivalent,
+                },
+                metrics,
+            )
         }
 
         fn random_sequence<R: rand::RngExt>(
@@ -620,24 +647,33 @@ mod tests {
         }
     }
 
-    fn run_timeout_probe_search(config: SearchConfig) -> Option<u64> {
-        RECORDED_SMT_TIMEOUT_MS.with(|recorded| recorded.set(None));
-        PROBE_EQUIVALENCE_RESULT
-            .with(|result| *result.borrow_mut() = EquivalenceResult::Equivalent);
-
+    fn run_timeout_probe_search_with(
+        config: SearchConfig,
+        verdict: usize,
+        smt_called: bool,
+    ) -> (SearchStatistics, Option<u64>) {
+        let _guard = set_timeout_probe_result(verdict, smt_called);
         let mut search: StochasticSearch<TimeoutProbeIsa> = StochasticSearch::new();
         let target = [TimeoutProbeInstruction(1), TimeoutProbeInstruction(2)];
         let result = search.search(&target, &(), &config);
-        assert_eq!(result.statistics.smt_queries, 1);
+        let statistics = result.statistics;
 
-        RECORDED_SMT_TIMEOUT_MS.with(|recorded| recorded.get())
+        (
+            statistics,
+            RECORDED_SMT_TIMEOUT_MS.with(|recorded| recorded.get()),
+        )
+    }
+
+    fn run_timeout_probe_search(config: SearchConfig) -> Option<u64> {
+        let (statistics, recorded_timeout) =
+            run_timeout_probe_search_with(config, TIMEOUT_PROBE_EQUIVALENT, true);
+        assert_eq!(statistics.smt_queries, 1);
+        recorded_timeout
     }
 
     #[test]
     fn stochastic_search_does_not_accept_smt_refuted_cheaper_proposal() {
-        RECORDED_SMT_TIMEOUT_MS.with(|recorded| recorded.set(None));
-        PROBE_EQUIVALENCE_RESULT
-            .with(|result| *result.borrow_mut() = EquivalenceResult::NotEquivalent);
+        let _guard = set_timeout_probe_result(TIMEOUT_PROBE_NOT_EQUIVALENT, true);
 
         let mut search: StochasticSearch<TimeoutProbeIsa> = StochasticSearch::new();
         let config = SearchConfig::default().with_stochastic(
@@ -707,6 +743,27 @@ mod tests {
         assert_eq!(result.statistics.candidates_passed_fast, 1);
         assert_eq!(result.statistics.candidates_pruned_by_cost, 1);
         assert_eq!(result.statistics.smt_queries, 0);
+    }
+
+    #[test]
+    fn stochastic_search_does_not_count_pre_smt_refutation_as_smt_query() {
+        let (statistics, recorded_timeout) = run_timeout_probe_search_with(
+            SearchConfig::default()
+                .with_stochastic(
+                    StochasticConfig::default()
+                        .with_iterations(1)
+                        .with_test_count(0)
+                        .with_seed(1),
+                )
+                .with_solver_timeout(Duration::from_millis(17)),
+            TIMEOUT_PROBE_NOT_EQUIVALENT,
+            false,
+        );
+
+        assert_eq!(recorded_timeout, Some(17));
+        assert_eq!(statistics.candidates_passed_fast, 1);
+        assert_eq!(statistics.smt_queries, 0);
+        assert_eq!(statistics.smt_equivalent, 0);
     }
 
     #[test]

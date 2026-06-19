@@ -1749,10 +1749,18 @@ impl AArch64Assembler {
                         dynasm!(ops ; .arch aarch64 ; adds X(rd_reg), XSP(rn_reg), imm);
                         Ok(())
                     }
-                    Operand::ShiftedRegister { .. } => {
-                        Err("ADDS shifted-register form not yet supported (issue #59 covers ADD without flags)".to_string())
+                    Operand::ShiftedRegister { reg, kind, amount } => {
+                        // Shifted-register form: all three slots are plain Xn,
+                        // so register 31 is XZR and SP is rejected.
+                        let rn_reg = register_to_dynasm(*rn)?;
+                        let rm_reg = register_to_dynasm(*reg)?;
+                        emit_shifted_reg_3op_arith!(
+                            ops, adds, rd_reg, rn_reg, rm_reg, kind, *amount
+                        )
                     }
-                    Operand::ExtendedRegister { .. } => Err("ExtendedRegister encoding not yet implemented".to_string()),
+                    Operand::ExtendedRegister { .. } => {
+                        Err("ExtendedRegister encoding not yet implemented".to_string())
+                    }
                 }
             }
             Instruction::Subs { rd, rn, rm } => {
@@ -1777,8 +1785,14 @@ impl AArch64Assembler {
                         dynasm!(ops ; .arch aarch64 ; subs X(rd_reg), XSP(rn_reg), imm);
                         Ok(())
                     }
-                    Operand::ShiftedRegister { .. } => {
-                        Err("SUBS shifted-register form not yet supported".to_string())
+                    Operand::ShiftedRegister { reg, kind, amount } => {
+                        // Shifted-register form: all three slots are plain Xn,
+                        // so register 31 is XZR and SP is rejected.
+                        let rn_reg = register_to_dynasm(*rn)?;
+                        let rm_reg = register_to_dynasm(*reg)?;
+                        emit_shifted_reg_3op_arith!(
+                            ops, subs, rd_reg, rn_reg, rm_reg, kind, *amount
+                        )
                     }
                     Operand::ExtendedRegister { .. } => {
                         Err("ExtendedRegister encoding not yet implemented".to_string())
@@ -4828,6 +4842,32 @@ mod tests {
                 vec!["x3".into(), "x4".into(), "x5".into(), "lsr #5".into()],
             ),
             (
+                Instruction::Adds {
+                    rd: Register::X21,
+                    rn: Register::X22,
+                    rm: Operand::ShiftedRegister {
+                        reg: Register::X23,
+                        kind: ShiftKind::Lsl,
+                        amount: 6,
+                    },
+                },
+                "adds",
+                vec!["x21".into(), "x22".into(), "x23".into(), "lsl #6".into()],
+            ),
+            (
+                Instruction::Subs {
+                    rd: Register::X24,
+                    rn: Register::X25,
+                    rm: Operand::ShiftedRegister {
+                        reg: Register::X26,
+                        kind: ShiftKind::Asr,
+                        amount: 9,
+                    },
+                },
+                "subs",
+                vec!["x24".into(), "x25".into(), "x26".into(), "asr #9".into()],
+            ),
+            (
                 Instruction::And {
                     rd: Register::X6,
                     rn: Register::X7,
@@ -4922,17 +4962,55 @@ mod tests {
     /// even if a caller bypasses `is_encodable_aarch64`.
     #[test]
     fn test_assemble_shifted_arith_rejects_ror() {
-        let mut assembler = AArch64Assembler::new();
-        let instr = Instruction::Add {
-            rd: Register::X0,
-            rn: Register::X1,
-            rm: Operand::ShiftedRegister {
-                reg: Register::X2,
-                kind: ShiftKind::Ror,
-                amount: 1,
+        let cases = [
+            Instruction::Add {
+                rd: Register::X0,
+                rn: Register::X1,
+                rm: Operand::ShiftedRegister {
+                    reg: Register::X2,
+                    kind: ShiftKind::Ror,
+                    amount: 1,
+                },
             },
-        };
-        assert!(assembler.assemble_instructions(&[instr], 0).is_err());
+            Instruction::Sub {
+                rd: Register::X0,
+                rn: Register::X1,
+                rm: Operand::ShiftedRegister {
+                    reg: Register::X2,
+                    kind: ShiftKind::Ror,
+                    amount: 1,
+                },
+            },
+            Instruction::Adds {
+                rd: Register::X0,
+                rn: Register::X1,
+                rm: Operand::ShiftedRegister {
+                    reg: Register::X2,
+                    kind: ShiftKind::Ror,
+                    amount: 1,
+                },
+            },
+            Instruction::Subs {
+                rd: Register::X0,
+                rn: Register::X1,
+                rm: Operand::ShiftedRegister {
+                    reg: Register::X2,
+                    kind: ShiftKind::Ror,
+                    amount: 1,
+                },
+            },
+        ];
+
+        for instr in cases {
+            let mut assembler = AArch64Assembler::new();
+            let err = assembler
+                .assemble_instructions(&[instr], 0)
+                .expect_err("ROR shifted arithmetic should fail");
+            assert!(
+                err.contains("ROR"),
+                "expected ROR-specific rejection, got: {err}"
+            );
+        }
     }
 
     // ===== Issue #69: branch / control-flow encoding =====
