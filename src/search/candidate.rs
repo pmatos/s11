@@ -1,6 +1,6 @@
 //! Instruction generation utilities for search algorithms
 
-use crate::ir::instructions::MOVW_LEGAL_SHIFTS;
+use crate::ir::instructions::{AARCH64_RANDOM_SHIFT_IMMEDIATES, MOVW_LEGAL_SHIFTS};
 use crate::ir::{Instruction, Operand, Register, RegisterWidth, ShiftKind};
 use crate::isa::{AArch64, Assembler, InstructionType};
 
@@ -137,11 +137,11 @@ pub fn generate_all_instructions(registers: &[Register], immediates: &[i64]) -> 
             //   Add/Sub: LSL/LSR/ASR (no ROR)
             //   And/Orr/Eor: LSL/LSR/ASR/ROR
             // AArch64 shifted-register encodings cannot use SP in rd/rn/rm, so
-            // pre-filter those tuples instead of allocating candidates that the
-            // later encodability pass will discard.
+            // hoist the rd/rn filter while keeping rm filtered per tuple.
             use crate::ir::ShiftKind;
+            let shifted_register_allows_rd_rn = rd != Register::SP && rn != Register::SP;
             for &rm in registers {
-                if rd != Register::SP && rn != Register::SP && rm != Register::SP {
+                if shifted_register_allows_rd_rn && rm != Register::SP {
                     for &amount in SHIFTED_OP_AMOUNTS {
                         for kind in [ShiftKind::Lsl, ShiftKind::Lsr, ShiftKind::Asr] {
                             let sr = Operand::ShiftedRegister {
@@ -544,7 +544,7 @@ pub fn generate_all_instructions(registers: &[Register], immediates: &[i64]) -> 
     // the soundness argument; the SMT layer reasons over all widths
     // regardless of which forms search enumerates.
     {
-        use crate::ir::types::{AccessWidth, AddressOperand, IndexMode};
+        use crate::ir::types::{AccessWidth, AddressOperand, IndexMode, PairAccessWidth};
         const MEM_IMM_SAMPLES: [i64; 5] = [0, 8, 16, 32, -8];
         for &rt in registers {
             if rt == Register::SP || rt == Register::XZR {
@@ -619,14 +619,14 @@ pub fn generate_all_instructions(registers: &[Register], immediates: &[i64]) -> 
                             rt1,
                             rt2,
                             addr,
-                            width: AccessWidth::Extended,
+                            width: PairAccessWidth::Extended,
                             signed: false,
                         });
                         instrs.push(Instruction::Stp {
                             rt1,
                             rt2,
                             addr,
-                            width: AccessWidth::Extended,
+                            width: PairAccessWidth::Extended,
                         });
                     }
                 }
@@ -635,9 +635,11 @@ pub fn generate_all_instructions(registers: &[Register], immediates: &[i64]) -> 
     }
 
     // Bit-field manipulation (UBFX/SBFX/BFI/BFXIL/UBFIZ/SBFIZ): sparse
-    // (lsb, width) samples to keep the enumerative budget bounded. With
-    // 31 non-SP registers × 31 rn × ~24 valid (lsb,width) pairs × 6 variants
-    // ≈ 138k additional candidates, comparable to the CCMP/CCMN budget.
+    // (lsb, width) samples to keep the enumerative budget bounded, emitted for
+    // both the X (64-bit) and W (32-bit) register forms. The shared sample
+    // tables are filtered per width against the encodability bound
+    // (lsb < bound, lsb+width <= bound), so the W form naturally drops lsb=32/63
+    // and width=64. This roughly doubles the bit-field slice of the pool.
     const BITFIELD_LSB_SAMPLES: [u8; 5] = [0, 1, 16, 32, 63];
     const BITFIELD_WIDTH_SAMPLES: [u8; 6] = [1, 4, 8, 16, 32, 64];
     for &rd in registers {
@@ -648,17 +650,59 @@ pub fn generate_all_instructions(registers: &[Register], immediates: &[i64]) -> 
             if rn == Register::SP {
                 continue;
             }
-            for &lsb in &BITFIELD_LSB_SAMPLES {
-                for &width in &BITFIELD_WIDTH_SAMPLES {
-                    if (lsb as u16 + width as u16) > 64 {
+            for reg_width in [RegisterWidth::X64, RegisterWidth::W32] {
+                let bound = reg_width.bit_width() as u16;
+                for &lsb in &BITFIELD_LSB_SAMPLES {
+                    if lsb as u16 >= bound {
                         continue;
                     }
-                    instrs.push(Instruction::Ubfx { rd, rn, lsb, width });
-                    instrs.push(Instruction::Sbfx { rd, rn, lsb, width });
-                    instrs.push(Instruction::Bfi { rd, rn, lsb, width });
-                    instrs.push(Instruction::Bfxil { rd, rn, lsb, width });
-                    instrs.push(Instruction::Ubfiz { rd, rn, lsb, width });
-                    instrs.push(Instruction::Sbfiz { rd, rn, lsb, width });
+                    for &width in &BITFIELD_WIDTH_SAMPLES {
+                        if width as u16 > bound || (lsb as u16 + width as u16) > bound {
+                            continue;
+                        }
+                        instrs.push(Instruction::Ubfx {
+                            rd,
+                            rn,
+                            lsb,
+                            width,
+                            reg_width,
+                        });
+                        instrs.push(Instruction::Sbfx {
+                            rd,
+                            rn,
+                            lsb,
+                            width,
+                            reg_width,
+                        });
+                        instrs.push(Instruction::Bfi {
+                            rd,
+                            rn,
+                            lsb,
+                            width,
+                            reg_width,
+                        });
+                        instrs.push(Instruction::Bfxil {
+                            rd,
+                            rn,
+                            lsb,
+                            width,
+                            reg_width,
+                        });
+                        instrs.push(Instruction::Ubfiz {
+                            rd,
+                            rn,
+                            lsb,
+                            width,
+                            reg_width,
+                        });
+                        instrs.push(Instruction::Sbfiz {
+                            rd,
+                            rn,
+                            lsb,
+                            width,
+                            reg_width,
+                        });
+                    }
                 }
             }
         }
@@ -923,8 +967,9 @@ pub fn generate_random_instruction<R: rand::RngExt>(
         }
         // Bit-field manipulation (UBFX/SBFX/BFI/BFXIL/UBFIZ/SBFIZ).
         // SP rejected in rd and rn (matches `generate_all_instructions` and
-        // `is_encodable_aarch64`); 2D constraint on (lsb, width) enforced by
-        // sampling width AFTER lsb so width is bounded by `64-lsb`.
+        // `is_encodable_aarch64`). The register width is picked first; the 2D
+        // constraint on (lsb, width) is enforced relative to that width's bound
+        // (32 for W, 64 for X) by sampling width AFTER lsb.
         33 => {
             let non_sp: Vec<Register> = registers
                 .iter()
@@ -941,8 +986,14 @@ pub fn generate_random_instruction<R: rand::RngExt>(
             let pick_non_sp = |rng: &mut R| non_sp[rng.random_range(0..non_sp.len())];
             let rd_local = pick_non_sp(rng);
             let rn = pick_non_sp(rng);
-            let lsb = (rng.random::<u32>() & 0x3F) as u8;
-            let max_w = 64 - lsb as u32;
+            let reg_width = if rng.random_bool(0.5) {
+                RegisterWidth::W32
+            } else {
+                RegisterWidth::X64
+            };
+            let bound = reg_width.bit_width() as u32;
+            let lsb = (rng.random::<u32>() % bound) as u8;
+            let max_w = bound - lsb as u32;
             let width = ((rng.random::<u32>() % max_w) + 1) as u8;
             match rng.random_range(0..6) {
                 0 => Instruction::Ubfx {
@@ -950,36 +1001,42 @@ pub fn generate_random_instruction<R: rand::RngExt>(
                     rn,
                     lsb,
                     width,
+                    reg_width,
                 },
                 1 => Instruction::Sbfx {
                     rd: rd_local,
                     rn,
                     lsb,
                     width,
+                    reg_width,
                 },
                 2 => Instruction::Bfi {
                     rd: rd_local,
                     rn,
                     lsb,
                     width,
+                    reg_width,
                 },
                 3 => Instruction::Bfxil {
                     rd: rd_local,
                     rn,
                     lsb,
                     width,
+                    reg_width,
                 },
                 4 => Instruction::Ubfiz {
                     rd: rd_local,
                     rn,
                     lsb,
                     width,
+                    reg_width,
                 },
                 _ => Instruction::Sbfiz {
                     rd: rd_local,
                     rn,
                     lsb,
                     width,
+                    reg_width,
                 },
             }
         }
@@ -1185,7 +1242,7 @@ fn random_operand<R: rand::RngExt>(
     if rng.random_bool(0.5) && !registers.is_empty() {
         Operand::Register(registers[rng.random_range(0..registers.len())])
     } else if !immediates.is_empty() {
-        Operand::Immediate(immediates[rng.random_range(0..immediates.len())])
+        Operand::Immediate(immediates[rng.random_range(0..immediates.len())].rem_euclid(0x1000))
     } else if !registers.is_empty() {
         Operand::Register(registers[rng.random_range(0..registers.len())])
     } else {
@@ -1212,7 +1269,7 @@ fn random_arith_rm_operand<R: rand::RngExt>(
 fn random_shift_operand<R: rand::RngExt>(rng: &mut R, registers: &[Register]) -> Operand {
     if rng.random_bool(0.7) {
         // Prefer immediate shifts
-        let shifts = [0, 1, 2, 4, 8, 16, 32];
+        let shifts = AARCH64_RANDOM_SHIFT_IMMEDIATES;
         Operand::Immediate(shifts[rng.random_range(0..shifts.len())])
     } else if !registers.is_empty() {
         Operand::Register(registers[rng.random_range(0..registers.len())])
@@ -1413,6 +1470,25 @@ mod tests {
             word_for_range(3, kind_index),
             word_for_range(SHIFTED_OP_AMOUNTS.len() as u32, 0),
         ])
+    }
+
+    #[test]
+    fn random_operand_clamps_immediates_to_imm12_range() {
+        let immediates = [0, 1, 0xFFF, 0x1000, 8192, 0x1_0000, 1_000_000, -1];
+
+        for (index, &raw_imm) in immediates.iter().enumerate() {
+            let mut rng = BudgetedRng::new(vec![
+                0,
+                0,
+                word_for_range(immediates.len() as u32, index as u32),
+            ]);
+            let operand = random_operand(&mut rng, &[], &immediates);
+            assert_eq!(
+                operand,
+                Operand::Immediate(raw_imm.rem_euclid(0x1000)),
+                "immediate table value {raw_imm} must be clamped to imm12"
+            );
+        }
     }
 
     #[test]
@@ -2298,9 +2374,11 @@ mod tests {
             }
         }
 
-        assert!(
-            shifted_count > 0,
-            "enumeration must retain valid shifted-register candidates"
+        // 2 non-SP choices for each of rd/rn/rm, with 162 shifted-register
+        // binary candidates per tuple from the current AArch64 candidate matrix.
+        assert_eq!(
+            shifted_count, 1296,
+            "enumeration must retain the expected shifted-register candidate count"
         );
     }
 
@@ -2316,6 +2394,50 @@ mod tests {
                 assert!(regs.contains(&dest));
             }
         }
+    }
+
+    #[test]
+    fn generate_random_instruction_never_samples_zero_shift_immediates() {
+        use rand::SeedableRng;
+        use rand_chacha::ChaCha8Rng;
+
+        let regs = default_registers();
+        let imms = default_immediates();
+        let mut rng = ChaCha8Rng::seed_from_u64(0x263);
+        let mut seen = std::collections::BTreeSet::new();
+
+        for _ in 0..50_000 {
+            let instr = generate_random_instruction(&mut rng, &regs, &imms);
+            let sampled = match instr {
+                Instruction::Lsl {
+                    shift: Operand::Immediate(amount),
+                    ..
+                } => Some(("lsl", amount)),
+                Instruction::Lsr {
+                    shift: Operand::Immediate(amount),
+                    ..
+                } => Some(("lsr", amount)),
+                Instruction::Asr {
+                    shift: Operand::Immediate(amount),
+                    ..
+                } => Some(("asr", amount)),
+                Instruction::Ror {
+                    shift: Operand::Immediate(amount),
+                    ..
+                } => Some(("ror", amount)),
+                _ => None,
+            };
+
+            if let Some((mnemonic, amount)) = sampled {
+                assert_ne!(amount, 0, "random {mnemonic} sampled immediate shift #0");
+                seen.insert(mnemonic);
+            }
+        }
+
+        assert_eq!(
+            seen,
+            std::collections::BTreeSet::from(["asr", "lsl", "lsr", "ror"])
+        );
     }
 
     #[test]
@@ -2377,6 +2499,128 @@ mod tests {
                 assert_eq!(rn, Register::X0);
             }
             other => panic!("expected bit-field instruction, got {other:?}"),
+        }
+    }
+
+    fn rng_for_arith_immediate_slot(slot: u32, imm_count: u32, imm_index: u32) -> BudgetedRng {
+        BudgetedRng::new(vec![
+            word_for_range(3, 0),
+            word_for_range(38, slot),
+            word_for_range(3, 0),
+            u32::MAX,
+            u32::MAX,
+            word_for_range(imm_count, imm_index),
+        ])
+    }
+
+    fn rng_for_compare_immediate_slot(choice: u32, imm_count: u32, imm_index: u32) -> BudgetedRng {
+        // `random_compare_or_test_instruction` consumes, in order: `family`
+        // (0=CMP, 1=CMN, 2=TST), then `shape` (0=register, 1=immediate,
+        // 2=shifted), then for the immediate shape an `rn` register pick and the
+        // immediate index. Drive `family = choice` (CMP/CMN) with the immediate
+        // shape so both choices exercise the imm12-clamped compare path.
+        BudgetedRng::new(vec![
+            word_for_range(3, 0),      // rd register pick (unused by CMP/CMN)
+            word_for_range(38, 36),    // slot 36: compare / test
+            word_for_range(3, choice), // family: 0=CMP, 1=CMN
+            word_for_range(3, 1),      // shape: 1=immediate
+            word_for_range(3, 0),      // rn register pick
+            word_for_range(imm_count, imm_index),
+        ])
+    }
+
+    fn assert_imm12_arith_or_compare(instr: &Instruction, raw_imm: i64) {
+        let imm = match instr {
+            Instruction::Add {
+                rm: Operand::Immediate(imm),
+                ..
+            }
+            | Instruction::Sub {
+                rm: Operand::Immediate(imm),
+                ..
+            }
+            | Instruction::Adds {
+                rm: Operand::Immediate(imm),
+                ..
+            }
+            | Instruction::Subs {
+                rm: Operand::Immediate(imm),
+                ..
+            }
+            | Instruction::Cmp {
+                rm: Operand::Immediate(imm),
+                ..
+            }
+            | Instruction::Cmn {
+                rm: Operand::Immediate(imm),
+                ..
+            } => *imm,
+            other => panic!("expected immediate arithmetic/compare instruction, got {other:?}"),
+        };
+
+        assert_eq!(imm, raw_imm.rem_euclid(0x1000));
+        assert!(
+            instr.is_encodable_aarch64(),
+            "random arithmetic/compare instruction must be encodable: {instr}"
+        );
+    }
+
+    #[test]
+    fn generate_random_instruction_clamps_arith_compare_immediates_to_imm12() {
+        let regs = [Register::X0, Register::X1, Register::X2];
+        let imms = [0, 1, 0xFFF, 0x1000, 8192, 0x1_0000, 1_000_000, -1];
+        let imm_count = imms.len() as u32;
+
+        for slot in [2, 3, 18, 19] {
+            for (imm_index, &raw_imm) in imms.iter().enumerate() {
+                let mut rng = rng_for_arith_immediate_slot(slot, imm_count, imm_index as u32);
+                let instr = generate_random_instruction(&mut rng, &regs, &imms);
+                assert_imm12_arith_or_compare(&instr, raw_imm);
+            }
+        }
+
+        for choice in [0, 1] {
+            for (imm_index, &raw_imm) in imms.iter().enumerate() {
+                let mut rng = rng_for_compare_immediate_slot(choice, imm_count, imm_index as u32);
+                let instr = generate_random_instruction(&mut rng, &regs, &imms);
+                assert_imm12_arith_or_compare(&instr, raw_imm);
+            }
+        }
+    }
+
+    #[test]
+    fn generate_random_instruction_keeps_ccmp_immediates_in_imm5_range() {
+        let regs = [Register::X0, Register::X1, Register::X2];
+        let imms = [0, 31, 32, 0xFFF, 0x1000, 1_000_000, -1];
+        let imm_count = imms.len() as u32;
+
+        for (imm_index, &raw_imm) in imms.iter().enumerate() {
+            let mut rng = BudgetedRng::new(vec![
+                word_for_range(3, 0),
+                word_for_range(38, 32),
+                word_for_range(3, 0),
+                u32::MAX,
+                u32::MAX,
+                word_for_range(imm_count, imm_index as u32),
+            ]);
+            let instr = generate_random_instruction(&mut rng, &regs, &imms);
+            let imm = match instr {
+                Instruction::Ccmp {
+                    rm: Operand::Immediate(imm),
+                    ..
+                }
+                | Instruction::Ccmn {
+                    rm: Operand::Immediate(imm),
+                    ..
+                } => imm,
+                other => panic!("expected immediate-form CCMP/CCMN, got {other:?}"),
+            };
+
+            assert_eq!(imm, raw_imm.rem_euclid(32));
+            assert!(
+                instr.is_encodable_aarch64(),
+                "random CCMP/CCMN instruction must be encodable: {instr}"
+            );
         }
     }
 
@@ -2529,42 +2773,90 @@ mod tests {
                 rn: Register::X1,
                 lsb: 0,
                 width: 1,
+                reg_width: crate::ir::RegisterWidth::X64,
             },
             Instruction::Sbfx {
                 rd: Register::X0,
                 rn: Register::X1,
                 lsb: 0,
                 width: 1,
+                reg_width: crate::ir::RegisterWidth::X64,
             },
             Instruction::Bfi {
                 rd: Register::X0,
                 rn: Register::X1,
                 lsb: 0,
                 width: 1,
+                reg_width: crate::ir::RegisterWidth::X64,
             },
             Instruction::Bfxil {
                 rd: Register::X0,
                 rn: Register::X1,
                 lsb: 0,
                 width: 1,
+                reg_width: crate::ir::RegisterWidth::X64,
             },
             Instruction::Ubfiz {
                 rd: Register::X0,
                 rn: Register::X1,
                 lsb: 0,
                 width: 1,
+                reg_width: crate::ir::RegisterWidth::X64,
             },
             Instruction::Sbfiz {
                 rd: Register::X0,
                 rn: Register::X1,
                 lsb: 0,
                 width: 1,
+                reg_width: crate::ir::RegisterWidth::X64,
             },
         ];
 
         let ids: Vec<_> = instrs.iter().map(InstructionType::opcode_id).collect();
         let unique: std::collections::HashSet<_> = ids.iter().collect();
         assert_eq!(ids.len(), unique.len());
+    }
+
+    #[test]
+    fn test_generate_all_instructions_includes_w_bitfield() {
+        let registers = vec![Register::X0, Register::X1];
+        let all = generate_all_instructions(&registers, &[0]);
+        let is_w = |i: &Instruction| {
+            matches!(
+                i,
+                Instruction::Ubfx {
+                    reg_width: RegisterWidth::W32,
+                    ..
+                } | Instruction::Sbfx {
+                    reg_width: RegisterWidth::W32,
+                    ..
+                } | Instruction::Bfi {
+                    reg_width: RegisterWidth::W32,
+                    ..
+                } | Instruction::Bfxil {
+                    reg_width: RegisterWidth::W32,
+                    ..
+                } | Instruction::Ubfiz {
+                    reg_width: RegisterWidth::W32,
+                    ..
+                } | Instruction::Sbfiz {
+                    reg_width: RegisterWidth::W32,
+                    ..
+                }
+            )
+        };
+        assert!(
+            all.iter().any(is_w),
+            "enumerative output must contain W-form bit-field instructions"
+        );
+        // Every W-form bit-field instruction must satisfy is_encodable_aarch64
+        // (lsb<=31, lsb+width<=32).
+        for instr in all.iter().filter(|i| is_w(i)) {
+            assert!(
+                instr.is_encodable_aarch64(),
+                "enumerative produced un-encodable W bit-field: {instr}"
+            );
+        }
     }
 
     #[test]
@@ -2704,6 +2996,37 @@ mod tests {
             )
         });
         assert!(has_uxtb, "enumeration missing ADD with UXTB extended-reg");
+    }
+
+    #[test]
+    fn enumerate_extended_register_add_sub_allows_sp_rd_rn() {
+        let regs = vec![Register::SP, Register::X0];
+        let imms = vec![];
+        let candidates = generate_all_instructions(&regs, &imms);
+        let extended_x0_uxtb = Operand::ExtendedRegister {
+            reg: Register::X0,
+            kind: crate::ir::ExtendKind::Uxtb,
+            shift: 0,
+        };
+
+        for expected in [
+            Instruction::Add {
+                rd: Register::SP,
+                rn: Register::SP,
+                rm: extended_x0_uxtb,
+            },
+            Instruction::Sub {
+                rd: Register::SP,
+                rn: Register::SP,
+                rm: extended_x0_uxtb,
+            },
+        ] {
+            assert!(
+                candidates.contains(&expected),
+                "enumeration missing SP-bearing extended-register candidate: {}",
+                expected
+            );
+        }
     }
 
     #[test]

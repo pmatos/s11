@@ -9,7 +9,15 @@ use std::str::FromStr;
 /// Error type for parsing live-out register sets and live-out contracts.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ParseRegisterSetError {
-    pub message: String,
+    message: String,
+}
+
+impl ParseRegisterSetError {
+    fn new(message: impl Into<String>) -> Self {
+        Self {
+            message: message.into(),
+        }
+    }
 }
 
 impl std::fmt::Display for ParseRegisterSetError {
@@ -49,9 +57,10 @@ fn parse_register(s: &str) -> Result<Register, ParseRegisterSetError> {
         return Ok(reg);
     }
 
-    Err(ParseRegisterSetError {
-        message: format!("invalid register name: '{}'", s),
-    })
+    Err(ParseRegisterSetError::new(format!(
+        "invalid register name: '{}'",
+        s
+    )))
 }
 
 impl FromStr for RegisterSet<Register> {
@@ -106,7 +115,7 @@ fn misplaced_flag_token_error(token: &str, input: &str) -> ParseRegisterSetError
             token, input
         )
     };
-    ParseRegisterSetError { message }
+    ParseRegisterSetError::new(message)
 }
 
 /// Parse the CLI `--live-out` contract string.
@@ -126,18 +135,17 @@ pub fn parse_live_out_contract(s: &str) -> Result<LiveOut, ParseLiveOutError> {
     let trimmed = s.trim();
     let semicolon_count = trimmed.matches(';').count();
     if semicolon_count > 1 {
-        return Err(ParseRegisterSetError {
-            message: format!("--live-out accepts at most one ';' (got: '{}')", s),
-        });
+        return Err(ParseRegisterSetError::new(format!(
+            "--live-out accepts at most one ';' (got: '{}')",
+            s
+        )));
     }
     if semicolon_count == 0 {
         if trimmed.eq_ignore_ascii_case("nzcv") {
-            return Err(ParseRegisterSetError {
-                message: format!(
-                    "flag-only live-out requires a leading ';' (e.g. \";nzcv\"); got '{}'",
-                    s
-                ),
-            });
+            return Err(ParseRegisterSetError::new(format!(
+                "flag-only live-out requires a leading ';' (e.g. \";nzcv\"); got '{}'",
+                s
+            )));
         }
         if let Some(token) = misplaced_flag_token_in_register_list(trimmed) {
             return Err(misplaced_flag_token_error(token, s));
@@ -155,17 +163,16 @@ pub fn parse_live_out_contract(s: &str) -> Result<LiveOut, ParseLiveOutError> {
         "" => false,
         "nzcv" => true,
         "n" | "z" | "c" | "v" => {
-            return Err(ParseRegisterSetError {
-                message: format!(
-                    "per-flag token '{}' is reserved for a future extension; use 'nzcv' for all flags",
-                    flags_tok
-                ),
-            });
+            return Err(ParseRegisterSetError::new(format!(
+                "per-flag token '{}' is reserved for a future extension; use 'nzcv' for all flags",
+                flags_tok
+            )));
         }
         other => {
-            return Err(ParseRegisterSetError {
-                message: format!("unknown flag token '{}'; expected 'nzcv'", other),
-            });
+            return Err(ParseRegisterSetError::new(format!(
+                "unknown flag token '{}'; expected 'nzcv'",
+                other
+            )));
         }
     };
     Ok(regs.with_flags(flags_live))
@@ -188,16 +195,7 @@ pub fn compute_written_registers(instructions: &[Instruction]) -> RegisterSet<Re
 /// Drives the auto-derivation of `EquivalenceConfig::memory_live` (and the
 /// `fast_only` carve-out) in `check_equivalence_with_config`. See ADR-0007.
 pub fn touches_memory(instructions: &[Instruction]) -> bool {
-    instructions.iter().any(|i| {
-        matches!(
-            i,
-            Instruction::Ldr { .. }
-                | Instruction::Ldrs { .. }
-                | Instruction::Str { .. }
-                | Instruction::Ldp { .. }
-                | Instruction::Stp { .. }
-        )
-    })
+    instructions.iter().any(Instruction::is_memory_op)
 }
 
 /// Returns true if NZCV may be observable after the sequence executes.
@@ -307,6 +305,7 @@ pub fn x86_live_out_from_target(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ir::types::{AccessWidth, AddressOperand, IndexMode};
     use crate::ir::{Condition, LabelId, Operand};
 
     #[test]
@@ -420,6 +419,44 @@ mod tests {
     fn test_compute_written_registers_empty() {
         let mask = compute_written_registers(&[]);
         assert!(mask.is_empty());
+    }
+
+    #[test]
+    fn touches_memory_matches_instruction_memory_classifier() {
+        assert!(!touches_memory(&[]));
+
+        let arithmetic_only = vec![Instruction::Add {
+            rd: Register::X0,
+            rn: Register::X1,
+            rm: Operand::Register(Register::X2),
+        }];
+        assert!(!touches_memory(&arithmetic_only));
+        assert_eq!(
+            touches_memory(&arithmetic_only),
+            arithmetic_only.iter().any(Instruction::is_memory_op)
+        );
+
+        let memory_and_arithmetic = vec![
+            Instruction::Add {
+                rd: Register::X0,
+                rn: Register::X1,
+                rm: Operand::Register(Register::X2),
+            },
+            Instruction::Ldr {
+                rt: Register::X3,
+                addr: AddressOperand::Imm {
+                    base: Register::X4,
+                    offset: 16,
+                    mode: IndexMode::Offset,
+                },
+                width: AccessWidth::Extended,
+            },
+        ];
+        assert!(touches_memory(&memory_and_arithmetic));
+        assert_eq!(
+            touches_memory(&memory_and_arithmetic),
+            memory_and_arithmetic.iter().any(Instruction::is_memory_op)
+        );
     }
 
     #[test]
@@ -783,11 +820,11 @@ mod tests {
     #[test]
     fn test_parse_live_out_contract_bareword_nzcv_rejected() {
         let err = parse_live_out_contract("nzcv").unwrap_err();
+        let message = err.to_string();
         assert!(
-            err.message
-                .contains("flag-only live-out requires a leading ';'"),
+            message.contains("flag-only live-out requires a leading ';'"),
             "got: {}",
-            err.message
+            message
         );
     }
 
@@ -801,23 +838,24 @@ mod tests {
             "x0,nzcv;nzcv",
         ] {
             let err = parse_live_out_contract(input).unwrap_err();
+            let message = err.to_string();
             assert!(
-                err.message.contains("'nzcv'"),
+                message.contains("'nzcv'"),
                 "expected error to name misplaced flag token in '{}', got: {}",
                 input,
-                err.message
+                message
             );
             assert!(
-                err.message.contains(";nzcv"),
+                message.contains(";nzcv"),
                 "expected error to hint at ';nzcv' syntax for '{}', got: {}",
                 input,
-                err.message
+                message
             );
             assert!(
-                !err.message.contains("invalid register name"),
+                !message.contains("invalid register name"),
                 "expected live-out grammar diagnostic for '{}', got: {}",
                 input,
-                err.message
+                message
             );
         }
     }
@@ -827,23 +865,24 @@ mod tests {
         for tok in ["n", "z", "c", "v"] {
             for input in [format!("{},x0", tok), format!("{} x0", tok)] {
                 let err = parse_live_out_contract(&input).unwrap_err();
+                let message = err.to_string();
                 assert!(
-                    err.message.contains(&format!("'{}'", tok)),
+                    message.contains(&format!("'{}'", tok)),
                     "expected error to name misplaced flag token in '{}', got: {}",
                     input,
-                    err.message
+                    message
                 );
                 assert!(
-                    err.message.contains("reserved") || err.message.contains(";nzcv"),
+                    message.contains("reserved") || message.contains(";nzcv"),
                     "expected error to hint at reserved flag syntax for '{}', got: {}",
                     input,
-                    err.message
+                    message
                 );
                 assert!(
-                    !err.message.contains("invalid register name"),
+                    !message.contains("invalid register name"),
                     "expected live-out grammar diagnostic for '{}', got: {}",
                     input,
-                    err.message
+                    message
                 );
             }
         }
@@ -867,11 +906,8 @@ mod tests {
     #[test]
     fn test_parse_live_out_contract_unknown_flag_rejected() {
         let err: ParseLiveOutError = parse_live_out_contract("x0;bogus").unwrap_err();
-        assert!(
-            err.message.contains("unknown flag token"),
-            "got: {}",
-            err.message
-        );
+        let message = err.to_string();
+        assert!(message.contains("unknown flag token"), "got: {}", message);
     }
 
     #[test]
@@ -879,17 +915,18 @@ mod tests {
         for tok in ["n", "z", "c", "v"] {
             let s = format!("x0;{}", tok);
             let err = parse_live_out_contract(&s).unwrap_err();
+            let message = err.to_string();
             assert!(
-                err.message.contains("reserved for a future extension"),
+                message.contains("reserved for a future extension"),
                 "expected '{}' to be rejected as reserved, got: {}",
                 s,
-                err.message
+                message
             );
             assert!(
-                err.message.contains(&format!("per-flag token '{}'", tok)),
+                message.contains(&format!("per-flag token '{}'", tok)),
                 "expected reserved-token error to name '{}', got: {}",
                 tok,
-                err.message
+                message
             );
         }
     }

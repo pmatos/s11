@@ -35,8 +35,8 @@ jobs:
     - name: Build
       run: cargo build --verbose
 
-    - name: Run unit tests only
-      run: cargo test --bins --verbose
+    - name: Run unit tests (lib + bins)
+      run: cargo test --lib --bins --verbose
       
     - name: Check s11 binary exists
       run: |
@@ -60,7 +60,7 @@ jobs:
     - name: Run integration tests with debug output
       run: |
         export RUST_BACKTRACE=1
-        cargo test --test integration_tests -- --nocapture || true
+        cargo test --test integration_tests -- --nocapture
         
     - name: Run all tests
       run: ./test_all.sh
