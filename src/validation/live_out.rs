@@ -188,16 +188,7 @@ pub fn compute_written_registers(instructions: &[Instruction]) -> RegisterSet<Re
 /// Drives the auto-derivation of `EquivalenceConfig::memory_live` (and the
 /// `fast_only` carve-out) in `check_equivalence_with_config`. See ADR-0007.
 pub fn touches_memory(instructions: &[Instruction]) -> bool {
-    instructions.iter().any(|i| {
-        matches!(
-            i,
-            Instruction::Ldr { .. }
-                | Instruction::Ldrs { .. }
-                | Instruction::Str { .. }
-                | Instruction::Ldp { .. }
-                | Instruction::Stp { .. }
-        )
-    })
+    instructions.iter().any(Instruction::is_memory_op)
 }
 
 /// Returns true if NZCV may be observable after the sequence executes.
@@ -307,6 +298,7 @@ pub fn x86_live_out_from_target(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ir::types::{AccessWidth, AddressOperand, IndexMode};
     use crate::ir::{Condition, LabelId, Operand};
 
     #[test]
@@ -420,6 +412,44 @@ mod tests {
     fn test_compute_written_registers_empty() {
         let mask = compute_written_registers(&[]);
         assert!(mask.is_empty());
+    }
+
+    #[test]
+    fn touches_memory_matches_instruction_memory_classifier() {
+        assert!(!touches_memory(&[]));
+
+        let arithmetic_only = vec![Instruction::Add {
+            rd: Register::X0,
+            rn: Register::X1,
+            rm: Operand::Register(Register::X2),
+        }];
+        assert!(!touches_memory(&arithmetic_only));
+        assert_eq!(
+            touches_memory(&arithmetic_only),
+            arithmetic_only.iter().any(Instruction::is_memory_op)
+        );
+
+        let memory_and_arithmetic = vec![
+            Instruction::Add {
+                rd: Register::X0,
+                rn: Register::X1,
+                rm: Operand::Register(Register::X2),
+            },
+            Instruction::Ldr {
+                rt: Register::X3,
+                addr: AddressOperand::Imm {
+                    base: Register::X4,
+                    offset: 16,
+                    mode: IndexMode::Offset,
+                },
+                width: AccessWidth::Extended,
+            },
+        ];
+        assert!(touches_memory(&memory_and_arithmetic));
+        assert_eq!(
+            touches_memory(&memory_and_arithmetic),
+            memory_and_arithmetic.iter().any(Instruction::is_memory_op)
+        );
     }
 
     #[test]

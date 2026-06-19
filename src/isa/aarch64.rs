@@ -401,15 +401,7 @@ impl InstructionType for Instruction {
         // Memory ops have observable side effects beyond NZCV: stores write
         // memory, writeback modes mutate the base register, loads read from
         // potentially-aliased memory. See ADR-0007.
-        self.modifies_flags()
-            || matches!(
-                self,
-                Instruction::Ldr { .. }
-                    | Instruction::Ldrs { .. }
-                    | Instruction::Str { .. }
-                    | Instruction::Ldp { .. }
-                    | Instruction::Stp { .. }
-            )
+        self.modifies_flags() || self.is_memory_op()
     }
 }
 
@@ -1827,6 +1819,7 @@ fn mutate_shift_operand<R: RngExt>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ir::types::{AccessWidth, AddressOperand, IndexMode};
     use rand::SeedableRng;
     use rand_chacha::ChaCha8Rng;
     use std::collections::BTreeSet;
@@ -2223,6 +2216,17 @@ mod tests {
             rm: Operand::Register(Register::X2),
         };
         assert!(cmp.has_side_effects());
+
+        let ldr = Instruction::Ldr {
+            rt: Register::X0,
+            addr: AddressOperand::Imm {
+                base: Register::X1,
+                offset: 0,
+                mode: IndexMode::Offset,
+            },
+            width: AccessWidth::Extended,
+        };
+        assert!(ldr.has_side_effects());
     }
 
     #[test]
