@@ -47,6 +47,8 @@ Rewritable straight-line mnemonics accepted by the parser and Capstone bridge:
   `bics`, `orn`, `eon`
   - Logical-immediate forms for `and`, `ands`, `orr`, `eor`, and `tst`
     support both 64-bit `X` registers and 32-bit `W` registers.
+    Non-flag-setting `and`, `orr`, and `eor` also support 32-bit `W`
+    register and shifted-register forms.
     Capstone `mov Wd|WSP, #imm` bitmask aliases are accepted for the
     `orr Wd|WSP, wzr, #imm` form.
 - Shifts and rotate: `lsl`, `lsr`, `asr`, `ror`
