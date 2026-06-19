@@ -49,6 +49,21 @@ fn set_w_register(state: &mut ConcreteMachineState, reg: Register, value: u64) {
     state.set_register(reg, ConcreteValue::new(value & u32::MAX as u64));
 }
 
+// Store a bit-field op's 64-bit result into `rd`, honouring the register width.
+// For the W form, the upper 32 bits of the destination are zeroed (ARM ARM:
+// writing a W register clears bits [63:32]); the X form stores all 64 bits.
+fn store_bitfield_result(
+    state: &mut ConcreteMachineState,
+    rd: Register,
+    result: u64,
+    reg_width: crate::ir::RegisterWidth,
+) {
+    match reg_width {
+        crate::ir::RegisterWidth::W32 => set_w_register(state, rd, result),
+        crate::ir::RegisterWidth::X64 => state.set_register(rd, ConcreteValue::new(result)),
+    }
+}
+
 fn eval_w_operand(state: &ConcreteMachineState, operand: &Operand) -> u64 {
     match operand {
         Operand::Register(reg) => state.get_register(*reg).as_u64() & u32::MAX as u64,
@@ -524,7 +539,13 @@ pub fn apply_instruction_concrete(
         // UBFX rd, rn, #lsb, #width: extract bits [lsb+width-1:lsb] of rn,
         // zero-extend the result into rd. width=64 must use u64::MAX as the
         // low-bits mask to avoid the `1u64 << 64` UB.
-        Instruction::Ubfx { rd, rn, lsb, width } => {
+        Instruction::Ubfx {
+            rd,
+            rn,
+            lsb,
+            width,
+            reg_width,
+        } => {
             let value = state.get_register(*rn).as_u64();
             let low_mask = if *width == 64 {
                 u64::MAX
@@ -532,11 +553,17 @@ pub fn apply_instruction_concrete(
                 (1u64 << *width) - 1
             };
             let extracted = (value >> *lsb) & low_mask;
-            state.set_register(*rd, ConcreteValue::new(extracted));
+            store_bitfield_result(&mut state, *rd, extracted, *reg_width);
         }
         // SBFX rd, rn, #lsb, #width: extract bits [lsb+width-1:lsb] of rn,
         // sign-extend the result into rd. width=64 is the no-op identity.
-        Instruction::Sbfx { rd, rn, lsb, width } => {
+        Instruction::Sbfx {
+            rd,
+            rn,
+            lsb,
+            width,
+            reg_width,
+        } => {
             let value = state.get_register(*rn).as_u64();
             // Shift left then arithmetic-right by the same amount, computed on
             // i64, to sign-extend the field MSB across the upper bits.
@@ -546,12 +573,20 @@ pub fn apply_instruction_concrete(
             let shift_left = 64 - ((*lsb as u32) + (*width as u32));
             let intermediate = (value << shift_left) as i64;
             // Right shift by (64 - width) sign-extends from bit (width-1).
+            // For the W form the low 32 bits hold the 32-bit sign-extended value;
+            // store_bitfield_result then zeroes bits [63:32].
             let result = (intermediate >> (64 - *width as u32)) as u64;
-            state.set_register(*rd, ConcreteValue::new(result));
+            store_bitfield_result(&mut state, *rd, result, *reg_width);
         }
         // BFI rd, rn, #lsb, #width: insert low `width` bits of rn at position
         // lsb of rd, preserving the other bits of rd.
-        Instruction::Bfi { rd, rn, lsb, width } => {
+        Instruction::Bfi {
+            rd,
+            rn,
+            lsb,
+            width,
+            reg_width,
+        } => {
             let dest = state.get_register(*rd).as_u64();
             let src = state.get_register(*rn).as_u64();
             let low_mask = if *width == 64 {
@@ -562,11 +597,17 @@ pub fn apply_instruction_concrete(
             let shifted_mask = low_mask << *lsb;
             let inserted = (src & low_mask) << *lsb;
             let result = (dest & !shifted_mask) | inserted;
-            state.set_register(*rd, ConcreteValue::new(result));
+            store_bitfield_result(&mut state, *rd, result, *reg_width);
         }
         // BFXIL rd, rn, #lsb, #width: extract bits [lsb+width-1:lsb] of rn,
         // place at [width-1:0] of rd, preserve rd[63:width].
-        Instruction::Bfxil { rd, rn, lsb, width } => {
+        Instruction::Bfxil {
+            rd,
+            rn,
+            lsb,
+            width,
+            reg_width,
+        } => {
             let dest = state.get_register(*rd).as_u64();
             let src = state.get_register(*rn).as_u64();
             let low_mask = if *width == 64 {
@@ -576,11 +617,17 @@ pub fn apply_instruction_concrete(
             };
             let extracted = (src >> *lsb) & low_mask;
             let result = (dest & !low_mask) | extracted;
-            state.set_register(*rd, ConcreteValue::new(result));
+            store_bitfield_result(&mut state, *rd, result, *reg_width);
         }
         // UBFIZ rd, rn, #lsb, #width: take low `width` bits of rn, zero-extend
         // to 64, shift left by lsb → rd (other bits zero).
-        Instruction::Ubfiz { rd, rn, lsb, width } => {
+        Instruction::Ubfiz {
+            rd,
+            rn,
+            lsb,
+            width,
+            reg_width,
+        } => {
             let value = state.get_register(*rn).as_u64();
             let low_mask = if *width == 64 {
                 u64::MAX
@@ -588,18 +635,24 @@ pub fn apply_instruction_concrete(
                 (1u64 << *width) - 1
             };
             let inserted = (value & low_mask) << *lsb;
-            state.set_register(*rd, ConcreteValue::new(inserted));
+            store_bitfield_result(&mut state, *rd, inserted, *reg_width);
         }
         // SBFIZ rd, rn, #lsb, #width: low `width` bits of rn, sign-extended
         // across bits [63:width], then shifted left by lsb → rd.
-        Instruction::Sbfiz { rd, rn, lsb, width } => {
+        Instruction::Sbfiz {
+            rd,
+            rn,
+            lsb,
+            width,
+            reg_width,
+        } => {
             let value = state.get_register(*rn).as_u64();
             // Sign-extend the low `width` bits to 64.
             let shift_left = 64 - *width as u32;
             let sign_extended = ((value << shift_left) as i64 >> shift_left) as u64;
             // Then shift left by lsb.
             let result = sign_extended << *lsb;
-            state.set_register(*rd, ConcreteValue::new(result));
+            store_bitfield_result(&mut state, *rd, result, *reg_width);
         }
         // Branches / terminators: callers must strip terminators before
         // apply_sequence_concrete. The equivalence layer handles them via
@@ -654,18 +707,19 @@ pub fn apply_instruction_concrete(
             signed,
         } => {
             let (effective, writeback) = compute_address(&state, addr);
+            let access_width = (*width).as_access_width();
             let bytes = width.bytes() as u64;
-            let raw1 = state.read_bytes(effective, *width);
-            let raw2 = state.read_bytes(effective.wrapping_add(bytes), *width);
+            let raw1 = state.read_bytes(effective, access_width);
+            let raw2 = state.read_bytes(effective.wrapping_add(bytes), access_width);
             let (v1, v2) = if *signed {
                 (
-                    sign_extend_load(raw1, *width),
-                    sign_extend_load(raw2, *width),
+                    sign_extend_load(raw1, access_width),
+                    sign_extend_load(raw2, access_width),
                 )
             } else {
                 (
-                    zero_extend_load(raw1, *width),
-                    zero_extend_load(raw2, *width),
+                    zero_extend_load(raw1, access_width),
+                    zero_extend_load(raw2, access_width),
                 )
             };
             state.set_register(*rt1, ConcreteValue::new(v1));
@@ -681,11 +735,12 @@ pub fn apply_instruction_concrete(
             width,
         } => {
             let (effective, writeback) = compute_address(&state, addr);
+            let access_width = (*width).as_access_width();
             let bytes = width.bytes() as u64;
             let v1 = state.get_register(*rt1).as_u64();
             let v2 = state.get_register(*rt2).as_u64();
-            state.write_bytes(effective, v1, *width);
-            state.write_bytes(effective.wrapping_add(bytes), v2, *width);
+            state.write_bytes(effective, v1, access_width);
+            state.write_bytes(effective.wrapping_add(bytes), v2, access_width);
             if let Some((base, new_base)) = writeback {
                 state.set_register(base, ConcreteValue::new(new_base));
             }
@@ -818,9 +873,8 @@ pub fn apply_sequence_concrete(
 /// must be structurally equal (prune-on-write guarantees structural ==
 /// semantic equality).
 ///
-/// TODO(#282): The explicit `flags_live` parameter is now redundant with
-/// `live_out.flags_live()` for every caller except the stochastic backend
-/// (which deliberately passes `false`). Tracked for cleanup in issue #282.
+/// TODO(#282): Production callers now pass `live_out.flags_live()` here; the
+/// explicit parameter is retained for direct tests and future cleanup.
 pub fn states_equal_for_live_out(
     state1: &ConcreteMachineState,
     state2: &ConcreteMachineState,
@@ -846,8 +900,8 @@ pub fn states_equal_for_live_out(
 /// Flag divergence (when `flags_live` is set) is reported via the `XZR`
 /// sentinel since the function signature is register-typed.
 ///
-/// TODO(#282): see `states_equal_for_live_out` — the same `flags_live`
-/// redundancy applies here. Tracked for follow-up cleanup.
+/// TODO(#282): see `states_equal_for_live_out` — the same explicit
+/// `flags_live` parameter remains for follow-up cleanup.
 pub fn find_first_difference(
     state1: &ConcreteMachineState,
     state2: &ConcreteMachineState,
@@ -882,6 +936,7 @@ pub fn find_first_difference(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ir::types::PairAccessWidth;
     use std::collections::HashMap;
 
     fn state_with(values: Vec<(Register, u64)>) -> ConcreteMachineState {
@@ -2620,6 +2675,7 @@ mod tests {
             rn: Register::X1,
             lsb: 8,
             width: 16,
+            reg_width: crate::ir::RegisterWidth::X64,
         };
         let after = apply_instruction_concrete(state, &instr);
         // bits [23:8] of 0xDEAD_BEEF_CAFE_0123 = 0xFE01
@@ -2636,6 +2692,7 @@ mod tests {
             rn: Register::X1,
             lsb: 0,
             width: 64,
+            reg_width: crate::ir::RegisterWidth::X64,
         };
         let after = apply_instruction_concrete(state, &instr);
         assert_eq!(
@@ -2655,6 +2712,7 @@ mod tests {
             rn: Register::X1,
             lsb: 4,
             width: 8,
+            reg_width: crate::ir::RegisterWidth::X64,
         };
         let after = apply_instruction_concrete(state, &instr);
         // 0xF0 sign-extended from 8 bits = 0xFFFF_FFFF_FFFF_FFF0
@@ -2673,9 +2731,122 @@ mod tests {
             rn: Register::X1,
             lsb: 8,
             width: 8,
+            reg_width: crate::ir::RegisterWidth::X64,
         };
         let after = apply_instruction_concrete(state, &instr);
         assert_eq!(after.get_register(Register::X0).as_u64(), 0x7F);
+    }
+
+    #[test]
+    fn test_sbfx_w_form_zeroes_upper_32_bits() {
+        // SBFX W0, W1, #4, #8: extract bits [11:4] = 0xF0 of W1, sign-extend
+        // within 32 bits, then zero bits [63:32] of the destination X register
+        // (ARM ARM: writing a W register zeroes the upper half). The X form would
+        // instead fill [63:32] with the sign bit.
+        let state = state_with(vec![(Register::X1, 0xF00)]);
+        let instr = Instruction::Sbfx {
+            rd: Register::X0,
+            rn: Register::X1,
+            lsb: 4,
+            width: 8,
+            reg_width: crate::ir::RegisterWidth::W32,
+        };
+        let after = apply_instruction_concrete(state, &instr);
+        // 0xF0 sign-extended from 8 bits within 32 = 0xFFFF_FFF0; upper 32 zeroed.
+        assert_eq!(
+            after.get_register(Register::X0).as_u64(),
+            0x0000_0000_FFFF_FFF0
+        );
+    }
+
+    #[test]
+    fn test_bfi_w_form_zeroes_upper_32_bits() {
+        // BFI W0, W1, #4, #8: insert low 8 bits of W1 (0x00) at position 4 of W0,
+        // preserving the other low-32 bits of W0, and zero bits [63:32].
+        let state = state_with(vec![(Register::X0, u64::MAX), (Register::X1, 0x00)]);
+        let instr = Instruction::Bfi {
+            rd: Register::X0,
+            rn: Register::X1,
+            lsb: 4,
+            width: 8,
+            reg_width: crate::ir::RegisterWidth::W32,
+        };
+        let after = apply_instruction_concrete(state, &instr);
+        // low 32 of rd = 0xFFFF_FFFF, clear [11:4], insert 0 -> 0xFFFF_F00F; upper 32 zeroed.
+        assert_eq!(
+            after.get_register(Register::X0).as_u64(),
+            0x0000_0000_FFFF_F00F
+        );
+    }
+
+    #[test]
+    fn test_bfxil_w_form_zeroes_upper_32_bits() {
+        // BFXIL W0, W1, #4, #8: extract bits [11:4] of W1 (=0) into [7:0] of W0,
+        // preserve W0[31:8], and zero bits [63:32].
+        let state = state_with(vec![(Register::X0, u64::MAX), (Register::X1, 0x00)]);
+        let instr = Instruction::Bfxil {
+            rd: Register::X0,
+            rn: Register::X1,
+            lsb: 4,
+            width: 8,
+            reg_width: crate::ir::RegisterWidth::W32,
+        };
+        let after = apply_instruction_concrete(state, &instr);
+        // low 32 of rd keeps [31:8]=1, [7:0]=0 -> 0xFFFF_FF00; upper 32 zeroed.
+        assert_eq!(
+            after.get_register(Register::X0).as_u64(),
+            0x0000_0000_FFFF_FF00
+        );
+    }
+
+    #[test]
+    fn test_sbfiz_w_form_zeroes_upper_32_bits() {
+        // SBFIZ W0, W1, #4, #8: low 8 bits of W1 (0xAB, MSB set), sign-extend
+        // within 32 bits, shift left by 4, and zero bits [63:32].
+        let state = state_with(vec![(Register::X1, 0xAB)]);
+        let instr = Instruction::Sbfiz {
+            rd: Register::X0,
+            rn: Register::X1,
+            lsb: 4,
+            width: 8,
+            reg_width: crate::ir::RegisterWidth::W32,
+        };
+        let after = apply_instruction_concrete(state, &instr);
+        // 0xAB sign-extended within 32 = 0xFFFF_FFAB, <<4 = 0xFFFF_FAB0; upper 32 zeroed.
+        assert_eq!(
+            after.get_register(Register::X0).as_u64(),
+            0x0000_0000_FFFF_FAB0
+        );
+    }
+
+    #[test]
+    fn test_ubfx_w_form_matches_x_form_for_valid_field() {
+        // UBFX zero-extends, so for a W field (width<=32) the result already has
+        // zero upper bits: W and X agree. Guards against accidental divergence.
+        let state = state_with(vec![(Register::X1, 0xF00)]);
+        let instr = Instruction::Ubfx {
+            rd: Register::X0,
+            rn: Register::X1,
+            lsb: 4,
+            width: 8,
+            reg_width: crate::ir::RegisterWidth::W32,
+        };
+        let after = apply_instruction_concrete(state, &instr);
+        assert_eq!(after.get_register(Register::X0).as_u64(), 0xF0);
+    }
+
+    #[test]
+    fn test_ubfiz_w_form_matches_x_form_for_valid_field() {
+        let state = state_with(vec![(Register::X1, 0xAB)]);
+        let instr = Instruction::Ubfiz {
+            rd: Register::X0,
+            rn: Register::X1,
+            lsb: 4,
+            width: 8,
+            reg_width: crate::ir::RegisterWidth::W32,
+        };
+        let after = apply_instruction_concrete(state, &instr);
+        assert_eq!(after.get_register(Register::X0).as_u64(), 0xAB0);
     }
 
     #[test]
@@ -2688,6 +2859,7 @@ mod tests {
             rn: Register::X1,
             lsb: 4,
             width: 8,
+            reg_width: crate::ir::RegisterWidth::X64,
         };
         let after = apply_instruction_concrete(state, &instr);
         // 0xAB sign-extended from 8 bits → 0xFFFF_FFFF_FFFF_FFAB
@@ -2707,6 +2879,7 @@ mod tests {
             rn: Register::X1,
             lsb: 4,
             width: 8,
+            reg_width: crate::ir::RegisterWidth::X64,
         };
         let after = apply_instruction_concrete(state, &instr);
         // 0x7F << 4 = 0x7F0; no sign extension.
@@ -2726,6 +2899,7 @@ mod tests {
             rn: Register::X1,
             lsb: 4,
             width: 8,
+            reg_width: crate::ir::RegisterWidth::X64,
         };
         let after = apply_instruction_concrete(state, &instr);
         // 0xAB << 4 = 0xAB0; everything else zero.
@@ -2745,6 +2919,7 @@ mod tests {
             rn: Register::X1,
             lsb: 8,
             width: 8,
+            reg_width: crate::ir::RegisterWidth::X64,
         };
         let after = apply_instruction_concrete(state, &instr);
         // X0 upper 56 bits preserved (all ones), low 8 bits = 0xAB
@@ -2767,6 +2942,7 @@ mod tests {
             rn: Register::X1,
             lsb: 4,
             width: 8,
+            reg_width: crate::ir::RegisterWidth::X64,
         };
         let after = apply_instruction_concrete(state, &instr);
         // Bits [11:4] become 0xAA (from rn low 8 bits); other bits of X0 preserved.
@@ -2789,6 +2965,7 @@ mod tests {
             rn: Register::X1,
             lsb: 63,
             width: 1,
+            reg_width: crate::ir::RegisterWidth::X64,
         };
         let after = apply_instruction_concrete(state, &instr);
         assert_eq!(after.get_register(Register::X0).as_u64(), 1);
@@ -2921,7 +3098,7 @@ mod tests {
                 offset: 0,
                 mode: IndexMode::Offset,
             },
-            width: AccessWidth::Extended,
+            width: PairAccessWidth::Extended,
             signed: false,
         };
         let after = apply_instruction_concrete(state, &instr);
@@ -2945,7 +3122,7 @@ mod tests {
                 offset: 0,
                 mode: IndexMode::Offset,
             },
-            width: AccessWidth::Extended,
+            width: PairAccessWidth::Extended,
         };
         let after = apply_instruction_concrete(state, &instr);
         assert_eq!(after.read_bytes(0x1000, AccessWidth::Extended), 0xAAAA);

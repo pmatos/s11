@@ -31,7 +31,7 @@ use rand::{RngExt, SeedableRng};
 use rand_chacha::ChaCha8Rng;
 use std::marker::PhantomData;
 use std::sync::atomic::Ordering;
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 /// Stochastic search using MCMC-style proposals and Metropolis cost
 /// acceptance, generic over ISA.
@@ -102,14 +102,16 @@ where
         // Pull register / immediate pools out of the config via the backend.
         let regs = <I as StochasticBackend<I>>::registers_from_config(config);
         let imms = <I as StochasticBackend<I>>::immediates_from_config(config);
+        let validation_regs =
+            <I as StochasticBackend<I>>::validation_registers(&regs, target, live_out);
 
         // Generate test cases: random + edge.
         let test_inputs = <I as StochasticBackend<I>>::make_test_inputs(
-            &regs,
+            &validation_regs,
             width,
             config.stochastic.test_count,
         );
-        let edge_inputs = <I as StochasticBackend<I>>::make_edge_inputs(&regs, width);
+        let edge_inputs = <I as StochasticBackend<I>>::make_edge_inputs(&validation_regs, width);
 
         // Precompute target outputs.
         let target_outputs: Vec<_> = test_inputs
@@ -159,10 +161,7 @@ where
         // tail, so length-change proposals only vary the prefix length.
         let min_length = 1 + terminator_len;
         let max_length = target.len();
-        let smt_timeout = config
-            .symbolic
-            .solver_timeout
-            .unwrap_or(Duration::from_secs(5));
+        let smt_timeout = config.symbolic.effective_solver_timeout();
 
         for iteration in 0..config.stochastic.iterations {
             self.statistics.iterations = iteration + 1;
@@ -240,6 +239,7 @@ where
 
             self.statistics.candidates_passed_fast += 1;
 
+            let mut smt_refuted = false;
             if proposal_cost < best_cost {
                 let (verdict, metrics) = <I as StochasticBackend<I>>::check_equivalence(
                     target,
@@ -252,21 +252,34 @@ where
                 if metrics.smt_called {
                     self.statistics.smt_queries += 1;
                 }
-                if let EquivalenceResult::Equivalent = verdict {
-                    self.statistics.smt_equivalent += 1;
-                    self.statistics.improvements_found += 1;
+                match verdict {
+                    EquivalenceResult::Equivalent => {
+                        self.statistics.smt_equivalent += 1;
+                        self.statistics.improvements_found += 1;
 
-                    best_equivalent = Some(proposal.clone());
-                    best_cost = proposal_cost;
-                    self.statistics.best_cost_found = best_cost;
+                        best_equivalent = Some(proposal.clone());
+                        best_cost = proposal_cost;
+                        self.statistics.best_cost_found = best_cost;
 
-                    if config.verbose {
-                        println!(
-                            "Found improvement at iteration {}: cost {} -> {}",
-                            iteration, original_cost, best_cost
-                        );
+                        if config.verbose {
+                            println!(
+                                "Found improvement at iteration {}: cost {} -> {}",
+                                iteration, original_cost, best_cost
+                            );
+                        }
                     }
+                    EquivalenceResult::NotEquivalent | EquivalenceResult::NotEquivalentFast(_) => {
+                        smt_refuted = true;
+                    }
+                    // SMT timeout / inconclusive: we cannot prove the proposal
+                    // incorrect, so leave the Metropolis decision below intact
+                    // rather than vetoing exploration.
+                    EquivalenceResult::Unknown(_) => {}
                 }
+            }
+
+            if smt_refuted {
+                continue;
             }
 
             if acceptance.accept(&mut rng, current_cost, proposal_cost) {
@@ -317,7 +330,13 @@ pub fn evaluate_with_tests(
 
     for (input, target_output) in test_inputs.iter().zip(target_outputs.iter()) {
         let proposal_output = apply_sequence_concrete(input.clone(), proposal);
-        if !states_equal_for_live_out(&proposal_output, target_output, live_out, false, false) {
+        if !states_equal_for_live_out(
+            &proposal_output,
+            target_output,
+            live_out,
+            live_out.flags_live(),
+            false,
+        ) {
             passes_all = false;
             break;
         }
@@ -342,6 +361,7 @@ mod tests {
     use crate::semantics::live_out::LiveOut;
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering as AtomicOrdering};
     use std::sync::{Mutex as TestMutex, MutexGuard};
+    use std::time::Duration;
 
     fn mov_add_sequence() -> Vec<Instruction> {
         vec![
@@ -663,6 +683,28 @@ mod tests {
     }
 
     #[test]
+    fn stochastic_search_does_not_accept_smt_refuted_cheaper_proposal() {
+        let _guard = set_timeout_probe_result(TIMEOUT_PROBE_NOT_EQUIVALENT, true);
+
+        let mut search: StochasticSearch<TimeoutProbeIsa> = StochasticSearch::new();
+        let config = SearchConfig::default().with_stochastic(
+            StochasticConfig::default()
+                .with_iterations(1)
+                .with_test_count(0)
+                .with_seed(1),
+        );
+        let target = [TimeoutProbeInstruction(1), TimeoutProbeInstruction(2)];
+
+        let result = search.search(&target, &(), &config);
+
+        assert_eq!(result.statistics.smt_queries, 1);
+        assert_eq!(result.statistics.smt_equivalent, 0);
+        assert_eq!(result.statistics.improvements_found, 0);
+        assert!(!result.found_optimization);
+        assert_eq!(result.statistics.accepted_proposals, 0);
+    }
+
+    #[test]
     fn stochastic_search_uses_symbolic_solver_timeout_for_smt() {
         let recorded_timeout = run_timeout_probe_search(
             SymbolicConfig::default().with_timeout(Duration::from_millis(17)),
@@ -672,7 +714,7 @@ mod tests {
     }
 
     #[test]
-    fn stochastic_search_falls_back_to_five_seconds_when_solver_timeout_unset() {
+    fn stochastic_search_falls_back_to_symbolic_default_when_solver_timeout_unset() {
         let symbolic_config = SymbolicConfig {
             solver_timeout: None,
             ..SymbolicConfig::default()
@@ -680,7 +722,7 @@ mod tests {
 
         let recorded_timeout = run_timeout_probe_search(symbolic_config);
 
-        assert_eq!(recorded_timeout, Some(5000));
+        assert_eq!(recorded_timeout, Some(30000));
     }
 
     #[test]
@@ -900,11 +942,8 @@ mod tests {
     // ---- x86 stochastic search (issue #73 Phase C step 5) ----
 
     /// Tracer-bullet test that the generic `StochasticSearch<X86_64>`
-    /// instantiates, runs an MCMC loop end-to-end on a 2-instruction
-    /// x86 target, and finishes without panic. The target is the
-    /// canonical zeroing fusion `mov rax, 0; add rax, rbx` — the
-    /// search should at minimum *not crash*, and the iteration counter
-    /// should advance.
+    /// instantiates and discovers the dead-flags collapse for a
+    /// 2-instruction x86 target.
     #[test]
     fn x86_stochastic_runs_end_to_end() {
         use crate::isa::X86_64;
@@ -936,13 +975,20 @@ mod tests {
         ];
 
         let result = search.search(&target, &live_out, &config);
-        let stats = result.statistics;
+        let stats = &result.statistics;
 
         assert_eq!(stats.algorithm, Algorithm::Stochastic);
         assert_eq!(stats.iterations, 500);
-        // The search may or may not find an optimisation in 500
-        // iterations; we only require that the loop made progress.
         assert!(stats.candidates_evaluated > 0);
+        assert!(result.found_optimization);
+        assert_eq!(result.cost_savings(), 1);
+        assert_eq!(
+            result.optimized_sequence,
+            Some(vec![X86Instruction::MovReg {
+                rd: X86Register::RAX,
+                rs: X86Register::RBX,
+            }])
+        );
     }
 
     /// Mirror of `x86_stochastic_runs_end_to_end` for x86-32 (Mode32 /
