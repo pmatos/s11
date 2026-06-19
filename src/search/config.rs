@@ -336,8 +336,6 @@ pub struct SearchConfig {
     pub x86_available_registers: Vec<crate::isa::x86::X86Register>,
     /// x86 operand width: 64 for x86-64, 32 for x86-32.
     pub x86_width: u32,
-    /// x86 assembler mode. Mirrors `x86_width`.
-    pub x86_mode: crate::assembler::x86::X86Mode,
     /// Stochastic-specific configuration
     pub stochastic: StochasticConfig,
     /// Symbolic-specific configuration
@@ -375,7 +373,6 @@ impl Default for SearchConfig {
             ],
             x86_available_registers: crate::isa::x86::default_x86_registers(),
             x86_width: 64,
-            x86_mode: crate::assembler::x86::X86Mode::Mode64,
             stochastic: StochasticConfig::default(),
             symbolic: SymbolicConfig::default(),
             llm: LlmConfig::default(),
@@ -468,22 +465,26 @@ impl SearchConfig {
         self
     }
 
-    /// Set the x86 width (32 or 64) and matching assembler mode.
+    /// Set the x86 operand width (32 or 64).
     pub fn with_x86_width(mut self, width: u32) -> Self {
-        // Only 32 and 64 are valid x86 widths; any other value would
-        // be silently coerced to Mode64 below, which is a misuse trap.
+        // Only 32 and 64 are valid x86 widths. Other values currently
+        // fall back to Mode64 through `x86_mode()`, which is a misuse trap.
         debug_assert!(
             width == 32 || width == 64,
             "with_x86_width: only 32 or 64 are valid; got {}",
             width
         );
         self.x86_width = width;
-        self.x86_mode = if width == 32 {
+        self
+    }
+
+    /// Return the x86 assembler mode derived from `x86_width`.
+    pub fn x86_mode(&self) -> crate::assembler::x86::X86Mode {
+        if self.x86_width == 32 {
             crate::assembler::x86::X86Mode::Mode32
         } else {
             crate::assembler::x86::X86Mode::Mode64
-        };
-        self
+        }
     }
 }
 
@@ -583,6 +584,22 @@ mod tests {
         assert_eq!(config.available_registers, vec![Register::X0, Register::X1]);
         assert_eq!(config.available_immediates, vec![0, 42]);
         assert!(config.verbose);
+    }
+
+    #[test]
+    fn search_config_derives_x86_mode_from_width() {
+        assert_eq!(
+            SearchConfig::default().x86_mode(),
+            crate::assembler::x86::X86Mode::Mode64
+        );
+        assert_eq!(
+            SearchConfig::default().with_x86_width(32).x86_mode(),
+            crate::assembler::x86::X86Mode::Mode32
+        );
+        assert_eq!(
+            SearchConfig::default().with_x86_width(64).x86_mode(),
+            crate::assembler::x86::X86Mode::Mode64
+        );
     }
 
     #[test]
