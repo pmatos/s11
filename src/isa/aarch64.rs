@@ -951,7 +951,8 @@ impl InstructionGenerator<Instruction> for AArch64InstructionGenerator {
                 let rm = if rng.random_bool(0.5) {
                     Operand::Register(pick_non_sp(rng))
                 } else {
-                    Operand::Immediate(pick_imm(rng).rem_euclid(32))
+                    let imm5_immediates = normalized_immediate_pool(immediates, 32);
+                    Operand::Immediate(imm5_immediates[rng.random_range(0..imm5_immediates.len())])
                 };
                 let nzcv = (rng.random::<u32>() & 0x0F) as u8;
                 let cond = Condition::random_normal(rng);
@@ -1770,13 +1771,11 @@ fn mutate_operand<R: RngExt>(
     imm_max: i64,
 ) -> Operand {
     debug_assert!(imm_max >= 0, "imm_max must be non-negative");
+    let bounded_immediates = normalized_immediate_pool(immediates, imm_max + 1);
     let pick_imm = |rng: &mut R| {
-        let v = immediates[rng.random_range(0..immediates.len())];
-        // Issue #87: clamp to the caller's encodable upper bound. Mirrors
-        // the CCMP/CCMN clamp in `src/search/stochastic/mutation.rs` and
-        // matches `Instruction::is_encodable_aarch64`'s per-variant ranges
-        // (ADD/SUB/ADDS/SUBS/CMP/CMN: 0..=0xFFF; CCMP/CCMN: 0..=31).
-        Operand::Immediate(v.rem_euclid(imm_max + 1))
+        // Bounded immediates are normalized and deduplicated before sampling,
+        // so congruent configured values do not carry extra proposal weight.
+        Operand::Immediate(bounded_immediates[rng.random_range(0..bounded_immediates.len())])
     };
     match operand {
         Operand::Register(_)
@@ -1796,6 +1795,23 @@ fn mutate_operand<R: RngExt>(
             }
         }
     }
+}
+
+fn normalized_immediate_pool(immediates: &[i64], modulus: i64) -> Vec<i64> {
+    debug_assert!(modulus > 0, "immediate modulus must be positive");
+
+    if immediates.is_empty() {
+        return vec![0];
+    }
+
+    let mut normalized = Vec::new();
+    for imm in immediates {
+        let residue = imm.rem_euclid(modulus);
+        if !normalized.contains(&residue) {
+            normalized.push(residue);
+        }
+    }
+    normalized
 }
 
 fn mutate_shift_operand<R: RngExt>(
@@ -1829,7 +1845,7 @@ mod tests {
     use super::*;
     use rand::SeedableRng;
     use rand_chacha::ChaCha8Rng;
-    use std::collections::BTreeSet;
+    use std::collections::{BTreeMap, BTreeSet};
 
     fn all_instruction_families() -> Vec<Instruction> {
         vec![
@@ -2377,6 +2393,81 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn mutate_operand_samples_unique_bounded_immediate_residues() {
+        let regs = vec![Register::X0, Register::X1, Register::X2];
+        let imms = vec![0x1000, 0x2000, 0x3000, 5];
+        let mut rng = ChaCha8Rng::seed_from_u64(0x2762);
+        let mut counts = BTreeMap::new();
+
+        for _ in 0..50_000 {
+            if let Operand::Immediate(imm) =
+                super::mutate_operand(&mut rng, Operand::Immediate(0), &regs, &imms, 0xFFF)
+            {
+                *counts.entry(imm).or_insert(0usize) += 1;
+            }
+        }
+
+        assert_eq!(
+            counts.keys().copied().collect::<Vec<_>>(),
+            vec![0, 5],
+            "bounded helper should only sample unique imm12 residues"
+        );
+        let zero = counts[&0];
+        let five = counts[&5];
+        let samples = zero + five;
+        assert!(
+            samples > 1_000,
+            "seeded run should observe enough immediate proposals, saw {samples}"
+        );
+        assert!(
+            zero.abs_diff(five) * 5 <= samples,
+            "deduplicated residues should be sampled with similar probability: {counts:?}"
+        );
+    }
+
+    #[test]
+    fn generate_random_conditional_compare_samples_unique_imm5_residues() {
+        let generator = AArch64InstructionGenerator;
+        let regs = vec![Register::X0, Register::X1, Register::X2];
+        let imms = vec![0, 32, 64, 31];
+        let mut rng = ChaCha8Rng::seed_from_u64(0x2763);
+        let mut counts = BTreeMap::new();
+
+        for _ in 0..300_000 {
+            match generator.generate_random(&mut rng, &regs, &imms) {
+                Instruction::Ccmp {
+                    rm: Operand::Immediate(imm),
+                    ..
+                }
+                | Instruction::Ccmn {
+                    rm: Operand::Immediate(imm),
+                    ..
+                } => {
+                    *counts.entry(imm).or_insert(0usize) += 1;
+                }
+                _ => {}
+            }
+        }
+
+        assert_eq!(
+            counts.keys().copied().collect::<Vec<_>>(),
+            vec![0, 31],
+            "CCMP/CCMN generation should only sample unique imm5 residues"
+        );
+        let zero = counts[&0];
+        let thirty_one = counts[&31];
+        let samples = zero + thirty_one;
+        assert!(
+            samples > 1_000,
+            "seeded run should observe enough conditional-compare immediates, saw {samples}"
+        );
+        assert!(
+            zero.abs_diff(thirty_one) * 5 <= samples,
+            "deduplicated residues should be sampled with similar probability: {counts:?}"
+        );
     }
 
     #[test]

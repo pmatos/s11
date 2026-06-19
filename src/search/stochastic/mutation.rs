@@ -96,6 +96,23 @@ fn single_source_opcode_peer<R: RngExt>(rng: &mut R, rd: Register, rn: Register)
     }
 }
 
+fn normalized_immediate_pool(immediates: &[i64], modulus: i64) -> Vec<i64> {
+    debug_assert!(modulus > 0, "immediate modulus must be positive");
+
+    if immediates.is_empty() {
+        return vec![0];
+    }
+
+    let mut normalized = Vec::new();
+    for imm in immediates {
+        let residue = imm.rem_euclid(modulus);
+        if !normalized.contains(&residue) {
+            normalized.push(residue);
+        }
+    }
+    normalized
+}
+
 /// Mutation operator types
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MutationType {
@@ -114,14 +131,25 @@ pub enum MutationType {
 pub struct Mutator {
     registers: Vec<Register>,
     immediates: Vec<i64>,
+    imm12_immediates: Vec<i64>,
+    imm5_immediates: Vec<i64>,
     weights: MutationWeights,
 }
 
 impl Mutator {
     pub fn new(registers: Vec<Register>, immediates: Vec<i64>, weights: MutationWeights) -> Self {
+        // Keep the raw table for unrestricted immediates (MOV, move-wide,
+        // instruction replacement) but precompute per-opcode-class pools for
+        // bounded forms. The pools deduplicate after normalization so
+        // congruent configured values do not get extra proposal weight.
+        let imm12_immediates = normalized_immediate_pool(&immediates, 0x1000);
+        let imm5_immediates = normalized_immediate_pool(&immediates, 32);
+
         Self {
             registers,
             immediates,
+            imm12_immediates,
+            imm5_immediates,
             weights,
         }
     }
@@ -195,14 +223,16 @@ impl Mutator {
                     0 => *rd = self.random_register(rng),
                     1 => *rn = self.random_register(rng),
                     // Add/Sub do not allow ROR in the shifted-register form.
-                    // Immediates must fit `is_encodable_aarch64`'s 12-bit
-                    // range (issue #87).
+                    // Immediate proposals draw from the deduplicated imm12
+                    // pool so congruent configured immediates do not carry
+                    // extra proposal weight.
                     _ => {
-                        *rm = Self::clamp_imm12(self.random_operand_3op(
+                        *rm = self.random_operand_3op_from_pool(
                             rng,
                             false,
                             RegisterWidth::X64,
-                        ));
+                            &self.imm12_immediates,
+                        );
                     }
                 }
             }
@@ -215,11 +245,12 @@ impl Mutator {
                     // Keep the same proposal heat as X-form Add/Sub while
                     // using a W-safe amount pool.
                     _ => {
-                        *rm = Self::clamp_imm12(self.random_operand_3op(
+                        *rm = self.random_operand_3op_from_pool(
                             rng,
                             false,
                             RegisterWidth::W32,
-                        ));
+                            &self.imm12_immediates,
+                        );
                     }
                 }
             }
@@ -280,9 +311,12 @@ impl Mutator {
                 if rng.random_bool(0.5) {
                     *rn = self.random_register(rng);
                 } else {
-                    // Same 12-bit clamp as Add/Sub (issue #87).
-                    *rm =
-                        Self::clamp_imm12(self.random_operand_3op(rng, false, RegisterWidth::X64));
+                    *rm = self.random_operand_3op_from_pool(
+                        rng,
+                        false,
+                        RegisterWidth::X64,
+                        &self.imm12_immediates,
+                    );
                 }
             }
             Instruction::Tst { rn, rm, width } => {
@@ -294,18 +328,15 @@ impl Mutator {
             }
             // CCMP / CCMN: rn (register), rm (operand), nzcv (0..=15), cond.
             // Uniform pick among the four mutable fields. Immediate `rm`
-            // operands are clamped to imm5 via rem_euclid(32) to match the
-            // candidate generator (candidate.rs::generate_random_instruction)
-            // and avoid avoidable is_encodable_aarch64 rejection churn.
-            // (See `clamp_imm12` for the 12-bit analogue used by
-            // ADD/SUB/ADDS/SUBS/CMP/CMN, issue #87.)
+            // operands draw from a deduplicated imm5 pool so configured
+            // immediates congruent modulo 32 do not become overweighted.
             Instruction::Ccmp { rn, rm, nzcv, cond } | Instruction::Ccmn { rn, rm, nzcv, cond } => {
                 match rng.random_range(0..4) {
                     0 => *rn = self.random_register(rng),
                     1 => {
-                        *rm = match self.random_operand(rng) {
+                        *rm = match self.random_operand_from_pool(rng, &self.imm5_immediates) {
                             Operand::Register(r) => Operand::Register(r),
-                            Operand::Immediate(v) => Operand::Immediate(v.rem_euclid(32)),
+                            Operand::Immediate(v) => Operand::Immediate(v),
                             // CCMP/CCMN reject shifted-register or extended-
                             // register operands; collapse to a plain register
                             // (consistent with candidate::generate_random_-
@@ -391,8 +422,7 @@ impl Mutator {
                 match choice {
                     0 => *rd = self.random_register(rng),
                     1 => *rn = self.random_register(rng),
-                    // Same 12-bit clamp as Add/Sub (issue #87).
-                    _ => *rm = Self::clamp_imm12(self.random_operand(rng)),
+                    _ => *rm = self.random_operand_from_pool(rng, &self.imm12_immediates),
                 }
             }
             // ADC/ADCS/SBC/SBCS are register-only (rd, rn, rm all registers).
@@ -535,11 +565,12 @@ impl Mutator {
                     Instruction::AddW {
                         rd,
                         rn,
-                        rm: Self::clamp_imm12(self.random_operand_3op(
+                        rm: self.random_operand_3op_from_pool(
                             rng,
                             false,
                             RegisterWidth::W32,
-                        )),
+                            &self.imm12_immediates,
+                        ),
                     }
                 } else {
                     Instruction::MovRegW { rd, rn }
@@ -1246,11 +1277,24 @@ impl Mutator {
         }
     }
 
+    fn random_immediate_from_pool<R: RngExt>(&self, rng: &mut R, pool: &[i64]) -> i64 {
+        debug_assert!(!pool.is_empty(), "immediate pool must be non-empty");
+        pool[rng.random_range(0..pool.len())]
+    }
+
+    fn random_operand_from_pool<R: RngExt>(&self, rng: &mut R, pool: &[i64]) -> Operand {
+        if rng.random_bool(0.5) && !self.registers.is_empty() {
+            Operand::Register(self.random_register(rng))
+        } else {
+            Operand::Immediate(self.random_immediate_from_pool(rng, pool))
+        }
+    }
+
     /// Issue #87. ADD/SUB/ADDS/SUBS/CMP/CMN immediates must fit the 12-bit
     /// unsigned range `0..=0xFFF` (see `Instruction::is_encodable_aarch64`).
-    /// Mirrors the CCMP/CCMN clamp at L240-258 — the operand is only
-    /// rewritten when it's an `Immediate`; register/shifted forms pass
-    /// through unchanged.
+    /// This wraps an existing operand when bridging opcode families; fresh
+    /// arithmetic-immediate proposals use `imm12_immediates` instead so raw
+    /// configured immediates that share a residue do not become overweighted.
     fn clamp_imm12(operand: Operand) -> Operand {
         match operand {
             Operand::Immediate(v) => Operand::Immediate(v.rem_euclid(0x1000)),
@@ -1282,6 +1326,25 @@ impl Mutator {
             self.random_extended_register(rng)
         } else {
             self.random_operand(rng)
+        }
+    }
+
+    fn random_operand_3op_from_pool<R: RngExt>(
+        &self,
+        rng: &mut R,
+        allow_ror: bool,
+        width: RegisterWidth,
+        immediate_pool: &[i64],
+    ) -> Operand {
+        let choice: f64 = rng.random();
+        if choice < SHIFTED_REGISTER_OPERAND_PROBABILITY && !self.registers.is_empty() {
+            self.random_shifted_register(rng, allow_ror, width)
+        } else if choice < SHIFTED_REGISTER_OPERAND_PROBABILITY + EXTENDED_REGISTER_OPERAND_DELTA
+            && self.has_extended_register_source()
+        {
+            self.random_extended_register(rng)
+        } else {
+            self.random_operand_from_pool(rng, immediate_pool)
         }
     }
 
@@ -1472,6 +1535,7 @@ pub fn mutate_opcode_in_place<R: RngExt>(rng: &mut R, instr: &mut Instruction) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::search::config::SearchConfig;
     use proptest::prelude::*;
     use rand::SeedableRng;
     use rand::rngs::StdRng;
@@ -1484,6 +1548,32 @@ mod tests {
             vec![-1, 0, 1, 2],
             MutationWeights::default(),
         )
+    }
+
+    #[test]
+    fn normalized_immediate_pool_keeps_unique_residues_in_first_seen_order() {
+        assert_eq!(
+            normalized_immediate_pool(&[0x1000, 0x2000, 0x3000, 5, 0x1005], 0x1000),
+            vec![0, 5]
+        );
+        assert_eq!(normalized_immediate_pool(&[], 32), vec![0]);
+    }
+
+    #[test]
+    fn mutator_stores_per_opcode_class_immediate_pools() {
+        let config = SearchConfig::default();
+        let mutator = Mutator::new(
+            config.available_registers,
+            config.available_immediates,
+            MutationWeights::default(),
+        );
+
+        assert_eq!(mutator.immediates.len(), 20);
+        assert_eq!(mutator.imm12_immediates, mutator.immediates);
+        assert_eq!(
+            mutator.imm5_immediates,
+            vec![0, 1, 2, 3, 4, 5, 7, 8, 10, 15, 16, 31]
+        );
     }
 
     fn logical_immediate_instrs(imm: i64, width: RegisterWidth) -> [Instruction; 5] {
@@ -3192,6 +3282,95 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn arithmetic_operand_mutation_samples_unique_imm12_residues() {
+        let regs = vec![Register::X0, Register::X1, Register::X2];
+        let imms = vec![0x1000, 0x2000, 0x3000, 5];
+        let mutator = Mutator::new(regs, imms, MutationWeights::default());
+        let mut rng = StdRng::seed_from_u64(0x2760);
+        let mut counts = BTreeMap::new();
+
+        for _ in 0..50_000 {
+            let mut seq = vec![Instruction::Add {
+                rd: Register::X0,
+                rn: Register::X1,
+                rm: Operand::Register(Register::X2),
+            }];
+            mutator.mutate_operand(&mut rng, &mut seq);
+            assert!(seq[0].is_encodable_aarch64());
+
+            if let Instruction::Add {
+                rm: Operand::Immediate(imm),
+                ..
+            } = seq[0]
+            {
+                *counts.entry(imm).or_insert(0usize) += 1;
+            }
+        }
+
+        assert_eq!(
+            counts.keys().copied().collect::<Vec<_>>(),
+            vec![0, 5],
+            "ADD should only sample unique imm12 residues"
+        );
+        let zero = counts[&0];
+        let five = counts[&5];
+        let samples = zero + five;
+        assert!(
+            samples > 1_000,
+            "seeded run should observe enough immediate proposals, saw {samples}"
+        );
+        assert!(
+            zero.abs_diff(five) * 5 <= samples,
+            "deduplicated residues should be sampled with similar probability: {counts:?}"
+        );
+    }
+
+    #[test]
+    fn conditional_compare_operand_mutation_samples_unique_imm5_residues() {
+        let regs = vec![Register::X0, Register::X1, Register::X2];
+        let imms = vec![0, 32, 64, 31];
+        let mutator = Mutator::new(regs, imms, MutationWeights::default());
+        let mut rng = StdRng::seed_from_u64(0x2761);
+        let mut counts = BTreeMap::new();
+
+        for _ in 0..50_000 {
+            let mut seq = vec![Instruction::Ccmp {
+                rn: Register::X1,
+                rm: Operand::Register(Register::X2),
+                nzcv: 0,
+                cond: Condition::EQ,
+            }];
+            mutator.mutate_operand(&mut rng, &mut seq);
+            assert!(seq[0].is_encodable_aarch64());
+
+            if let Instruction::Ccmp {
+                rm: Operand::Immediate(imm),
+                ..
+            } = seq[0]
+            {
+                *counts.entry(imm).or_insert(0usize) += 1;
+            }
+        }
+
+        assert_eq!(
+            counts.keys().copied().collect::<Vec<_>>(),
+            vec![0, 31],
+            "CCMP should only sample unique imm5 residues"
+        );
+        let zero = counts[&0];
+        let thirty_one = counts[&31];
+        let samples = zero + thirty_one;
+        assert!(
+            samples > 1_000,
+            "seeded run should observe enough immediate proposals, saw {samples}"
+        );
+        assert!(
+            zero.abs_diff(thirty_one) * 5 <= samples,
+            "deduplicated residues should be sampled with similar probability: {counts:?}"
+        );
     }
 
     #[test]
