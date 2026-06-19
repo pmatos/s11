@@ -483,8 +483,8 @@ pub fn compute_flags_add(lhs: &BV, rhs: &BV, width: u32) -> Nzcv {
 pub fn compute_flags_adc(lhs: &BV, rhs: &BV, carry: &BV, width: u32) -> Nzcv {
     let sum = lhs
         .zero_ext(1)
-        .bvadd(&rhs.zero_ext(1))
-        .bvadd(&carry.zero_ext(width));
+        .bvadd(rhs.zero_ext(1))
+        .bvadd(carry.zero_ext(width));
     let result = sum.extract(width - 1, 0);
     let zero = BV::from_u64(0, width);
     let msb = width - 1;
@@ -494,7 +494,7 @@ pub fn compute_flags_adc(lhs: &BV, rhs: &BV, carry: &BV, width: u32) -> Nzcv {
     let lhs_sign = lhs.extract(msb, msb);
     let rhs_sign = rhs.extract(msb, msb);
     let res_sign = result.extract(msb, msb);
-    let signs_match = lhs_sign.bvxor(&rhs_sign).bvxor(&bv_one());
+    let signs_match = lhs_sign.bvxor(&rhs_sign).bvxor(bv_one());
     let signs_flip = lhs_sign.bvxor(&res_sign);
     let v = signs_match.bvand(&signs_flip);
     (n, z, c, v)
@@ -887,14 +887,14 @@ pub fn apply_instruction(mut state: MachineState, instruction: &Instruction) -> 
             let lhs = state.get_register(*rn).clone();
             let rhs = state.get_register(*rm).clone();
             let carry = state.get_flags().2.clone();
-            state.set_register(*rd, lhs.bvadd(&rhs).bvadd(&carry.zero_ext(width - 1)));
+            state.set_register(*rd, lhs.bvadd(&rhs).bvadd(carry.zero_ext(width - 1)));
         }
         Instruction::Adcs { rd, rn, rm } => {
             let lhs = state.get_register(*rn).clone();
             let rhs = state.get_register(*rm).clone();
             let carry = state.get_flags().2.clone();
             let (n, z, c, v) = compute_flags_adc(&lhs, &rhs, &carry, width);
-            state.set_register(*rd, lhs.bvadd(&rhs).bvadd(&carry.zero_ext(width - 1)));
+            state.set_register(*rd, lhs.bvadd(&rhs).bvadd(carry.zero_ext(width - 1)));
             state.set_flags(n, z, c, v);
         }
         // Subtract with carry: rd = rn + NOT(rm) + C.
@@ -902,20 +902,14 @@ pub fn apply_instruction(mut state: MachineState, instruction: &Instruction) -> 
             let lhs = state.get_register(*rn).clone();
             let rhs = state.get_register(*rm).clone();
             let carry = state.get_flags().2.clone();
-            state.set_register(
-                *rd,
-                lhs.bvadd(&rhs.bvnot()).bvadd(&carry.zero_ext(width - 1)),
-            );
+            state.set_register(*rd, lhs.bvadd(rhs.bvnot()).bvadd(carry.zero_ext(width - 1)));
         }
         Instruction::Sbcs { rd, rn, rm } => {
             let lhs = state.get_register(*rn).clone();
             let rhs = state.get_register(*rm).clone();
             let carry = state.get_flags().2.clone();
             let (n, z, c, v) = compute_flags_sbc(&lhs, &rhs, &carry, width);
-            state.set_register(
-                *rd,
-                lhs.bvadd(&rhs.bvnot()).bvadd(&carry.zero_ext(width - 1)),
-            );
+            state.set_register(*rd, lhs.bvadd(rhs.bvnot()).bvadd(carry.zero_ext(width - 1)));
             state.set_flags(n, z, c, v);
         }
         Instruction::Ands {
