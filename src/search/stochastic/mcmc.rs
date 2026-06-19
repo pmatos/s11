@@ -31,7 +31,7 @@ use rand::{RngExt, SeedableRng};
 use rand_chacha::ChaCha8Rng;
 use std::marker::PhantomData;
 use std::sync::atomic::Ordering;
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 /// Stochastic search using MCMC-style proposals and Metropolis cost
 /// acceptance, generic over ISA.
@@ -159,10 +159,7 @@ where
         // tail, so length-change proposals only vary the prefix length.
         let min_length = 1 + terminator_len;
         let max_length = target.len();
-        let smt_timeout = config
-            .symbolic
-            .solver_timeout
-            .unwrap_or(Duration::from_secs(5));
+        let smt_timeout = config.symbolic.effective_solver_timeout();
 
         for iteration in 0..config.stochastic.iterations {
             self.statistics.iterations = iteration + 1;
@@ -339,6 +336,7 @@ mod tests {
     use crate::search::config::{StochasticConfig, SymbolicConfig};
     use crate::semantics::cost::CostMetric;
     use crate::semantics::live_out::LiveOut;
+    use std::time::Duration;
 
     fn mov_add_sequence() -> Vec<Instruction> {
         vec![
@@ -632,7 +630,7 @@ mod tests {
     }
 
     #[test]
-    fn stochastic_search_falls_back_to_five_seconds_when_solver_timeout_unset() {
+    fn stochastic_search_falls_back_to_symbolic_default_when_solver_timeout_unset() {
         let symbolic_config = SymbolicConfig {
             solver_timeout: None,
             ..SymbolicConfig::default()
@@ -640,7 +638,7 @@ mod tests {
 
         let recorded_timeout = run_timeout_probe_search(symbolic_config);
 
-        assert_eq!(recorded_timeout, Some(5000));
+        assert_eq!(recorded_timeout, Some(30000));
     }
 
     #[test]

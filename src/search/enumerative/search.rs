@@ -402,10 +402,7 @@ where
 }
 
 fn configured_solver_timeout(config: &SearchConfig) -> Duration {
-    config
-        .symbolic
-        .solver_timeout
-        .unwrap_or(Duration::from_secs(5))
+    config.symbolic.effective_solver_timeout()
 }
 
 fn candidate_solver_timeout_for_elapsed(
@@ -1454,7 +1451,7 @@ mod tests {
                 &no_search_timeout,
                 std::time::Duration::from_secs(999)
             ),
-            Some(std::time::Duration::from_secs(5))
+            Some(std::time::Duration::from_secs(30))
         );
     }
 
