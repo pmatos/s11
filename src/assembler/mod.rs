@@ -121,6 +121,33 @@ macro_rules! emit_shifted_reg_3op_logical {
     }};
 }
 
+macro_rules! emit_shifted_reg_3op_logical_w {
+    ($ops:expr, $mnem:ident, $rd:expr, $rn:expr, $rm:expr, $kind:expr, $amt:expr) => {{
+        let rd_n: u8 = $rd;
+        let rn_n: u8 = $rn;
+        let rm_n: u8 = $rm;
+        let amt_n: u32 = ($amt) as u32;
+        match $kind {
+            ShiftKind::Lsl => {
+                dynasm!($ops ; .arch aarch64 ; $mnem W(rd_n), W(rn_n), W(rm_n), LSL amt_n);
+                Ok(())
+            }
+            ShiftKind::Lsr => {
+                dynasm!($ops ; .arch aarch64 ; $mnem W(rd_n), W(rn_n), W(rm_n), LSR amt_n);
+                Ok(())
+            }
+            ShiftKind::Asr => {
+                dynasm!($ops ; .arch aarch64 ; $mnem W(rd_n), W(rn_n), W(rm_n), ASR amt_n);
+                Ok(())
+            }
+            ShiftKind::Ror => {
+                dynasm!($ops ; .arch aarch64 ; $mnem W(rd_n), W(rn_n), W(rm_n), ROR amt_n);
+                Ok(())
+            }
+        }
+    }};
+}
+
 /// 2-operand arithmetic shifted-register form (Cmp/Cmn) — no ROR.
 macro_rules! emit_shifted_reg_2op_arith {
     ($ops:expr, $mnem:ident, $rn:expr, $rm:expr, $kind:expr, $amt:expr) => {{
@@ -897,15 +924,22 @@ impl AArch64Assembler {
 
                 match rm {
                     Operand::Register(rm_reg) => {
-                        if *width != RegisterWidth::X64 {
-                            return Err("AND with W registers supports immediate operands only; register and shifted-register forms require X registers".to_string());
-                        }
                         let rd_reg = register_to_dynasm(*rd)?;
                         let rm_reg_num = register_to_dynasm(*rm_reg)?;
-                        dynasm!(ops
-                            ; .arch aarch64
-                            ; and X(rd_reg), X(rn_reg), X(rm_reg_num)
-                        );
+                        match width {
+                            RegisterWidth::X64 => {
+                                dynasm!(ops
+                                    ; .arch aarch64
+                                    ; and X(rd_reg), X(rn_reg), X(rm_reg_num)
+                                );
+                            }
+                            RegisterWidth::W32 => {
+                                dynasm!(ops
+                                    ; .arch aarch64
+                                    ; and W(rd_reg), W(rn_reg), W(rm_reg_num)
+                                );
+                            }
+                        }
                         Ok(())
                     }
                     Operand::Immediate(imm) => {
@@ -937,14 +971,16 @@ impl AArch64Assembler {
                         Ok(())
                     }
                     Operand::ShiftedRegister { reg, kind, amount } => {
-                        if *width != RegisterWidth::X64 {
-                            return Err("AND with W registers supports immediate operands only; register and shifted-register forms require X registers".to_string());
-                        }
                         let rd_reg = register_to_dynasm(*rd)?;
                         let rm_reg_num = register_to_dynasm(*reg)?;
-                        emit_shifted_reg_3op_logical!(
-                            ops, and, rd_reg, rn_reg, rm_reg_num, kind, *amount
-                        )
+                        match width {
+                            RegisterWidth::X64 => emit_shifted_reg_3op_logical!(
+                                ops, and, rd_reg, rn_reg, rm_reg_num, kind, *amount
+                            ),
+                            RegisterWidth::W32 => emit_shifted_reg_3op_logical_w!(
+                                ops, and, rd_reg, rn_reg, rm_reg_num, kind, *amount
+                            ),
+                        }
                     }
                     Operand::ExtendedRegister { .. } => {
                         Err("ExtendedRegister encoding not yet implemented".to_string())
@@ -956,15 +992,22 @@ impl AArch64Assembler {
 
                 match rm {
                     Operand::Register(rm_reg) => {
-                        if *width != RegisterWidth::X64 {
-                            return Err("ORR with W registers supports immediate operands only; register and shifted-register forms require X registers".to_string());
-                        }
                         let rd_reg = register_to_dynasm(*rd)?;
                         let rm_reg_num = register_to_dynasm(*rm_reg)?;
-                        dynasm!(ops
-                            ; .arch aarch64
-                            ; orr X(rd_reg), X(rn_reg), X(rm_reg_num)
-                        );
+                        match width {
+                            RegisterWidth::X64 => {
+                                dynasm!(ops
+                                    ; .arch aarch64
+                                    ; orr X(rd_reg), X(rn_reg), X(rm_reg_num)
+                                );
+                            }
+                            RegisterWidth::W32 => {
+                                dynasm!(ops
+                                    ; .arch aarch64
+                                    ; orr W(rd_reg), W(rn_reg), W(rm_reg_num)
+                                );
+                            }
+                        }
                         Ok(())
                     }
                     Operand::Immediate(imm) => {
@@ -995,14 +1038,16 @@ impl AArch64Assembler {
                         Ok(())
                     }
                     Operand::ShiftedRegister { reg, kind, amount } => {
-                        if *width != RegisterWidth::X64 {
-                            return Err("ORR with W registers supports immediate operands only; register and shifted-register forms require X registers".to_string());
-                        }
                         let rd_reg = register_to_dynasm(*rd)?;
                         let rm_reg_num = register_to_dynasm(*reg)?;
-                        emit_shifted_reg_3op_logical!(
-                            ops, orr, rd_reg, rn_reg, rm_reg_num, kind, *amount
-                        )
+                        match width {
+                            RegisterWidth::X64 => emit_shifted_reg_3op_logical!(
+                                ops, orr, rd_reg, rn_reg, rm_reg_num, kind, *amount
+                            ),
+                            RegisterWidth::W32 => emit_shifted_reg_3op_logical_w!(
+                                ops, orr, rd_reg, rn_reg, rm_reg_num, kind, *amount
+                            ),
+                        }
                     }
                     Operand::ExtendedRegister { .. } => {
                         Err("ExtendedRegister encoding not yet implemented".to_string())
@@ -1014,15 +1059,22 @@ impl AArch64Assembler {
 
                 match rm {
                     Operand::Register(rm_reg) => {
-                        if *width != RegisterWidth::X64 {
-                            return Err("EOR with W registers supports immediate operands only; register and shifted-register forms require X registers".to_string());
-                        }
                         let rd_reg = register_to_dynasm(*rd)?;
                         let rm_reg_num = register_to_dynasm(*rm_reg)?;
-                        dynasm!(ops
-                            ; .arch aarch64
-                            ; eor X(rd_reg), X(rn_reg), X(rm_reg_num)
-                        );
+                        match width {
+                            RegisterWidth::X64 => {
+                                dynasm!(ops
+                                    ; .arch aarch64
+                                    ; eor X(rd_reg), X(rn_reg), X(rm_reg_num)
+                                );
+                            }
+                            RegisterWidth::W32 => {
+                                dynasm!(ops
+                                    ; .arch aarch64
+                                    ; eor W(rd_reg), W(rn_reg), W(rm_reg_num)
+                                );
+                            }
+                        }
                         Ok(())
                     }
                     Operand::Immediate(imm) => {
@@ -1053,14 +1105,16 @@ impl AArch64Assembler {
                         Ok(())
                     }
                     Operand::ShiftedRegister { reg, kind, amount } => {
-                        if *width != RegisterWidth::X64 {
-                            return Err("EOR with W registers supports immediate operands only; register and shifted-register forms require X registers".to_string());
-                        }
                         let rd_reg = register_to_dynasm(*rd)?;
                         let rm_reg_num = register_to_dynasm(*reg)?;
-                        emit_shifted_reg_3op_logical!(
-                            ops, eor, rd_reg, rn_reg, rm_reg_num, kind, *amount
-                        )
+                        match width {
+                            RegisterWidth::X64 => emit_shifted_reg_3op_logical!(
+                                ops, eor, rd_reg, rn_reg, rm_reg_num, kind, *amount
+                            ),
+                            RegisterWidth::W32 => emit_shifted_reg_3op_logical_w!(
+                                ops, eor, rd_reg, rn_reg, rm_reg_num, kind, *amount
+                            ),
+                        }
                     }
                     Operand::ExtendedRegister { .. } => {
                         Err("ExtendedRegister encoding not yet implemented".to_string())
@@ -2818,6 +2872,58 @@ mod tests {
             let bytes = assembler
                 .assemble_instructions(&[instr], 0)
                 .expect("W32 logical immediate should encode");
+            disassemble_and_verify(&bytes, mnemonic, &operands);
+        }
+    }
+
+    #[test]
+    fn test_w32_logical_register_and_shifted_register_roundtrip() {
+        let cases: Vec<(Instruction, &str, Vec<&str>)> = vec![
+            (
+                Instruction::And {
+                    rd: Register::X0,
+                    rn: Register::X1,
+                    rm: Operand::Register(Register::X2),
+                    width: RegisterWidth::W32,
+                },
+                "and",
+                vec!["w0", "w1", "w2"],
+            ),
+            (
+                Instruction::Orr {
+                    rd: Register::X3,
+                    rn: Register::X4,
+                    rm: Operand::ShiftedRegister {
+                        reg: Register::X5,
+                        kind: ShiftKind::Lsl,
+                        amount: 31,
+                    },
+                    width: RegisterWidth::W32,
+                },
+                "orr",
+                vec!["w3", "w4", "w5", "lsl #31"],
+            ),
+            (
+                Instruction::Eor {
+                    rd: Register::X6,
+                    rn: Register::X7,
+                    rm: Operand::ShiftedRegister {
+                        reg: Register::X8,
+                        kind: ShiftKind::Ror,
+                        amount: 7,
+                    },
+                    width: RegisterWidth::W32,
+                },
+                "eor",
+                vec!["w6", "w7", "w8", "ror #7"],
+            ),
+        ];
+
+        for (instr, mnemonic, operands) in cases {
+            let mut assembler = AArch64Assembler::new();
+            let bytes = assembler
+                .assemble_instructions(&[instr], 0)
+                .expect("W32 logical register or shifted-register form should encode");
             disassemble_and_verify(&bytes, mnemonic, &operands);
         }
     }
