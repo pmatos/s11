@@ -901,6 +901,10 @@ impl X86Mutator {
         // #593 behaviour change is *which* prefiltered pool the single imm
         // draw indexes: opcode 1 (MOV) uses the MOVABS-capable `mov`
         // pool, every other imm form uses the non-MOV pool.
+        // CMOV with rd == rs is a no-op, so the trailing CMOV opcode slot is
+        // only offered when the pool holds a distinct pair. This MUST mirror
+        // `generate_random_rewritable_x86_instruction` so the two stay in
+        // lock-step (stream parity) while both filter self-CMOV.
         let opcode_count = if has_distinct_register_pair(&self.registers) {
             X86_REWRITABLE_OPCODE_COUNT
         } else {
