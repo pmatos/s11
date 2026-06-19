@@ -207,6 +207,7 @@ fn test_disasm_arch_mismatch_rejected_before_disassembly() {
     let output = Command::new(binary)
         .arg("disasm")
         .arg("--arch")
+        // simple_debug is AArch64; passing x86-64 forces a mismatch.
         .arg("x86-64")
         .arg(&test_elf)
         .output()
@@ -219,7 +220,9 @@ fn test_disasm_arch_mismatch_rejected_before_disassembly() {
 
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
-        stderr.trim_start().starts_with("Architecture mismatch:"),
+        stderr
+            .trim_start()
+            .starts_with("Architecture mismatch: --arch x86-64 but ELF reports aarch64"),
         "Should reject mismatched architecture without starting disassembly, stderr: {stderr}"
     );
     assert!(
@@ -232,7 +235,7 @@ fn test_disasm_arch_mismatch_rejected_before_disassembly() {
     );
     assert!(
         !stderr.contains("X86_64") && !stderr.contains("Aarch64"),
-        "Should not print Rust variant names, stderr: {stderr}"
+        "Should report CLI architecture names, stderr: {stderr}"
     );
 
     let stdout = String::from_utf8_lossy(&output.stdout);

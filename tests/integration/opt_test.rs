@@ -2,6 +2,9 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+use capstone::prelude::*;
+use s11::parser::{LineResult, parse_line};
+
 fn check_test_binary(path: &PathBuf) {
     if !path.exists() {
         panic!(
@@ -58,6 +61,75 @@ fn find_encoding_masked(elf_path: &Path, expected: &[u8; 4], mask: &[u8; 4], lab
     );
 }
 
+fn find_supported_aarch64_instruction_window(
+    elf_path: &Path,
+    instruction_count: usize,
+) -> (u64, u64) {
+    assert!(
+        instruction_count > 0,
+        "instruction window must contain at least one instruction"
+    );
+
+    let data = std::fs::read(elf_path).expect("read ELF for supported-window scan");
+    let elf = elf::ElfBytes::<elf::endian::AnyEndian>::minimal_parse(&data)
+        .expect("parse ELF for supported-window scan");
+    let section_headers = elf.section_headers().expect("ELF section headers");
+    let cs = Capstone::new()
+        .arm64()
+        .mode(capstone::arch::arm64::ArchMode::Arm)
+        .build()
+        .expect("create AArch64 Capstone disassembler");
+
+    for section in section_headers.iter() {
+        if section.sh_flags & elf::abi::SHF_EXECINSTR as u64 == 0 {
+            continue;
+        }
+
+        let file_start = section.sh_offset as usize;
+        let size = section.sh_size as usize;
+        if size < instruction_count * 4 {
+            continue;
+        }
+        let bytes = &data[file_start..file_start + size];
+        let instructions = cs
+            .disasm_all(bytes, section.sh_addr)
+            .expect("disassemble executable section for supported-window scan");
+        let instructions: Vec<_> = instructions.iter().collect();
+
+        for window in instructions.windows(instruction_count) {
+            let first = window[0].address();
+            let mut next_address = first;
+            let supported_straight_line = window.iter().all(|instruction| {
+                if instruction.address() != next_address || instruction.bytes().len() != 4 {
+                    return false;
+                }
+                next_address += 4;
+
+                let mnemonic = instruction.mnemonic().unwrap_or("");
+                let op_str = instruction.op_str().unwrap_or("");
+                let line = if op_str.trim().is_empty() {
+                    mnemonic.to_string()
+                } else {
+                    format!("{mnemonic} {}", op_str.trim())
+                };
+
+                match parse_line(&line) {
+                    Ok(LineResult::Instruction(instruction)) => !instruction.is_terminator(),
+                    Ok(LineResult::Skip) | Err(_) => false,
+                }
+            });
+
+            if supported_straight_line {
+                return (first, first + instruction_count as u64 * 4);
+            }
+        }
+    }
+
+    panic!(
+        "no supported {instruction_count}-instruction AArch64 window found in any executable section of {elf_path:?}"
+    );
+}
+
 fn executable_window(path: &Path, width: u64) -> (u64, u64) {
     let data = std::fs::read(path).expect("read test ELF");
     let elf =
@@ -98,9 +170,16 @@ fn assert_opt_arch_mismatch_rejected(test_elf: &Path, arch: &str, detected_arch:
     );
 
     let stderr = String::from_utf8_lossy(&output.stderr);
+    let expected_message =
+        format!("Architecture mismatch: --arch {arch} but ELF reports {detected_arch}");
     assert!(
-        stderr.contains("Architecture mismatch"),
-        "Should reject before optimization, stderr: {}",
+        stderr.trim_start().starts_with(&expected_message),
+        "Should reject before optimization with CLI architecture names, stderr: {}",
+        stderr
+    );
+    assert!(
+        !stderr.contains("Aarch64") && !stderr.contains("X86_64") && !stderr.contains("X86_32"),
+        "Should not report Rust architecture variant names, stderr: {}",
         stderr
     );
     assert!(
@@ -136,23 +215,21 @@ fn test_opt_basic_functionality() {
 
     check_test_binary(&test_elf);
 
-    // executable_window starts at the first executable section, which is .init
-    // and begins with `paciasp` (an unsupported HINT); the AArch64 optimization
-    // path now correctly rejects that window. Scan instead for any PLT
-    // trampoline slot `add x16, x16, #N` — encoding constraints sf=1, sh=0,
-    // Rd=Rn=16, immediate N free. Mask leaves the 12 imm bits as wildcards
-    // so we match every build's GOT-offset variation.
-    let start_addr = find_encoding_masked(
-        &test_elf,
-        &[0x10, 0x02, 0x00, 0x91],
-        &[0xff, 0x03, 0xc0, 0xff],
-        "add x16, x16, #N (PLT trampoline)",
-    );
-    let end_addr = start_addr + 4;
+    // Avoid the unsupported .init PAC instruction while still exercising a
+    // parser-supported, straight-line multi-instruction optimization window.
+    let (start_addr, end_addr) = find_supported_aarch64_instruction_window(&test_elf, 4);
 
     let output = Command::new(binary)
         .arg("opt")
         .arg(&test_elf)
+        .arg("--algorithm")
+        .arg("stochastic")
+        .arg("--iterations")
+        .arg("64")
+        .arg("--seed")
+        .arg("0")
+        .arg("--timeout")
+        .arg("5")
         .arg("--start-addr")
         .arg(format!("0x{start_addr:x}"))
         .arg("--end-addr")
@@ -201,7 +278,19 @@ fn test_opt_basic_functionality() {
         stdout.contains("Disassembled"),
         "Should disassemble instructions"
     );
+    assert!(
+        stdout.contains("Disassembled 4 instructions"),
+        "Should disassemble a multi-instruction window; stdout: {stdout}"
+    );
     assert!(stdout.contains("Converted"), "Should convert to IR");
+    assert!(
+        stdout.contains("Converted 4 instructions"),
+        "Should convert a multi-instruction window to IR; stdout: {stdout}"
+    );
+    assert!(
+        stdout.contains("Running stochastic (MCMC) search"),
+        "Should run the bounded stochastic search path; stdout: {stdout}"
+    );
     assert!(
         stdout.contains("Reassembled"),
         "Should reassemble instructions"
@@ -467,21 +556,18 @@ fn test_opt_rejects_unsupported_instruction_window() {
 /// Helper for memory-op integration tests: assert that `s11 opt` on the
 /// given single-instruction window succeeds.
 ///
-/// Each test copies the source ELF to a unique tmp path
-/// (`std::env::temp_dir` joined with the supplied `fixture_tag`) so
-/// concurrent `cargo test` runs don't collide on the
-/// `<input>_optimized` artifact the binary always writes alongside its
-/// input. The artifact is cleaned up before the test returns.
-fn assert_opt_succeeds_on_window(source_elf: &Path, fixture_tag: &str, start_addr: u64) {
+/// Each test copies the source ELF to a unique tempdir so concurrent
+/// `cargo test` runs don't collide on the `<input>_optimized` artifact
+/// the binary always writes alongside its input. The tempdir is cleaned
+/// up automatically when the helper returns or panics.
+fn assert_opt_succeeds_on_window(source_elf: &Path, start_addr: u64) {
     let binary = get_binary_path();
     let end_addr = start_addr + 4;
 
-    let tmp_dir = std::env::temp_dir().join(format!("s11_opt_{fixture_tag}"));
-    let _ = fs::remove_dir_all(&tmp_dir);
-    fs::create_dir_all(&tmp_dir).expect("create temp fixture dir");
-    let test_elf = tmp_dir.join("loops_debug");
+    let tmp_dir = tempfile::tempdir().expect("create temp fixture dir");
+    let test_elf = tmp_dir.path().join("loops_debug");
     fs::copy(source_elf, &test_elf).expect("copy ELF fixture to tmp");
-    let optimized_path = tmp_dir.join("loops_debug_optimized");
+    let optimized_path = tmp_dir.path().join("loops_debug_optimized");
 
     let output = Command::new(&binary)
         .arg("opt")
@@ -494,7 +580,6 @@ fn assert_opt_succeeds_on_window(source_elf: &Path, fixture_tag: &str, start_add
         .expect("Failed to execute s11");
 
     if !output.status.success() {
-        let _ = fs::remove_dir_all(&tmp_dir);
         panic!(
             "opt failed on memory-op window 0x{start_addr:x}.\nstdout: {}\nstderr: {}",
             String::from_utf8_lossy(&output.stdout),
@@ -505,7 +590,6 @@ fn assert_opt_succeeds_on_window(source_elf: &Path, fixture_tag: &str, start_add
     let stdout = String::from_utf8_lossy(&output.stdout);
     let ok = stdout.contains("Optimization completed successfully");
     let optimized_exists = optimized_path.exists();
-    let _ = fs::remove_dir_all(&tmp_dir);
 
     assert!(
         ok,
@@ -533,7 +617,7 @@ fn test_opt_accepts_stp_writeback_window() {
         &[0xff, 0xff, 0xff, 0xff],
         "stp x29, x30, [sp, #-16]!",
     );
-    assert_opt_succeeds_on_window(&source_elf, "stp_writeback", start_addr);
+    assert_opt_succeeds_on_window(&source_elf, start_addr);
 }
 
 #[test]
@@ -551,7 +635,7 @@ fn test_opt_accepts_ldp_postindex_window() {
         &[0xff, 0xff, 0xff, 0xff],
         "ldp x29, x30, [sp], #16",
     );
-    assert_opt_succeeds_on_window(&source_elf, "ldp_postindex", start_addr);
+    assert_opt_succeeds_on_window(&source_elf, start_addr);
 }
 
 #[test]
@@ -573,7 +657,7 @@ fn test_opt_accepts_ldr_positive_offset_window() {
         &[0x00, 0x00, 0xc0, 0xff],
         "ldr xN, [xM{, #imm}]",
     );
-    assert_opt_succeeds_on_window(&source_elf, "ldr_offset", start_addr);
+    assert_opt_succeeds_on_window(&source_elf, start_addr);
 }
 
 #[test]
