@@ -1536,6 +1536,10 @@ mod tests {
                 "{name} should accept low registers with u32::MAX bit pattern"
             );
             assert!(
+                can_assemble(form(X86Register::RDX, 0)),
+                "{name} should accept another low register"
+            );
+            assert!(
                 !can_assemble(form(X86Register::RAX, i64::from(i32::MIN) - 1)),
                 "{name} should reject non-canonical values below signed imm32"
             );
