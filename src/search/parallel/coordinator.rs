@@ -288,18 +288,17 @@ fn run_coordinator(
     }
 }
 
-/// Single source of truth for which algorithm a worker runs.
+/// Map the config-owned worker placement to the algorithm a worker runs.
 ///
-/// Mirrors the contract encoded by [`ParallelConfig::num_stochastic_workers`]:
-/// a worker is symbolic only when `include_symbolic` is set, more than one
-/// worker is configured, and this is worker 0. With a single worker the lone
-/// worker is stochastic regardless of `include_symbolic`, so CLI knobs like
-/// `--beta`, `--iterations`, and `--seed` are not silently ignored.
+/// [`ParallelConfig::num_stochastic_workers`] defines the stochastic suffix
+/// length, and [`ParallelConfig::is_stochastic_worker`] owns worker-id
+/// placement. This function only maps that placement to the enum used by
+/// worker execution and statistics.
 fn worker_algorithm(worker_id: usize, parallel_config: &ParallelConfig) -> Algorithm {
-    if parallel_config.include_symbolic && parallel_config.num_workers > 1 && worker_id == 0 {
-        Algorithm::Symbolic
-    } else {
+    if parallel_config.is_stochastic_worker(worker_id) {
         Algorithm::Stochastic
+    } else {
+        Algorithm::Symbolic
     }
 }
 
@@ -457,10 +456,71 @@ mod tests {
         assert!(result.total_statistics.elapsed_time.as_nanos() > 0);
     }
 
-    // Issue #244 regression: hybrid dispatch must follow the contract pinned by
-    // ParallelConfig::num_stochastic_workers. Worker 0 is symbolic only when
-    // include_symbolic && num_workers > 1; otherwise the lone worker must run
+    // Issue #244 regression: hybrid dispatch must follow the config-owned
+    // stochastic suffix placement. With one worker, the lone worker must run
     // stochastic so the user's --beta/--iterations/--seed knobs take effect.
+
+    #[test]
+    fn test_worker_algorithm_matches_stochastic_worker_suffix_contract() {
+        let cases = [
+            (
+                ParallelConfig::default()
+                    .with_workers(1)
+                    .with_symbolic(true),
+                vec![Algorithm::Stochastic],
+            ),
+            (
+                ParallelConfig::default()
+                    .with_workers(2)
+                    .with_symbolic(true),
+                vec![Algorithm::Symbolic, Algorithm::Stochastic],
+            ),
+            (
+                ParallelConfig::default()
+                    .with_workers(4)
+                    .with_symbolic(true),
+                vec![
+                    Algorithm::Symbolic,
+                    Algorithm::Stochastic,
+                    Algorithm::Stochastic,
+                    Algorithm::Stochastic,
+                ],
+            ),
+            (
+                ParallelConfig::default()
+                    .with_workers(4)
+                    .with_symbolic(false),
+                vec![
+                    Algorithm::Stochastic,
+                    Algorithm::Stochastic,
+                    Algorithm::Stochastic,
+                    Algorithm::Stochastic,
+                ],
+            ),
+        ];
+
+        for (config, expected) in cases {
+            let actual: Vec<Algorithm> = (0..config.num_workers)
+                .map(|worker_id| worker_algorithm(worker_id, &config))
+                .collect();
+
+            assert_eq!(actual, expected);
+            assert_eq!(
+                actual
+                    .iter()
+                    .filter(|&&algorithm| algorithm == Algorithm::Stochastic)
+                    .count(),
+                config.num_stochastic_workers(),
+            );
+
+            for (worker_id, algorithm) in actual.iter().copied().enumerate() {
+                assert_eq!(
+                    algorithm == Algorithm::Stochastic,
+                    config.is_stochastic_worker(worker_id),
+                );
+            }
+        }
+    }
 
     #[test]
     fn test_two_workers_with_symbolic_reports_one_symbolic_one_stochastic() {
@@ -510,10 +570,10 @@ mod tests {
             .with_immediates(vec![0, 1, 2])
             .with_stochastic(StochasticConfig::default().with_iterations(200));
 
-        // include_symbolic = true but num_workers = 1: per the contract pinned
-        // by ParallelConfig::num_stochastic_workers, the lone worker must be
-        // stochastic. Before the fix, coordinator.rs dispatched worker 0 to
-        // SymbolicSearch and reported Stochastic anyway via a hardcoded label.
+        // include_symbolic = true but num_workers = 1: per the config-owned
+        // stochastic suffix placement, the lone worker must be stochastic.
+        // Before the fix, coordinator.rs dispatched worker 0 to SymbolicSearch
+        // and reported Stochastic anyway via a hardcoded label.
         let parallel_config = ParallelConfig::default()
             .with_workers(1)
             .with_symbolic(true)
