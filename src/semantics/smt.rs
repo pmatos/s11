@@ -1231,6 +1231,7 @@ pub fn apply_instruction(mut state: MachineState, instruction: &Instruction) -> 
             signed,
         } => {
             let (effective, writeback) = state.eval_address(addr);
+            let access_width = (*width).as_access_width();
             let bytes = width.bytes();
             let raw1 = state.select_n(&effective, bytes);
             let offset = BV::from_u64(bytes as u64, 64);
@@ -1238,13 +1239,13 @@ pub fn apply_instruction(mut state: MachineState, instruction: &Instruction) -> 
             let raw2 = state.select_n(&effective2, bytes);
             let (v1, v2) = if *signed {
                 (
-                    ldr_sign_extend(&raw1, *width, state.width),
-                    ldr_sign_extend(&raw2, *width, state.width),
+                    ldr_sign_extend(&raw1, access_width, state.width),
+                    ldr_sign_extend(&raw2, access_width, state.width),
                 )
             } else {
                 (
-                    ldr_zero_extend(&raw1, *width, state.width),
-                    ldr_zero_extend(&raw2, *width, state.width),
+                    ldr_zero_extend(&raw1, access_width, state.width),
+                    ldr_zero_extend(&raw2, access_width, state.width),
                 )
             };
             state.set_register(*rt1, v1);

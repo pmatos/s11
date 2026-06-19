@@ -2,8 +2,8 @@
 
 use crate::ir::aarch64_encoding::logical_imm64_encodable;
 use crate::ir::types::{
-    AccessWidth, AddressOperand, Condition, ExtendKind, IndexMode, LabelId, Operand, Register,
-    RegisterWidth, ShiftKind,
+    AccessWidth, AddressOperand, Condition, ExtendKind, IndexMode, LabelId, Operand,
+    PairAccessWidth, Register, RegisterWidth, ShiftKind,
 };
 use std::fmt;
 
@@ -566,7 +566,7 @@ pub enum Instruction {
         rt1: Register,
         rt2: Register,
         addr: AddressOperand,
-        width: AccessWidth,
+        width: PairAccessWidth,
         signed: bool,
     },
     /// STP — store a pair of registers. `rt1`/`rt2` are read; writeback
@@ -575,7 +575,7 @@ pub enum Instruction {
         rt1: Register,
         rt2: Register,
         addr: AddressOperand,
-        width: AccessWidth,
+        width: PairAccessWidth,
     },
 }
 
@@ -1475,7 +1475,7 @@ fn is_encodable_pair(
     rt1: Register,
     rt2: Register,
     addr: &AddressOperand,
-    width: AccessWidth,
+    width: PairAccessWidth,
     signed: bool,
 ) -> bool {
     if !is_plain_x(rt1) || !is_plain_x(rt2) {
@@ -1487,15 +1487,8 @@ fn is_encodable_pair(
     // LDP rejects rt1 == rt2 (UNPREDICTABLE per ARM ARM). STP allows it —
     // stores the same value twice — so this rule fires only for the
     // load-pair caller.
-    if signed && width != AccessWidth::Word {
+    if signed && width != PairAccessWidth::Word {
         // LDPSW is the only "signed pair" form; it is always 32→64.
-        return false;
-    }
-    // LDP/STP only have Word and Extended forms at the architecture level
-    // (no LDPB/LDPH/STPB/STPH). Byte/Half pair widths construct cleanly
-    // but the assembler errors at emit time — reject at the IR gate so
-    // parser and search candidates can't smuggle them through.
-    if !matches!(width, AccessWidth::Word | AccessWidth::Extended) {
         return false;
     }
     // LDP/STP have no register-offset / register-extend addressing form.
@@ -2184,7 +2177,7 @@ mod tests {
                 offset: 16,
                 mode: IndexMode::Offset,
             },
-            width: AccessWidth::Extended,
+            width: PairAccessWidth::Extended,
             signed: false,
         };
         assert_eq!(ldp.destinations(), vec![Register::X0, Register::X1]);
@@ -2200,7 +2193,7 @@ mod tests {
                 offset: -16,
                 mode: IndexMode::PreIndex,
             },
-            width: AccessWidth::Extended,
+            width: PairAccessWidth::Extended,
             signed: false,
         };
         assert_eq!(
@@ -2219,7 +2212,7 @@ mod tests {
                 offset: 0,
                 mode: IndexMode::Offset,
             },
-            width: AccessWidth::Word,
+            width: PairAccessWidth::Word,
             signed: true,
         };
         assert_eq!(format!("{}", ldp), "ldpsw x0, x1, [sp]");
@@ -2235,7 +2228,7 @@ mod tests {
                 offset: 16,
                 mode: IndexMode::Offset,
             },
-            width: AccessWidth::Extended,
+            width: PairAccessWidth::Extended,
             signed: false,
         };
         assert_eq!(format!("{}", ldp), "ldp x0, x1, [sp, #16]");
@@ -2387,35 +2380,13 @@ mod tests {
     }
 
     #[test]
-    fn pair_byte_width_rejected_at_encodability() {
-        // LDP/STP have no Byte form at the architecture level.
-        let stp_byte = Instruction::Stp {
-            rt1: Register::X0,
-            rt2: Register::X1,
-            addr: AddressOperand::Imm {
-                base: Register::X2,
-                offset: 0,
-                mode: IndexMode::Offset,
-            },
-            width: AccessWidth::Byte,
-        };
-        assert!(!stp_byte.is_encodable_aarch64());
+    fn pair_byte_width_rejected_at_construction_boundary() {
+        assert!(PairAccessWidth::try_from(AccessWidth::Byte).is_err());
     }
 
     #[test]
-    fn pair_half_width_rejected_at_encodability() {
-        let ldp_half = Instruction::Ldp {
-            rt1: Register::X0,
-            rt2: Register::X1,
-            addr: AddressOperand::Imm {
-                base: Register::X2,
-                offset: 0,
-                mode: IndexMode::Offset,
-            },
-            width: AccessWidth::Half,
-            signed: false,
-        };
-        assert!(!ldp_half.is_encodable_aarch64());
+    fn pair_half_width_rejected_at_construction_boundary() {
+        assert!(PairAccessWidth::try_from(AccessWidth::Half).is_err());
     }
 
     #[test]
@@ -2428,7 +2399,7 @@ mod tests {
                 idx: Register::X3,
                 shift: 0,
             },
-            width: AccessWidth::Extended,
+            width: PairAccessWidth::Extended,
             signed: false,
         };
         assert!(!ldp.is_encodable_aarch64());
@@ -2440,7 +2411,7 @@ mod tests {
                 idx: Register::X3,
                 shift: 3,
             },
-            width: AccessWidth::Word,
+            width: PairAccessWidth::Word,
         };
         assert!(!stp.is_encodable_aarch64());
     }
@@ -2457,7 +2428,7 @@ mod tests {
                 kind: ExtendKind::Uxtw,
                 shift: 0,
             },
-            width: AccessWidth::Extended,
+            width: PairAccessWidth::Extended,
             signed: false,
         };
         assert!(!ldp.is_encodable_aarch64());
@@ -2475,7 +2446,7 @@ mod tests {
                 offset: 512,
                 mode: IndexMode::Offset,
             },
-            width: AccessWidth::Extended,
+            width: PairAccessWidth::Extended,
             signed: false,
         };
         assert!(!ldp.is_encodable_aarch64());
@@ -2492,7 +2463,7 @@ mod tests {
                 offset: 12,
                 mode: IndexMode::Offset,
             },
-            width: AccessWidth::Extended,
+            width: PairAccessWidth::Extended,
             signed: false,
         };
         assert!(!ldp.is_encodable_aarch64());
@@ -2509,7 +2480,7 @@ mod tests {
                 offset: 504,
                 mode: IndexMode::Offset,
             },
-            width: AccessWidth::Extended,
+            width: PairAccessWidth::Extended,
             signed: false,
         };
         assert!(ldp.is_encodable_aarch64());
@@ -2525,7 +2496,7 @@ mod tests {
                 offset: 16,
                 mode: IndexMode::Offset,
             },
-            width: AccessWidth::Extended,
+            width: PairAccessWidth::Extended,
         };
         assert!(stp.destinations().is_empty());
     }
@@ -2540,7 +2511,7 @@ mod tests {
                 offset: -16,
                 mode: IndexMode::PreIndex,
             },
-            width: AccessWidth::Extended,
+            width: PairAccessWidth::Extended,
         };
         assert_eq!(stp.destinations(), vec![Register::SP]);
     }
@@ -2555,7 +2526,7 @@ mod tests {
                 offset: 0,
                 mode: IndexMode::Offset,
             },
-            width: AccessWidth::Extended,
+            width: PairAccessWidth::Extended,
         };
         let sources = stp.source_registers();
         assert!(sources.contains(&Register::X29));
@@ -2573,7 +2544,7 @@ mod tests {
                 offset: -16,
                 mode: IndexMode::PreIndex,
             },
-            width: AccessWidth::Extended,
+            width: PairAccessWidth::Extended,
         };
         assert_eq!(format!("{}", stp), "stp x29, x30, [sp, #-16]!");
     }
@@ -2791,7 +2762,7 @@ mod tests {
                 offset: 0,
                 mode: IndexMode::Offset,
             },
-            width: AccessWidth::Extended,
+            width: PairAccessWidth::Extended,
             signed: false,
         };
         assert!(!ldp.is_encodable_aarch64());
@@ -2808,7 +2779,7 @@ mod tests {
                 offset: 0,
                 mode: IndexMode::Offset,
             },
-            width: AccessWidth::Extended,
+            width: PairAccessWidth::Extended,
         };
         assert!(stp.is_encodable_aarch64());
     }
@@ -2823,7 +2794,7 @@ mod tests {
                 offset: -16,
                 mode: IndexMode::PreIndex,
             },
-            width: AccessWidth::Extended,
+            width: PairAccessWidth::Extended,
             signed: false,
         };
         assert!(!ldp.is_encodable_aarch64());
@@ -2839,7 +2810,7 @@ mod tests {
                 offset: 0,
                 mode: IndexMode::Offset,
             },
-            width: AccessWidth::Word,
+            width: PairAccessWidth::Word,
             signed: true,
         };
         assert!(ldpsw_word.is_encodable_aarch64());
@@ -2852,7 +2823,7 @@ mod tests {
                 offset: 0,
                 mode: IndexMode::Offset,
             },
-            width: AccessWidth::Extended,
+            width: PairAccessWidth::Extended,
             signed: true,
         };
         assert!(!ldpsw_extended.is_encodable_aarch64());
