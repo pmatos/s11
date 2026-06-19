@@ -74,13 +74,24 @@ impl ParallelConfig {
         self
     }
 
-    /// Get the number of stochastic workers (excludes symbolic worker if present).
+    /// Get the number of stochastic workers.
+    ///
+    /// Stochastic workers occupy the trailing worker-id suffix. Any symbolic
+    /// worker occupies the leading prefix.
     pub fn num_stochastic_workers(&self) -> usize {
         if self.include_symbolic && self.num_workers > 1 {
             self.num_workers - 1
         } else {
             self.num_workers
         }
+    }
+
+    /// Return whether the worker id belongs to the stochastic suffix.
+    pub(crate) fn is_stochastic_worker(&self, worker_id: usize) -> bool {
+        let first_stochastic_worker = self
+            .num_workers
+            .saturating_sub(self.num_stochastic_workers());
+        worker_id >= first_stochastic_worker
     }
 }
 
@@ -131,6 +142,51 @@ mod tests {
             .with_workers(1)
             .with_symbolic(true);
         assert_eq!(config.num_stochastic_workers(), 1);
+    }
+
+    #[test]
+    fn test_is_stochastic_worker() {
+        let cases = [
+            (
+                ParallelConfig::default()
+                    .with_workers(1)
+                    .with_symbolic(true),
+                vec![true],
+            ),
+            (
+                ParallelConfig::default()
+                    .with_workers(2)
+                    .with_symbolic(true),
+                vec![false, true],
+            ),
+            (
+                ParallelConfig::default()
+                    .with_workers(4)
+                    .with_symbolic(true),
+                vec![false, true, true, true],
+            ),
+            (
+                ParallelConfig::default()
+                    .with_workers(4)
+                    .with_symbolic(false),
+                vec![true, true, true, true],
+            ),
+        ];
+
+        for (config, expected) in cases {
+            let actual: Vec<bool> = (0..config.num_workers)
+                .map(|worker_id| config.is_stochastic_worker(worker_id))
+                .collect();
+
+            assert_eq!(actual, expected);
+            assert_eq!(
+                actual
+                    .iter()
+                    .filter(|&&is_stochastic| is_stochastic)
+                    .count(),
+                config.num_stochastic_workers(),
+            );
+        }
     }
 
     #[test]

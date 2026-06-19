@@ -20,7 +20,7 @@ A candidate that is both **strictly cheaper** than the target and **proven equiv
 The observable architectural state whose values must agree between target and candidate after execution. Today this is represented by `LiveOut` in `src/semantics/live_out.rs`; it populates two slices — a register set (`RegisterSet<R>` per ADR-0004 §5) and the AArch64 NZCV `flags_live` bit (ADR-0006). The intended concept is still broader: memory and PC can also be live-out when downstream code observes them, and they remain unmodeled.
 
 ### Live-out registers
-The register slice of the live-out contract. Represented by `LiveOutRegisters`, a set of architectural registers whose values must agree between target and candidate after execution. This is not the whole live-out concept.
+The register slice of the live-out contract. In the AArch64 path this is the register set carried by the `LiveOut` alias (`RegisterSet<Register>`), containing architectural registers whose values must agree between target and candidate after execution. This is not the whole live-out concept; `LiveOut.flags_live` models NZCV separately.
 
 ### Observable state
 Any architectural state a downstream context can observe after the target executes. Registers and AArch64 condition state (NZCV) are modeled today (the latter via `LiveOut.flags_live`, ADR-0006). Memory and PC are intentionally reserved in the term so the live-out contract can grow without being renamed.
