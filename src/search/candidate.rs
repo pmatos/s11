@@ -2503,12 +2503,21 @@ mod tests {
     }
 
     fn rng_for_arith_immediate_slot(slot: u32, imm_count: u32, imm_index: u32) -> BudgetedRng {
+        // ADD/SUB/ADDS/SUBS (slots 2, 3, 18, 19) consume, in order: `rd`, the
+        // opcode slot, `rn`, then `random_arith_rm_operand`. The latter first
+        // draws a 0..3 shape selector (2 = shifted register, issue #279) and,
+        // when that is not 2, falls through to `random_operand`, whose
+        // `random_bool(0.5)` register/immediate coin pulls a u64 (two words).
+        // Drive shape != 2 and bias the coin toward the immediate branch so the
+        // imm12 clamp is exercised. The high word governs the 0.5 split, so
+        // `u32::MAX, u32::MAX` selects the immediate (non-register) arm.
         BudgetedRng::new(vec![
-            word_for_range(3, 0),
+            word_for_range(3, 0), // rd register pick
             word_for_range(38, slot),
-            word_for_range(3, 0),
-            u32::MAX,
-            u32::MAX,
+            word_for_range(3, 0), // rn register pick
+            word_for_range(3, 0), // shape selector: != 2 → not shifted
+            u32::MAX,             // random_bool low word
+            u32::MAX,             // random_bool high word → false → immediate
             word_for_range(imm_count, imm_index),
         ])
     }
