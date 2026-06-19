@@ -269,21 +269,22 @@ where
     shared
         .smt_elapsed_nanos
         .fetch_add(solver_nanos, Ordering::Relaxed);
-    // Count only candidates that actually reached `solver.check()`. The
-    // pre-SMT guard (`flag_writers_diverge && flags_live`) returns
-    // `NotEquivalent` with `metrics.smt_called == false`, and the
-    // fast-path returns `NotEquivalentFast` the same way — using the
-    // metric is both correct and future-proof against new early-return
-    // paths (PR #269 review).
+    // Count only candidates that actually reached `solver.check()`. The same
+    // metric also marks candidates that passed fast concrete validation,
+    // including ones later disproved by SMT. `smt_called` is the right guard
+    // because every early return that never reaches the solver leaves it
+    // false: the pre-SMT guard (`flag_writers_diverge && flags_live`) returns
+    // `NotEquivalent` and the fast-path returns `NotEquivalentFast`, neither of
+    // which should count as a fast pass (PR #269 review).
     if metrics.smt_called {
         shared.smt_queries.fetch_add(1, Ordering::Relaxed);
+        shared
+            .candidates_passed_fast
+            .fetch_add(1, Ordering::Relaxed);
     }
     match verdict {
         EquivalenceResult::Equivalent => {
             shared.smt_equivalent.fetch_add(1, Ordering::Relaxed);
-            shared
-                .candidates_passed_fast
-                .fetch_add(1, Ordering::Relaxed);
             true
         }
         _ => false,
@@ -637,7 +638,7 @@ where
 mod tests {
     use super::*;
     use std::fmt;
-    use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering as AtomicOrdering};
     use std::sync::{Mutex as TestMutex, MutexGuard};
 
     use crate::ir::{Instruction, Operand, Register};
@@ -1044,6 +1045,184 @@ mod tests {
         );
     }
 
+    #[derive(Clone)]
+    struct VerifyStatsIsa;
+
+    #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+    struct VerifyStatsInstruction(u8);
+
+    impl fmt::Display for VerifyStatsInstruction {
+        fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+            write!(f, "verify{}", self.0)
+        }
+    }
+
+    impl InstructionType for VerifyStatsInstruction {
+        type Register = Register;
+        type Operand = Operand;
+
+        fn destination(&self) -> Option<Self::Register> {
+            Some(Register::X0)
+        }
+
+        fn source_registers(&self) -> Vec<Self::Register> {
+            Vec::new()
+        }
+
+        fn opcode_id(&self) -> u8 {
+            self.0
+        }
+
+        fn mnemonic(&self) -> &'static str {
+            "verify"
+        }
+    }
+
+    struct VerifyStatsMutator;
+
+    impl ISAMutator<VerifyStatsInstruction> for VerifyStatsMutator {
+        fn mutate<R: rand::RngExt>(
+            &self,
+            _rng: &mut R,
+            sequence: &[VerifyStatsInstruction],
+        ) -> Vec<VerifyStatsInstruction> {
+            sequence.to_vec()
+        }
+    }
+
+    impl ISA for VerifyStatsIsa {
+        type Register = Register;
+        type Operand = Operand;
+        type Instruction = VerifyStatsInstruction;
+        type Width = U64;
+        type Flags = ();
+        type Mutator = VerifyStatsMutator;
+
+        fn name(&self) -> &'static str {
+            "VerifyStats"
+        }
+
+        fn register_count(&self) -> usize {
+            1
+        }
+
+        fn instruction_size(&self) -> Option<usize> {
+            Some(1)
+        }
+
+        fn general_registers(&self) -> Vec<Self::Register> {
+            vec![Register::X0]
+        }
+
+        fn zero_register(&self) -> Option<Self::Register> {
+            Some(Register::XZR)
+        }
+    }
+
+    const VERIFY_STATS_NOT_EQUIVALENT: usize = 0;
+    const VERIFY_STATS_EQUIVALENT: usize = 1;
+
+    static VERIFY_STATS_TEST_LOCK: TestMutex<()> = TestMutex::new(());
+    static VERIFY_STATS_VERDICT: AtomicUsize = AtomicUsize::new(VERIFY_STATS_NOT_EQUIVALENT);
+    static VERIFY_STATS_SMT_CALLED: AtomicBool = AtomicBool::new(false);
+
+    fn set_verify_stats_result(verdict: usize, smt_called: bool) -> MutexGuard<'static, ()> {
+        let guard = VERIFY_STATS_TEST_LOCK
+            .lock()
+            .expect("verify stats test lock poisoned");
+        VERIFY_STATS_VERDICT.store(verdict, AtomicOrdering::SeqCst);
+        VERIFY_STATS_SMT_CALLED.store(smt_called, AtomicOrdering::SeqCst);
+        guard
+    }
+
+    impl EnumerativeBackend<VerifyStatsIsa> for VerifyStatsIsa {
+        type LiveOut = ();
+
+        fn registers_from_config(_config: &SearchConfig) -> Vec<Register> {
+            vec![Register::X0]
+        }
+
+        fn immediates_from_config(_config: &SearchConfig) -> Vec<i64> {
+            vec![0]
+        }
+
+        fn enumerate_all(_regs: &[Register], _imms: &[i64]) -> Vec<VerifyStatsInstruction> {
+            vec![VerifyStatsInstruction(0)]
+        }
+
+        fn sequence_cost(seq: &[VerifyStatsInstruction], _config: &SearchConfig) -> u64 {
+            seq.len() as u64
+        }
+
+        fn check_equivalence(
+            _target: &[VerifyStatsInstruction],
+            _candidate: &[VerifyStatsInstruction],
+            _live_out: &Self::LiveOut,
+            _smt_timeout: Duration,
+        ) -> (EquivalenceResult, EquivalenceMetrics) {
+            let metrics = EquivalenceMetrics {
+                smt_called: VERIFY_STATS_SMT_CALLED.load(AtomicOrdering::SeqCst),
+                ..EquivalenceMetrics::default()
+            };
+            match VERIFY_STATS_VERDICT.load(AtomicOrdering::SeqCst) {
+                VERIFY_STATS_EQUIVALENT => (EquivalenceResult::Equivalent, metrics),
+                _ => (EquivalenceResult::NotEquivalent, metrics),
+            }
+        }
+    }
+
+    fn verify_stats_candidate(
+        verdict: usize,
+        smt_called: bool,
+    ) -> (bool, SharedState<VerifyStatsIsa>) {
+        let _guard = set_verify_stats_result(verdict, smt_called);
+        let target = [VerifyStatsInstruction(1)];
+        let candidate = [VerifyStatsInstruction(2)];
+        let config = SearchConfig::default().with_timeout_option(None);
+        let shared = SharedState::<VerifyStatsIsa>::new(u64::MAX);
+
+        let is_equivalent = verify_candidate::<VerifyStatsIsa>(
+            &target,
+            &candidate,
+            &(),
+            &config,
+            &shared,
+            Instant::now(),
+        );
+
+        (is_equivalent, shared)
+    }
+
+    #[test]
+    fn enumerative_verify_counts_smt_counterexample_as_fast_pass() {
+        let (is_equivalent, shared) = verify_stats_candidate(VERIFY_STATS_NOT_EQUIVALENT, true);
+
+        assert!(!is_equivalent);
+        assert_eq!(shared.smt_queries.load(Ordering::Relaxed), 1);
+        assert_eq!(shared.candidates_passed_fast.load(Ordering::Relaxed), 1);
+        assert_eq!(shared.smt_equivalent.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn enumerative_verify_counts_smt_equivalence_as_fast_pass_and_equivalent() {
+        let (is_equivalent, shared) = verify_stats_candidate(VERIFY_STATS_EQUIVALENT, true);
+
+        assert!(is_equivalent);
+        assert_eq!(shared.smt_queries.load(Ordering::Relaxed), 1);
+        assert_eq!(shared.candidates_passed_fast.load(Ordering::Relaxed), 1);
+        assert_eq!(shared.smt_equivalent.load(Ordering::Relaxed), 1);
+    }
+
+    #[test]
+    fn enumerative_verify_does_not_count_fast_refutation_as_fast_pass() {
+        let (is_equivalent, shared) = verify_stats_candidate(VERIFY_STATS_NOT_EQUIVALENT, false);
+
+        assert!(!is_equivalent);
+        assert_eq!(shared.smt_queries.load(Ordering::Relaxed), 0);
+        assert_eq!(shared.candidates_passed_fast.load(Ordering::Relaxed), 0);
+        assert_eq!(shared.smt_equivalent.load(Ordering::Relaxed), 0);
+    }
+
     fn small_config() -> SearchConfig {
         // Tight register/immediate pool so unit tests run fast.
         //
@@ -1302,6 +1481,94 @@ mod tests {
         assert!(shared.stop.load(Ordering::Relaxed));
         assert_eq!(shared.smt_queries.load(Ordering::Relaxed), 0);
         assert_eq!(shared.smt_elapsed_nanos.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn verify_candidate_does_not_count_pre_smt_guard_as_smt() {
+        let target = vec![Instruction::Cmp {
+            rn: Register::X0,
+            rm: Operand::Immediate(0),
+        }];
+        let candidate = vec![Instruction::MovImm {
+            rd: Register::X1,
+            imm: 7,
+        }];
+        let live_out = LiveOut::from_registers(vec![]).with_flags(true);
+        let config = SearchConfig::default().with_timeout_option(None);
+        let shared = SharedState::<AArch64>::new(u64::MAX);
+
+        assert!(!verify_candidate::<AArch64>(
+            &target,
+            &candidate,
+            &live_out,
+            &config,
+            &shared,
+            std::time::Instant::now(),
+        ));
+        assert_eq!(shared.smt_queries.load(Ordering::Relaxed), 0);
+        assert_eq!(shared.candidates_passed_fast.load(Ordering::Relaxed), 0);
+        assert_eq!(shared.smt_elapsed_nanos.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn verify_candidate_counts_smt_refutation_as_fast_pass() {
+        let target = vec![Instruction::Add {
+            rd: Register::X0,
+            rn: Register::X1,
+            rm: Operand::Immediate(1),
+        }];
+        let candidate = vec![Instruction::MovImm {
+            rd: Register::X0,
+            imm: 1,
+        }];
+        let live_out = LiveOut::from_registers(vec![Register::X0]);
+        let config = SearchConfig::default().with_timeout_option(None);
+        let shared = SharedState::<AArch64>::new(u64::MAX);
+
+        assert!(!verify_candidate::<AArch64>(
+            &target,
+            &candidate,
+            &live_out,
+            &config,
+            &shared,
+            std::time::Instant::now(),
+        ));
+        assert_eq!(shared.smt_queries.load(Ordering::Relaxed), 1);
+        assert_eq!(shared.candidates_passed_fast.load(Ordering::Relaxed), 1);
+        assert_eq!(shared.smt_equivalent.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn verify_candidate_counts_smt_equivalence() {
+        // Commutativity: `add x0, x1, x2` == `add x0, x2, x1`. The candidate
+        // passes fast concrete validation and Z3 then proves equivalence, so
+        // the success path must record one SMT query, one fast pass, and one
+        // equivalence.
+        let target = vec![Instruction::Add {
+            rd: Register::X0,
+            rn: Register::X1,
+            rm: Operand::Register(Register::X2),
+        }];
+        let candidate = vec![Instruction::Add {
+            rd: Register::X0,
+            rn: Register::X2,
+            rm: Operand::Register(Register::X1),
+        }];
+        let live_out = LiveOut::from_registers(vec![Register::X0]);
+        let config = SearchConfig::default().with_timeout_option(None);
+        let shared = SharedState::<AArch64>::new(u64::MAX);
+
+        assert!(verify_candidate::<AArch64>(
+            &target,
+            &candidate,
+            &live_out,
+            &config,
+            &shared,
+            std::time::Instant::now(),
+        ));
+        assert_eq!(shared.smt_queries.load(Ordering::Relaxed), 1);
+        assert_eq!(shared.candidates_passed_fast.load(Ordering::Relaxed), 1);
+        assert_eq!(shared.smt_equivalent.load(Ordering::Relaxed), 1);
     }
 
     #[test]

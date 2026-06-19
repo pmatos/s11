@@ -39,6 +39,7 @@ Rewritable straight-line mnemonics accepted by the parser and Capstone bridge:
   `movk`
   - Register `mov` supports both 64-bit `X` and 32-bit `W` forms.
 - Arithmetic and flag-setting arithmetic: `add`, `sub`, `adds`, `subs`
+- Add/subtract with carry (X-only, register form): `adc`, `adcs`, `sbc`, `sbcs`
   - Non-flag-setting `add` and `sub` support both 64-bit `X` and 32-bit `W`
     register/immediate/shifted-register forms. W extended-register arithmetic
     remains out of scope for now.
@@ -60,8 +61,12 @@ Rewritable straight-line mnemonics accepted by the parser and Capstone bridge:
 - Memory loads and stores (issue #68, [ADR-0007](adr/0007-memory-model.md);
   byte-addressed Z3-array memory model with sound full aliasing, whole-memory
   live-out auto-derived): `ldr`, `ldrb`, `ldrh`, `ldrsb`, `ldrsh`, `ldrsw`,
-  `str`, `strb`, `strh`, `ldp`, `stp`, `ldpsw` — accepted in immediate-offset,
-  pre-index, post-index, register-offset, and register-extend addressing forms.
+  `str`, `strb`, `strh`, `ldp`, `stp`, `ldpsw`. Single-register memory
+  instructions accept immediate-offset, pre-index, post-index, register-offset,
+  and register-extend addressing in supported `W`/`X`-sized forms. Pair memory
+  instructions accept immediate-offset, pre-index, and post-index addressing
+  only; `ldp`/`stp` cover `W` and `X` pairs, and `ldpsw` loads sign-extended
+  word pairs.
   Unsized `ldr` / `str` infer `W` vs `X` width from the data register spelling.
   Zero-extending `ldrb` / `ldrh` loads and `strb` / `strh` stores use scoped
   `W`/`X` register slots.
