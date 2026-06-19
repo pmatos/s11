@@ -219,6 +219,21 @@ fn assert_opt_arch_mismatch_rejected(test_elf: &Path, arch: &str, detected_arch:
         "Should not report Rust architecture variant names, stderr: {}",
         stderr
     );
+    assert!(
+        stderr.contains(&format!("--arch {arch}")),
+        "Should print requested CLI arch spelling, stderr: {}",
+        stderr
+    );
+    assert!(
+        stderr.contains(&format!("ELF reports {detected_arch}")),
+        "Should print detected CLI arch spelling, stderr: {}",
+        stderr
+    );
+    assert!(
+        !stderr.contains("Aarch64") && !stderr.contains("X86_64") && !stderr.contains("X86_32"),
+        "Should not print Rust variant names, stderr: {}",
+        stderr
+    );
 
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(
