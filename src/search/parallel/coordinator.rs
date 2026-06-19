@@ -723,24 +723,26 @@ mod tests {
     // must flow through the parallel coordinator without being relabelled as
     // stochastic or having every field except `candidates_evaluated` zeroed.
     // Hyperparameters mirror `test_symbolic_finds_mov_add_fusion` in
-    // src/search/symbolic/synthesis.rs which is known to land the
-    // mov-add -> add fusion within a few seconds.
+    // src/search/symbolic/synthesis.rs. The happy path is sub-second locally;
+    // the 30s timeout is only a CI safety ceiling around the 10s solver budget.
     #[test]
     fn test_parallel_search_symbolic_worker_statistics_are_propagated() {
         let target = mov_add_sequence();
         let live_out = LiveOut::from_registers(vec![Register::X0]);
+        let ci_timeout = Duration::from_secs(30);
 
         let search_config = SearchConfig::default()
             .with_registers(vec![Register::X0, Register::X1, Register::X2])
             .with_immediates(vec![-1, 0, 1, 2])
             .with_symbolic(SymbolicConfig::default().with_timeout(Duration::from_secs(10)))
-            .with_stochastic(StochasticConfig::default().with_iterations(200));
+            .with_stochastic(StochasticConfig::default().with_iterations(200))
+            .with_timeout(ci_timeout);
 
         let parallel_config = ParallelConfig::default()
             .with_workers(2)
             .with_symbolic(true)
             .with_seed(42)
-            .with_timeout(Duration::from_secs(60));
+            .with_timeout(ci_timeout);
 
         let result = run_parallel_search(&target, &live_out, &search_config, &parallel_config);
 
