@@ -609,13 +609,7 @@ fn run_fast_path(
         let state1 = apply_sequence_concrete(input.clone(), seq1);
         let state2 = apply_sequence_concrete(input.clone(), seq2);
 
-        if !states_equal_for_live_out(
-            &state1,
-            &state2,
-            live_out_registers,
-            config.live_out.flags_live(),
-            config.memory_live,
-        ) {
+        if !states_equal_for_live_out(&state1, &state2, live_out_registers, config.memory_live) {
             return Some(EquivalenceResult::NotEquivalentFast(input.clone()));
         }
     }
@@ -625,13 +619,7 @@ fn run_fast_path(
         let state1 = apply_sequence_concrete(input.clone(), seq1);
         let state2 = apply_sequence_concrete(input.clone(), seq2);
 
-        if !states_equal_for_live_out(
-            &state1,
-            &state2,
-            live_out_registers,
-            config.live_out.flags_live(),
-            config.memory_live,
-        ) {
+        if !states_equal_for_live_out(&state1, &state2, live_out_registers, config.memory_live) {
             return Some(EquivalenceResult::NotEquivalentFast(input.clone()));
         }
     }
@@ -651,13 +639,8 @@ fn run_fast_path(
         for input in &fast_path_initial_nzcv_variants(&input_regs) {
             let state1 = apply_sequence_concrete(input.clone(), seq1);
             let state2 = apply_sequence_concrete(input.clone(), seq2);
-            if !states_equal_for_live_out(
-                &state1,
-                &state2,
-                live_out_registers,
-                config.live_out.flags_live(),
-                config.memory_live,
-            ) {
+            if !states_equal_for_live_out(&state1, &state2, live_out_registers, config.memory_live)
+            {
                 return Some(EquivalenceResult::NotEquivalentFast(input.clone()));
             }
         }
@@ -825,7 +808,6 @@ fn build_smt_solver(
         &final_state1,
         &final_state2,
         &config.live_out,
-        config.live_out.flags_live(),
         config.memory_live,
     ));
     solver
@@ -915,12 +897,7 @@ pub fn find_counterexample_concrete(
         let state1 = apply_sequence_concrete(input.clone(), seq1);
         let state2 = apply_sequence_concrete(input.clone(), seq2);
 
-        if let Some(diff) = find_first_difference(
-            &state1,
-            &state2,
-            live_out_registers,
-            config.live_out.flags_live(),
-        ) {
+        if let Some(diff) = find_first_difference(&state1, &state2, live_out_registers) {
             return Some(diff);
         }
     }
@@ -930,12 +907,7 @@ pub fn find_counterexample_concrete(
         let state1 = apply_sequence_concrete(input.clone(), seq1);
         let state2 = apply_sequence_concrete(input.clone(), seq2);
 
-        if let Some(diff) = find_first_difference(
-            &state1,
-            &state2,
-            live_out_registers,
-            config.live_out.flags_live(),
-        ) {
+        if let Some(diff) = find_first_difference(&state1, &state2, live_out_registers) {
             return Some(diff);
         }
     }

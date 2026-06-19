@@ -483,8 +483,8 @@ pub fn compute_flags_add(lhs: &BV, rhs: &BV, width: u32) -> Nzcv {
 pub fn compute_flags_adc(lhs: &BV, rhs: &BV, carry: &BV, width: u32) -> Nzcv {
     let sum = lhs
         .zero_ext(1)
-        .bvadd(&rhs.zero_ext(1))
-        .bvadd(&carry.zero_ext(width));
+        .bvadd(rhs.zero_ext(1))
+        .bvadd(carry.zero_ext(width));
     let result = sum.extract(width - 1, 0);
     let zero = BV::from_u64(0, width);
     let msb = width - 1;
@@ -494,7 +494,7 @@ pub fn compute_flags_adc(lhs: &BV, rhs: &BV, carry: &BV, width: u32) -> Nzcv {
     let lhs_sign = lhs.extract(msb, msb);
     let rhs_sign = rhs.extract(msb, msb);
     let res_sign = result.extract(msb, msb);
-    let signs_match = lhs_sign.bvxor(&rhs_sign).bvxor(&bv_one());
+    let signs_match = lhs_sign.bvxor(&rhs_sign).bvxor(bv_one());
     let signs_flip = lhs_sign.bvxor(&res_sign);
     let v = signs_match.bvand(&signs_flip);
     (n, z, c, v)
@@ -887,14 +887,14 @@ pub fn apply_instruction(mut state: MachineState, instruction: &Instruction) -> 
             let lhs = state.get_register(*rn).clone();
             let rhs = state.get_register(*rm).clone();
             let carry = state.get_flags().2.clone();
-            state.set_register(*rd, lhs.bvadd(&rhs).bvadd(&carry.zero_ext(width - 1)));
+            state.set_register(*rd, lhs.bvadd(&rhs).bvadd(carry.zero_ext(width - 1)));
         }
         Instruction::Adcs { rd, rn, rm } => {
             let lhs = state.get_register(*rn).clone();
             let rhs = state.get_register(*rm).clone();
             let carry = state.get_flags().2.clone();
             let (n, z, c, v) = compute_flags_adc(&lhs, &rhs, &carry, width);
-            state.set_register(*rd, lhs.bvadd(&rhs).bvadd(&carry.zero_ext(width - 1)));
+            state.set_register(*rd, lhs.bvadd(&rhs).bvadd(carry.zero_ext(width - 1)));
             state.set_flags(n, z, c, v);
         }
         // Subtract with carry: rd = rn + NOT(rm) + C.
@@ -902,20 +902,14 @@ pub fn apply_instruction(mut state: MachineState, instruction: &Instruction) -> 
             let lhs = state.get_register(*rn).clone();
             let rhs = state.get_register(*rm).clone();
             let carry = state.get_flags().2.clone();
-            state.set_register(
-                *rd,
-                lhs.bvadd(&rhs.bvnot()).bvadd(&carry.zero_ext(width - 1)),
-            );
+            state.set_register(*rd, lhs.bvadd(rhs.bvnot()).bvadd(carry.zero_ext(width - 1)));
         }
         Instruction::Sbcs { rd, rn, rm } => {
             let lhs = state.get_register(*rn).clone();
             let rhs = state.get_register(*rm).clone();
             let carry = state.get_flags().2.clone();
             let (n, z, c, v) = compute_flags_sbc(&lhs, &rhs, &carry, width);
-            state.set_register(
-                *rd,
-                lhs.bvadd(&rhs.bvnot()).bvadd(&carry.zero_ext(width - 1)),
-            );
+            state.set_register(*rd, lhs.bvadd(rhs.bvnot()).bvadd(carry.zero_ext(width - 1)));
             state.set_flags(n, z, c, v);
         }
         Instruction::Ands {
@@ -1298,17 +1292,12 @@ pub fn states_not_equal(state1: &MachineState, state2: &MachineState) -> z3::ast
 }
 
 /// Check if two machine states are not equal for the specified live-out
-/// registers, optionally including the NZCV flag bits and the whole memory
-/// image (see ADR-0007).
-///
-/// TODO(#282): The explicit `flags_live` parameter duplicates
-/// `live_out.flags_live()` for every non-stochastic caller. Tracked for
-/// cleanup in issue #282.
+/// contract, including the NZCV flag bits when `live_out.flags_live()` is set
+/// and the whole memory image when `memory_live` is set (see ADR-0007).
 pub fn states_not_equal_for_live_out(
     state1: &MachineState,
     state2: &MachineState,
     live_out: &RegisterSet<Register>,
-    flags_live: bool,
     memory_live: bool,
 ) -> z3::ast::Bool {
     let mut not_equal = z3::ast::Bool::from_bool(false);
@@ -1320,7 +1309,7 @@ pub fn states_not_equal_for_live_out(
         not_equal = z3::ast::Bool::or(&[&not_equal, &reg_not_equal]);
     }
 
-    if flags_live {
+    if live_out.flags_live() {
         not_equal = z3::ast::Bool::or(&[&not_equal, &flags_not_equal(state1, state2)]);
     }
 
@@ -1665,13 +1654,35 @@ mod tests {
 
         let solver = Solver::new();
         let diseq =
-            states_not_equal_for_live_out(&state_cls, &state_signfold_clz, &live_out, false, false);
+            states_not_equal_for_live_out(&state_cls, &state_signfold_clz, &live_out, false);
         solver.assert(diseq);
         assert_eq!(
             solver.check(),
             SatResult::Unsat,
             "CLS(x) should match CLZ(x XOR (x ASR 63)) - 1 for live-out X0"
         );
+    }
+
+    #[test]
+    fn test_states_not_equal_for_live_out_reads_flags_from_mask() {
+        let state1 = MachineState::new_symbolic("flag_mask_a");
+        let state2 = MachineState::new_symbolic("flag_mask_b");
+        let live_out = RegisterSet::<Register>::empty();
+
+        let solver = Solver::new();
+        solver.assert(states_not_equal_for_live_out(
+            &state1, &state2, &live_out, false,
+        ));
+        assert_eq!(solver.check(), SatResult::Unsat);
+
+        let solver = Solver::new();
+        solver.assert(states_not_equal_for_live_out(
+            &state1,
+            &state2,
+            &live_out.with_flags(true),
+            false,
+        ));
+        assert_eq!(solver.check(), SatResult::Sat);
     }
 
     #[test]

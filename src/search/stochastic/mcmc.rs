@@ -24,7 +24,9 @@ use crate::search::stochastic::acceptance::AcceptanceCriterion;
 use crate::search::stochastic::backend::StochasticBackend;
 use crate::search::{Algorithm, SearchAlgorithm};
 use crate::semantics::EquivalenceResult;
-use crate::semantics::concrete::{apply_sequence_concrete, states_equal_for_live_out};
+use crate::semantics::concrete::{
+    apply_sequence_concrete, states_equal_for_live_out_ignoring_flags,
+};
 use crate::semantics::live_out::RegisterSet;
 use crate::semantics::state::ConcreteMachineState;
 use rand::{RngExt, SeedableRng};
@@ -316,7 +318,12 @@ pub fn evaluate_with_tests(
 
     for (input, target_output) in test_inputs.iter().zip(target_outputs.iter()) {
         let proposal_output = apply_sequence_concrete(input.clone(), proposal);
-        if !states_equal_for_live_out(&proposal_output, target_output, live_out, false, false) {
+        if !states_equal_for_live_out_ignoring_flags(
+            &proposal_output,
+            target_output,
+            live_out,
+            false,
+        ) {
             passes_all = false;
             break;
         }
@@ -339,6 +346,7 @@ mod tests {
     use crate::search::config::{StochasticConfig, SymbolicConfig};
     use crate::semantics::cost::CostMetric;
     use crate::semantics::live_out::LiveOut;
+    use crate::semantics::state::{ConcreteValue, ConditionFlags};
 
     fn mov_add_sequence() -> Vec<Instruction> {
         vec![
@@ -746,6 +754,36 @@ mod tests {
 
         assert!(!passes);
         assert!(cost > 100); // High penalty
+    }
+
+    #[test]
+    fn test_evaluate_with_tests_ignores_flags_even_when_mask_flags_live() {
+        let target = Vec::new();
+        let proposal = Vec::new();
+
+        let mut input = ConcreteMachineState::new_zeroed();
+        input.set_register(Register::X0, ConcreteValue(42));
+        input.set_flags(ConditionFlags {
+            n: true,
+            z: false,
+            c: false,
+            v: false,
+        });
+
+        let mut target_output = input.clone();
+        target_output.set_flags(ConditionFlags {
+            n: false,
+            z: true,
+            c: false,
+            v: false,
+        });
+
+        let live_out = RegisterSet::<Register>::from_registers(vec![Register::X0]).with_flags(true);
+        let (cost, passes) =
+            evaluate_with_tests(&proposal, &target, &[input], &[target_output], &live_out);
+
+        assert!(passes);
+        assert_eq!(cost, 0);
     }
 
     #[test]

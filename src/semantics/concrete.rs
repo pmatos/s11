@@ -809,19 +809,42 @@ pub fn apply_sequence_concrete(
     state
 }
 
-/// Check if two concrete states are equal for the specified live-out registers,
-/// optionally including the NZCV condition flags and the whole memory map.
+/// Check if two concrete states are equal for the specified live-out contract,
+/// including the NZCV condition flags when `live_out.flags_live()` is set and
+/// the whole memory map when `memory_live` is set.
 ///
 /// `memory_live` is derived automatically by callers from whether either
 /// sequence touches memory (see ADR-0007). When set, every memory cell
 /// must agree between the two states — equivalently, the two `BTreeMap`s
 /// must be structurally equal (prune-on-write guarantees structural ==
 /// semantic equality).
-///
-/// TODO(#282): The explicit `flags_live` parameter is now redundant with
-/// `live_out.flags_live()` for every caller except the stochastic backend
-/// (which deliberately passes `false`). Tracked for cleanup in issue #282.
 pub fn states_equal_for_live_out(
+    state1: &ConcreteMachineState,
+    state2: &ConcreteMachineState,
+    live_out: &RegisterSet<Register>,
+    memory_live: bool,
+) -> bool {
+    states_equal_for_live_out_with_flags(
+        state1,
+        state2,
+        live_out,
+        live_out.flags_live(),
+        memory_live,
+    )
+}
+
+/// Check two concrete states over the live-out registers and memory while
+/// deliberately ignoring NZCV, even if `live_out.flags_live()` is set.
+pub fn states_equal_for_live_out_ignoring_flags(
+    state1: &ConcreteMachineState,
+    state2: &ConcreteMachineState,
+    live_out: &RegisterSet<Register>,
+    memory_live: bool,
+) -> bool {
+    states_equal_for_live_out_with_flags(state1, state2, live_out, false, memory_live)
+}
+
+fn states_equal_for_live_out_with_flags(
     state1: &ConcreteMachineState,
     state2: &ConcreteMachineState,
     live_out: &RegisterSet<Register>,
@@ -845,14 +868,10 @@ pub fn states_equal_for_live_out(
 /// Find the first differing register between two states for live-out registers.
 /// Flag divergence (when `flags_live` is set) is reported via the `XZR`
 /// sentinel since the function signature is register-typed.
-///
-/// TODO(#282): see `states_equal_for_live_out` — the same `flags_live`
-/// redundancy applies here. Tracked for follow-up cleanup.
 pub fn find_first_difference(
     state1: &ConcreteMachineState,
     state2: &ConcreteMachineState,
     live_out: &RegisterSet<Register>,
-    flags_live: bool,
 ) -> Option<(Register, ConcreteValue, ConcreteValue)> {
     for reg in live_out.iter() {
         let v1 = state1.get_register(*reg);
@@ -861,7 +880,7 @@ pub fn find_first_difference(
             return Some((*reg, v1, v2));
         }
     }
-    if flags_live {
+    if live_out.flags_live() {
         let f1 = state1.get_flags();
         let f2 = state2.get_flags();
         if f1 != f2 {
@@ -1323,7 +1342,7 @@ mod tests {
 
         let live_out = RegisterSet::<Register>::from_registers(vec![Register::X0]);
         assert!(states_equal_for_live_out(
-            &state1, &state2, &live_out, false, false
+            &state1, &state2, &live_out, false
         ));
     }
 
@@ -1334,7 +1353,39 @@ mod tests {
 
         let live_out = RegisterSet::<Register>::from_registers(vec![Register::X0]);
         assert!(!states_equal_for_live_out(
-            &state1, &state2, &live_out, false, false
+            &state1, &state2, &live_out, false
+        ));
+    }
+
+    #[test]
+    fn test_states_equal_for_live_out_reads_flags_from_mask() {
+        let mut state1 = state_with(vec![(Register::X0, 42)]);
+        let mut state2 = state_with(vec![(Register::X0, 42)]);
+        state1.set_flags(ConditionFlags {
+            n: true,
+            z: false,
+            c: false,
+            v: false,
+        });
+        state2.set_flags(ConditionFlags {
+            n: false,
+            z: true,
+            c: false,
+            v: false,
+        });
+
+        let live_out = RegisterSet::<Register>::from_registers(vec![Register::X0]);
+        assert!(states_equal_for_live_out(
+            &state1,
+            &state2,
+            &live_out.clone().with_flags(false),
+            false
+        ));
+        assert!(!states_equal_for_live_out(
+            &state1,
+            &state2,
+            &live_out.with_flags(true),
+            false
         ));
     }
 
@@ -1344,7 +1395,7 @@ mod tests {
         let state2 = state_with(vec![(Register::X0, 42), (Register::X1, 200)]);
 
         let live_out = RegisterSet::<Register>::from_registers(vec![Register::X0, Register::X1]);
-        let diff = find_first_difference(&state1, &state2, &live_out, false);
+        let diff = find_first_difference(&state1, &state2, &live_out);
         assert!(diff.is_some());
         let (reg, v1, v2) = diff.unwrap();
         assert_eq!(reg, Register::X1);
@@ -1358,7 +1409,7 @@ mod tests {
         let state2 = state_with(vec![(Register::X0, 42)]);
 
         let live_out = RegisterSet::<Register>::from_registers(vec![Register::X0]);
-        let diff = find_first_difference(&state1, &state2, &live_out, false);
+        let diff = find_first_difference(&state1, &state2, &live_out);
         assert!(diff.is_none());
     }
 
@@ -1381,13 +1432,10 @@ mod tests {
 
         let live_out = RegisterSet::<Register>::from_registers(vec![Register::X0]);
         assert_eq!(
-            find_first_difference(&state1, &state2, &live_out, true),
+            find_first_difference(&state1, &state2, &live_out.clone().with_flags(true)),
             Some((Register::XZR, ConcreteValue(8), ConcreteValue(4)))
         );
-        assert_eq!(
-            find_first_difference(&state1, &state2, &live_out, false),
-            None
-        );
+        assert_eq!(find_first_difference(&state1, &state2, &live_out), None);
     }
 
     #[test]
@@ -1410,7 +1458,7 @@ mod tests {
 
         let live_out = RegisterSet::<Register>::from_registers(vec![Register::X0]);
         assert!(states_equal_for_live_out(
-            &state1, &state2, &live_out, false, false
+            &state1, &state2, &live_out, false
         ));
     }
 
