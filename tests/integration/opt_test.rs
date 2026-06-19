@@ -2,6 +2,9 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+use capstone::prelude::*;
+use s11::parser::{LineResult, parse_line};
+
 fn check_test_binary(path: &PathBuf) {
     if !path.exists() {
         panic!(
@@ -55,6 +58,75 @@ fn find_encoding_masked(elf_path: &Path, expected: &[u8; 4], mask: &[u8; 4], lab
     panic!(
         "encoding matching {:02x?} (mask {:02x?}, {}) not found in any executable section of {:?}",
         expected, mask, label, elf_path
+    );
+}
+
+fn find_supported_aarch64_instruction_window(
+    elf_path: &Path,
+    instruction_count: usize,
+) -> (u64, u64) {
+    assert!(
+        instruction_count > 0,
+        "instruction window must contain at least one instruction"
+    );
+
+    let data = std::fs::read(elf_path).expect("read ELF for supported-window scan");
+    let elf = elf::ElfBytes::<elf::endian::AnyEndian>::minimal_parse(&data)
+        .expect("parse ELF for supported-window scan");
+    let section_headers = elf.section_headers().expect("ELF section headers");
+    let cs = Capstone::new()
+        .arm64()
+        .mode(capstone::arch::arm64::ArchMode::Arm)
+        .build()
+        .expect("create AArch64 Capstone disassembler");
+
+    for section in section_headers.iter() {
+        if section.sh_flags & elf::abi::SHF_EXECINSTR as u64 == 0 {
+            continue;
+        }
+
+        let file_start = section.sh_offset as usize;
+        let size = section.sh_size as usize;
+        if size < instruction_count * 4 {
+            continue;
+        }
+        let bytes = &data[file_start..file_start + size];
+        let instructions = cs
+            .disasm_all(bytes, section.sh_addr)
+            .expect("disassemble executable section for supported-window scan");
+        let instructions: Vec<_> = instructions.iter().collect();
+
+        for window in instructions.windows(instruction_count) {
+            let first = window[0].address();
+            let mut next_address = first;
+            let supported_straight_line = window.iter().all(|instruction| {
+                if instruction.address() != next_address || instruction.bytes().len() != 4 {
+                    return false;
+                }
+                next_address += 4;
+
+                let mnemonic = instruction.mnemonic().unwrap_or("");
+                let op_str = instruction.op_str().unwrap_or("");
+                let line = if op_str.trim().is_empty() {
+                    mnemonic.to_string()
+                } else {
+                    format!("{mnemonic} {}", op_str.trim())
+                };
+
+                match parse_line(&line) {
+                    Ok(LineResult::Instruction(instruction)) => !instruction.is_terminator(),
+                    Ok(LineResult::Skip) | Err(_) => false,
+                }
+            });
+
+            if supported_straight_line {
+                return (first, first + instruction_count as u64 * 4);
+            }
+        }
+    }
+
+    panic!(
+        "no supported {instruction_count}-instruction AArch64 window found in any executable section of {elf_path:?}"
     );
 }
 
@@ -128,23 +200,21 @@ fn test_opt_basic_functionality() {
 
     check_test_binary(&test_elf);
 
-    // executable_window starts at the first executable section, which is .init
-    // and begins with `paciasp` (an unsupported HINT); the AArch64 optimization
-    // path now correctly rejects that window. Scan instead for any PLT
-    // trampoline slot `add x16, x16, #N` — encoding constraints sf=1, sh=0,
-    // Rd=Rn=16, immediate N free. Mask leaves the 12 imm bits as wildcards
-    // so we match every build's GOT-offset variation.
-    let start_addr = find_encoding_masked(
-        &test_elf,
-        &[0x10, 0x02, 0x00, 0x91],
-        &[0xff, 0x03, 0xc0, 0xff],
-        "add x16, x16, #N (PLT trampoline)",
-    );
-    let end_addr = start_addr + 4;
+    // Avoid the unsupported .init PAC instruction while still exercising a
+    // parser-supported, straight-line multi-instruction optimization window.
+    let (start_addr, end_addr) = find_supported_aarch64_instruction_window(&test_elf, 4);
 
     let output = Command::new(binary)
         .arg("opt")
         .arg(&test_elf)
+        .arg("--algorithm")
+        .arg("stochastic")
+        .arg("--iterations")
+        .arg("64")
+        .arg("--seed")
+        .arg("0")
+        .arg("--timeout")
+        .arg("5")
         .arg("--start-addr")
         .arg(format!("0x{start_addr:x}"))
         .arg("--end-addr")
@@ -193,7 +263,19 @@ fn test_opt_basic_functionality() {
         stdout.contains("Disassembled"),
         "Should disassemble instructions"
     );
+    assert!(
+        stdout.contains("Disassembled 4 instructions"),
+        "Should disassemble a multi-instruction window; stdout: {stdout}"
+    );
     assert!(stdout.contains("Converted"), "Should convert to IR");
+    assert!(
+        stdout.contains("Converted 4 instructions"),
+        "Should convert a multi-instruction window to IR; stdout: {stdout}"
+    );
+    assert!(
+        stdout.contains("Running stochastic (MCMC) search"),
+        "Should run the bounded stochastic search path; stdout: {stdout}"
+    );
     assert!(
         stdout.contains("Reassembled"),
         "Should reassemble instructions"
