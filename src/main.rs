@@ -710,7 +710,7 @@ impl ElfOptimizationBackend for X86OptimizationBackend {
                 {
                     let mn = last.mnemonic().unwrap_or("");
                     let ops = last.op_str().unwrap_or("");
-                    let parsed_last = match x86_ir_from_mnemonic(mn, ops) {
+                    let parsed_last = match parser::x86::x86_ir_from_mnemonic(mn, ops) {
                         Ok(Some(instr)) => instr,
                         Ok(None) => panic!(
                             "last Capstone instruction must yield x86 IR when original IR has a Jcc"
