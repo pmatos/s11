@@ -846,8 +846,8 @@ const EXTEND_KEYWORDS: [&str; 8] = [
     "uxtb", "uxth", "uxtw", "uxtx", "sxtb", "sxth", "sxtw", "sxtx",
 ];
 
-/// Returns true if the keyword names an extend kind
-/// (UXTB/UXTH/UXTW/UXTX/SXTB/SXTH/SXTW/SXTX) rather than a shift kind.
+/// Returns true if `kw` names an extend kind (ASCII-case-insensitive:
+/// UXTB/UXTH/UXTW/UXTX/SXTB/SXTH/SXTW/SXTX) rather than a shift kind.
 fn is_extend_keyword(kw: &str) -> bool {
     EXTEND_KEYWORDS
         .iter()
