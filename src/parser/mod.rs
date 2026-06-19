@@ -1318,68 +1318,41 @@ fn parse_sub(operands: &[&str]) -> Result<Instruction, String> {
 
 /// Parse AND instruction
 fn parse_and(operands: &[&str]) -> Result<Instruction, String> {
-    if operands.len() == 3 {
-        let (rd, rn, width) = parse_same_width_registers("and", operands)?;
-        let rm = match width {
-            RegisterWidth::W32 => Operand::Immediate(parse_immediate(operands[2])?),
-            RegisterWidth::X64 => parse_operand(operands[2])?,
-        };
-        return Ok(Instruction::And { rd, rn, rm, width });
+    if operands.len() != 3 && operands.len() != 4 {
+        return Err(format!(
+            "and requires 3 or 4 operands, got {}",
+            operands.len()
+        ));
     }
-
-    let rm = parse_rm_3op("and", operands)?;
-    let rd = parse_register(operands[0])?;
-    let rn = parse_register(operands[1])?;
-    Ok(Instruction::And {
-        rd,
-        rn,
-        rm,
-        width: RegisterWidth::X64,
-    })
+    let (rd, rn, width) = parse_same_width_registers("and", operands)?;
+    let rm = parse_rm_3op_with_width("and", operands, width)?;
+    Ok(Instruction::And { rd, rn, rm, width })
 }
 
 /// Parse ORR instruction
 fn parse_orr(operands: &[&str]) -> Result<Instruction, String> {
-    if operands.len() == 3 {
-        let (rd, rn, width) = parse_same_width_registers("orr", operands)?;
-        let rm = match width {
-            RegisterWidth::W32 => Operand::Immediate(parse_immediate(operands[2])?),
-            RegisterWidth::X64 => parse_operand(operands[2])?,
-        };
-        return Ok(Instruction::Orr { rd, rn, rm, width });
+    if operands.len() != 3 && operands.len() != 4 {
+        return Err(format!(
+            "orr requires 3 or 4 operands, got {}",
+            operands.len()
+        ));
     }
-
-    let rm = parse_rm_3op("orr", operands)?;
-    let rd = parse_register(operands[0])?;
-    let rn = parse_register(operands[1])?;
-    Ok(Instruction::Orr {
-        rd,
-        rn,
-        rm,
-        width: RegisterWidth::X64,
-    })
+    let (rd, rn, width) = parse_same_width_registers("orr", operands)?;
+    let rm = parse_rm_3op_with_width("orr", operands, width)?;
+    Ok(Instruction::Orr { rd, rn, rm, width })
 }
 
 /// Parse EOR instruction
 fn parse_eor(operands: &[&str]) -> Result<Instruction, String> {
-    if operands.len() == 3 {
-        let (rd, rn, width) = parse_same_width_registers("eor", operands)?;
-        let rm = match width {
-            RegisterWidth::W32 => Operand::Immediate(parse_immediate(operands[2])?),
-            RegisterWidth::X64 => parse_operand(operands[2])?,
-        };
-        return Ok(Instruction::Eor { rd, rn, rm, width });
+    if operands.len() != 3 && operands.len() != 4 {
+        return Err(format!(
+            "eor requires 3 or 4 operands, got {}",
+            operands.len()
+        ));
     }
-
-    let rm = parse_rm_3op("eor", operands)?;
-    let rd = parse_register(operands[0])?;
-    let rn = parse_register(operands[1])?;
-    Ok(Instruction::Eor {
-        rd,
-        rn,
-        rm,
-        width: RegisterWidth::X64,
-    })
+    let (rd, rn, width) = parse_same_width_registers("eor", operands)?;
+    let rm = parse_rm_3op_with_width("eor", operands, width)?;
+    Ok(Instruction::Eor { rd, rn, rm, width })
 }
 
 /// Parse LSL instruction
@@ -2715,6 +2688,18 @@ mod tests {
     }
 
     #[test]
+    fn test_parse_w_logical_register_and_shifted_register_roundtrip() {
+        for text in [
+            "and w0, w1, w2",
+            "orr w3, w4, w5, lsl #31",
+            "eor w6, w7, w8, ror #7",
+        ] {
+            let instr = parse_one(text);
+            assert_eq!(format!("{}", instr), text);
+        }
+    }
+
+    #[test]
     fn test_parse_mov_w_logical_immediate_aliases() {
         let instr = parse_one("mov w0, #0xff");
         assert_eq!(
@@ -2748,7 +2733,9 @@ mod tests {
             "ands wsp, w1, #255",
             "tst wsp, #255",
             "and w0, x1, #255",
-            "and w0, w1, w2",
+            "and w0, w1, w2, lsl #32",
+            "orr w0, w1, x2",
+            "eor w0, w1, x2, lsl #1",
             "mov wzr, #0xff",
             "mov w0, #5",
         ] {

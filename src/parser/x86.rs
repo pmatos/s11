@@ -164,6 +164,15 @@ pub fn parse_x86_register(reg_str: &str) -> Result<X86Register, String> {
         .map_err(|err| err.to_string())
 }
 
+/// Parse a single x86 register name and report the textual alias width.
+///
+/// This is syntax metadata only: the returned register is still the
+/// canonical minimal-IR register, while the width preserves whether the
+/// source text named `rax`, `eax`, `ax`, or `al`.
+pub fn parse_x86_register_with_width(reg_str: &str) -> Result<(X86Register, u32), String> {
+    classify_x86_register_alias(reg_str).map_err(|err| err.to_string())
+}
+
 /// Parse an Intel-syntax operand string ("rax" or "42" or "0x2a").
 pub fn parse_x86_operand(op_str: &str) -> Result<X86Operand, String> {
     let s = op_str.trim();
@@ -495,6 +504,29 @@ mod tests {
         assert_eq!(parse_x86_register("r10").unwrap(), X86Register::R10);
         assert_eq!(parse_x86_register("r10d").unwrap(), X86Register::R10);
         assert!(parse_x86_register("zmm0").is_err());
+    }
+
+    #[test]
+    fn parse_register_reports_alias_widths() {
+        let cases = [
+            ("rax", X86Register::RAX, 64),
+            ("r8", X86Register::R8, 64),
+            ("eax", X86Register::RAX, 32),
+            ("r8d", X86Register::R8, 32),
+            ("ax", X86Register::RAX, 16),
+            ("r8w", X86Register::R8, 16),
+            ("al", X86Register::RAX, 8),
+            ("r8b", X86Register::R8, 8),
+        ];
+
+        for (alias, expected_register, expected_width) in cases {
+            assert_eq!(
+                parse_x86_register_with_width(alias).unwrap(),
+                (expected_register, expected_width),
+                "{alias}"
+            );
+        }
+        assert!(parse_x86_register_with_width("zmm0").is_err());
     }
 
     #[test]

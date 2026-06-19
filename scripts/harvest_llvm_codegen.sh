@@ -22,6 +22,153 @@ SEED="${1:-42}"
 SAMPLE_SIZE="${2:-30}"
 LLVM_CACHE="${LLVM_CACHE:-/tmp/s11-llvm}"
 
+# Supported AArch64 mnemonics — keep in sync with CLAUDE.md:11 and the
+# top-level mnemonic dispatch in src/parser/mod.rs. `uxtw` is intentionally
+# omitted: the parser handles it as an extend-operand modifier only, not
+# as a standalone instruction, so a harvested block containing it would
+# panic in load_sequence at bench time.
+SUPPORTED_MNEMONICS=(
+    mov add sub and orr eor lsl lsr asr mul sdiv udiv cmp cmn tst
+    csel csinc csinv csneg madd msub mneg smulh umulh ccmp ccmn
+    ubfx sbfx bfi bfxil ubfiz sbfiz
+    sxtb sxth sxtw uxtb uxth
+)
+
+build_mnemonic_re() {
+    local re="^[[:space:]]*("
+    local m
+    for m in "${SUPPORTED_MNEMONICS[@]}"; do
+        re+="$m|"
+    done
+    re="${re%|})[[:space:]]"
+    printf '%s\n' "$re"
+}
+
+extract_basic_block() {
+    local mnemonic_re="$1"
+    awk -v mnemonic_re="$mnemonic_re" '
+        BEGIN { block = ""; count = 0; supported = 1; done = 0 }
+        function trim(s) {
+            sub(/^[[:space:]]+/, "", s)
+            sub(/[[:space:]]+$/, "", s)
+            return s
+        }
+        function clear_live(k) {
+            for (k in live) {
+                delete live[k]
+            }
+        }
+        function reset() {
+            block = ""; count = 0; supported = 1; clear_live()
+        }
+        function writes_destination(mnemonic) {
+            return mnemonic != "cmp" && mnemonic != "cmn" && mnemonic != "tst" &&
+                mnemonic != "ccmp" && mnemonic != "ccmn"
+        }
+        function normalize_reg(raw, reg, n) {
+            reg = tolower(trim(raw))
+            sub(/[[:space:]].*$/, "", reg)
+            sub(/!$/, "", reg)
+
+            if (reg == "xzr" || reg == "wzr") {
+                return ""
+            }
+            if (reg == "fp") {
+                return "x29"
+            }
+            if (reg == "lr") {
+                return "x30"
+            }
+            if (reg == "sp" || reg == "wsp") {
+                return "sp"
+            }
+            if (reg ~ /^x([0-9]|[12][0-9]|30)$/) {
+                return reg
+            }
+            if (reg ~ /^w([0-9]|[12][0-9]|30)$/) {
+                n = substr(reg, 2)
+                return "x" n
+            }
+            return ""
+        }
+        function record_destination(line, tmp, mnemonic, rest, operands, dest) {
+            tmp = line
+            sub(/^[[:space:]]+/, "", tmp)
+            mnemonic = tolower(tmp)
+            sub(/[[:space:]].*$/, "", mnemonic)
+            if (!writes_destination(mnemonic)) {
+                return
+            }
+
+            rest = tmp
+            sub(/^[^[:space:]]+[[:space:]]+/, "", rest)
+            split(rest, operands, ",")
+            dest = normalize_reg(operands[1])
+            if (dest != "") {
+                live[dest] = 1
+            }
+        }
+        function live_count(k, n) {
+            n = 0
+            for (k in live) {
+                n++
+            }
+            return n
+        }
+        function live_out_list(i, reg, sep, out) {
+            sep = ""; out = ""
+            for (i = 0; i <= 30; i++) {
+                reg = "x" i
+                if (reg in live) {
+                    out = out sep reg
+                    sep = ","
+                }
+            }
+            if ("sp" in live) {
+                out = out sep "sp"
+            }
+            return out
+        }
+        function finish() {
+            if (supported && count >= 2 && count <= 32 && live_count() > 0) {
+                print "// Live-out: " live_out_list()
+                print block
+                done = 1
+                exit 0
+            }
+            reset()
+        }
+        # Blank lines and stripped comments — keep accumulating.
+        /^[[:space:]]*$/ { next }
+        /^[[:space:]]*\/\// { next }
+        # Assembler directives (.text, .cfi_*, etc.) — keep accumulating.
+        /^[[:space:]]*\./ { next }
+        # Labels close the current block.
+        /^[[:space:]]*[A-Za-z_.][A-Za-z0-9_.]*:/ { finish(); next }
+        # Branch / return terminators close the current block.
+        /^[[:space:]]*(b|br|bl|blr|ret|cbz|cbnz|tbz|tbnz)([[:space:]]|$)/ { finish(); next }
+        /^[[:space:]]*b\.[a-z]+([[:space:]]|$)/ { finish(); next }
+        # Supported instruction — append to the in-flight block.
+        $0 ~ mnemonic_re {
+            block = (count == 0 ? $0 : block "\n" $0)
+            record_destination($0)
+            count++
+            next
+        }
+        # Any other instruction disqualifies the block.
+        { supported = 0 }
+        # END fires even after `exit 0`, so guard against double-emit.
+        END { if (!done) finish() }
+    '
+}
+
+MNEMONIC_RE="$(build_mnemonic_re)"
+
+if [[ "${S11_HARVEST_EXTRACT_ONLY:-0}" == "1" ]]; then
+    extract_basic_block "$MNEMONIC_RE"
+    exit 0
+fi
+
 # 1. Precheck: llc must include the AArch64 backend.
 if ! llc --version 2>/dev/null | grep -qE '^\s*aarch64\b'; then
     echo "error: llc lacks the AArch64 backend" >&2
@@ -63,25 +210,6 @@ mapfile -t SAMPLES < <(
 OUT_DIR="$(git rev-parse --show-toplevel)/benches/llvm_codegen"
 mkdir -p "$OUT_DIR"
 
-# Supported AArch64 mnemonics — keep in sync with CLAUDE.md:11 and the
-# top-level mnemonic dispatch in src/parser/mod.rs. `uxtw` is intentionally
-# omitted: the parser handles it as an extend-operand modifier only, not
-# as a standalone instruction, so a harvested block containing it would
-# panic in load_sequence at bench time.
-SUPPORTED_MNEMONICS=(
-    mov add sub and orr eor lsl lsr asr mul sdiv udiv cmp cmn tst
-    csel csinc csinv csneg madd msub mneg smulh umulh ccmp ccmn
-    ubfx sbfx bfi bfxil ubfiz sbfiz
-    sxtb sxth sxtw uxtb uxth
-)
-
-# Build a regex matching exactly one supported mnemonic at line start.
-MNEMONIC_RE="^[[:space:]]*("
-for m in "${SUPPORTED_MNEMONICS[@]}"; do
-    MNEMONIC_RE+="$m|"
-done
-MNEMONIC_RE="${MNEMONIC_RE%|})[[:space:]]"
-
 # 4. Run llc on each sample, emit .s blocks the s11 parser can consume.
 #
 # The body extractor is an awk state machine. It walks the llc output
@@ -95,51 +223,22 @@ MNEMONIC_RE="${MNEMONIC_RE%|})[[:space:]]"
 # disqualifies the currently-accumulating block — the harvester does
 # not silently splice supported lines across an unsupported one.
 #
-# The first qualifying block (2..32 supported instructions) is emitted
-# and awk exits. This guarantees one straight-line block per fixture,
-# preventing the previous behaviour of grep'ing across multiple basic
-# blocks / functions and gluing unrelated paths together (PR #269 review).
+# The first qualifying block (2..32 supported instructions, with at
+# least one inferred destination register) is emitted and awk exits.
+# This guarantees one straight-line block per fixture, preventing the
+# previous behaviour of grep'ing across multiple basic blocks / functions
+# and gluing unrelated paths together (PR #269 review).
 echo "[3/4] running llc and extracting basic blocks..."
 kept=0
 for ll in "${SAMPLES[@]}"; do
     base="$(basename "${ll%.ll}")"
     asm="$(llc -mtriple=aarch64-linux-gnu -O2 -filetype=asm -o - "$ll" 2>/dev/null)" || continue
 
-    body="$(printf '%s\n' "$asm" | awk -v mnemonic_re="$MNEMONIC_RE" '
-        BEGIN { block = ""; count = 0; supported = 1; done = 0 }
-        function finish() {
-            if (supported && count >= 2 && count <= 32) {
-                print block
-                done = 1
-                exit 0
-            }
-            block = ""; count = 0; supported = 1
-        }
-        # Blank lines and stripped comments — keep accumulating.
-        /^[[:space:]]*$/ { next }
-        /^[[:space:]]*\/\// { next }
-        # Assembler directives (.text, .cfi_*, etc.) — keep accumulating.
-        /^[[:space:]]*\./ { next }
-        # Labels close the current block.
-        /^[[:space:]]*[A-Za-z_.][A-Za-z0-9_.]*:/ { finish(); next }
-        # Branch / return terminators close the current block.
-        /^[[:space:]]*(b|br|bl|blr|ret|cbz|cbnz|tbz|tbnz)([[:space:]]|$)/ { finish(); next }
-        /^[[:space:]]*b\.[a-z]+([[:space:]]|$)/ { finish(); next }
-        # Supported instruction — append to the in-flight block.
-        $0 ~ mnemonic_re {
-            block = (count == 0 ? $0 : block "\n" $0)
-            count++
-            next
-        }
-        # Any other instruction disqualifies the block.
-        { supported = 0 }
-        # END fires even after `exit 0`, so guard against double-emit.
-        END { if (!done) finish() }
-    ')"
+    fixture="$(printf '%s\n' "$asm" | extract_basic_block "$MNEMONIC_RE")"
 
-    # awk emits a block only on success; an empty body means no
-    # qualifying block was found in this .ll.
-    if [[ -z "$body" ]]; then
+    # awk emits a block only on success; an empty fixture means no
+    # qualifying block with inferred live-out destinations was found.
+    if [[ -z "$fixture" ]]; then
         continue
     fi
 
@@ -147,18 +246,11 @@ for ll in "${SAMPLES[@]}"; do
     {
         printf '// Source: llvm-project/llvm/test/CodeGen/AArch64/%s\n' "$(basename "$ll")"
         printf '// Live-in: x0, x1\n'
-        printf '// Live-out: x0\n'
-        printf '%s\n' "$body"
+        printf '%s\n' "$fixture"
     } > "$out"
     kept=$((kept+1))
 done
 
 echo "[4/4] wrote $kept fixtures to $OUT_DIR"
 echo "Review them with:   git -C $(git rev-parse --show-toplevel) status -- benches/llvm_codegen"
-echo
-echo "WARNING: every fixture inherits a hardcoded \`// Live-out: x0\` header."
-echo "         If the underlying basic block writes its result to a different"
-echo "         register (e.g. x8, x9, or a callee-saved reg), hand-edit the"
-echo "         header before committing — otherwise the benchmark will be"
-echo "         observing the wrong state. Per-block live-out inference is"
-echo "         tracked in https://github.com/pmatos/s11/issues/287."
+echo "Live-out headers are inferred from destination operands; review them before committing."

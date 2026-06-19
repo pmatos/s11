@@ -78,10 +78,9 @@ fn register_logical_value(state: &MachineState, reg: Register, width: RegisterWi
 }
 
 fn eval_logical_operand(state: &MachineState, operand: &Operand, width: RegisterWidth) -> BV {
-    let value = state.eval_operand(operand);
     match width {
-        RegisterWidth::W32 => value.extract(31, 0),
-        RegisterWidth::X64 => value,
+        RegisterWidth::W32 => eval_w_operand(state, operand),
+        RegisterWidth::X64 => state.eval_operand(operand),
     }
 }
 
@@ -1360,16 +1359,12 @@ pub fn states_not_equal(state1: &MachineState, state2: &MachineState) -> z3::ast
 }
 
 /// Check if two machine states are not equal for the specified live-out
-/// registers, optionally including the NZCV flag bits and the whole memory
-/// image (see ADR-0007).
-///
-/// TODO(#282): Production equivalence callers pass `live_out.flags_live()`
-/// here; the explicit parameter remains for direct tests and future cleanup.
+/// contract, including the NZCV flag bits when `live_out.flags_live()` is set
+/// and the whole memory image when `memory_live` is set (see ADR-0007).
 pub fn states_not_equal_for_live_out(
     state1: &MachineState,
     state2: &MachineState,
     live_out: &RegisterSet<Register>,
-    flags_live: bool,
     memory_live: bool,
 ) -> z3::ast::Bool {
     let mut not_equal = z3::ast::Bool::from_bool(false);
@@ -1381,7 +1376,7 @@ pub fn states_not_equal_for_live_out(
         not_equal = z3::ast::Bool::or(&[&not_equal, &reg_not_equal]);
     }
 
-    if flags_live {
+    if live_out.flags_live() {
         not_equal = z3::ast::Bool::or(&[&not_equal, &flags_not_equal(state1, state2)]);
     }
 
@@ -1726,13 +1721,35 @@ mod tests {
 
         let solver = Solver::new();
         let diseq =
-            states_not_equal_for_live_out(&state_cls, &state_signfold_clz, &live_out, false, false);
+            states_not_equal_for_live_out(&state_cls, &state_signfold_clz, &live_out, false);
         solver.assert(diseq);
         assert_eq!(
             solver.check(),
             SatResult::Unsat,
             "CLS(x) should match CLZ(x XOR (x ASR 63)) - 1 for live-out X0"
         );
+    }
+
+    #[test]
+    fn test_states_not_equal_for_live_out_reads_flags_from_mask() {
+        let state1 = MachineState::new_symbolic("flag_mask_a");
+        let state2 = MachineState::new_symbolic("flag_mask_b");
+        let live_out = RegisterSet::<Register>::empty();
+
+        let solver = Solver::new();
+        solver.assert(states_not_equal_for_live_out(
+            &state1, &state2, &live_out, false,
+        ));
+        assert_eq!(solver.check(), SatResult::Unsat);
+
+        let solver = Solver::new();
+        solver.assert(states_not_equal_for_live_out(
+            &state1,
+            &state2,
+            &live_out.with_flags(true),
+            false,
+        ));
+        assert_eq!(solver.check(), SatResult::Sat);
     }
 
     #[test]
@@ -2755,6 +2772,56 @@ mod tests {
             ),
         ] {
             assert_concrete_smt_parity(&instr, &[(Register::X1, pre)], Register::X0);
+        }
+    }
+
+    #[test]
+    fn test_w32_logical_shifted_register_concrete_smt_parity() {
+        for (instr, pre_values) in [
+            (
+                Instruction::And {
+                    rd: Register::X0,
+                    rn: Register::X1,
+                    rm: Operand::ShiftedRegister {
+                        reg: Register::X2,
+                        kind: crate::ir::ShiftKind::Lsr,
+                        amount: 1,
+                    },
+                    width: RegisterWidth::W32,
+                },
+                vec![
+                    (Register::X1, 0xFFFF_FFFF),
+                    (Register::X2, 0x0000_0001_0000_0000),
+                ],
+            ),
+            (
+                Instruction::Orr {
+                    rd: Register::X0,
+                    rn: Register::X1,
+                    rm: Operand::ShiftedRegister {
+                        reg: Register::X2,
+                        kind: crate::ir::ShiftKind::Asr,
+                        amount: 31,
+                    },
+                    width: RegisterWidth::W32,
+                },
+                vec![(Register::X1, 0), (Register::X2, 0x0000_0001_8000_0000)],
+            ),
+            (
+                Instruction::Eor {
+                    rd: Register::X0,
+                    rn: Register::X1,
+                    rm: Operand::ShiftedRegister {
+                        reg: Register::X2,
+                        kind: crate::ir::ShiftKind::Ror,
+                        amount: 1,
+                    },
+                    width: RegisterWidth::W32,
+                },
+                vec![(Register::X1, 0), (Register::X2, 0x0000_0001_0000_0000)],
+            ),
+        ] {
+            assert_concrete_smt_parity(&instr, &pre_values, Register::X0);
         }
     }
 
