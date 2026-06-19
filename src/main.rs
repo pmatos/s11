@@ -471,6 +471,9 @@ trait ElfOptimizationBackend {
 
     fn validate_window_ir(&self, ir: &[Self::Instruction]) -> Result<(), String>;
 
+    /// Run the selected search. `capstone_instructions` preserves source
+    /// operand spelling for backends whose IR collapses aliases; backends
+    /// that do not need that syntax metadata can ignore it.
     fn run_search(
         &self,
         ir: &[Self::Instruction],
@@ -966,6 +969,9 @@ fn build_x86_symbolic_search_config(
     target: &[isa::x86::X86Instruction],
     width: u32,
     options: &OptimizationOptions,
+    // Binary-patching guard: direct IR callers can allow same-count CodeSize
+    // search, but the ELF frontend disables it when Capstone exposed
+    // partial-register operands that the x86 IR cannot model.
     same_count_code_size_allowed: bool,
 ) -> SearchConfig {
     let symbolic_config = SymbolicConfig::default()
@@ -1769,6 +1775,11 @@ fn x86_capstone_window_uses_only_full_width_register_operands(
             .all(
                 |operand| match parse_x86_register_with_width(operand.trim()) {
                     Ok((_reg, alias_width)) => alias_width == width,
+                    // Non-register syntax (immediates, memory operands,
+                    // unsupported forms) does not participate in this direct
+                    // register-width guard. Supported instructions naming an
+                    // unknown register such as `ah` are rejected by
+                    // `convert_to_x86_ir` before this helper is used.
                     Err(_) => true,
                 },
             )
@@ -3307,6 +3318,7 @@ mod cli_helper_tests {
         assert!(parse_x86_operand("not-an-operand").is_err());
         assert!(x86_ir_from_mnemonic("add", "rax").unwrap().is_none());
         assert!(x86_ir_from_mnemonic("add", "rax, nope").is_err());
+        assert!(x86_ir_from_mnemonic("mov", "ah, 0").is_err());
 
         let mut opts = options_for(Algorithm::Enumerative);
         opts.timeout = Some(Duration::from_secs(5));
@@ -3400,6 +3412,7 @@ mod cli_helper_tests {
             downstream_flags_live: false,
         };
 
+        // 66 b8 00 00 = mov ax, 0
         let partial_instructions = cs.disasm_all(&[0x66, 0xb8, 0x00, 0x00], 0x1000).unwrap();
         let partial_ir = backend.convert_ir(&partial_instructions).unwrap();
         assert_eq!(
@@ -3417,6 +3430,7 @@ mod cli_helper_tests {
             "x86-64 symbolic search must not same-count rewrite a partial-width source operand"
         );
 
+        // 66 83 e0 00 = and ax, 0; 74 00 = je +0
         let partial_with_jcc_instructions = cs
             .disasm_all(&[0x66, 0x83, 0xe0, 0x00, 0x74, 0x00], 0x1000)
             .unwrap();
@@ -3446,6 +3460,7 @@ mod cli_helper_tests {
             "the operand-width gate must also suppress same-prefix-count rewrites before a pinned Jcc"
         );
 
+        // 48 c7 c0 00 00 00 00 = mov rax, 0
         let full_instructions = cs
             .disasm_all(&[0x48, 0xc7, 0xc0, 0x00, 0x00, 0x00, 0x00], 0x1000)
             .unwrap();
