@@ -298,6 +298,9 @@ pub fn check_equivalence(seq1: &[Instruction], seq2: &[Instruction]) -> Equivale
 /// Optional per-call metrics from the equivalence pipeline.
 #[derive(Debug, Default, Clone)]
 pub struct EquivalenceMetrics {
+    /// Whether a pre-SMT flag-writer guard rejected the candidate before
+    /// concrete or symbolic equivalence checking.
+    pub flag_guard_rejected: bool,
     /// Whether the SMT solver was actually invoked. False when fast-path
     /// refuted the candidate, when fast_only is set, or when the candidate
     /// was rejected before reaching SMT for any other reason.
@@ -769,7 +772,13 @@ where
     I::adjust_config_for_sequences(&mut effective_config, prefix1, prefix2, terminator1);
 
     if let Some(early) = I::pre_smt_guard_for(prefix1, prefix2, &effective_config) {
-        return (early, metrics);
+        return (
+            early,
+            EquivalenceMetrics {
+                flag_guard_rejected: true,
+                ..metrics
+            },
+        );
     }
 
     if let Some(fast) = I::run_fast_path_for(prefix1, prefix2, &effective_config) {
@@ -792,6 +801,7 @@ where
             smt_called: true,
             smt_formula_bytes,
             smt_elapsed,
+            ..EquivalenceMetrics::default()
         },
     )
 }
@@ -2502,6 +2512,17 @@ mod tests {
             EquivalenceResult::NotEquivalent,
             "Dropping a flag-writer must not be certified as equivalent when flags are live"
         );
+        let (metrics_result, metrics) =
+            check_equivalence_with_config_metrics(&adds, &add, &cfg_flags_live);
+        assert_eq!(metrics_result, EquivalenceResult::NotEquivalent);
+        assert!(
+            metrics.flag_guard_rejected,
+            "Metrics should identify pre-SMT flag-guard rejections"
+        );
+        assert!(!metrics.smt_called);
+        assert!(metrics.smt_formula_bytes.is_none());
+        assert_eq!(metrics.smt_elapsed, Duration::ZERO);
+
         // The unmasked path always treats NZCV as part of full state, so it
         // also rejects.
         assert_eq!(
@@ -2629,12 +2650,16 @@ mod tests {
         );
         // Mirror the assertion for the metrics-returning entry point, which
         // shares the same pre_smt_guard plumbing.
-        let (metrics_result, _metrics) =
+        let (metrics_result, metrics) =
             check_equivalence_with_config_metrics(&target, &candidate, &cfg_flags_dead);
         assert_eq!(
             metrics_result,
             EquivalenceResult::Equivalent,
             "Metrics entry point also accepts flag-only divergence when flags are dead"
+        );
+        assert!(
+            !metrics.flag_guard_rejected,
+            "Flag guard metric should remain false when flags are dead"
         );
     }
 
