@@ -68,11 +68,9 @@ impl X86Condition {
         Self::P,
         Self::NP,
     ];
-}
 
-impl fmt::Display for X86Condition {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let s = match self {
+    pub const fn suffix(self) -> &'static str {
+        match self {
             X86Condition::E => "e",
             X86Condition::NE => "ne",
             X86Condition::B => "b",
@@ -89,8 +87,55 @@ impl fmt::Display for X86Condition {
             X86Condition::NO => "no",
             X86Condition::P => "p",
             X86Condition::NP => "np",
-        };
-        f.write_str(s)
+        }
+    }
+
+    pub const fn cmov_mnemonic(self) -> &'static str {
+        match self {
+            X86Condition::E => "cmove",
+            X86Condition::NE => "cmovne",
+            X86Condition::B => "cmovb",
+            X86Condition::AE => "cmovae",
+            X86Condition::BE => "cmovbe",
+            X86Condition::A => "cmova",
+            X86Condition::L => "cmovl",
+            X86Condition::GE => "cmovge",
+            X86Condition::LE => "cmovle",
+            X86Condition::G => "cmovg",
+            X86Condition::S => "cmovs",
+            X86Condition::NS => "cmovns",
+            X86Condition::O => "cmovo",
+            X86Condition::NO => "cmovno",
+            X86Condition::P => "cmovp",
+            X86Condition::NP => "cmovnp",
+        }
+    }
+
+    pub const fn jcc_mnemonic(self) -> &'static str {
+        match self {
+            X86Condition::E => "je",
+            X86Condition::NE => "jne",
+            X86Condition::B => "jb",
+            X86Condition::AE => "jae",
+            X86Condition::BE => "jbe",
+            X86Condition::A => "ja",
+            X86Condition::L => "jl",
+            X86Condition::GE => "jge",
+            X86Condition::LE => "jle",
+            X86Condition::G => "jg",
+            X86Condition::S => "js",
+            X86Condition::NS => "jns",
+            X86Condition::O => "jo",
+            X86Condition::NO => "jno",
+            X86Condition::P => "jp",
+            X86Condition::NP => "jnp",
+        }
+    }
+}
+
+impl fmt::Display for X86Condition {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.suffix())
     }
 }
 
@@ -307,8 +352,8 @@ impl X86Instruction {
             X86Instruction::OrReg { .. } | X86Instruction::OrImm { .. } => "or",
             X86Instruction::XorReg { .. } | X86Instruction::XorImm { .. } => "xor",
             X86Instruction::CmpReg { .. } | X86Instruction::CmpImm { .. } => "cmp",
-            X86Instruction::Cmov { .. } => "cmov",
-            X86Instruction::Jcc { .. } => "jcc",
+            X86Instruction::Cmov { cond, .. } => cond.cmov_mnemonic(),
+            X86Instruction::Jcc { cond } => cond.jcc_mnemonic(),
         }
     }
 
@@ -418,10 +463,9 @@ impl fmt::Display for X86Instruction {
             | X86Instruction::XorImm { rd, imm } => write!(f, "{} {}, {}", mn, rd, imm),
             X86Instruction::CmpReg { rn, rs } => write!(f, "{} {}, {}", mn, rn, rs),
             X86Instruction::CmpImm { rn, imm } => write!(f, "{} {}, {}", mn, rn, imm),
-            // Render as e.g. `cmove rax, rbx` (mnemonic + condition suffix).
-            X86Instruction::Cmov { rd, rs, cond } => write!(f, "cmov{} {}, {}", cond, rd, rs),
+            X86Instruction::Cmov { rd, rs, .. } => write!(f, "{} {}, {}", mn, rd, rs),
             // Target is opaque to the IR; render with a placeholder.
-            X86Instruction::Jcc { cond } => write!(f, "j{} <target>", cond),
+            X86Instruction::Jcc { .. } => write!(f, "{} <target>", mn),
         }
     }
 }
@@ -1802,6 +1846,43 @@ mod tests {
         ];
         for (instr, expected) in cases {
             assert_eq!(instr.mnemonic(), *expected);
+        }
+    }
+
+    #[test]
+    fn x86_condition_mnemonics_include_suffixes() {
+        use crate::isa::traits::InstructionType;
+        let cmove = X86Instruction::Cmov {
+            rd: X86Register::RAX,
+            rs: X86Register::RBX,
+            cond: X86Condition::E,
+        };
+        let cmovne = X86Instruction::Cmov {
+            rd: X86Register::RAX,
+            rs: X86Register::RBX,
+            cond: X86Condition::NE,
+        };
+        let je = X86Instruction::Jcc {
+            cond: X86Condition::E,
+        };
+        let jne = X86Instruction::Jcc {
+            cond: X86Condition::NE,
+        };
+
+        let cases = [
+            (cmove, "cmove", "cmove rax, rbx"),
+            (cmovne, "cmovne", "cmovne rax, rbx"),
+            (je, "je", "je <target>"),
+            (jne, "jne", "jne <target>"),
+        ];
+
+        for (instr, mnemonic, display) in cases {
+            assert_eq!(instr.mnemonic(), mnemonic);
+            assert_eq!(
+                <X86Instruction as InstructionType>::mnemonic(&instr),
+                mnemonic
+            );
+            assert_eq!(instr.to_string(), display);
         }
     }
 

@@ -681,15 +681,34 @@ impl ElfOptimizationBackend for X86OptimizationBackend {
             )
             .into());
         }
-        let pinned_terminator_bytes: Option<Vec<u8>> = if original_terminator.is_some() {
-            let last = capstone_instructions
-                .iter()
-                .last()
-                .ok_or("expected non-empty disassembly when peeling terminator")?;
-            Some(last.bytes().to_vec())
-        } else {
-            None
-        };
+        let pinned_terminator_bytes: Option<Vec<u8>> =
+            if let Some(expected_terminator) = original_terminator {
+                let last = capstone_instructions
+                    .iter()
+                    .last()
+                    .ok_or("expected non-empty disassembly when peeling terminator")?;
+                #[cfg(debug_assertions)]
+                {
+                    let mn = last.mnemonic().unwrap_or("");
+                    let ops = last.op_str().unwrap_or("");
+                    let parsed_last = match x86_ir_from_mnemonic(mn, ops) {
+                        Ok(Some(instr)) => instr,
+                        Ok(None) => panic!(
+                            "last Capstone instruction must yield x86 IR when original IR has a Jcc"
+                        ),
+                        Err(err) => panic!(
+                            "last Capstone instruction must parse when original IR has a Jcc: {err}"
+                        ),
+                    };
+                    debug_assert_eq!(
+                        parsed_last, *expected_terminator,
+                        "peeled x86 Jcc terminator must correspond to the last Capstone instruction"
+                    );
+                }
+                Some(last.bytes().to_vec())
+            } else {
+                None
+            };
         let original_prefix_byte_size =
             original_bytes.len() - pinned_terminator_bytes.as_ref().map_or(0, |b| b.len());
 
@@ -1941,27 +1960,43 @@ fn reassemble_x86_prefix_with_pinned_terminator(
         ));
     }
 
+    let gap = original_prefix_byte_size - out.len();
+    append_nop_padding(&mut out, gap, arch, |remaining| {
+        arch.nop_sequence(remaining)
+    })?;
+    out.extend_from_slice(jcc_bytes);
+    Ok(out)
+}
+
+fn append_nop_padding<F>(
+    out: &mut Vec<u8>,
+    gap: usize,
+    arch: DetectedArch,
+    mut nop_sequence: F,
+) -> Result<(), String>
+where
+    F: FnMut(usize) -> &'static [u8],
+{
     // Pad NOPs so the Jcc lands at the same offset as in the original
     // window. `nop_sequence` may return fewer than the requested bytes;
     // loop until the gap is filled. Return Err on an empty NOP slice
     // (debug-assert alone would let release builds spin forever).
-    let gap = original_prefix_byte_size - out.len();
     let mut padded = 0;
     while padded < gap {
-        let nop = arch.nop_sequence(gap - padded);
+        let remaining = gap - padded;
+        let nop = nop_sequence(remaining);
         if nop.is_empty() {
             return Err(format!(
                 "nop_sequence returned an empty slice while padding {} bytes \
                  for arch {:?}; refusing to spin forever",
-                gap - padded,
-                arch
+                remaining, arch
             ));
         }
-        out.extend_from_slice(nop);
-        padded += nop.len();
+        let take = nop.len().min(remaining);
+        out.extend_from_slice(&nop[..take]);
+        padded += take;
     }
-    out.extend_from_slice(jcc_bytes);
-    Ok(out)
+    Ok(())
 }
 
 // --- Equivalence Checking Command ---
@@ -4378,6 +4413,19 @@ mod cli_helper_tests {
         assert_eq!(&out[5..7], &original_jcc_bytes);
         // Bytes [2..5] are NOP-padding; x86-32 nop_sequence emits 0x90.
         assert_eq!(&out[2..5], &[0x90u8; 3]);
+    }
+
+    #[test]
+    fn append_nop_padding_clamps_overlong_nop_provider() {
+        let mut out = vec![0xcc];
+
+        append_nop_padding(&mut out, 3, DetectedArch::X86_64, |_| {
+            &[0x90, 0x90, 0x90, 0x90]
+        })
+        .expect("padding succeeds");
+
+        assert_eq!(out.len(), 4, "padding must not overshoot the requested gap");
+        assert_eq!(&out[1..], &[0x90, 0x90, 0x90]);
     }
 
     #[test]

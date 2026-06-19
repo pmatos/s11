@@ -87,6 +87,9 @@ impl MachineStateX86 {
 
 // --- symbolic EFLAGS helpers ---
 
+// z3 0.20 constructors use the thread-local context. Keep this helper
+// aligned with the AArch64 SMT module; an explicit-context refactor should
+// move both backends together.
 fn bv_one() -> BV {
     BV::from_u64(1, 1)
 }
@@ -659,6 +662,74 @@ mod tests {
         );
     }
 
+    fn assert_x86_cmov_concrete_smt_parity(
+        cond: crate::isa::x86::X86Condition,
+        input_flags: crate::semantics::state::Eflags,
+        lhs: u64,
+        rhs: u64,
+    ) {
+        use crate::semantics::concrete_x86::apply_instruction_concrete_x86;
+        use crate::semantics::state::{ConcreteValue, X86ConcreteMachineState};
+
+        let instr = X86Instruction::Cmov {
+            rd: X86Register::RAX,
+            rs: X86Register::RBX,
+            cond,
+        };
+
+        let mut concrete_pre = X86ConcreteMachineState::new_zeroed(64);
+        concrete_pre.set_register(X86Register::RAX, ConcreteValue::new(lhs));
+        concrete_pre.set_register(X86Register::RBX, ConcreteValue::new(rhs));
+        concrete_pre.set_flags(input_flags);
+        let concrete_post = apply_instruction_concrete_x86(concrete_pre, &instr);
+        let expected_flags = concrete_post.get_flags();
+
+        let symbolic_pre = MachineStateX86::new_symbolic("cmov_pre", 64);
+        let solver = Solver::new();
+        solver.assert(
+            symbolic_pre
+                .get_register(X86Register::RAX)
+                .eq(BV::from_u64(lhs, 64)),
+        );
+        solver.assert(
+            symbolic_pre
+                .get_register(X86Register::RBX)
+                .eq(BV::from_u64(rhs, 64)),
+        );
+
+        let one_bit = |b: bool| BV::from_u64(b as u64, 1);
+        let (cf_pre, pf_pre, zf_pre, sf_pre, of_pre) = symbolic_pre.get_flags();
+        solver.assert(cf_pre.eq(one_bit(input_flags.cf)));
+        solver.assert(pf_pre.eq(one_bit(input_flags.pf)));
+        solver.assert(zf_pre.eq(one_bit(input_flags.zf)));
+        solver.assert(sf_pre.eq(one_bit(input_flags.sf)));
+        solver.assert(of_pre.eq(one_bit(input_flags.of)));
+
+        let symbolic_post = apply_instruction(symbolic_pre, &instr);
+        let (cf_s, pf_s, zf_s, sf_s, of_s) = symbolic_post.get_flags();
+        let expected_rd = BV::from_u64(concrete_post.get_register(X86Register::RAX).as_u64(), 64);
+        let diffs = [
+            symbolic_post
+                .get_register(X86Register::RAX)
+                .eq(&expected_rd)
+                .not(),
+            cf_s.eq(one_bit(expected_flags.cf)).not(),
+            pf_s.eq(one_bit(expected_flags.pf)).not(),
+            zf_s.eq(one_bit(expected_flags.zf)).not(),
+            sf_s.eq(one_bit(expected_flags.sf)).not(),
+            of_s.eq(one_bit(expected_flags.of)).not(),
+        ];
+        let refs: Vec<&z3::ast::Bool> = diffs.iter().collect();
+        solver.assert(z3::ast::Bool::or(&refs));
+        assert_eq!(
+            solver.check(),
+            SatResult::Unsat,
+            "CMOV concrete/SMT parity violation for {:?} with flags {:?}",
+            instr,
+            input_flags
+        );
+    }
+
     const PARITY_SAMPLES: &[(u64, u64)] = &[
         (0, 0),
         (0, 1),
@@ -738,6 +809,42 @@ mod tests {
         for &(a, b) in PARITY_SAMPLES {
             assert_x86_concrete_smt_parity(&instr, a, b);
         }
+    }
+
+    #[test]
+    fn parity_cmov_reg_taken_and_not_taken() {
+        use crate::isa::x86::X86Condition;
+        use crate::semantics::state::Eflags;
+
+        let taken_flags = Eflags {
+            cf: true,
+            pf: false,
+            af: true,
+            zf: true,
+            sf: false,
+            of: true,
+        };
+        assert_x86_cmov_concrete_smt_parity(
+            X86Condition::E,
+            taken_flags,
+            0x1111_2222_3333_4444,
+            0xAAAA_BBBB_CCCC_DDDD,
+        );
+
+        let not_taken_flags = Eflags {
+            cf: false,
+            pf: true,
+            af: true,
+            zf: false,
+            sf: true,
+            of: false,
+        };
+        assert_x86_cmov_concrete_smt_parity(
+            X86Condition::E,
+            not_taken_flags,
+            0x1111_2222_3333_4444,
+            0xAAAA_BBBB_CCCC_DDDD,
+        );
     }
 
     #[test]
