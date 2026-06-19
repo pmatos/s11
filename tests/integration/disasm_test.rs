@@ -207,6 +207,7 @@ fn test_disasm_arch_mismatch_rejected_before_disassembly() {
     let output = Command::new(binary)
         .arg("disasm")
         .arg("--arch")
+        // simple_debug is AArch64; passing x86-64 forces a mismatch.
         .arg("x86-64")
         .arg(&test_elf)
         .output()
