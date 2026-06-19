@@ -537,7 +537,7 @@ mod tests {
         use crate::test_utils::TempFile;
 
         let text_vaddr: u64 = 0x100000;
-        let text_bytes = [0xd5u8; 16];
+        let text_bytes = [0xdeu8; 16];
         let elf_bytes = build_minimal_aarch64_elf(&text_bytes, text_vaddr);
 
         let input = TempFile::new_bytes("s11-elf-aarch64-padding-in", "elf", &elf_bytes);
@@ -563,6 +563,73 @@ mod tests {
             &patched_window[8..],
             &[0x1f, 0x20, 0x03, 0xd5, 0x1f, 0x20, 0x03, 0xd5][..],
             "padding should be repeated canonical AArch64 NOPs",
+        );
+    }
+
+    #[test]
+    fn create_patched_copy_emits_no_aarch64_padding_when_payload_fills_window() {
+        use crate::test_utils::TempFile;
+
+        let text_vaddr: u64 = 0x100000;
+        let text_bytes = [0xdeu8; 16];
+        let elf_bytes = build_minimal_aarch64_elf(&text_bytes, text_vaddr);
+
+        let input = TempFile::new_bytes("s11-elf-aarch64-no-padding-in", "elf", &elf_bytes);
+        let output = TempFile::new_bytes("s11-elf-aarch64-no-padding-out", "elf", &[]);
+
+        let patcher = ElfPatcher::new(input.path()).expect("patcher should accept minimal ELF");
+
+        let window = AddressWindow {
+            start: text_vaddr,
+            end: text_vaddr + 16,
+        };
+        let payload = [
+            0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff, 0x11, 0x22, 0x44, 0x55, 0x66, 0x77, 0x88, 0x99,
+            0xab, 0xcd,
+        ];
+        patcher
+            .create_patched_copy(output.path(), &window, &payload)
+            .expect("patch should succeed");
+
+        let patched = std::fs::read(output.path()).expect("output should be readable");
+        let text_file_offset = 64usize;
+        let patched_window = &patched[text_file_offset..text_file_offset + 16];
+        assert_eq!(
+            patched_window,
+            &payload[..],
+            "payload that fills the window should not receive AArch64 padding",
+        );
+    }
+
+    #[test]
+    fn create_patched_copy_emits_no_x86_padding_when_payload_fills_window() {
+        use crate::test_utils::TempFile;
+
+        let text_vaddr: u64 = 0x100000;
+        let text_bytes = [0xc3u8; 8];
+        let elf_bytes = build_minimal_x86_64_elf(&text_bytes, text_vaddr);
+
+        let input = TempFile::new_bytes("s11-elf-x86-no-padding-in", "elf", &elf_bytes);
+        let output = TempFile::new_bytes("s11-elf-x86-no-padding-out", "elf", &[]);
+
+        let patcher = ElfPatcher::new(input.path()).expect("patcher should accept minimal ELF");
+
+        let window = AddressWindow {
+            start: text_vaddr,
+            end: text_vaddr + 8,
+        };
+        let payload = [0xcc, 0x31, 0xc0, 0x48, 0x83, 0xc0, 0x01, 0xc3];
+        patcher
+            .create_patched_copy(output.path(), &window, &payload)
+            .expect("patch should succeed");
+
+        let patched = std::fs::read(output.path()).expect("output should be readable");
+        let text_file_offset = 64usize;
+        let patched_window = &patched[text_file_offset..text_file_offset + 8];
+        assert_eq!(
+            patched_window,
+            &payload[..],
+            "payload that fills the window should not receive x86 padding",
         );
     }
 
@@ -603,6 +670,42 @@ mod tests {
             &patched_window[12..20],
             &[0x0f, 0x1f, 0x84, 0x00, 0x00, 0x00, 0x00, 0x00][..],
             "second pad should be the canonical 8-byte Intel NOP",
+        );
+    }
+
+    #[test]
+    fn create_patched_copy_pads_large_aarch64_gap_with_repeated_nops() {
+        use crate::test_utils::TempFile;
+
+        let text_vaddr: u64 = 0x100000;
+        let text_bytes = [0xdeu8; 20];
+        let elf_bytes = build_minimal_aarch64_elf(&text_bytes, text_vaddr);
+
+        let input = TempFile::new_bytes("s11-elf-aarch64-padding-big-in", "elf", &elf_bytes);
+        let output = TempFile::new_bytes("s11-elf-aarch64-padding-big-out", "elf", &[]);
+
+        let patcher = ElfPatcher::new(input.path()).expect("patcher should accept minimal ELF");
+
+        let window = AddressWindow {
+            start: text_vaddr,
+            end: text_vaddr + 20,
+        };
+        let payload = [0xaa, 0xbb, 0xcc, 0xdd];
+        patcher
+            .create_patched_copy(output.path(), &window, &payload)
+            .expect("patch should succeed");
+
+        let patched = std::fs::read(output.path()).expect("output should be readable");
+        let text_file_offset = 64usize;
+        let patched_window = &patched[text_file_offset..text_file_offset + 20];
+        assert_eq!(&patched_window[..4], &payload[..], "payload bytes mismatch");
+        assert_eq!(
+            &patched_window[4..],
+            &[
+                0x1f, 0x20, 0x03, 0xd5, 0x1f, 0x20, 0x03, 0xd5, 0x1f, 0x20, 0x03, 0xd5, 0x1f, 0x20,
+                0x03, 0xd5,
+            ][..],
+            "padding should be four repeated canonical AArch64 NOPs",
         );
     }
 
