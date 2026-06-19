@@ -329,13 +329,7 @@ pub fn evaluate_with_tests(
 
     for (input, target_output) in test_inputs.iter().zip(target_outputs.iter()) {
         let proposal_output = apply_sequence_concrete(input.clone(), proposal);
-        if !states_equal_for_live_out(
-            &proposal_output,
-            target_output,
-            live_out,
-            live_out.flags_live(),
-            false,
-        ) {
+        if !states_equal_for_live_out(&proposal_output, target_output, live_out, false) {
             passes_all = false;
             break;
         }
@@ -358,6 +352,7 @@ mod tests {
     use crate::search::config::StochasticConfig;
     use crate::semantics::cost::CostMetric;
     use crate::semantics::live_out::LiveOut;
+    use crate::semantics::state::{ConcreteValue, ConditionFlags};
     use std::time::Duration;
 
     fn mov_add_sequence() -> Vec<Instruction> {
@@ -795,6 +790,54 @@ mod tests {
 
         assert!(!passes);
         assert!(cost > 100); // High penalty
+    }
+
+    #[test]
+    fn test_evaluate_with_tests_honors_flags_from_mask() {
+        let target = Vec::new();
+        let proposal = Vec::new();
+
+        let mut input = ConcreteMachineState::new_zeroed();
+        input.set_register(Register::X0, ConcreteValue(42));
+        input.set_flags(ConditionFlags {
+            n: true,
+            z: false,
+            c: false,
+            v: false,
+        });
+
+        let mut target_output = input.clone();
+        target_output.set_flags(ConditionFlags {
+            n: false,
+            z: true,
+            c: false,
+            v: false,
+        });
+
+        // Mask without flag liveness: the divergent NZCV bits are ignored, so
+        // the proposal still passes.
+        let live_out_flags_dead = RegisterSet::<Register>::from_registers(vec![Register::X0]);
+        let (cost, passes) = evaluate_with_tests(
+            &proposal,
+            &target,
+            &[input.clone()],
+            &[target_output.clone()],
+            &live_out_flags_dead,
+        );
+        assert!(passes);
+        assert_eq!(cost, 0);
+
+        // Mask with flag liveness: NZCV divergence now fails the proposal,
+        // matching the flag-honoring stochastic prefilter.
+        let live_out_flags_live = live_out_flags_dead.with_flags(true);
+        let (_cost, passes) = evaluate_with_tests(
+            &proposal,
+            &target,
+            &[input],
+            &[target_output],
+            &live_out_flags_live,
+        );
+        assert!(!passes);
     }
 
     #[test]

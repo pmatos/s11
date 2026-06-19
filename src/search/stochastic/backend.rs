@@ -178,16 +178,12 @@ impl StochasticBackend<crate::isa::AArch64> for crate::isa::AArch64 {
     }
 
     fn states_equal(s1: &Self::State, s2: &Self::State, live_out: &Self::LiveOut) -> bool {
-        // `memory_live = false`: stochastic validation is still a register /
-        // flag prefilter. The full equivalence path force-enables memory
-        // comparison when either sequence touches memory.
-        crate::semantics::concrete::states_equal_for_live_out(
-            s1,
-            s2,
-            live_out,
-            live_out.flags_live(),
-            false,
-        )
+        // Honor the flag liveness carried by the mask: `states_equal_for_live_out`
+        // derives it from `live_out.flags_live()`. Stochastic validation is still
+        // a register/flag prefilter; the full equivalence path force-enables
+        // memory comparison when either sequence touches memory, so
+        // `memory_live = false` here.
+        crate::semantics::concrete::states_equal_for_live_out(s1, s2, live_out, false)
     }
 
     fn sequence_cost(seq: &[crate::ir::Instruction], metric: &CostMetric, _width: u32) -> u64 {
