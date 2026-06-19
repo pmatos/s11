@@ -79,7 +79,7 @@ fn executable_window(path: &Path, width: u64) -> (u64, u64) {
     panic!("no executable window of {width} bytes found in {path:?}");
 }
 
-fn assert_opt_arch_mismatch_rejected(test_elf: &Path, arch: &str) {
+fn assert_opt_arch_mismatch_rejected(test_elf: &Path, arch: &str, detected_arch: &str) {
     let output = Command::new(get_binary_path())
         .arg("opt")
         .arg(test_elf)
@@ -101,6 +101,21 @@ fn assert_opt_arch_mismatch_rejected(test_elf: &Path, arch: &str) {
     assert!(
         stderr.contains("Architecture mismatch"),
         "Should reject before optimization, stderr: {}",
+        stderr
+    );
+    assert!(
+        stderr.contains(&format!("--arch {arch}")),
+        "Should print requested CLI arch spelling, stderr: {}",
+        stderr
+    );
+    assert!(
+        stderr.contains(&format!("ELF reports {detected_arch}")),
+        "Should print detected CLI arch spelling, stderr: {}",
+        stderr
+    );
+    assert!(
+        !stderr.contains("Aarch64") && !stderr.contains("X86_64") && !stderr.contains("X86_32"),
+        "Should not print Rust variant names, stderr: {}",
         stderr
     );
 
@@ -310,15 +325,15 @@ fn test_opt_rejects_arch_mismatch_before_optimization() {
         .join("simple_debug");
 
     check_test_binary(&aarch64_elf);
-    assert_opt_arch_mismatch_rejected(&aarch64_elf, "x86-64");
-    assert_opt_arch_mismatch_rejected(&aarch64_elf, "x86-32");
+    assert_opt_arch_mismatch_rejected(&aarch64_elf, "x86-64", "aarch64");
+    assert_opt_arch_mismatch_rejected(&aarch64_elf, "x86-32", "aarch64");
 
     let x86_elf = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("binaries")
         .join("x86_64")
         .join("simple_debug");
     if x86_elf.exists() {
-        assert_opt_arch_mismatch_rejected(&x86_elf, "aarch64");
+        assert_opt_arch_mismatch_rejected(&x86_elf, "aarch64", "x86-64");
     } else {
         eprintln!(
             "Skipping x86-64 opt mismatch case: {:?} not present (run build_tests.sh)",

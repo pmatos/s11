@@ -222,6 +222,18 @@ fn test_disasm_arch_mismatch_rejected_before_disassembly() {
         stderr.trim_start().starts_with("Architecture mismatch:"),
         "Should reject mismatched architecture without starting disassembly, stderr: {stderr}"
     );
+    assert!(
+        stderr.contains("--arch x86-64"),
+        "Should print requested CLI arch spelling, stderr: {stderr}"
+    );
+    assert!(
+        stderr.contains("ELF reports aarch64"),
+        "Should print detected CLI arch spelling, stderr: {stderr}"
+    );
+    assert!(
+        !stderr.contains("X86_64") && !stderr.contains("Aarch64"),
+        "Should not print Rust variant names, stderr: {stderr}"
+    );
 
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(

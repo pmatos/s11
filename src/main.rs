@@ -118,6 +118,15 @@ pub enum CliArch {
     X86_32,
 }
 
+impl std::fmt::Display for CliArch {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let possible_value = self
+            .to_possible_value()
+            .expect("CliArch variants must have clap values");
+        f.write_str(possible_value.get_name())
+    }
+}
+
 impl From<DetectedArch> for CliArch {
     fn from(arch: DetectedArch) -> Self {
         // DetectedArch is the closed set of architectures ElfPatcher accepts
@@ -289,7 +298,7 @@ fn analyze_elf_binary(
         && expected_arch != detected_arch
     {
         return Err(format!(
-            "{ARCH_MISMATCH_PREFIX} --arch {expected_arch:?} but ELF reports {detected_arch:?}"
+            "{ARCH_MISMATCH_PREFIX} --arch {expected_arch} but ELF reports {detected_arch}"
         )
         .into());
     }
@@ -2174,9 +2183,7 @@ fn main() {
             let cli_arch = match arch {
                 Some(a) if a == detected_arch => a,
                 Some(a) => {
-                    eprintln!(
-                        "{ARCH_MISMATCH_PREFIX} --arch {a:?} but ELF reports {detected_arch:?}"
-                    );
+                    eprintln!("{ARCH_MISMATCH_PREFIX} --arch {a} but ELF reports {detected_arch}");
                     std::process::exit(1);
                 }
                 None => detected_arch,
@@ -2388,10 +2395,12 @@ mod cli_helper_tests {
         let err = analyze_elf_binary(input.path(), true, Some(CliArch::Aarch64))
             .expect_err("mismatched expected architecture should fail");
 
-        assert!(
-            err.to_string().starts_with(ARCH_MISMATCH_PREFIX),
-            "diagnostic should report architecture mismatch: {err}"
+        assert_eq!(
+            err.to_string(),
+            "Architecture mismatch: --arch aarch64 but ELF reports x86-64"
         );
+        assert!(!err.to_string().contains("Aarch64"));
+        assert!(!err.to_string().contains("X86_64"));
     }
 
     #[test]
@@ -2422,6 +2431,15 @@ mod cli_helper_tests {
             opt_help.contains("9,728"),
             "opt help should mention the default AArch64 multiply candidate growth:\n{opt_help}"
         );
+    }
+
+    #[test]
+    fn cli_arch_display_uses_value_enum_spellings() {
+        assert_eq!(CliArch::Aarch64.to_string(), "aarch64");
+        assert_eq!(CliArch::Riscv32.to_string(), "riscv32");
+        assert_eq!(CliArch::Riscv64.to_string(), "riscv64");
+        assert_eq!(CliArch::X86_64.to_string(), "x86-64");
+        assert_eq!(CliArch::X86_32.to_string(), "x86-32");
     }
 
     #[test]
