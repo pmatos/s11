@@ -80,7 +80,8 @@ Useful flags on `opt`:
 | `--cores N` | worker threads for `hybrid` |
 | `--timeout SECS` | wall-clock budget for the search |
 | `--beta`, `--iterations`, `--seed` | MCMC tuning for `stochastic` |
-| `--search-mode linear\|binary`, `--solver-timeout SECS` | SMT synthesis tuning |
+| `--search-mode linear\|binary` | SMT synthesis search tuning |
+| `--solver-timeout SECS` | per-query SMT verifier/synthesis timeout |
 | `--no-symbolic` | run hybrid as all-stochastic workers |
 
 Note: enumerative search scales with the generated instruction families in its

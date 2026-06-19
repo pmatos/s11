@@ -756,25 +756,143 @@ impl InstructionGenerator<Instruction> for AArch64InstructionGenerator {
         registers: &[Register],
         immediates: &[i64],
     ) -> Instruction {
-        // 38 random-generation slots: 0..=12 original, 13..=23 Tier 1,
-        // 24 = MOVZ, 25 = MOVK, 26..=31 = CLZ/CLS/RBIT/REV/REV32/REV16 as
-        // separate top-level slots, 32 = multiply-accumulate family (issue
-        // #56: 5-way sub-multiplexer for MADD/MSUB/MNEG/SMULH/UMULH), 33 =
-        // conditional-compare family (issue #57: 2-way sub-multiplexer for
-        // CCMP/CCMN), 34 = bit-field aliases (issue #61: 6-way sub-multiplexer
-        // for UBFX/SBFX/BFI/BFXIL/UBFIZ/SBFIZ), 35 = CSET, 36 = CSETM,
-        // 37 = ROR.
+        // 48 opcode slots: 0..=12 original, 13..=23 Tier 1, 24 = MOVZ,
+        // 25 = MOVK, 26..=31 = CLZ/CLS/RBIT/REV/REV32/REV16, 32 =
+        // MADD, 33 = CCMP, 34 = UBFX, 35 = CSET, 36 = CSETM, 37 = ROR,
+        // 38..=41 = MSUB/MNEG/SMULH/UMULH, 42 = CCMN, and 43..=47 =
+        // SBFX/BFI/BFXIL/UBFIZ/SBFIZ.
         // These sampler slots are independent from `opcode_id()` values; for
         // example, CSET/CSETM/ROR are slots 35/36/37 here but opcode IDs
         // 31/32/33.
         // See also `src/search/candidate.rs::generate_random_instruction`:
-        // it is a parallel 38-slot sampler, but its slot numbers differ
+        // it is a parallel 48-slot sampler, but its slot numbers differ
         // (notably, ROR is slot 23 there and slot 37 here).
-        let opcode = rng.random_range(0..38);
+        let opcode = rng.random_range(0..48);
         let rd = registers[rng.random_range(0..registers.len())];
         let rn = registers[rng.random_range(0..registers.len())];
         let pick_reg = |rng: &mut R| registers[rng.random_range(0..registers.len())];
         let pick_imm = |rng: &mut R| immediates[rng.random_range(0..immediates.len())];
+        let random_madd_like = |rng: &mut R, variant: u8| {
+            let rm = pick_reg(rng);
+            match variant {
+                0 => {
+                    let ra = pick_reg(rng);
+                    Instruction::Madd { rd, rn, rm, ra }
+                }
+                1 => {
+                    let ra = pick_reg(rng);
+                    Instruction::Msub { rd, rn, rm, ra }
+                }
+                2 => Instruction::Mneg { rd, rn, rm },
+                3 => Instruction::Smulh { rd, rn, rm },
+                4 => Instruction::Umulh { rd, rn, rm },
+                _ => unreachable!(),
+            }
+        };
+        let random_cond_compare = |rng: &mut R, negative: bool| {
+            let non_sp: Vec<Register> = registers
+                .iter()
+                .copied()
+                .filter(|r| *r != Register::SP)
+                .collect();
+            if non_sp.is_empty() {
+                let rm = pick_reg(rng);
+                return Instruction::Mneg { rd, rn, rm };
+            }
+            let pick_non_sp = |rng: &mut R| non_sp[rng.random_range(0..non_sp.len())];
+            let ccmp_rn = pick_non_sp(rng);
+            let rm = if rng.random_bool(0.5) {
+                Operand::Register(pick_non_sp(rng))
+            } else {
+                let imm5_immediates = normalized_immediate_pool(immediates, 32);
+                Operand::Immediate(imm5_immediates[rng.random_range(0..imm5_immediates.len())])
+            };
+            let nzcv = (rng.random::<u32>() & 0x0F) as u8;
+            let cond = Condition::random_normal(rng);
+            if negative {
+                Instruction::Ccmn {
+                    rn: ccmp_rn,
+                    rm,
+                    nzcv,
+                    cond,
+                }
+            } else {
+                Instruction::Ccmp {
+                    rn: ccmp_rn,
+                    rm,
+                    nzcv,
+                    cond,
+                }
+            }
+        };
+        let random_bitfield = |rng: &mut R, variant: u8| {
+            let non_sp: Vec<Register> = registers
+                .iter()
+                .copied()
+                .filter(|r| *r != Register::SP)
+                .collect();
+            if non_sp.is_empty() {
+                let rm = pick_reg(rng);
+                return Instruction::Mneg { rd, rn, rm };
+            }
+            let pick_non_sp = |rng: &mut R| non_sp[rng.random_range(0..non_sp.len())];
+            let bf_rd = pick_non_sp(rng);
+            let bf_rn = pick_non_sp(rng);
+            let reg_width = if rng.random_bool(0.5) {
+                RegisterWidth::W32
+            } else {
+                RegisterWidth::X64
+            };
+            let bound = reg_width.bit_width() as u32;
+            let lsb = (rng.random::<u32>() % bound) as u8;
+            let max_w = bound - lsb as u32;
+            let width = ((rng.random::<u32>() % max_w) + 1) as u8;
+            match variant {
+                0 => Instruction::Ubfx {
+                    rd: bf_rd,
+                    rn: bf_rn,
+                    lsb,
+                    width,
+                    reg_width,
+                },
+                1 => Instruction::Sbfx {
+                    rd: bf_rd,
+                    rn: bf_rn,
+                    lsb,
+                    width,
+                    reg_width,
+                },
+                2 => Instruction::Bfi {
+                    rd: bf_rd,
+                    rn: bf_rn,
+                    lsb,
+                    width,
+                    reg_width,
+                },
+                3 => Instruction::Bfxil {
+                    rd: bf_rd,
+                    rn: bf_rn,
+                    lsb,
+                    width,
+                    reg_width,
+                },
+                4 => Instruction::Ubfiz {
+                    rd: bf_rd,
+                    rn: bf_rn,
+                    lsb,
+                    width,
+                    reg_width,
+                },
+                5 => Instruction::Sbfiz {
+                    rd: bf_rd,
+                    rn: bf_rn,
+                    lsb,
+                    width,
+                    reg_width,
+                },
+                _ => unreachable!(),
+            }
+        };
 
         match opcode {
             0 => Instruction::MovReg { rd, rn },
@@ -947,69 +1065,16 @@ impl InstructionGenerator<Instruction> for AArch64InstructionGenerator {
                 rd,
                 rn: pick_reg(rng),
             },
-            // Multiply-accumulate family.
-            32 => {
-                let rm = pick_reg(rng);
-                match rng.random_range(0..5) {
-                    0 => {
-                        let ra = pick_reg(rng);
-                        Instruction::Madd { rd, rn, rm, ra }
-                    }
-                    1 => {
-                        let ra = pick_reg(rng);
-                        Instruction::Msub { rd, rn, rm, ra }
-                    }
-                    2 => Instruction::Mneg { rd, rn, rm },
-                    3 => Instruction::Smulh { rd, rn, rm },
-                    _ => Instruction::Umulh { rd, rn, rm },
-                }
-            }
-            // Conditional-compare family (CCMP/CCMN). `is_encodable_aarch64`
+            // Multiply-accumulate variants.
+            32 => random_madd_like(rng, 0),
+            // Conditional-compare variants (CCMP/CCMN). `is_encodable_aarch64`
             // forbids SP in `rn` and forbids AL/NV; mirror those in the
             // sampler to keep the emitted candidates encodable. Build a
             // SP-filtered slice up front so the picker is a single
             // bounded sample (no retry loop, no infinite-spin risk in
             // release builds on a degenerate `[SP]`-only pool — that
             // case falls back to the next opcode).
-            33 => {
-                let non_sp: Vec<Register> = registers
-                    .iter()
-                    .copied()
-                    .filter(|r| *r != Register::SP)
-                    .collect();
-                if non_sp.is_empty() {
-                    // No encodable CCMP/CCMN candidates with this pool —
-                    // fall back to the multiply-accumulate family which
-                    // tolerates any register.
-                    let rm = pick_reg(rng);
-                    return Instruction::Mneg { rd, rn, rm };
-                }
-                let pick_non_sp = |rng: &mut R| non_sp[rng.random_range(0..non_sp.len())];
-                let ccmp_rn = pick_non_sp(rng);
-                let rm = if rng.random_bool(0.5) {
-                    Operand::Register(pick_non_sp(rng))
-                } else {
-                    let imm5_immediates = normalized_immediate_pool(immediates, 32);
-                    Operand::Immediate(imm5_immediates[rng.random_range(0..imm5_immediates.len())])
-                };
-                let nzcv = (rng.random::<u32>() & 0x0F) as u8;
-                let cond = Condition::random_normal(rng);
-                if rng.random_bool(0.5) {
-                    Instruction::Ccmp {
-                        rn: ccmp_rn,
-                        rm,
-                        nzcv,
-                        cond,
-                    }
-                } else {
-                    Instruction::Ccmn {
-                        rn: ccmp_rn,
-                        rm,
-                        nzcv,
-                        cond,
-                    }
-                }
-            }
+            33 => random_cond_compare(rng, false),
             // Bit-field aliases (issue #61: UBFX/SBFX/BFI/BFXIL/UBFIZ/SBFIZ).
             // SP is illegal in both rd and rn; we pre-filter rather than retry
             // so the release build has no infinite-spin path on a degenerate
@@ -1017,73 +1082,7 @@ impl InstructionGenerator<Instruction> for AArch64InstructionGenerator {
             // family (which tolerates any register). The 2D constraint
             // `lsb + width <= 64` is enforced by sampling width AFTER lsb so
             // width is bounded by `64 - lsb`.
-            34 => {
-                let non_sp: Vec<Register> = registers
-                    .iter()
-                    .copied()
-                    .filter(|r| *r != Register::SP)
-                    .collect();
-                if non_sp.is_empty() {
-                    let rm = pick_reg(rng);
-                    return Instruction::Mneg { rd, rn, rm };
-                }
-                let pick_non_sp = |rng: &mut R| non_sp[rng.random_range(0..non_sp.len())];
-                let bf_rd = pick_non_sp(rng);
-                let bf_rn = pick_non_sp(rng);
-                let reg_width = if rng.random_bool(0.5) {
-                    RegisterWidth::W32
-                } else {
-                    RegisterWidth::X64
-                };
-                let bound = reg_width.bit_width() as u32;
-                let lsb = (rng.random::<u32>() % bound) as u8;
-                let max_w = bound - lsb as u32;
-                let width = ((rng.random::<u32>() % max_w) + 1) as u8;
-                match rng.random_range(0..6) {
-                    0 => Instruction::Ubfx {
-                        rd: bf_rd,
-                        rn: bf_rn,
-                        lsb,
-                        width,
-                        reg_width,
-                    },
-                    1 => Instruction::Sbfx {
-                        rd: bf_rd,
-                        rn: bf_rn,
-                        lsb,
-                        width,
-                        reg_width,
-                    },
-                    2 => Instruction::Bfi {
-                        rd: bf_rd,
-                        rn: bf_rn,
-                        lsb,
-                        width,
-                        reg_width,
-                    },
-                    3 => Instruction::Bfxil {
-                        rd: bf_rd,
-                        rn: bf_rn,
-                        lsb,
-                        width,
-                        reg_width,
-                    },
-                    4 => Instruction::Ubfiz {
-                        rd: bf_rd,
-                        rn: bf_rn,
-                        lsb,
-                        width,
-                        reg_width,
-                    },
-                    _ => Instruction::Sbfiz {
-                        rd: bf_rd,
-                        rn: bf_rn,
-                        lsb,
-                        width,
-                        reg_width,
-                    },
-                }
-            }
+            34 => random_bitfield(rng, 0),
             35 => Instruction::Cset {
                 rd,
                 cond: Condition::random_normal(rng),
@@ -1101,6 +1100,16 @@ impl InstructionGenerator<Instruction> for AArch64InstructionGenerator {
                 };
                 Instruction::Ror { rd, rn, shift }
             }
+            38 => random_madd_like(rng, 1),
+            39 => random_madd_like(rng, 2),
+            40 => random_madd_like(rng, 3),
+            41 => random_madd_like(rng, 4),
+            42 => random_cond_compare(rng, true),
+            43 => random_bitfield(rng, 1),
+            44 => random_bitfield(rng, 2),
+            45 => random_bitfield(rng, 3),
+            46 => random_bitfield(rng, 4),
+            47 => random_bitfield(rng, 5),
             _ => unreachable!(),
         }
     }
@@ -1877,14 +1886,12 @@ impl InstructionGenerator<Instruction> for AArch64InstructionGenerator {
         }
     }
 
-    /// Total number of distinct opcode *families* (the upper bound on
-    /// `opcode_id()`). Not the same as `generate_random`'s slot count —
-    /// `generate_random` samples 38 top-level slots and still folds several
-    /// families into sub-multiplexers (e.g. the five multiply-accumulate ops,
-    /// the two conditional-compare ops, the five standalone extend aliases,
-    /// and the six bit-field aliases). So `opcode_id < opcode_count` always
-    /// holds for generated arithmetic/logical families, but the
-    /// random-generation distribution is not uniform across all 60 IDs.
+    /// Total number of canonical AArch64 opcode IDs below the branch/terminator
+    /// range. Not the same as `generate_random`'s 48-slot sampler: those random
+    /// slots cover the generated arithmetic/logical variants promoted for
+    /// stochastic sampling fairness, while compare/test, conditional-select,
+    /// and standalone extend aliases still have canonical IDs without dedicated
+    /// `AArch64InstructionGenerator::generate_random` slots.
     fn opcode_count(&self) -> u8 {
         60 // 20 original + 14 Tier 1 (MVN, NEG, NEGS, MovN, BIC, BICS, ORN,
         //  EON, ADDS, SUBS, ANDS, CSET, CSETM, ROR) + 2 MOVK/MOVZ (issue
@@ -1904,7 +1911,10 @@ fn mutate_operand<R: RngExt>(
     immediates: &[i64],
     imm_max: i64,
 ) -> Operand {
-    debug_assert!(imm_max >= 0, "imm_max must be non-negative");
+    debug_assert!(
+        (0..i64::MAX).contains(&imm_max),
+        "imm_max must be non-negative and less than i64::MAX"
+    );
     let bounded_immediates = normalized_immediate_pool(immediates, imm_max + 1);
     let pick_imm = |rng: &mut R| {
         // Bounded immediates are normalized and deduplicated before sampling,
@@ -1977,7 +1987,7 @@ fn mutate_shift_operand<R: RngExt>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ir::types::{AccessWidth, AddressOperand, IndexMode};
+    use crate::ir::types::{AccessWidth, AddressOperand, IndexMode, LabelId, PairAccessWidth};
     use rand::SeedableRng;
     use rand_chacha::ChaCha8Rng;
     use std::collections::{BTreeMap, BTreeSet};
@@ -2291,6 +2301,92 @@ mod tests {
         ]
     }
 
+    fn non_enumerated_instruction_families() -> Vec<Instruction> {
+        let target = LabelId(0x1000);
+        let addr = AddressOperand::Imm {
+            base: Register::X1,
+            offset: 0,
+            mode: IndexMode::Offset,
+        };
+
+        vec![
+            Instruction::B { target },
+            Instruction::BCond {
+                target,
+                cond: Condition::EQ,
+            },
+            Instruction::Ret { rn: Register::X30 },
+            Instruction::Cbz {
+                rn: Register::X0,
+                target,
+            },
+            Instruction::Cbnz {
+                rn: Register::X0,
+                target,
+            },
+            Instruction::Tbz {
+                rt: Register::X0,
+                bit: 3,
+                target,
+            },
+            Instruction::Tbnz {
+                rt: Register::X0,
+                bit: 3,
+                target,
+            },
+            Instruction::Bl { target },
+            Instruction::Br { rn: Register::X16 },
+            Instruction::Ldr {
+                rt: Register::X0,
+                addr,
+                width: AccessWidth::Extended,
+            },
+            Instruction::Ldrs {
+                rt: Register::X0,
+                addr,
+                width: AccessWidth::Word,
+            },
+            Instruction::Str {
+                rt: Register::X0,
+                addr,
+                width: AccessWidth::Extended,
+            },
+            Instruction::Ldp {
+                rt1: Register::X0,
+                rt2: Register::X2,
+                addr,
+                width: PairAccessWidth::Extended,
+                signed: false,
+            },
+            Instruction::Stp {
+                rt1: Register::X0,
+                rt2: Register::X2,
+                addr,
+                width: PairAccessWidth::Extended,
+            },
+            Instruction::Adc {
+                rd: Register::X0,
+                rn: Register::X1,
+                rm: Register::X2,
+            },
+            Instruction::Adcs {
+                rd: Register::X0,
+                rn: Register::X1,
+                rm: Register::X2,
+            },
+            Instruction::Sbc {
+                rd: Register::X0,
+                rn: Register::X1,
+                rm: Register::X2,
+            },
+            Instruction::Sbcs {
+                rd: Register::X0,
+                rn: Register::X1,
+                rm: Register::X2,
+            },
+        ]
+    }
+
     #[test]
     fn test_aarch64_isa_metadata() {
         let isa = AArch64;
@@ -2547,6 +2643,17 @@ mod tests {
         }
     }
 
+    #[cfg(debug_assertions)]
+    #[test]
+    #[should_panic(expected = "imm_max must be non-negative and less than i64::MAX")]
+    fn mutate_operand_rejects_i64_max_imm_max_in_debug() {
+        let regs = vec![Register::X0];
+        let imms = vec![0];
+        let mut rng = ChaCha8Rng::seed_from_u64(42);
+
+        super::mutate_operand(&mut rng, Operand::Immediate(0), &regs, &imms, i64::MAX);
+    }
+
     #[test]
     fn mutate_operand_samples_unique_bounded_immediate_residues() {
         let regs = vec![Register::X0, Register::X1, Register::X2];
@@ -2653,6 +2760,23 @@ mod tests {
             .collect();
         assert_eq!(seen.len(), all_instruction_families().len());
         assert_eq!(seen.len(), generator.opcode_count() as usize);
+    }
+
+    #[test]
+    fn non_enumerated_instruction_families_stay_above_opcode_count() {
+        let generator = AArch64InstructionGenerator;
+        let opcode_count = generator.opcode_count();
+
+        for instr in non_enumerated_instruction_families() {
+            let id = instr.opcode_id();
+            assert!(
+                id >= opcode_count,
+                "non-enumerated opcode {} has id {} below opcode_count {}",
+                instr,
+                id,
+                opcode_count
+            );
+        }
     }
 
     #[test]
@@ -2900,10 +3024,10 @@ mod tests {
     /// pool. The current code collects the non-SP registers up front
     /// and falls back to `Mneg` when the filter yields an empty slice,
     /// so every call must return a valid `Instruction` in finite time.
-    /// Not asserting which opcode comes back — both slot 32 (the
-    /// multiply-accumulate sub-multiplexer) and slot 33's fallback can
-    /// emit Mneg, so any "did the conditional-compare slot fire?" proxy gives false
-    /// confidence. The 10000 samples + bounded loop is the contract:
+    /// Not asserting which opcode comes back — direct MNEG and the CCMP/CCMN
+    /// and bit-field fallbacks can all emit Mneg, so any "did the
+    /// conditional-compare slot fire?" proxy gives false confidence. The 10000
+    /// samples + bounded loop is the contract:
     /// completing the loop without panicking or hanging is the test.
     #[test]
     fn random_generator_handles_sp_only_register_pool() {
@@ -2992,24 +3116,177 @@ mod tests {
         }
     }
 
-    /// Regression test for issue #93: ANDS/CSET/CSETM/ROR used to share
-    /// slot 23 via a 4-way sub-multiplexer, giving each ~1/152 vs ~1/38
-    /// for singleton top-level slots. Each should now hold its own slot.
-    /// With N = 30_000 ChaCha8-seeded draws each singleton-slot opcode is
-    /// expected near 789 hits; the old sub-mux would give ~197. The lower
-    /// threshold catches under-sampling, while the wide 3x upper bound catches
-    /// accidental over-weighting without treating every opcode family as
-    /// uniformly distributed.
     #[test]
-    fn slot_23_sub_multiplexer_removed_for_issue_93() {
+    fn aarch64_random_generation_promotes_semantic_family_variants_to_top_level_slots() {
+        use std::collections::HashMap;
+
+        let generator = AArch64InstructionGenerator;
+        let regs = vec![Register::X0, Register::X1, Register::X2];
+        let imms = vec![0, 1, 2, 16, 32];
+        let mut rng = ChaCha8Rng::seed_from_u64(0x257);
+        let mut counts: HashMap<u8, u32> = HashMap::new();
+        const EXPECTED_PER_TOP_LEVEL_SLOT: u32 = 2_000;
+        const RANDOM_SLOT_COUNT: u32 = 48;
+        const N: u32 = RANDOM_SLOT_COUNT * EXPECTED_PER_TOP_LEVEL_SLOT;
+        const MIN_TOP_LEVEL_SAMPLES: u32 = 1_500;
+
+        for _ in 0..N {
+            let id = generator
+                .generate_random(&mut rng, &regs, &imms)
+                .opcode_id();
+            *counts.entry(id).or_default() += 1;
+        }
+
+        for (label, instr) in [
+            (
+                "Madd",
+                Instruction::Madd {
+                    rd: Register::X0,
+                    rn: Register::X1,
+                    rm: Register::X2,
+                    ra: Register::X0,
+                },
+            ),
+            (
+                "Msub",
+                Instruction::Msub {
+                    rd: Register::X0,
+                    rn: Register::X1,
+                    rm: Register::X2,
+                    ra: Register::X0,
+                },
+            ),
+            (
+                "Mneg",
+                Instruction::Mneg {
+                    rd: Register::X0,
+                    rn: Register::X1,
+                    rm: Register::X2,
+                },
+            ),
+            (
+                "Smulh",
+                Instruction::Smulh {
+                    rd: Register::X0,
+                    rn: Register::X1,
+                    rm: Register::X2,
+                },
+            ),
+            (
+                "Umulh",
+                Instruction::Umulh {
+                    rd: Register::X0,
+                    rn: Register::X1,
+                    rm: Register::X2,
+                },
+            ),
+            (
+                "Ccmp",
+                Instruction::Ccmp {
+                    rn: Register::X0,
+                    rm: Operand::Register(Register::X1),
+                    nzcv: 0,
+                    cond: Condition::EQ,
+                },
+            ),
+            (
+                "Ccmn",
+                Instruction::Ccmn {
+                    rn: Register::X0,
+                    rm: Operand::Register(Register::X1),
+                    nzcv: 0,
+                    cond: Condition::EQ,
+                },
+            ),
+            (
+                "Ubfx",
+                Instruction::Ubfx {
+                    rd: Register::X0,
+                    rn: Register::X1,
+                    lsb: 0,
+                    width: 1,
+                    reg_width: RegisterWidth::X64,
+                },
+            ),
+            (
+                "Sbfx",
+                Instruction::Sbfx {
+                    rd: Register::X0,
+                    rn: Register::X1,
+                    lsb: 0,
+                    width: 1,
+                    reg_width: RegisterWidth::X64,
+                },
+            ),
+            (
+                "Bfi",
+                Instruction::Bfi {
+                    rd: Register::X0,
+                    rn: Register::X1,
+                    lsb: 0,
+                    width: 1,
+                    reg_width: RegisterWidth::X64,
+                },
+            ),
+            (
+                "Bfxil",
+                Instruction::Bfxil {
+                    rd: Register::X0,
+                    rn: Register::X1,
+                    lsb: 0,
+                    width: 1,
+                    reg_width: RegisterWidth::X64,
+                },
+            ),
+            (
+                "Ubfiz",
+                Instruction::Ubfiz {
+                    rd: Register::X0,
+                    rn: Register::X1,
+                    lsb: 0,
+                    width: 1,
+                    reg_width: RegisterWidth::X64,
+                },
+            ),
+            (
+                "Sbfiz",
+                Instruction::Sbfiz {
+                    rd: Register::X0,
+                    rn: Register::X1,
+                    lsb: 0,
+                    width: 1,
+                    reg_width: RegisterWidth::X64,
+                },
+            ),
+        ] {
+            let id = instr.opcode_id();
+            let count = counts.get(&id).copied().unwrap_or(0);
+            assert!(
+                count >= MIN_TOP_LEVEL_SAMPLES,
+                "expected >= {MIN_TOP_LEVEL_SAMPLES} samples for {label} (id {id}) in {N} draws, got {count}",
+            );
+        }
+    }
+
+    /// Regression test for issue #93: ANDS/CSET/CSETM/ROR used to share
+    /// slot 23 via a 4-way sub-multiplexer, giving each ~1/192 vs ~1/48
+    /// for singleton top-level slots. Each should now hold its own slot so
+    /// the sampler is roughly uniform across the current 48-slot table.
+    /// With N = 48_000 ChaCha8-seeded draws each singleton-slot opcode is
+    /// expected near 1000 hits; the old sub-mux would give ~250. The lower
+    /// 750 threshold catches under-sampling, while the wide 3x upper bound
+    /// catches accidental over-weighting without treating every opcode family
+    /// as uniformly distributed.
+    #[test]
+    fn ands_cset_csetm_ror_sampling_uniformity() {
         use std::collections::BTreeMap;
         let generator = AArch64InstructionGenerator;
         let regs = vec![Register::X0, Register::X1, Register::X2];
         let imms = vec![0, 1, 2, 16, 32];
         let mut rng = ChaCha8Rng::seed_from_u64(0x9300);
         let mut counts: BTreeMap<u8, u32> = BTreeMap::new();
-        const N: u32 = 30_000;
-        const TOP_LEVEL_SLOT_COUNT: u32 = 38;
+        const N: u32 = 48_000;
+        const TOP_LEVEL_SLOT_COUNT: u32 = 48;
         const EXPECTED_TOP_LEVEL_COUNT: u32 = N / TOP_LEVEL_SLOT_COUNT;
         const MAX_REASONABLE_TOP_LEVEL_COUNT: u32 = 3 * N / TOP_LEVEL_SLOT_COUNT;
         for _ in 0..N {
@@ -3056,8 +3333,8 @@ mod tests {
             let id = instr.opcode_id();
             let count = counts.get(&id).copied().unwrap_or(0);
             assert!(
-                count >= 600,
-                "expected >= 600 samples for {} (id {}) in {} draws, got {}",
+                count >= 750,
+                "expected >= 750 samples for {} (id {}) in {} draws, got {}",
                 instr,
                 id,
                 N,

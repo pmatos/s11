@@ -120,17 +120,23 @@ impl RegisterSet<Register> {
     }
 }
 
-/// Self-documenting Display: `LiveOut { registers={x0, x1} }`.
+/// Self-documenting Display for the neutral register-set carrier.
 ///
-/// Format from PR #79: wrapping the register slice in a labelled outer
-/// keeps the rendering forward-compatible with extra state slices
-/// (flags_live today, memory/PC tomorrow) without breaking log readers.
+/// `RegisterSet` is used for both live-in and live-out contexts, so the
+/// rendering names the carrier itself and includes the NZCV liveness bit
+/// explicitly instead of implying a live-out-only role.
 impl fmt::Display for RegisterSet<Register> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let mut regs: Vec<_> = self.iter().collect();
         regs.sort_by_key(|r| r.index().unwrap_or(255));
         let names: Vec<_> = regs.iter().map(|r| format!("{}", r)).collect();
-        write!(f, "LiveOut {{ registers={{{}}} }}", names.join(", "))
+        let flags = if self.flags_live() { "nzcv" } else { "none" };
+        write!(
+            f,
+            "RegisterSet {{ registers={{{}}}, flags={} }}",
+            names.join(", "),
+            flags
+        )
     }
 }
 
@@ -224,19 +230,28 @@ mod tests {
     #[test]
     fn test_live_out_display_single_register() {
         let live_out = LiveOut::from_registers(vec![Register::X0]);
-        assert_eq!(format!("{}", live_out), "LiveOut { registers={x0} }");
+        assert_eq!(
+            format!("{}", live_out),
+            "RegisterSet { registers={x0}, flags=none }"
+        );
     }
 
     #[test]
     fn test_live_out_display_multiple_registers_sorted() {
         let live_out = LiveOut::from_registers(vec![Register::X1, Register::X0]);
-        assert_eq!(format!("{}", live_out), "LiveOut { registers={x0, x1} }");
+        assert_eq!(
+            format!("{}", live_out),
+            "RegisterSet { registers={x0, x1}, flags=none }"
+        );
     }
 
     #[test]
     fn test_live_out_display_empty() {
         let live_out = LiveOut::from_registers(vec![]);
-        assert_eq!(format!("{}", live_out), "LiveOut { registers={} }");
+        assert_eq!(
+            format!("{}", live_out),
+            "RegisterSet { registers={}, flags=none }"
+        );
     }
 
     #[test]
@@ -292,6 +307,19 @@ mod tests {
     fn test_register_set_aarch64_display_sorted() {
         let mask: RegisterSet<Register> =
             RegisterSet::from_registers(vec![Register::X5, Register::X1, Register::X3]);
-        assert_eq!(format!("{}", mask), "LiveOut { registers={x1, x3, x5} }");
+        assert_eq!(
+            format!("{}", mask),
+            "RegisterSet { registers={x1, x3, x5}, flags=none }"
+        );
+    }
+
+    #[test]
+    fn test_register_set_display_includes_live_flags() {
+        let mask: RegisterSet<Register> =
+            RegisterSet::from_registers(vec![Register::X1]).with_flags(true);
+        assert_eq!(
+            format!("{}", mask),
+            "RegisterSet { registers={x1}, flags=nzcv }"
+        );
     }
 }
