@@ -825,6 +825,8 @@ fn optimize_elf_binary_with_backend<B: ElfOptimizationBackend>(
 
     // Convert to IR
     let ir_instructions = backend.convert_ir(&instructions)?;
+    // An all-NOP AArch64 window can legitimately convert to empty IR: NOPs are
+    // skipped and the patcher pads the original byte window back out with NOPs.
     println!(
         "Converted {} instructions to {}:",
         ir_instructions.len(),
@@ -1505,10 +1507,16 @@ fn ensure_window_fully_decoded_for_arch(
     use std::cmp::Ordering;
     match decoded_bytes.cmp(&window_bytes) {
         Ordering::Equal => Ok(()),
-        Ordering::Less => Err(format!(
-            "{} window 0x{:x}-0x{:x} ({} bytes) was not fully decoded by Capstone; decoded only {} bytes",
-            arch_label, start_addr, end_addr, window_bytes, decoded_bytes
-        )),
+        Ordering::Less => {
+            let first_undecoded = start_addr
+                .saturating_add(decoded_bytes as u64)
+                .min(end_addr);
+            Err(format!(
+                "{} window 0x{:x}-0x{:x} ({} bytes) was not fully decoded by Capstone; \
+                 decoded only {} bytes, first undecoded byte at 0x{:x}",
+                arch_label, start_addr, end_addr, window_bytes, decoded_bytes, first_undecoded
+            ))
+        }
         // Defensive: cs.disasm_all only emits bytes it was given, so this
         // branch is an internal-invariant guard, not a user-facing condition.
         Ordering::Greater => Err(format!(
@@ -1525,10 +1533,16 @@ fn convert_capstone_op_for_optimization(
 ) -> Result<Option<Instruction>, String> {
     match convert_capstone_op(mnemonic, op_str) {
         ConvertOutcome::Instruction(instr) => Ok(Some(instr)),
-        ConvertOutcome::Skip => Ok(None),
+        ConvertOutcome::Skip => {
+            // `Skip` is intentionally narrower than `Unsupported`: today it is
+            // only used for NOP-equivalent instructions, which the patcher can
+            // re-pad after rewriting the whole byte window. Unsupported
+            // instructions must still abort so side effects are never dropped.
+            Ok(None)
+        }
         ConvertOutcome::Unsupported(line) => Err(format!(
             "AArch64 window contains unsupported instruction '{}' at 0x{:x}; \
-             cannot optimize. Narrow the --start-addr/--end-addr range to \
+             narrow the --start-addr/--end-addr range to \
              exclude it, or add the mnemonic to the supported set.",
             line, address
         )),
@@ -1708,7 +1722,7 @@ fn convert_to_x86_ir(
                 // `call`, etc. would lose its side effect from the binary.
                 return Err(format!(
                     "x86 window contains unsupported mnemonic '{} {}' at 0x{:x}; \
-                     cannot optimize. Narrow the --start-addr/--end-addr range \
+                     narrow the --start-addr/--end-addr range \
                      to exclude it, or add the mnemonic to the supported set.",
                     mn,
                     ops,
@@ -2935,6 +2949,48 @@ mod cli_helper_tests {
     }
 
     #[test]
+    fn convert_to_ir_returns_empty_for_pure_nop_window() {
+        let cs = aarch64_test_capstone();
+        let bytes = [
+            0x1f, 0x20, 0x03, 0xd5, // nop
+            0x1f, 0x20, 0x03, 0xd5, // nop
+        ];
+        let instructions = cs
+            .disasm_all(&bytes, 0x1000)
+            .expect("test NOP bytes should disassemble");
+
+        let ir = convert_to_ir(&instructions).expect("pure-NOP window should convert");
+
+        assert!(ir.is_empty(), "pure-NOP windows should produce empty IR");
+    }
+
+    #[test]
+    fn convert_to_ir_treats_nop_add_nop_as_add() {
+        let cs = aarch64_test_capstone();
+        let mut bytes = vec![0x1f, 0x20, 0x03, 0xd5]; // nop
+        bytes.extend(assemble_aarch64_test_bytes(&[Instruction::Add {
+            rd: Register::X0,
+            rn: Register::X1,
+            rm: Operand::Immediate(1),
+        }]));
+        bytes.extend([0x1f, 0x20, 0x03, 0xd5]); // nop
+        let instructions = cs
+            .disasm_all(&bytes, 0x1000)
+            .expect("test NOP/ADD bytes should disassemble");
+
+        let ir = convert_to_ir(&instructions).expect("NOP/ADD/NOP window should convert");
+
+        assert_eq!(
+            ir,
+            vec![Instruction::Add {
+                rd: Register::X0,
+                rn: Register::X1,
+                rm: Operand::Immediate(1),
+            }]
+        );
+    }
+
+    #[test]
     fn convert_capstone_op_flags_unknown_mnemonic_as_unsupported() {
         // NEON FADD is not parsed; memory ops were promoted to supported in
         // issue #68. See ADR-0007.
@@ -3090,7 +3146,8 @@ mod cli_helper_tests {
 
         assert!(err.contains("fadd v0.4s, v1.4s, v2.4s"));
         assert!(err.contains("0x1234"));
-        assert!(err.contains("cannot optimize"));
+        assert!(err.contains("--start-addr/--end-addr"));
+        assert!(!err.contains("cannot optimize"));
     }
 
     #[test]
@@ -3100,7 +3157,8 @@ mod cli_helper_tests {
 
         assert!(err.contains("mov x0, #0x12345678"));
         assert!(err.contains("0x4444"));
-        assert!(err.contains("cannot optimize"));
+        assert!(err.contains("--start-addr/--end-addr"));
+        assert!(!err.contains("cannot optimize"));
     }
 
     #[test]
@@ -3116,6 +3174,7 @@ mod cli_helper_tests {
 
         assert!(err.contains("0x1000"));
         assert!(err.contains("0x1008"));
+        assert!(err.contains("first undecoded byte at 0x1004"));
         assert!(err.contains("8 bytes"));
         assert!(err.contains("decoded only 4 bytes"));
     }
