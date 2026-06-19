@@ -757,13 +757,18 @@ mod tests {
 
         // cost_bound = 0 caps best_cost at min(0, original) = 0. Every AArch64
         // instruction has cost >= 1, so no candidate sequence can be strictly
-        // cheaper than 0; the length loop prunes every candidate before any SMT
-        // query runs (candidates_evaluated == 0, smt_queries == 0).
+        // cheaper than 0; the length loop counts each constructed candidate,
+        // then prunes it before any SMT query runs.
         assert!(!result.found_optimization);
         assert!(result.optimized_sequence.is_none());
         assert_eq!(result.statistics.best_cost_found, 2);
-        assert_eq!(result.statistics.candidates_evaluated, 0);
+        assert!(result.statistics.candidates_evaluated > 0);
+        assert_eq!(
+            result.statistics.candidates_pruned_by_cost,
+            result.statistics.candidates_evaluated
+        );
         assert_eq!(result.statistics.smt_queries, 0);
+        assert_eq!(result.statistics.candidates_passed_fast, 0);
     }
 
     #[test]
@@ -785,7 +790,8 @@ mod tests {
         assert!(result.optimized_sequence.is_none());
         assert_eq!(result.statistics.best_cost_found, 2);
         assert_eq!(TEST_EQUIVALENCE_CHECKS.load(Ordering::SeqCst), 0);
-        assert_eq!(result.statistics.candidates_evaluated, 0);
+        assert_eq!(result.statistics.candidates_evaluated, 1);
+        assert_eq!(result.statistics.candidates_pruned_by_cost, 1);
     }
 
     #[test]

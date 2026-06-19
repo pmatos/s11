@@ -1307,7 +1307,7 @@ mod tests {
     static VERIFY_STATS_CHECKS: AtomicUsize = AtomicUsize::new(0);
     static VERIFY_STATS_VERDICT: AtomicUsize = AtomicUsize::new(VERIFY_STATS_NOT_EQUIVALENT);
     static VERIFY_STATS_SMT_CALLED: AtomicBool = AtomicBool::new(false);
-    static VERIFY_STATS_CONSTANT_ZERO_COST: AtomicBool = AtomicBool::new(false);
+    static VERIFY_STATS_DRAIN_FIXTURE: AtomicBool = AtomicBool::new(false);
 
     fn set_verify_stats_result(verdict: usize, smt_called: bool) -> MutexGuard<'static, ()> {
         let guard = VERIFY_STATS_TEST_LOCK
@@ -1316,7 +1316,7 @@ mod tests {
         VERIFY_STATS_CHECKS.store(0, AtomicOrdering::SeqCst);
         VERIFY_STATS_VERDICT.store(verdict, AtomicOrdering::SeqCst);
         VERIFY_STATS_SMT_CALLED.store(smt_called, AtomicOrdering::SeqCst);
-        VERIFY_STATS_CONSTANT_ZERO_COST.store(false, AtomicOrdering::SeqCst);
+        VERIFY_STATS_DRAIN_FIXTURE.store(false, AtomicOrdering::SeqCst);
         guard
     }
 
@@ -1332,12 +1332,23 @@ mod tests {
         }
 
         fn enumerate_all(_regs: &[Register], _imms: &[i64]) -> Vec<VerifyStatsInstruction> {
-            vec![VerifyStatsInstruction(0)]
+            if VERIFY_STATS_DRAIN_FIXTURE.load(AtomicOrdering::SeqCst) {
+                vec![VerifyStatsInstruction(0), VerifyStatsInstruction(1)]
+            } else {
+                vec![VerifyStatsInstruction(0)]
+            }
         }
 
         fn sequence_cost(seq: &[VerifyStatsInstruction], _config: &SearchConfig) -> u64 {
-            if VERIFY_STATS_CONSTANT_ZERO_COST.load(AtomicOrdering::SeqCst) {
-                0
+            if VERIFY_STATS_DRAIN_FIXTURE.load(AtomicOrdering::SeqCst) {
+                match seq {
+                    // One candidate is cheap enough to verify; the other ties
+                    // the original cost and should be counted, then pruned.
+                    [VerifyStatsInstruction(0)] => 0,
+                    [VerifyStatsInstruction(1)] => 1,
+                    [VerifyStatsInstruction(1), VerifyStatsInstruction(2)] => 1,
+                    _ => seq.len() as u64,
+                }
             } else {
                 seq.len() as u64
             }
@@ -1469,13 +1480,9 @@ mod tests {
 
     #[test]
     fn search_drains_cost_pruned_candidate_count() {
-        let _guard = set_verify_stats_result(VERIFY_STATS_NOT_EQUIVALENT, true);
-        VERIFY_STATS_CONSTANT_ZERO_COST.store(true, AtomicOrdering::SeqCst);
-        let target = vec![
-            VerifyStatsInstruction(1),
-            VerifyStatsInstruction(2),
-            VerifyStatsInstruction(3),
-        ];
+        let _guard = set_verify_stats_result(VERIFY_STATS_NOT_EQUIVALENT, false);
+        VERIFY_STATS_DRAIN_FIXTURE.store(true, AtomicOrdering::SeqCst);
+        let target = vec![VerifyStatsInstruction(1), VerifyStatsInstruction(2)];
         let config = SearchConfig::default()
             .with_timeout_option(None)
             .with_cores(Some(1));
@@ -1484,8 +1491,8 @@ mod tests {
         let result = search.search(&target, &(), &config);
 
         assert_eq!(result.statistics.candidates_evaluated, 2);
-        assert_eq!(result.statistics.candidates_pruned_by_cost, 2);
-        assert_eq!(VERIFY_STATS_CHECKS.load(AtomicOrdering::SeqCst), 0);
+        assert_eq!(result.statistics.candidates_pruned_by_cost, 1);
+        assert_eq!(VERIFY_STATS_CHECKS.load(AtomicOrdering::SeqCst), 1);
         assert_eq!(result.statistics.smt_queries, 0);
         assert_eq!(result.statistics.candidates_passed_fast, 0);
     }
