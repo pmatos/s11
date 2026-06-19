@@ -2311,9 +2311,11 @@ mod tests {
             }
         }
 
-        assert!(
-            shifted_count > 0,
-            "enumeration must retain valid shifted-register candidates"
+        // 2 non-SP choices for each of rd/rn/rm, with 162 shifted-register
+        // binary candidates per tuple from the current AArch64 candidate matrix.
+        assert_eq!(
+            shifted_count, 1296,
+            "enumeration must retain the expected shifted-register candidate count"
         );
     }
 
