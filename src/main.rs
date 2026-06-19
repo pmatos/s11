@@ -3176,21 +3176,33 @@ mod cli_helper_tests {
         opts.timeout = Some(Duration::from_secs(5));
         opts.solver_timeout = Duration::from_secs(5);
         opts.cost_metric = CostMetric::CodeSize;
-        let optimized = run_x86_enumerative(
-            &[
-                X86Instruction::MovImm {
-                    rd: X86Register::RBX,
-                    imm: 1,
-                },
-                X86Instruction::MovImm {
-                    rd: X86Register::RBX,
-                    imm: 1,
-                },
-            ],
-            64,
-            &opts,
-        )
-        .expect("two identical RBX writes can be shortened");
+        let target = vec![
+            X86Instruction::MovImm {
+                rd: X86Register::RBX,
+                imm: 1,
+            },
+            X86Instruction::MovImm {
+                rd: X86Register::RBX,
+                imm: 1,
+            },
+        ];
+        let config = build_x86_enumerative_search_config(&target, 64, &opts);
+        assert_eq!(config.x86_available_registers, vec![X86Register::RBX]);
+        assert!(
+            !config.x86_available_registers.contains(&X86Register::RAX),
+            "RAX must not be injected into the duplicate-RBX search pool"
+        );
+        assert!(
+            !config.x86_available_registers.contains(&X86Register::RDI),
+            "RDI must not be injected into the duplicate-RBX search pool"
+        );
+        assert!(
+            config.available_immediates.contains(&1),
+            "immediate pool must preserve the fixture immediate"
+        );
+
+        let optimized = run_x86_enumerative(&target, 64, &opts)
+            .expect("two identical RBX writes can be shortened");
         assert_eq!(optimized.len(), 1);
         match optimized[0] {
             X86Instruction::MovImm { rd, imm } => {
