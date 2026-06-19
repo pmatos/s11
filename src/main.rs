@@ -118,6 +118,79 @@ pub enum CliArch {
     X86_32,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SupportedArch {
+    Aarch64,
+    X86_64,
+    X86_32,
+}
+
+impl SupportedArch {
+    fn from_e_machine(machine: u16) -> Result<Self, Box<dyn std::error::Error>> {
+        match machine {
+            elf::abi::EM_AARCH64 => Ok(Self::Aarch64),
+            elf::abi::EM_X86_64 => Ok(Self::X86_64),
+            elf::abi::EM_386 => Ok(Self::X86_32),
+            m => Err(format!("Unsupported architecture (e_machine: {})", m).into()),
+        }
+    }
+
+    fn display_name(self) -> &'static str {
+        match self {
+            Self::Aarch64 => "AArch64",
+            Self::X86_64 => "x86-64",
+            Self::X86_32 => "x86-32",
+        }
+    }
+
+    fn build_capstone(self) -> capstone::CsResult<Capstone> {
+        match self {
+            Self::Aarch64 => Capstone::new()
+                .arm64()
+                .mode(capstone::arch::arm64::ArchMode::Arm)
+                .detail(true)
+                .build(),
+            Self::X86_64 => Capstone::new()
+                .x86()
+                .mode(capstone::arch::x86::ArchMode::Mode64)
+                .syntax(capstone::arch::x86::ArchSyntax::Intel)
+                .detail(true)
+                .build(),
+            Self::X86_32 => Capstone::new()
+                .x86()
+                .mode(capstone::arch::x86::ArchMode::Mode32)
+                .syntax(capstone::arch::x86::ArchSyntax::Intel)
+                .detail(true)
+                .build(),
+        }
+    }
+}
+
+impl TryFrom<CliArch> for SupportedArch {
+    type Error = &'static str;
+
+    fn try_from(arch: CliArch) -> Result<Self, Self::Error> {
+        match arch {
+            CliArch::Aarch64 => Ok(Self::Aarch64),
+            CliArch::X86_64 => Ok(Self::X86_64),
+            CliArch::X86_32 => Ok(Self::X86_32),
+            CliArch::Riscv32 | CliArch::Riscv64 => Err("RISC-V disassembly is not yet supported"),
+        }
+    }
+}
+
+impl From<SupportedArch> for CliArch {
+    fn from(arch: SupportedArch) -> Self {
+        // SupportedArch is the closed set of architectures the disassembler
+        // accepts, so this mapping is total — there is no RISC-V case to handle.
+        match arch {
+            SupportedArch::Aarch64 => CliArch::Aarch64,
+            SupportedArch::X86_64 => CliArch::X86_64,
+            SupportedArch::X86_32 => CliArch::X86_32,
+        }
+    }
+}
+
 impl std::fmt::Display for CliArch {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         // Derive the spelling from clap's ValueEnum so Display and the CLI
@@ -272,19 +345,10 @@ enum Commands {
 /// caller can recognise the error without coupling to the full message text.
 const ARCH_MISMATCH_PREFIX: &str = "Architecture mismatch:";
 
-fn cli_arch_from_e_machine(machine: u16) -> Result<CliArch, Box<dyn std::error::Error>> {
-    match machine {
-        elf::abi::EM_AARCH64 => Ok(CliArch::Aarch64),
-        elf::abi::EM_X86_64 => Ok(CliArch::X86_64),
-        elf::abi::EM_386 => Ok(CliArch::X86_32),
-        m => Err(format!("Unsupported architecture (e_machine: {})", m).into()),
-    }
-}
-
 fn analyze_elf_binary(
     path: &Path,
     disasm_mode: bool,
-    expected_arch: Option<CliArch>,
+    expected_arch: Option<SupportedArch>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     if !disasm_mode {
         println!("Analyzing ELF binary: {}", path.display());
@@ -297,23 +361,20 @@ fn analyze_elf_binary(
     let elf = ElfBytes::<AnyEndian>::minimal_parse(&file_data)?;
 
     // Detect architecture; reject anything outside the supported set.
-    let detected_arch = cli_arch_from_e_machine(elf.ehdr.e_machine)?;
+    let detected_arch = SupportedArch::from_e_machine(elf.ehdr.e_machine)?;
     if let Some(expected_arch) = expected_arch
         && expected_arch != detected_arch
     {
+        // Report the mismatch using CLI architecture names (via Display for
+        // CliArch) so the diagnostic matches what users typed for --arch.
+        let expected_cli = CliArch::from(expected_arch);
+        let detected_cli = CliArch::from(detected_arch);
         return Err(format!(
-            "{ARCH_MISMATCH_PREFIX} --arch {expected_arch} but ELF reports {detected_arch}"
+            "{ARCH_MISMATCH_PREFIX} --arch {expected_cli} but ELF reports {detected_cli}"
         )
         .into());
     }
-    let arch = match detected_arch {
-        CliArch::Aarch64 => "AArch64",
-        CliArch::X86_64 => "x86-64",
-        CliArch::X86_32 => "x86-32",
-        CliArch::Riscv32 | CliArch::Riscv64 => {
-            unreachable!("RISC-V is not produced by cli_arch_from_e_machine")
-        }
-    };
+    let arch = detected_arch.display_name();
 
     if !disasm_mode {
         println!("ELF Header:");
@@ -331,28 +392,7 @@ fn analyze_elf_binary(
     }
 
     // Initialize Capstone disassembler per architecture.
-    let cs = match detected_arch {
-        CliArch::Aarch64 => Capstone::new()
-            .arm64()
-            .mode(capstone::arch::arm64::ArchMode::Arm)
-            .detail(true)
-            .build()?,
-        CliArch::X86_64 => Capstone::new()
-            .x86()
-            .mode(capstone::arch::x86::ArchMode::Mode64)
-            .syntax(capstone::arch::x86::ArchSyntax::Intel)
-            .detail(true)
-            .build()?,
-        CliArch::X86_32 => Capstone::new()
-            .x86()
-            .mode(capstone::arch::x86::ArchMode::Mode32)
-            .syntax(capstone::arch::x86::ArchSyntax::Intel)
-            .detail(true)
-            .build()?,
-        CliArch::Riscv32 | CliArch::Riscv64 => {
-            unreachable!("RISC-V is not produced by cli_arch_from_e_machine")
-        }
-    };
+    let cs = detected_arch.build_capstone()?;
 
     // Find and disassemble .text sections
     let section_headers = elf
@@ -2353,10 +2393,13 @@ fn main() {
             // backend. The optional `--arch` still early-rejects RISC-V, but
             // supported hints are cross-checked inside the analyzer after its
             // single ELF read/parse.
-            if let Some(CliArch::Riscv32 | CliArch::Riscv64) = arch {
-                eprintln!("RISC-V disassembly is not yet supported");
-                std::process::exit(1);
-            }
+            let arch = match arch.map(SupportedArch::try_from).transpose() {
+                Ok(arch) => arch,
+                Err(message) => {
+                    eprintln!("{message}");
+                    std::process::exit(1);
+                }
+            };
             match analyze_elf_binary(&binary, true, arch) {
                 Ok(()) => {}
                 Err(e) => {
@@ -2620,6 +2663,56 @@ mod cli_helper_tests {
     }
 
     #[test]
+    fn supported_arch_from_e_machine_rejects_riscv() {
+        assert_eq!(
+            SupportedArch::from_e_machine(elf::abi::EM_AARCH64).unwrap(),
+            SupportedArch::Aarch64
+        );
+        assert_eq!(
+            SupportedArch::from_e_machine(elf::abi::EM_X86_64).unwrap(),
+            SupportedArch::X86_64
+        );
+        assert_eq!(
+            SupportedArch::from_e_machine(elf::abi::EM_386).unwrap(),
+            SupportedArch::X86_32
+        );
+
+        let err = SupportedArch::from_e_machine(elf::abi::EM_RISCV)
+            .expect_err("RISC-V ELF disassembly should not be supported yet");
+
+        assert_eq!(
+            err.to_string(),
+            format!(
+                "Unsupported architecture (e_machine: {})",
+                elf::abi::EM_RISCV
+            )
+        );
+    }
+
+    #[test]
+    fn supported_arch_try_from_cli_arch_rejects_riscv() {
+        assert_eq!(
+            SupportedArch::try_from(CliArch::Aarch64).unwrap(),
+            SupportedArch::Aarch64
+        );
+        assert_eq!(
+            SupportedArch::try_from(CliArch::X86_64).unwrap(),
+            SupportedArch::X86_64
+        );
+        assert_eq!(
+            SupportedArch::try_from(CliArch::X86_32).unwrap(),
+            SupportedArch::X86_32
+        );
+
+        for cli_arch in [CliArch::Riscv32, CliArch::Riscv64] {
+            assert_eq!(
+                SupportedArch::try_from(cli_arch),
+                Err("RISC-V disassembly is not yet supported")
+            );
+        }
+    }
+
+    #[test]
     fn cli_arch_display_uses_cli_value_names() {
         assert_eq!(CliArch::Aarch64.to_string(), "aarch64");
         assert_eq!(CliArch::Riscv32.to_string(), "riscv32");
@@ -2633,7 +2726,7 @@ mod cli_helper_tests {
         let elf_bytes = build_minimal_elf64(&[0xc3], 0x1000, elf::abi::EM_X86_64);
         let input = TempFile::new_bytes("s11-disasm-mismatch", "elf", &elf_bytes);
 
-        let err = analyze_elf_binary(input.path(), true, Some(CliArch::Aarch64))
+        let err = analyze_elf_binary(input.path(), true, Some(SupportedArch::Aarch64))
             .expect_err("mismatched expected architecture should fail");
 
         let message = err.to_string();
@@ -2652,8 +2745,25 @@ mod cli_helper_tests {
         let elf_bytes = build_minimal_elf64(&[0xc3], 0x1000, elf::abi::EM_X86_64);
         let input = TempFile::new_bytes("s11-disasm-match", "elf", &elf_bytes);
 
-        analyze_elf_binary(input.path(), true, Some(CliArch::X86_64))
+        analyze_elf_binary(input.path(), true, Some(SupportedArch::X86_64))
             .expect("matching expected architecture should disassemble");
+    }
+
+    #[test]
+    fn analyze_elf_binary_rejects_riscv_machine() {
+        let elf_bytes = build_minimal_elf64(&[0x13, 0x00, 0x00, 0x00], 0x1000, elf::abi::EM_RISCV);
+        let input = TempFile::new_bytes("s11-disasm-riscv", "elf", &elf_bytes);
+
+        let err = analyze_elf_binary(input.path(), true, None)
+            .expect_err("RISC-V ELF disassembly should not be supported yet");
+
+        assert_eq!(
+            err.to_string(),
+            format!(
+                "Unsupported architecture (e_machine: {})",
+                elf::abi::EM_RISCV
+            )
+        );
     }
 
     #[test]
