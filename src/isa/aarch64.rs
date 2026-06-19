@@ -4,7 +4,7 @@
 
 #![allow(dead_code)]
 
-use crate::ir::instructions::MOVW_LEGAL_SHIFTS;
+use crate::ir::instructions::{AARCH64_RANDOM_SHIFT_IMMEDIATES, MOVW_LEGAL_SHIFTS};
 use crate::ir::types::Condition;
 use crate::ir::{Instruction, Operand, Register, RegisterWidth};
 use crate::isa::traits::{ISA, InstructionGenerator, InstructionType, OperandType, RegisterType};
@@ -401,15 +401,7 @@ impl InstructionType for Instruction {
         // Memory ops have observable side effects beyond NZCV: stores write
         // memory, writeback modes mutate the base register, loads read from
         // potentially-aliased memory. See ADR-0007.
-        self.modifies_flags()
-            || matches!(
-                self,
-                Instruction::Ldr { .. }
-                    | Instruction::Ldrs { .. }
-                    | Instruction::Str { .. }
-                    | Instruction::Ldp { .. }
-                    | Instruction::Stp { .. }
-            )
+        self.modifies_flags() || self.is_memory_op()
     }
 }
 
@@ -681,11 +673,12 @@ impl InstructionGenerator<Instruction> for AArch64InstructionGenerator {
             }
         }
 
-        // Bit-field aliases (issue #61: UBFX/SBFX/BFI/BFXIL/UBFIZ/SBFIZ).
-        // Sparse (lsb, width) sampling to keep the enumerative budget bounded.
-        // Filter SP from both rd and rn (matches is_encodable_aarch64). 2D
-        // constraint lsb + width <= 64 enforced via the if-guard. Mirrors the
-        // sampling tables in `src/search/candidate.rs::generate_all_instructions`.
+        // Bit-field aliases (issue #61: UBFX/SBFX/BFI/BFXIL/UBFIZ/SBFIZ) in both
+        // X (64-bit) and W (32-bit) forms (issue #145). Sparse (lsb, width)
+        // sampling to keep the enumerative budget bounded; SP filtered from rd
+        // and rn (matches is_encodable_aarch64). The shared sample tables are
+        // filtered per width against the bound (lsb < bound, lsb+width <= bound).
+        // Mirrors `src/search/candidate.rs::generate_all_instructions`.
         const BITFIELD_LSB_SAMPLES: [u8; 5] = [0, 1, 16, 32, 63];
         const BITFIELD_WIDTH_SAMPLES: [u8; 6] = [1, 4, 8, 16, 32, 64];
         for &rd in registers {
@@ -696,17 +689,59 @@ impl InstructionGenerator<Instruction> for AArch64InstructionGenerator {
                 if rn == Register::SP {
                     continue;
                 }
-                for &lsb in &BITFIELD_LSB_SAMPLES {
-                    for &width in &BITFIELD_WIDTH_SAMPLES {
-                        if (lsb as u16 + width as u16) > 64 {
+                for reg_width in [RegisterWidth::X64, RegisterWidth::W32] {
+                    let bound = reg_width.bit_width() as u16;
+                    for &lsb in &BITFIELD_LSB_SAMPLES {
+                        if lsb as u16 >= bound {
                             continue;
                         }
-                        instructions.push(Instruction::Ubfx { rd, rn, lsb, width });
-                        instructions.push(Instruction::Sbfx { rd, rn, lsb, width });
-                        instructions.push(Instruction::Bfi { rd, rn, lsb, width });
-                        instructions.push(Instruction::Bfxil { rd, rn, lsb, width });
-                        instructions.push(Instruction::Ubfiz { rd, rn, lsb, width });
-                        instructions.push(Instruction::Sbfiz { rd, rn, lsb, width });
+                        for &width in &BITFIELD_WIDTH_SAMPLES {
+                            if width as u16 > bound || (lsb as u16 + width as u16) > bound {
+                                continue;
+                            }
+                            instructions.push(Instruction::Ubfx {
+                                rd,
+                                rn,
+                                lsb,
+                                width,
+                                reg_width,
+                            });
+                            instructions.push(Instruction::Sbfx {
+                                rd,
+                                rn,
+                                lsb,
+                                width,
+                                reg_width,
+                            });
+                            instructions.push(Instruction::Bfi {
+                                rd,
+                                rn,
+                                lsb,
+                                width,
+                                reg_width,
+                            });
+                            instructions.push(Instruction::Bfxil {
+                                rd,
+                                rn,
+                                lsb,
+                                width,
+                                reg_width,
+                            });
+                            instructions.push(Instruction::Ubfiz {
+                                rd,
+                                rn,
+                                lsb,
+                                width,
+                                reg_width,
+                            });
+                            instructions.push(Instruction::Sbfiz {
+                                rd,
+                                rn,
+                                lsb,
+                                width,
+                                reg_width,
+                            });
+                        }
                     }
                 }
             }
@@ -721,14 +756,17 @@ impl InstructionGenerator<Instruction> for AArch64InstructionGenerator {
         registers: &[Register],
         immediates: &[i64],
     ) -> Instruction {
-        // 38 opcode slots: 0..=12 original, 13..=23 Tier 1, 24 = MOVZ,
-        // 25 = MOVK, 26..=31 = CLZ/CLS/RBIT/REV/REV32/REV16 as separate
-        // top-level slots, 32 = multiply-accumulate family (issue #56:
-        // 5-way sub-multiplexer for MADD/MSUB/MNEG/SMULH/UMULH), 33 =
-        // conditional-compare family (issue #57: 2-way sub-multiplexer
-        // for CCMP/CCMN), 34 = bit-field aliases (issue #61: 6-way
-        // sub-multiplexer for UBFX/SBFX/BFI/BFXIL/UBFIZ/SBFIZ), 35 = CSET,
-        // 36 = CSETM, 37 = ROR.
+        // 38 random-generation slots: 0..=12 original, 13..=23 Tier 1,
+        // 24 = MOVZ, 25 = MOVK, 26..=31 = CLZ/CLS/RBIT/REV/REV32/REV16 as
+        // separate top-level slots, 32 = multiply-accumulate family (issue
+        // #56: 5-way sub-multiplexer for MADD/MSUB/MNEG/SMULH/UMULH), 33 =
+        // conditional-compare family (issue #57: 2-way sub-multiplexer for
+        // CCMP/CCMN), 34 = bit-field aliases (issue #61: 6-way sub-multiplexer
+        // for UBFX/SBFX/BFI/BFXIL/UBFIZ/SBFIZ), 35 = CSET, 36 = CSETM,
+        // 37 = ROR.
+        // These sampler slots are independent from `opcode_id()` values; for
+        // example, CSET/CSETM/ROR are slots 35/36/37 here but opcode IDs
+        // 31/32/33.
         // See also `src/search/candidate.rs::generate_random_instruction`:
         // it is a parallel 38-slot sampler, but its slot numbers differ
         // (notably, ROR is slot 23 there and slot 37 here).
@@ -778,7 +816,7 @@ impl InstructionGenerator<Instruction> for AArch64InstructionGenerator {
             7..=9 => {
                 let use_imm = rng.random_bool(0.5);
                 let shift = if use_imm {
-                    let amounts = [0i64, 1, 2, 4, 8, 16, 32];
+                    let amounts = AARCH64_RANDOM_SHIFT_IMMEDIATES;
                     Operand::Immediate(amounts[rng.random_range(0..amounts.len())])
                 } else {
                     Operand::Register(pick_reg(rng))
@@ -951,7 +989,8 @@ impl InstructionGenerator<Instruction> for AArch64InstructionGenerator {
                 let rm = if rng.random_bool(0.5) {
                     Operand::Register(pick_non_sp(rng))
                 } else {
-                    Operand::Immediate(pick_imm(rng).rem_euclid(32))
+                    let imm5_immediates = normalized_immediate_pool(immediates, 32);
+                    Operand::Immediate(imm5_immediates[rng.random_range(0..imm5_immediates.len())])
                 };
                 let nzcv = (rng.random::<u32>() & 0x0F) as u8;
                 let cond = Condition::random_normal(rng);
@@ -991,8 +1030,14 @@ impl InstructionGenerator<Instruction> for AArch64InstructionGenerator {
                 let pick_non_sp = |rng: &mut R| non_sp[rng.random_range(0..non_sp.len())];
                 let bf_rd = pick_non_sp(rng);
                 let bf_rn = pick_non_sp(rng);
-                let lsb = (rng.random::<u32>() & 0x3F) as u8;
-                let max_w = 64 - lsb as u32;
+                let reg_width = if rng.random_bool(0.5) {
+                    RegisterWidth::W32
+                } else {
+                    RegisterWidth::X64
+                };
+                let bound = reg_width.bit_width() as u32;
+                let lsb = (rng.random::<u32>() % bound) as u8;
+                let max_w = bound - lsb as u32;
                 let width = ((rng.random::<u32>() % max_w) + 1) as u8;
                 match rng.random_range(0..6) {
                     0 => Instruction::Ubfx {
@@ -1000,36 +1045,42 @@ impl InstructionGenerator<Instruction> for AArch64InstructionGenerator {
                         rn: bf_rn,
                         lsb,
                         width,
+                        reg_width,
                     },
                     1 => Instruction::Sbfx {
                         rd: bf_rd,
                         rn: bf_rn,
                         lsb,
                         width,
+                        reg_width,
                     },
                     2 => Instruction::Bfi {
                         rd: bf_rd,
                         rn: bf_rn,
                         lsb,
                         width,
+                        reg_width,
                     },
                     3 => Instruction::Bfxil {
                         rd: bf_rd,
                         rn: bf_rn,
                         lsb,
                         width,
+                        reg_width,
                     },
                     4 => Instruction::Ubfiz {
                         rd: bf_rd,
                         rn: bf_rn,
                         lsb,
                         width,
+                        reg_width,
                     },
                     _ => Instruction::Sbfiz {
                         rd: bf_rd,
                         rn: bf_rn,
                         lsb,
                         width,
+                        reg_width,
                     },
                 }
             }
@@ -1043,7 +1094,7 @@ impl InstructionGenerator<Instruction> for AArch64InstructionGenerator {
             },
             37 => {
                 let shift = if rng.random_bool(0.5) {
-                    let amounts = [0i64, 1, 2, 4, 8, 16, 32];
+                    let amounts = AARCH64_RANDOM_SHIFT_IMMEDIATES;
                     Operand::Immediate(amounts[rng.random_range(0..amounts.len())])
                 } else {
                     Operand::Register(pick_reg(rng))
@@ -1214,41 +1265,83 @@ impl InstructionGenerator<Instruction> for AArch64InstructionGenerator {
                     Instruction::Sxtw { rn, .. } => Instruction::Sxtw { rd: new_rd, rn },
                     Instruction::Uxtb { rn, .. } => Instruction::Uxtb { rd: new_rd, rn },
                     Instruction::Uxth { rn, .. } => Instruction::Uxth { rd: new_rd, rn },
-                    Instruction::Ubfx { rn, lsb, width, .. } => Instruction::Ubfx {
+                    Instruction::Ubfx {
+                        rn,
+                        lsb,
+                        width,
+                        reg_width,
+                        ..
+                    } => Instruction::Ubfx {
                         rd: new_rd,
                         rn,
                         lsb,
                         width,
+                        reg_width,
                     },
-                    Instruction::Sbfx { rn, lsb, width, .. } => Instruction::Sbfx {
+                    Instruction::Sbfx {
+                        rn,
+                        lsb,
+                        width,
+                        reg_width,
+                        ..
+                    } => Instruction::Sbfx {
                         rd: new_rd,
                         rn,
                         lsb,
                         width,
+                        reg_width,
                     },
-                    Instruction::Bfi { rn, lsb, width, .. } => Instruction::Bfi {
+                    Instruction::Bfi {
+                        rn,
+                        lsb,
+                        width,
+                        reg_width,
+                        ..
+                    } => Instruction::Bfi {
                         rd: new_rd,
                         rn,
                         lsb,
                         width,
+                        reg_width,
                     },
-                    Instruction::Bfxil { rn, lsb, width, .. } => Instruction::Bfxil {
+                    Instruction::Bfxil {
+                        rn,
+                        lsb,
+                        width,
+                        reg_width,
+                        ..
+                    } => Instruction::Bfxil {
                         rd: new_rd,
                         rn,
                         lsb,
                         width,
+                        reg_width,
                     },
-                    Instruction::Ubfiz { rn, lsb, width, .. } => Instruction::Ubfiz {
+                    Instruction::Ubfiz {
+                        rn,
+                        lsb,
+                        width,
+                        reg_width,
+                        ..
+                    } => Instruction::Ubfiz {
                         rd: new_rd,
                         rn,
                         lsb,
                         width,
+                        reg_width,
                     },
-                    Instruction::Sbfiz { rn, lsb, width, .. } => Instruction::Sbfiz {
+                    Instruction::Sbfiz {
+                        rn,
+                        lsb,
+                        width,
+                        reg_width,
+                        ..
+                    } => Instruction::Sbfiz {
                         rd: new_rd,
                         rn,
                         lsb,
                         width,
+                        reg_width,
                     },
                     // Branches have no rd; identity-mutate.
                     Instruction::B { target } => Instruction::B { target },
@@ -1683,41 +1776,83 @@ impl InstructionGenerator<Instruction> for AArch64InstructionGenerator {
                         rd,
                         rn: registers[rng.random_range(0..registers.len())],
                     },
-                    Instruction::Ubfx { rd, lsb, width, .. } => Instruction::Ubfx {
+                    Instruction::Ubfx {
+                        rd,
+                        lsb,
+                        width,
+                        reg_width,
+                        ..
+                    } => Instruction::Ubfx {
                         rd,
                         rn: registers[rng.random_range(0..registers.len())],
                         lsb,
                         width,
+                        reg_width,
                     },
-                    Instruction::Sbfx { rd, lsb, width, .. } => Instruction::Sbfx {
+                    Instruction::Sbfx {
+                        rd,
+                        lsb,
+                        width,
+                        reg_width,
+                        ..
+                    } => Instruction::Sbfx {
                         rd,
                         rn: registers[rng.random_range(0..registers.len())],
                         lsb,
                         width,
+                        reg_width,
                     },
-                    Instruction::Bfi { rd, lsb, width, .. } => Instruction::Bfi {
+                    Instruction::Bfi {
+                        rd,
+                        lsb,
+                        width,
+                        reg_width,
+                        ..
+                    } => Instruction::Bfi {
                         rd,
                         rn: registers[rng.random_range(0..registers.len())],
                         lsb,
                         width,
+                        reg_width,
                     },
-                    Instruction::Bfxil { rd, lsb, width, .. } => Instruction::Bfxil {
+                    Instruction::Bfxil {
+                        rd,
+                        lsb,
+                        width,
+                        reg_width,
+                        ..
+                    } => Instruction::Bfxil {
                         rd,
                         rn: registers[rng.random_range(0..registers.len())],
                         lsb,
                         width,
+                        reg_width,
                     },
-                    Instruction::Ubfiz { rd, lsb, width, .. } => Instruction::Ubfiz {
+                    Instruction::Ubfiz {
+                        rd,
+                        lsb,
+                        width,
+                        reg_width,
+                        ..
+                    } => Instruction::Ubfiz {
                         rd,
                         rn: registers[rng.random_range(0..registers.len())],
                         lsb,
                         width,
+                        reg_width,
                     },
-                    Instruction::Sbfiz { rd, lsb, width, .. } => Instruction::Sbfiz {
+                    Instruction::Sbfiz {
+                        rd,
+                        lsb,
+                        width,
+                        reg_width,
+                        ..
+                    } => Instruction::Sbfiz {
                         rd,
                         rn: registers[rng.random_range(0..registers.len())],
                         lsb,
                         width,
+                        reg_width,
                     },
                     // Branches: no source operand mutation; identity.
                     Instruction::B { target } => Instruction::B { target },
@@ -1773,13 +1908,11 @@ fn mutate_operand<R: RngExt>(
         (0..i64::MAX).contains(&imm_max),
         "imm_max must be non-negative and less than i64::MAX"
     );
+    let bounded_immediates = normalized_immediate_pool(immediates, imm_max + 1);
     let pick_imm = |rng: &mut R| {
-        let v = immediates[rng.random_range(0..immediates.len())];
-        // Issue #87: clamp to the caller's encodable upper bound. Mirrors
-        // the CCMP/CCMN clamp in `src/search/stochastic/mutation.rs` and
-        // matches `Instruction::is_encodable_aarch64`'s per-variant ranges
-        // (ADD/SUB/ADDS/SUBS/CMP/CMN: 0..=0xFFF; CCMP/CCMN: 0..=31).
-        Operand::Immediate(v.rem_euclid(imm_max + 1))
+        // Bounded immediates are normalized and deduplicated before sampling,
+        // so congruent configured values do not carry extra proposal weight.
+        Operand::Immediate(bounded_immediates[rng.random_range(0..bounded_immediates.len())])
     };
     match operand {
         Operand::Register(_)
@@ -1801,12 +1934,29 @@ fn mutate_operand<R: RngExt>(
     }
 }
 
+fn normalized_immediate_pool(immediates: &[i64], modulus: i64) -> Vec<i64> {
+    debug_assert!(modulus > 0, "immediate modulus must be positive");
+
+    if immediates.is_empty() {
+        return vec![0];
+    }
+
+    let mut normalized = Vec::new();
+    for imm in immediates {
+        let residue = imm.rem_euclid(modulus);
+        if !normalized.contains(&residue) {
+            normalized.push(residue);
+        }
+    }
+    normalized
+}
+
 fn mutate_shift_operand<R: RngExt>(
     rng: &mut R,
     operand: Operand,
     registers: &[Register],
 ) -> Operand {
-    let shift_amounts: [i64; 7] = [0, 1, 2, 4, 8, 16, 32];
+    let shift_amounts = AARCH64_RANDOM_SHIFT_IMMEDIATES;
     match operand {
         Operand::Register(_)
         | Operand::ShiftedRegister { .. }
@@ -1830,9 +1980,10 @@ fn mutate_shift_operand<R: RngExt>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ir::types::{AccessWidth, AddressOperand, IndexMode};
     use rand::SeedableRng;
     use rand_chacha::ChaCha8Rng;
-    use std::collections::BTreeSet;
+    use std::collections::{BTreeMap, BTreeSet};
 
     fn all_instruction_families() -> Vec<Instruction> {
         vec![
@@ -2103,36 +2254,42 @@ mod tests {
                 rn: Register::X1,
                 lsb: 8,
                 width: 16,
+                reg_width: crate::ir::RegisterWidth::X64,
             },
             Instruction::Sbfx {
                 rd: Register::X0,
                 rn: Register::X1,
                 lsb: 8,
                 width: 16,
+                reg_width: crate::ir::RegisterWidth::X64,
             },
             Instruction::Bfi {
                 rd: Register::X0,
                 rn: Register::X1,
                 lsb: 4,
                 width: 8,
+                reg_width: crate::ir::RegisterWidth::X64,
             },
             Instruction::Bfxil {
                 rd: Register::X0,
                 rn: Register::X1,
                 lsb: 4,
                 width: 8,
+                reg_width: crate::ir::RegisterWidth::X64,
             },
             Instruction::Ubfiz {
                 rd: Register::X0,
                 rn: Register::X1,
                 lsb: 4,
                 width: 8,
+                reg_width: crate::ir::RegisterWidth::X64,
             },
             Instruction::Sbfiz {
                 rd: Register::X0,
                 rn: Register::X1,
                 lsb: 4,
                 width: 8,
+                reg_width: crate::ir::RegisterWidth::X64,
             },
         ]
     }
@@ -2226,6 +2383,17 @@ mod tests {
             rm: Operand::Register(Register::X2),
         };
         assert!(cmp.has_side_effects());
+
+        let ldr = Instruction::Ldr {
+            rt: Register::X0,
+            addr: AddressOperand::Imm {
+                base: Register::X1,
+                offset: 0,
+                mode: IndexMode::Offset,
+            },
+            width: AccessWidth::Extended,
+        };
+        assert!(ldr.has_side_effects());
     }
 
     #[test]
@@ -2394,6 +2562,81 @@ mod tests {
     }
 
     #[test]
+    fn mutate_operand_samples_unique_bounded_immediate_residues() {
+        let regs = vec![Register::X0, Register::X1, Register::X2];
+        let imms = vec![0x1000, 0x2000, 0x3000, 5];
+        let mut rng = ChaCha8Rng::seed_from_u64(0x2762);
+        let mut counts = BTreeMap::new();
+
+        for _ in 0..50_000 {
+            if let Operand::Immediate(imm) =
+                super::mutate_operand(&mut rng, Operand::Immediate(0), &regs, &imms, 0xFFF)
+            {
+                *counts.entry(imm).or_insert(0usize) += 1;
+            }
+        }
+
+        assert_eq!(
+            counts.keys().copied().collect::<Vec<_>>(),
+            vec![0, 5],
+            "bounded helper should only sample unique imm12 residues"
+        );
+        let zero = counts[&0];
+        let five = counts[&5];
+        let samples = zero + five;
+        assert!(
+            samples > 1_000,
+            "seeded run should observe enough immediate proposals, saw {samples}"
+        );
+        assert!(
+            zero.abs_diff(five) * 5 <= samples,
+            "deduplicated residues should be sampled with similar probability: {counts:?}"
+        );
+    }
+
+    #[test]
+    fn generate_random_conditional_compare_samples_unique_imm5_residues() {
+        let generator = AArch64InstructionGenerator;
+        let regs = vec![Register::X0, Register::X1, Register::X2];
+        let imms = vec![0, 32, 64, 31];
+        let mut rng = ChaCha8Rng::seed_from_u64(0x2763);
+        let mut counts = BTreeMap::new();
+
+        for _ in 0..300_000 {
+            match generator.generate_random(&mut rng, &regs, &imms) {
+                Instruction::Ccmp {
+                    rm: Operand::Immediate(imm),
+                    ..
+                }
+                | Instruction::Ccmn {
+                    rm: Operand::Immediate(imm),
+                    ..
+                } => {
+                    *counts.entry(imm).or_insert(0usize) += 1;
+                }
+                _ => {}
+            }
+        }
+
+        assert_eq!(
+            counts.keys().copied().collect::<Vec<_>>(),
+            vec![0, 31],
+            "CCMP/CCMN generation should only sample unique imm5 residues"
+        );
+        let zero = counts[&0];
+        let thirty_one = counts[&31];
+        let samples = zero + thirty_one;
+        assert!(
+            samples > 1_000,
+            "seeded run should observe enough conditional-compare immediates, saw {samples}"
+        );
+        assert!(
+            zero.abs_diff(thirty_one) * 5 <= samples,
+            "deduplicated residues should be sampled with similar probability: {counts:?}"
+        );
+    }
+
+    #[test]
     fn all_instruction_families_cover_trait_methods() {
         let generator = AArch64InstructionGenerator;
         let seen: BTreeSet<u8> = all_instruction_families()
@@ -2424,6 +2667,51 @@ mod tests {
             .collect();
         assert_eq!(seen.len(), all_instruction_families().len());
         assert_eq!(seen.len(), generator.opcode_count() as usize);
+    }
+
+    #[test]
+    fn generate_all_emits_encodable_w_bitfield() {
+        let generator = AArch64InstructionGenerator;
+        let regs = vec![Register::X0, Register::X1];
+        let imms = vec![0, 1];
+        let all = generator.generate_all(&regs, &imms);
+        let w_bitfields: Vec<&Instruction> = all
+            .iter()
+            .filter(|i| {
+                matches!(
+                    i,
+                    Instruction::Ubfx {
+                        reg_width: RegisterWidth::W32,
+                        ..
+                    } | Instruction::Sbfx {
+                        reg_width: RegisterWidth::W32,
+                        ..
+                    } | Instruction::Bfi {
+                        reg_width: RegisterWidth::W32,
+                        ..
+                    } | Instruction::Bfxil {
+                        reg_width: RegisterWidth::W32,
+                        ..
+                    } | Instruction::Ubfiz {
+                        reg_width: RegisterWidth::W32,
+                        ..
+                    } | Instruction::Sbfiz {
+                        reg_width: RegisterWidth::W32,
+                        ..
+                    }
+                )
+            })
+            .collect();
+        assert!(
+            !w_bitfields.is_empty(),
+            "trait generator must emit W-form bit-field instructions"
+        );
+        for instr in w_bitfields {
+            assert!(
+                instr.is_encodable_aarch64(),
+                "trait generator produced un-encodable W bit-field: {instr}"
+            );
+        }
     }
 
     #[test]
@@ -2581,6 +2869,45 @@ mod tests {
         }
     }
 
+    #[test]
+    fn random_shift_immediates_never_sample_zero() {
+        let generator = AArch64InstructionGenerator;
+        let regs = vec![Register::X0, Register::X1, Register::X2];
+        let imms = vec![0, 1, 2, 16, 32];
+        let mut rng = ChaCha8Rng::seed_from_u64(0x263);
+        let mut seen = BTreeSet::new();
+
+        for _ in 0..50_000 {
+            let instr = generator.generate_random(&mut rng, &regs, &imms);
+            let sampled = match instr {
+                Instruction::Lsl {
+                    shift: Operand::Immediate(amount),
+                    ..
+                } => Some(("lsl", amount)),
+                Instruction::Lsr {
+                    shift: Operand::Immediate(amount),
+                    ..
+                } => Some(("lsr", amount)),
+                Instruction::Asr {
+                    shift: Operand::Immediate(amount),
+                    ..
+                } => Some(("asr", amount)),
+                Instruction::Ror {
+                    shift: Operand::Immediate(amount),
+                    ..
+                } => Some(("ror", amount)),
+                _ => None,
+            };
+
+            if let Some((mnemonic, amount)) = sampled {
+                assert_ne!(amount, 0, "random {mnemonic} sampled immediate shift #0");
+                seen.insert(mnemonic);
+            }
+        }
+
+        assert_eq!(seen, BTreeSet::from(["asr", "lsl", "lsr", "ror"]));
+    }
+
     /// Termination guard for the CCMP/CCMN random-generator arm:
     /// before the slot-28 rewrite this test would have hung in release
     /// builds because `pick_non_sp` retried forever on a `[SP]`-only
@@ -2680,28 +3007,45 @@ mod tests {
     }
 
     /// Regression test for issue #93: ANDS/CSET/CSETM/ROR used to share
-    /// slot 23 via a 4-way sub-multiplexer, giving each ~1/120 vs ~1/30
-    /// for the rest of the old 30-slot table. Each should now hold its
-    /// own top-level slot so the sampler is roughly uniform across the
-    /// new 33-slot table (~1/33). With N = 30_000 ChaCha8-seeded draws
-    /// each is expected near 909 hits; the old sub-mux would give ~250.
-    /// The 600 threshold sits ~10σ below the new expected and ~22σ above
-    /// the old.
+    /// slot 23 via a 4-way sub-multiplexer, giving each ~1/152 vs ~1/38
+    /// for singleton top-level slots. Each should now hold its own slot.
+    /// With N = 30_000 ChaCha8-seeded draws each singleton-slot opcode is
+    /// expected near 789 hits; the old sub-mux would give ~197. The lower
+    /// threshold catches under-sampling, while the wide 3x upper bound catches
+    /// accidental over-weighting without treating every opcode family as
+    /// uniformly distributed.
     #[test]
     fn slot_23_sub_multiplexer_removed_for_issue_93() {
-        use std::collections::HashMap;
+        use std::collections::BTreeMap;
         let generator = AArch64InstructionGenerator;
         let regs = vec![Register::X0, Register::X1, Register::X2];
         let imms = vec![0, 1, 2, 16, 32];
         let mut rng = ChaCha8Rng::seed_from_u64(0x9300);
-        let mut counts: HashMap<u8, u32> = HashMap::new();
+        let mut counts: BTreeMap<u8, u32> = BTreeMap::new();
         const N: u32 = 30_000;
+        const TOP_LEVEL_SLOT_COUNT: u32 = 38;
+        const EXPECTED_TOP_LEVEL_COUNT: u32 = N / TOP_LEVEL_SLOT_COUNT;
+        const MAX_REASONABLE_TOP_LEVEL_COUNT: u32 = 3 * N / TOP_LEVEL_SLOT_COUNT;
         for _ in 0..N {
             let id = generator
                 .generate_random(&mut rng, &regs, &imms)
                 .opcode_id();
             *counts.entry(id).or_default() += 1;
         }
+
+        for (&id, &count) in &counts {
+            assert!(
+                count <= MAX_REASONABLE_TOP_LEVEL_COUNT,
+                "expected opcode id {} to stay <= {} samples in {} draws; got {} (single top-level expected {}, {} slots)",
+                id,
+                MAX_REASONABLE_TOP_LEVEL_COUNT,
+                N,
+                count,
+                EXPECTED_TOP_LEVEL_COUNT,
+                TOP_LEVEL_SLOT_COUNT,
+            );
+        }
+
         for instr in [
             Instruction::Ands {
                 rd: Register::X0,
@@ -2732,6 +3076,43 @@ mod tests {
                 id,
                 N,
                 count,
+            );
+            assert!(
+                count <= MAX_REASONABLE_TOP_LEVEL_COUNT,
+                "expected <= {} samples for {} (id {}) in {} draws, got {} (single top-level expected {}, {} slots)",
+                MAX_REASONABLE_TOP_LEVEL_COUNT,
+                instr,
+                id,
+                N,
+                count,
+                EXPECTED_TOP_LEVEL_COUNT,
+                TOP_LEVEL_SLOT_COUNT,
+            );
+        }
+    }
+
+    #[test]
+    fn mutate_shift_operand_never_samples_zero_immediate() {
+        let regs = vec![Register::X0, Register::X1, Register::X2];
+
+        for (seed, operand) in [
+            (0x2630, Operand::Immediate(1)),
+            (0x2631, Operand::Register(Register::X1)),
+        ] {
+            let mut rng = ChaCha8Rng::seed_from_u64(seed);
+            let mut saw_immediate = false;
+
+            for _ in 0..2_000 {
+                let mutated = super::mutate_shift_operand(&mut rng, operand, &regs);
+                if let Operand::Immediate(amount) = mutated {
+                    assert_ne!(amount, 0, "mutate_shift_operand sampled shift #0");
+                    saw_immediate = true;
+                }
+            }
+
+            assert!(
+                saw_immediate,
+                "mutate_shift_operand never returned an immediate"
             );
         }
     }

@@ -58,7 +58,8 @@ fn instruction_code_size(instr: &X86Instruction, width: u32) -> u64 {
         // Short-form Jcc is `7x rel8` = 2 bytes (no REX). Long-form
         // `0F 8x rel32` = 6 bytes is used when the displacement doesn't
         // fit. The optimizer never emits Jcc bytes (terminators stay
-        // pinned in the binary), so 2 is the conservative baseline.
+        // pinned in the binary), so this is only the IR accounting
+        // baseline; patching splices the original branch bytes back.
         X86Instruction::Jcc { .. } => 2,
     }
 }
