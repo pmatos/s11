@@ -1289,6 +1289,10 @@ pub fn apply_instruction(mut state: MachineState, instruction: &Instruction) -> 
 /// Zero-extend the low `width.bytes() * 8` bits of `raw` to `target_width`.
 fn ldr_zero_extend(raw: &BV, width: AccessWidth, target_width: u32) -> BV {
     let raw_bits = width.bytes() * 8;
+    assert!(
+        raw_bits <= target_width,
+        "raw load width {raw_bits} exceeds target register width {target_width}"
+    );
     let pad = target_width - raw_bits;
     if pad == 0 {
         raw.clone()
@@ -1300,6 +1304,10 @@ fn ldr_zero_extend(raw: &BV, width: AccessWidth, target_width: u32) -> BV {
 /// Sign-extend the low `width.bytes() * 8` bits of `raw` to `target_width`.
 fn ldr_sign_extend(raw: &BV, width: AccessWidth, target_width: u32) -> BV {
     let raw_bits = width.bytes() * 8;
+    assert!(
+        raw_bits <= target_width,
+        "raw load width {raw_bits} exceeds target register width {target_width}"
+    );
     let pad = target_width - raw_bits;
     if pad == 0 {
         raw.clone()
@@ -3966,6 +3974,24 @@ mod tests {
     }
 
     // ---- Memory ops (issue #68 step 7) ----
+
+    #[test]
+    #[should_panic(expected = "raw load width 64 exceeds target register width 32")]
+    fn ldr_zero_extend_rejects_raw_width_above_target() {
+        use crate::ir::types::AccessWidth;
+
+        let raw = BV::from_u64(0, 64);
+        let _ = ldr_zero_extend(&raw, AccessWidth::Extended, 32);
+    }
+
+    #[test]
+    #[should_panic(expected = "raw load width 64 exceeds target register width 32")]
+    fn ldr_sign_extend_rejects_raw_width_above_target() {
+        use crate::ir::types::AccessWidth;
+
+        let raw = BV::from_u64(0, 64);
+        let _ = ldr_sign_extend(&raw, AccessWidth::Extended, 32);
+    }
 
     /// `STR x0, [x1]; LDR x2, [x1]` must yield `x2 == x0` under Z3 array
     /// extensionality, even with arbitrary aliasing of `x1` against other
