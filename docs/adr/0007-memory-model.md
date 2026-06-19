@@ -5,7 +5,7 @@ Date: 2026-05-18
 
 ## Context
 
-Before this ADR, the AArch64 IR (`src/ir/instructions.rs:22-402`) and machine-state types (`src/semantics/state.rs:257-261`, `src/semantics/smt.rs:128-138`) carried no memory. The pipeline reasoned only about general-purpose registers and the four NZCV flag bits. Issue #68 closes that gap by adding the LDR / LDRB / LDRH / LDRSB / LDRSH / LDRSW / STR / STRB / STRH / LDP / STP / LDPSW family across all five addressing modes (immediate-offset, pre-index, post-index, register-offset, register-extend) and both W/X widths.
+Before this ADR, the AArch64 IR (`src/ir/instructions.rs:22-402`) and machine-state types (`src/semantics/state.rs:257-261`, `src/semantics/smt.rs:128-138`) carried no memory. The pipeline reasoned only about general-purpose registers and the four NZCV flag bits. Issue #68 closes that gap by adding the LDR / LDRB / LDRH / LDRSB / LDRSH / LDRSW / STR / STRB / STRH single-register family across all five addressing modes (immediate-offset, pre-index, post-index, register-offset, register-extend), plus the LDP / STP / LDPSW pair family across the architecturally valid immediate-offset, pre-index, and post-index forms.
 
 The user-facing scope decision for this work was the most ambitious option on every axis: the *full* instruction family, *full* search wiring (enumerative + stochastic + symbolic + LLM), *whole-memory* live-out, and *sound full aliasing*. This ADR records the resulting model choices so a future reviewer of `src/semantics/concrete.rs` or `src/semantics/smt.rs` can reconstruct *why* the layers look the way they do — and so a future widening (multi-region live-out, typed-array model, etc.) has a single document to revise.
 

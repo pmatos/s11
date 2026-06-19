@@ -313,6 +313,37 @@ fn is_label(line: &str) -> bool {
     trimmed.ends_with(':') && !trimmed.is_empty()
 }
 
+/// Strip leading label definitions from a line, if present.
+///
+/// A leading label is a single whitespace-free token followed by `:`, with
+/// optional whitespace around the colon. GAS accepts `foo: add`, `foo : add`,
+/// and dotted/numeric local labels such as `.L1 : add` or `1: add`, and stacked
+/// labels (`outer: inner: add`) are stripped in turn. The token itself is not
+/// validated, so any `<token>:` prefix (e.g. `0x1234:`) is stripped — acceptable
+/// here because the only goal is to reach the instruction mnemonic.
+fn strip_leading_labels(mut line: &str) -> &str {
+    loop {
+        let Some(colon_pos) = line.find(':') else {
+            return line;
+        };
+        // A leading colon is never a label terminator; leave the line unchanged.
+        if colon_pos == 0 {
+            return line;
+        }
+        // The text before the colon must be a single label token. Interior
+        // whitespace means the colon belongs to operands, not a label, so stop.
+        let label = line[..colon_pos].trim();
+        if label.is_empty() || label.contains(char::is_whitespace) {
+            return line;
+        }
+
+        line = line[colon_pos + 1..].trim_start();
+        if line.is_empty() {
+            return line;
+        }
+    }
+}
+
 /// Check if a line is a directive
 fn is_directive(line: &str) -> bool {
     line.trim().starts_with('.')
@@ -544,6 +575,50 @@ fn parse_subs(operands: &[&str]) -> Result<Instruction, String> {
     let rn = parse_register(operands[1])?;
     let rm = parse_operand(operands[2])?;
     Ok(Instruction::Subs { rd, rn, rm })
+}
+
+/// Parse ADC instruction (register-only; no immediate or shifted form)
+fn parse_adc(operands: &[&str]) -> Result<Instruction, String> {
+    if operands.len() != 3 {
+        return Err(format!("adc requires 3 operands, got {}", operands.len()));
+    }
+    let rd = parse_register(operands[0])?;
+    let rn = parse_register(operands[1])?;
+    let rm = parse_register(operands[2])?;
+    Ok(Instruction::Adc { rd, rn, rm })
+}
+
+/// Parse ADCS instruction (register-only; no immediate or shifted form)
+fn parse_adcs(operands: &[&str]) -> Result<Instruction, String> {
+    if operands.len() != 3 {
+        return Err(format!("adcs requires 3 operands, got {}", operands.len()));
+    }
+    let rd = parse_register(operands[0])?;
+    let rn = parse_register(operands[1])?;
+    let rm = parse_register(operands[2])?;
+    Ok(Instruction::Adcs { rd, rn, rm })
+}
+
+/// Parse SBC instruction (register-only; no immediate or shifted form)
+fn parse_sbc(operands: &[&str]) -> Result<Instruction, String> {
+    if operands.len() != 3 {
+        return Err(format!("sbc requires 3 operands, got {}", operands.len()));
+    }
+    let rd = parse_register(operands[0])?;
+    let rn = parse_register(operands[1])?;
+    let rm = parse_register(operands[2])?;
+    Ok(Instruction::Sbc { rd, rn, rm })
+}
+
+/// Parse SBCS instruction (register-only; no immediate or shifted form)
+fn parse_sbcs(operands: &[&str]) -> Result<Instruction, String> {
+    if operands.len() != 3 {
+        return Err(format!("sbcs requires 3 operands, got {}", operands.len()));
+    }
+    let rd = parse_register(operands[0])?;
+    let rn = parse_register(operands[1])?;
+    let rm = parse_register(operands[2])?;
+    Ok(Instruction::Sbcs { rd, rn, rm })
 }
 
 /// Parse ANDS instruction (register-only rm)
@@ -788,7 +863,8 @@ fn is_extend_keyword(kw: &str) -> bool {
 ///   - `[Xn, Xm]`                      → Reg { shift=0 }
 ///   - `[Xn, Xm, LSL #shift]`          → Reg { shift }, where shift is 0 or
 ///     log2(access bytes)
-///   - `[Xn, {W|X}m, UXTW/SXTW/UXTX/SXTX{ #shift}]`  → Ext
+///   - `[Xn, {W|X}m, UXTW/SXTW/UXTX/SXTX{ #shift}]`  → Ext, where shift is
+///     0 or log2(access bytes)
 ///
 /// Returns the parsed operand and the number of input tokens consumed (1 for
 /// the four bracketed forms, 2 for the trailing-immediate post-index form).
@@ -817,6 +893,7 @@ fn parse_memory_operand(
 
     // Parse the inner pieces.
     let inner_parts: Vec<&str> = inner.split(',').map(|s| s.trim()).collect();
+    let bracketed_form_is_bare_base = inner_parts.len() == 1;
     let base = parse_register(inner_parts[0])
         .map_err(|e| format!("invalid base register in memory operand: {}", e))?;
 
@@ -857,7 +934,7 @@ fn parse_memory_operand(
         } else if is_extend_keyword(kw) {
             let idx = parse_w_or_x_register(inner_parts[1])
                 .map_err(|e| format!("invalid index register in memory operand: {}", e))?;
-            let (kind, shift) = parse_memory_extend_tail(third)?;
+            let (kind, shift) = parse_memory_extend_tail(third, width)?;
             // Memory operands only accept the W/X-extend kinds (no byte/half).
             if !matches!(
                 kind,
@@ -909,11 +986,12 @@ fn parse_memory_operand(
     if tokens.len() >= 2 {
         let second = tokens[1].trim();
         if let Ok(imm) = parse_immediate(second) {
-            if let AddressOperand::Imm {
-                base,
-                offset: 0,
-                mode: IndexMode::Offset,
-            } = addr
+            if bracketed_form_is_bare_base
+                && let AddressOperand::Imm {
+                    base,
+                    offset: 0,
+                    mode: IndexMode::Offset,
+                } = addr
             {
                 addr = AddressOperand::Imm {
                     base,
@@ -948,12 +1026,7 @@ fn parse_lsl_amount(tail: &str) -> Result<u8, String> {
 /// Parse the narrower `LSL #N` tail accepted by memory register-offset forms.
 fn parse_memory_lsl_amount(tail: &str, width: crate::ir::types::AccessWidth) -> Result<u8, String> {
     let shift = parse_lsl_amount(tail)?;
-    let scaled_shift = match width {
-        crate::ir::types::AccessWidth::Byte => 0,
-        crate::ir::types::AccessWidth::Half => 1,
-        crate::ir::types::AccessWidth::Word => 2,
-        crate::ir::types::AccessWidth::Extended => 3,
-    };
+    let scaled_shift = width.scale_shift();
 
     if shift == 0 || shift == scaled_shift {
         return Ok(shift);
@@ -973,7 +1046,10 @@ fn parse_memory_lsl_amount(tail: &str, width: crate::ir::types::AccessWidth) -> 
 
 /// Parse a `<extend> #shift` tail used in memory operands. Returns the
 /// extend kind plus the optional shift (defaults to 0 if absent).
-fn parse_memory_extend_tail(tail: &str) -> Result<(crate::ir::types::ExtendKind, u8), String> {
+fn parse_memory_extend_tail(
+    tail: &str,
+    width: crate::ir::types::AccessWidth,
+) -> Result<(crate::ir::types::ExtendKind, u8), String> {
     use crate::ir::types::ExtendKind;
     let mut parts = tail.split_whitespace();
     let kw = parts.next().unwrap_or("").to_lowercase();
@@ -985,16 +1061,25 @@ fn parse_memory_extend_tail(tail: &str) -> Result<(crate::ir::types::ExtendKind,
         _ => return Err(format!("unsupported memory extend keyword `{}`", kw)),
     };
     let shift = match parts.next() {
-        None => 0u8,
-        Some(imm_tok) => {
-            let amt = parse_immediate(imm_tok)?;
-            if !(0..=4).contains(&amt) {
-                return Err(format!("extend shift {} out of range (0..=4)", amt));
-            }
-            amt as u8
-        }
+        None => 0,
+        Some(imm_tok) => parse_immediate(imm_tok)?,
     };
-    Ok((kind, shift))
+    let scaled_shift = width.scale_shift();
+
+    if shift == 0 || shift == i64::from(scaled_shift) {
+        return Ok((kind, shift as u8));
+    }
+
+    let access_bytes = 1u8 << scaled_shift;
+    let expected = if scaled_shift == 0 {
+        "0".to_string()
+    } else {
+        format!("0 or {}", scaled_shift)
+    };
+    Err(format!(
+        "memory extend shift {} invalid for {}-byte access (expected {})",
+        shift, access_bytes, expected
+    ))
 }
 
 /// Infer `AccessWidth` for the unsized LDR/STR mnemonics (where the data
@@ -1046,6 +1131,26 @@ fn parse_single_reg_mem(
     Ok(builder(rt, addr, width))
 }
 
+fn parse_signed_load_mem(
+    mnem: &str,
+    operands: &[&str],
+    width: crate::ir::types::AccessWidth,
+) -> Result<Instruction, String> {
+    if operands.len() >= 2 {
+        let (_, dst_width) = parse_sized_register(operands[0])
+            .map_err(|e| format!("{}: invalid Xt: {}", mnem, e))?;
+        if dst_width != RegisterWidth::X64 {
+            return Err(format!("{} signed-load destination must be X-form", mnem));
+        }
+    }
+
+    parse_single_reg_mem(mnem, operands, width, |rt, addr, w| Instruction::Ldrs {
+        rt,
+        addr,
+        width: w,
+    })
+}
+
 /// Parse a pair memory instruction (LDP/STP/LDPSW). The destination
 /// pair is the first two operands; the remaining tokens form the
 /// address operand. `signed=true` only for LDPSW.
@@ -1075,6 +1180,23 @@ fn parse_pair_mem(
             operands.len(),
             2 + consumed
         ));
+    }
+    match &addr {
+        crate::ir::types::AddressOperand::Reg { .. } => {
+            return Err(format!(
+                "{}: pair instructions do not support register-offset addressing; \
+                 use immediate-offset, pre-index, or post-index addressing",
+                mnem
+            ));
+        }
+        crate::ir::types::AddressOperand::Ext { .. } => {
+            return Err(format!(
+                "{}: pair instructions do not support register-extend addressing; \
+                 use immediate-offset, pre-index, or post-index addressing",
+                mnem
+            ));
+        }
+        crate::ir::types::AddressOperand::Imm { .. } => {}
     }
     if is_load {
         Ok(Instruction::Ldp {
@@ -1756,6 +1878,11 @@ pub fn parse_line(line: &str) -> Result<LineResult, ParseLineError> {
         return Ok(LineResult::Skip);
     }
 
+    let trimmed = strip_leading_labels(trimmed);
+    if trimmed.is_empty() {
+        return Ok(LineResult::Skip);
+    }
+
     // Skip directives
     if is_directive(trimmed) {
         return Ok(LineResult::Skip);
@@ -1833,6 +1960,10 @@ pub fn parse_line(line: &str) -> Result<LineResult, ParseLineError> {
         "eon" => parse_eon(&operands).map_err(ParseLineError::Other)?,
         "adds" => parse_adds(&operands).map_err(ParseLineError::Other)?,
         "subs" => parse_subs(&operands).map_err(ParseLineError::Other)?,
+        "adc" => parse_adc(&operands).map_err(ParseLineError::Other)?,
+        "adcs" => parse_adcs(&operands).map_err(ParseLineError::Other)?,
+        "sbc" => parse_sbc(&operands).map_err(ParseLineError::Other)?,
+        "sbcs" => parse_sbcs(&operands).map_err(ParseLineError::Other)?,
         "ands" => parse_ands(&operands).map_err(ParseLineError::Other)?,
         "cset" => parse_cset(&operands).map_err(ParseLineError::Other)?,
         "csetm" => parse_csetm(&operands).map_err(ParseLineError::Other)?,
@@ -1906,27 +2037,12 @@ pub fn parse_line(line: &str) -> Result<LineResult, ParseLineError> {
             |rt, addr, w| Instruction::Ldr { rt, addr, width: w },
         )
         .map_err(ParseLineError::Other)?,
-        "ldrsb" => parse_single_reg_mem(
-            "ldrsb",
-            &operands,
-            crate::ir::types::AccessWidth::Byte,
-            |rt, addr, w| Instruction::Ldrs { rt, addr, width: w },
-        )
-        .map_err(ParseLineError::Other)?,
-        "ldrsh" => parse_single_reg_mem(
-            "ldrsh",
-            &operands,
-            crate::ir::types::AccessWidth::Half,
-            |rt, addr, w| Instruction::Ldrs { rt, addr, width: w },
-        )
-        .map_err(ParseLineError::Other)?,
-        "ldrsw" => parse_single_reg_mem(
-            "ldrsw",
-            &operands,
-            crate::ir::types::AccessWidth::Word,
-            |rt, addr, w| Instruction::Ldrs { rt, addr, width: w },
-        )
-        .map_err(ParseLineError::Other)?,
+        "ldrsb" => parse_signed_load_mem("ldrsb", &operands, crate::ir::types::AccessWidth::Byte)
+            .map_err(ParseLineError::Other)?,
+        "ldrsh" => parse_signed_load_mem("ldrsh", &operands, crate::ir::types::AccessWidth::Half)
+            .map_err(ParseLineError::Other)?,
+        "ldrsw" => parse_signed_load_mem("ldrsw", &operands, crate::ir::types::AccessWidth::Word)
+            .map_err(ParseLineError::Other)?,
         "str" => parse_single_reg_mem("str", &operands, ldr_width(&operands), |rt, addr, w| {
             Instruction::Str { rt, addr, width: w }
         })
@@ -2259,6 +2375,114 @@ mod tests {
     }
 
     #[test]
+    fn parse_line_accepts_inline_label_before_instruction() {
+        match parse_line("_start: add x0, x1, x2").unwrap() {
+            LineResult::Instruction(Instruction::Add { rd, rn, rm }) => {
+                assert_eq!(rd, Register::X0);
+                assert_eq!(rn, Register::X1);
+                assert_eq!(rm, Operand::Register(Register::X2));
+            }
+            _ => panic!("expected Add"),
+        }
+    }
+
+    #[test]
+    fn parse_line_accepts_multiple_inline_labels_before_instruction() {
+        assert!(matches!(
+            parse_line("outer: inner:").unwrap(),
+            LineResult::Skip
+        ));
+
+        match parse_line("outer: inner: add x0, x1, x2").unwrap() {
+            LineResult::Instruction(Instruction::Add { rd, rn, rm }) => {
+                assert_eq!(rd, Register::X0);
+                assert_eq!(rn, Register::X1);
+                assert_eq!(rm, Operand::Register(Register::X2));
+            }
+            _ => panic!("expected Add"),
+        }
+    }
+
+    #[test]
+    fn parse_line_accepts_dotted_local_label_before_instruction() {
+        match parse_line(".Lfoo: add x0, x1, x2").unwrap() {
+            LineResult::Instruction(Instruction::Add { rd, rn, rm }) => {
+                assert_eq!(rd, Register::X0);
+                assert_eq!(rn, Register::X1);
+                assert_eq!(rm, Operand::Register(Register::X2));
+            }
+            _ => panic!("expected Add"),
+        }
+    }
+
+    #[test]
+    fn parse_line_accepts_numeric_local_label_before_instruction() {
+        match parse_line("1: add x0, x1, x2").unwrap() {
+            LineResult::Instruction(Instruction::Add { rd, rn, rm }) => {
+                assert_eq!(rd, Register::X0);
+                assert_eq!(rn, Register::X1);
+                assert_eq!(rm, Operand::Register(Register::X2));
+            }
+            _ => panic!("expected Add"),
+        }
+    }
+
+    #[test]
+    fn parse_line_accepts_inline_label_with_space_before_colon() {
+        for text in [
+            "foo : add x0, x1, x2",
+            ".L1 : add x0, x1, x2",
+            "a : b : add x0, x1, x2",
+        ] {
+            match parse_line(text).unwrap() {
+                LineResult::Instruction(Instruction::Add { rd, rn, rm }) => {
+                    assert_eq!(rd, Register::X0, "rd for {text:?}");
+                    assert_eq!(rn, Register::X1, "rn for {text:?}");
+                    assert_eq!(rm, Operand::Register(Register::X2), "rm for {text:?}");
+                }
+                other => panic!("expected Add for {text:?}, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn test_parse_line_adc_register_only() {
+        match parse_line("adc x0, x1, x2").unwrap() {
+            LineResult::Instruction(Instruction::Adc { rd, rn, rm }) => {
+                assert_eq!((rd, rn, rm), (Register::X0, Register::X1, Register::X2));
+            }
+            _ => panic!("expected Adc"),
+        }
+        match parse_line("adcs x0, x1, x2").unwrap() {
+            LineResult::Instruction(Instruction::Adcs { rd, rn, rm }) => {
+                assert_eq!((rd, rn, rm), (Register::X0, Register::X1, Register::X2));
+            }
+            _ => panic!("expected Adcs"),
+        }
+        // ADC/ADCS have no immediate form — an immediate operand must be rejected.
+        assert!(parse_line("adc x0, x1, #1").is_err());
+        assert!(parse_line("adcs x0, x1, #1").is_err());
+    }
+
+    #[test]
+    fn test_parse_line_sbc_register_only() {
+        match parse_line("sbc x0, x1, x2").unwrap() {
+            LineResult::Instruction(Instruction::Sbc { rd, rn, rm }) => {
+                assert_eq!((rd, rn, rm), (Register::X0, Register::X1, Register::X2));
+            }
+            _ => panic!("expected Sbc"),
+        }
+        match parse_line("sbcs x0, x1, x2").unwrap() {
+            LineResult::Instruction(Instruction::Sbcs { rd, rn, rm }) => {
+                assert_eq!((rd, rn, rm), (Register::X0, Register::X1, Register::X2));
+            }
+            _ => panic!("expected Sbcs"),
+        }
+        assert!(parse_line("sbc x0, x1, #1").is_err());
+        assert!(parse_line("sbcs x0, x1, #1").is_err());
+    }
+
+    #[test]
     fn parse_w_add_sub_mov_register_forms_roundtrip() {
         for text in [
             "add w0, w1, w2",
@@ -2457,6 +2681,47 @@ mod tests {
         assert_eq!(instructions.len(), 2);
         assert!(matches!(instructions[0], Instruction::MovReg { .. }));
         assert!(matches!(instructions[1], Instruction::Add { .. }));
+    }
+
+    #[test]
+    fn parse_assembly_string_accepts_inline_label_before_instruction() {
+        let instructions = parse_assembly_string(
+            ".text\n_start: add x0, x1, x2\n",
+            "inline-label.s".to_string(),
+        )
+        .unwrap();
+        assert_eq!(
+            instructions,
+            vec![Instruction::Add {
+                rd: Register::X0,
+                rn: Register::X1,
+                rm: Operand::Register(Register::X2),
+            }]
+        );
+    }
+
+    #[test]
+    fn parse_assembly_string_accepts_spaced_and_stacked_inline_labels() {
+        let instructions = parse_assembly_string(
+            ".text\n.L1 : add x0, x1, x2\nouter : inner : add x3, x4, x5\n",
+            "spaced-label.s".to_string(),
+        )
+        .unwrap();
+        assert_eq!(
+            instructions,
+            vec![
+                Instruction::Add {
+                    rd: Register::X0,
+                    rn: Register::X1,
+                    rm: Operand::Register(Register::X2),
+                },
+                Instruction::Add {
+                    rd: Register::X3,
+                    rn: Register::X4,
+                    rm: Operand::Register(Register::X5),
+                },
+            ]
+        );
     }
 
     #[test]
@@ -3066,14 +3331,14 @@ mod tests {
         );
 
         assert_eq!(
-            parse_one("ldr x0, [x1, w2, UxTw #2]"),
+            parse_one("ldr x0, [x1, w2, UxTw #3]"),
             Instruction::Ldr {
                 rt: Register::X0,
                 addr: AddressOperand::Ext {
                     base: Register::X1,
                     idx: Register::X2,
                     kind: ExtendKind::Uxtw,
-                    shift: 2,
+                    shift: 3,
                 },
                 width: AccessWidth::Extended,
             }
@@ -3504,6 +3769,34 @@ mod tests {
     }
 
     #[test]
+    fn parse_line_rejects_w_form_signed_load_destinations() {
+        for (line, mnemonic) in [
+            ("ldrsb w0, [x1]", "ldrsb"),
+            ("ldrsh w0, [x1]", "ldrsh"),
+            ("ldrsw w0, [x1]", "ldrsw"),
+            ("ldrsb w0, [x1, #1]!", "ldrsb"),
+            ("ldrsh w0, [x1], #2", "ldrsh"),
+            ("ldrsb w0, [x1, x2]", "ldrsb"),
+            ("ldrsb w0, [x1, w2, sxtw]", "ldrsb"),
+        ] {
+            match parse_line(line) {
+                Err(ParseLineError::Other(msg)) => {
+                    assert!(msg.contains(mnemonic), "{line} error should name mnemonic");
+                    assert!(msg.contains("X-form"), "{line} error should name X-form");
+                }
+                other => panic!("expected W-form signed-load rejection for {line}, got {other:?}"),
+            }
+        }
+
+        for line in ["ldrsb x0, [x1]", "ldrsh x0, [x1]", "ldrsw x0, [x1]"] {
+            assert!(
+                matches!(parse_line(line), Ok(LineResult::Instruction(_))),
+                "X-form signed load should remain accepted: {line}"
+            );
+        }
+    }
+
+    #[test]
     fn memory_op_round_trips_across_all_addressing_modes() {
         // Immediate-offset, including bare-base and negative offsets.
         assert_mem_round_trip("ldr x0, [x1]");
@@ -3519,7 +3812,7 @@ mod tests {
         assert_mem_round_trip("ldr x0, [x1, x2]");
         assert_mem_round_trip("ldr x0, [x1, x2, lsl #3]");
         // Register-extend.
-        assert_mem_round_trip("ldr x0, [x1, w2, uxtw #2]");
+        assert_mem_round_trip("ldr x0, [x1, w2, uxtw #3]");
         assert_mem_round_trip("ldr x0, [x1, w2, sxtw]");
         // Other mnemonics.
         assert_mem_round_trip("ldrb x0, [x1]");
@@ -3601,6 +3894,39 @@ mod tests {
     }
 
     #[test]
+    fn parse_post_index_rejects_explicit_zero_bracket_offset() {
+        for text in ["ldr x0, [x1, #0], #8", "ldp x0, x1, [sp, #0], #16"] {
+            let err = parse_line(text).expect_err("post-index requires bare base");
+
+            assert!(
+                err.to_string()
+                    .contains("post-index requires bare `[Xn]` base form"),
+                "{text}: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn parse_ldr_zero_post_index_remains_valid() {
+        use crate::ir::types::{AccessWidth, AddressOperand, IndexMode};
+        let instr = parse_one("ldr x0, [x1], #0");
+
+        assert_eq!(
+            instr,
+            Instruction::Ldr {
+                rt: Register::X0,
+                addr: AddressOperand::Imm {
+                    base: Register::X1,
+                    offset: 0,
+                    mode: IndexMode::PostIndex,
+                },
+                width: AccessWidth::Extended,
+            }
+        );
+        assert_eq!(format!("{}", instr), "ldr x0, [x1], #0");
+    }
+
+    #[test]
     fn parse_ldr_register_offset_with_shift() {
         use crate::ir::types::{AccessWidth, AddressOperand};
         let instr = parse_one("ldr x0, [x1, x2, lsl #3]");
@@ -3668,9 +3994,102 @@ mod tests {
     }
 
     #[test]
+    fn pair_mem_rejects_register_offset_addressing() {
+        for text in [
+            "ldp x0, x1, [x2, x3]",
+            "ldp x0, x1, [x2, x3, lsl #3]",
+            "stp x0, x1, [x2, x3]",
+            "ldpsw x0, x1, [x2, x3, lsl #2]",
+        ] {
+            let err = parse_line(text).expect_err("pair register-offset should be rejected");
+            let msg = err.to_string();
+            let mnemonic = text.split_whitespace().next().unwrap();
+            assert!(
+                msg.contains(mnemonic),
+                "{text}: error should name mnemonic `{mnemonic}`, got {msg}"
+            );
+            assert!(
+                msg.contains("register-offset"),
+                "{text}: error should name register-offset addressing, got {msg}"
+            );
+        }
+    }
+
+    #[test]
+    fn pair_mem_rejects_register_extend_addressing() {
+        for text in [
+            "ldp x0, x1, [x2, w3, uxtw #3]",
+            "stp x0, x1, [x2, w3, sxtw]",
+            "ldpsw x0, x1, [x2, w3, sxtw #2]",
+        ] {
+            let err = parse_line(text).expect_err("pair register-extend should be rejected");
+            let msg = err.to_string();
+            let mnemonic = text.split_whitespace().next().unwrap();
+            assert!(
+                msg.contains(mnemonic),
+                "{text}: error should name mnemonic `{mnemonic}`, got {msg}"
+            );
+            assert!(
+                msg.contains("register-extend"),
+                "{text}: error should name register-extend addressing, got {msg}"
+            );
+        }
+    }
+
+    #[test]
+    fn parse_memory_register_extend_rejects_illegal_shift_for_access_width() {
+        for (text, expected) in [
+            ("ldrb w0, [x1, w2, uxtw #1]", "expected 0"),
+            ("ldrh w0, [x1, w2, sxtw #2]", "expected 0 or 1"),
+            ("ldr w0, [x1, w2, uxtw #3]", "expected 0 or 2"),
+            ("ldr x0, [x1, w2, uxtw #4]", "expected 0 or 3"),
+            ("str x0, [x1, x2, sxtx #2]", "expected 0 or 3"),
+        ] {
+            let err = parse_line(text).expect_err("memory extend shift should be rejected");
+            let msg = err.to_string();
+            assert!(
+                msg.contains("memory extend shift"),
+                "{text}: error should name memory extend shift, got {msg}"
+            );
+            assert!(
+                msg.contains(expected),
+                "{text}: error should mention {expected}, got {msg}"
+            );
+        }
+    }
+
+    #[test]
+    fn parse_memory_register_extend_accepts_legal_shift_for_access_width() {
+        use crate::ir::types::{AddressOperand, ExtendKind};
+
+        for (text, expected_kind, expected_shift) in [
+            ("ldrb w0, [x1, w2, uxtw #0]", ExtendKind::Uxtw, 0),
+            ("ldrh w0, [x1, w2, sxtw #1]", ExtendKind::Sxtw, 1),
+            ("ldr w0, [x1, w2, uxtw #2]", ExtendKind::Uxtw, 2),
+            ("ldr x0, [x1, w2, uxtw #3]", ExtendKind::Uxtw, 3),
+            ("str x0, [x1, x2, sxtx #3]", ExtendKind::Sxtx, 3),
+        ] {
+            let instr = parse_one(text);
+            let (Instruction::Ldr { addr, .. } | Instruction::Str { addr, .. }) = instr else {
+                panic!("{text}: expected ldr/str-like instruction, got {instr:?}");
+            };
+            assert_eq!(
+                addr,
+                AddressOperand::Ext {
+                    base: Register::X1,
+                    idx: Register::X2,
+                    kind: expected_kind,
+                    shift: expected_shift,
+                },
+                "{text}"
+            );
+        }
+    }
+
+    #[test]
     fn parse_ldr_register_extend_with_w_index() {
         use crate::ir::types::{AccessWidth, AddressOperand, ExtendKind};
-        let instr = parse_one("ldr x0, [x1, w2, uxtw #2]");
+        let instr = parse_one("ldr x0, [x1, w2, uxtw #3]");
         assert_eq!(
             instr,
             Instruction::Ldr {
@@ -3679,7 +4098,7 @@ mod tests {
                     base: Register::X1,
                     idx: Register::X2,
                     kind: ExtendKind::Uxtw,
-                    shift: 2,
+                    shift: 3,
                 },
                 width: AccessWidth::Extended,
             }

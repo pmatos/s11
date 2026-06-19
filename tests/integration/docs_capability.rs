@@ -158,6 +158,12 @@ fn memory_operations_are_consistently_documented_with_known_gaps() {
         matrix.contains("`ldur`, `stur`, and `ldr (literal)` are out of scope"),
         "docs/capability.md must document unsupported memory-operation gaps"
     );
+    assert!(
+        matrix.contains(
+            "`ldrsb` / `ldrsh` / `ldrsw` signed loads currently accept only x-form destinations"
+        ),
+        "docs/capability.md must document the current signed-load destination-width limit"
+    );
 
     let tutorial = normalized_doc("TUTORIAL.md");
     assert!(
@@ -206,6 +212,36 @@ fn memory_operations_are_consistently_documented_with_known_gaps() {
         s11::parser::parse_line("ldr x0, #0x1234").is_err(),
         "parser must reject out-of-scope LDR literal form"
     );
+}
+
+#[test]
+fn docs_capability_documents_pair_memory_addressing_restriction() {
+    let matrix = normalized_doc("docs/capability.md");
+    assert!(
+        matrix.contains(
+            "single-register memory instructions accept immediate-offset, pre-index, post-index, register-offset, and register-extend addressing"
+        ),
+        "docs/capability.md must keep single-register memory addressing support visible"
+    );
+    assert!(
+        matrix.contains(
+            "pair memory instructions accept immediate-offset, pre-index, and post-index addressing only"
+        ),
+        "docs/capability.md must document pair memory addressing restrictions"
+    );
+
+    for (text, expected) in [
+        ("ldp x0, x1, [x2, x3]", "register-offset"),
+        ("stp x0, x1, [x2, w3, sxtw]", "register-extend"),
+    ] {
+        let err = s11::parser::parse_line(text)
+            .expect_err("pair register-index addressing should be rejected");
+        let msg = err.to_string();
+        assert!(
+            msg.contains(expected),
+            "{text}: error should mention {expected}, got {msg}"
+        );
+    }
 }
 
 #[test]

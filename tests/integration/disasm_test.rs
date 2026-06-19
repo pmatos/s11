@@ -219,8 +219,14 @@ fn test_disasm_arch_mismatch_rejected_before_disassembly() {
 
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
-        stderr.trim_start().starts_with("Architecture mismatch:"),
+        stderr
+            .trim_start()
+            .starts_with("Architecture mismatch: --arch x86-64 but ELF reports aarch64"),
         "Should reject mismatched architecture without starting disassembly, stderr: {stderr}"
+    );
+    assert!(
+        !stderr.contains("X86_64") && !stderr.contains("Aarch64"),
+        "Should report CLI architecture names, stderr: {stderr}"
     );
 
     let stdout = String::from_utf8_lossy(&output.stdout);

@@ -313,11 +313,14 @@ impl fmt::Display for Operand {
                 let inner = if kind.is_x_form() {
                     format!("{}", reg)
                 } else {
-                    match reg.index() {
-                        Some(idx) => format!("w{}", idx),
-                        // SP has no W-form; fall back to its canonical name
-                        // (encodability gates SP out before any caller sees it).
-                        None => format!("{}", reg),
+                    match reg {
+                        Register::XZR => "wzr".to_string(),
+                        reg => match reg.index() {
+                            Some(idx) => format!("w{}", idx),
+                            // SP has no W-form; fall back to its canonical name
+                            // (encodability gates SP out before any caller sees it).
+                            None => format!("{}", reg),
+                        },
                     }
                 };
                 write!(f, "{}, {} #{}", inner, kind, shift)
@@ -363,6 +366,17 @@ impl AccessWidth {
             AccessWidth::Extended => 8,
         }
     }
+
+    /// Log2 of the access size in bytes, used by scaled memory operands.
+    #[must_use]
+    pub fn scale_shift(&self) -> u8 {
+        match self {
+            AccessWidth::Byte => 0,
+            AccessWidth::Half => 1,
+            AccessWidth::Word => 2,
+            AccessWidth::Extended => 3,
+        }
+    }
 }
 
 /// Writeback / index selector for memory-address operands (`[Xn, #imm]`,
@@ -396,9 +410,9 @@ pub enum AddressOperand {
         shift: u8,
     },
     /// `[base, idx, kind{ #shift}]` where `kind` is one of UXTW/SXTW (idx
-    /// is W-form) or UXTX/SXTX (idx is X-form). UXTB/UXTH/SXTB/SXTH are
-    /// not valid AArch64 memory-extend kinds and are rejected by
-    /// `is_encodable_aarch64`.
+    /// is W-form) or UXTX/SXTX (idx is X-form), and `shift` is 0 or the
+    /// access-size scale shift. UXTB/UXTH/SXTB/SXTH and invalid shifts are
+    /// rejected by `is_encodable_aarch64`.
     Ext {
         base: Register,
         idx: Register,
@@ -651,6 +665,32 @@ mod tests {
     }
 
     #[test]
+    fn test_extended_register_display_w_form_xzr() {
+        assert_eq!(
+            Operand::ExtendedRegister {
+                reg: Register::XZR,
+                kind: ExtendKind::Uxtb,
+                shift: 0,
+            }
+            .to_string(),
+            "wzr, uxtb #0"
+        );
+    }
+
+    #[test]
+    fn test_extended_register_display_x_form_xzr() {
+        assert_eq!(
+            Operand::ExtendedRegister {
+                reg: Register::XZR,
+                kind: ExtendKind::Uxtx,
+                shift: 0,
+            }
+            .to_string(),
+            "xzr, uxtx #0"
+        );
+    }
+
+    #[test]
     fn test_condition_invert_pairs() {
         let pairs = [
             (Condition::EQ, Condition::NE),
@@ -848,5 +888,9 @@ mod tests {
         assert_eq!(AccessWidth::Half.bytes(), 2);
         assert_eq!(AccessWidth::Word.bytes(), 4);
         assert_eq!(AccessWidth::Extended.bytes(), 8);
+        assert_eq!(AccessWidth::Byte.scale_shift(), 0);
+        assert_eq!(AccessWidth::Half.scale_shift(), 1);
+        assert_eq!(AccessWidth::Word.scale_shift(), 2);
+        assert_eq!(AccessWidth::Extended.scale_shift(), 3);
     }
 }
