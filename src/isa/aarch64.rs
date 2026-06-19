@@ -2674,7 +2674,7 @@ mod tests {
     /// The 600 threshold sits ~10σ below the new expected and ~22σ above
     /// the old.
     #[test]
-    fn slot_23_sub_multiplexer_removed_for_issue_93() {
+    fn ands_cset_csetm_ror_sampling_uniformity() {
         use std::collections::HashMap;
         let generator = AArch64InstructionGenerator;
         let regs = vec![Register::X0, Register::X1, Register::X2];
