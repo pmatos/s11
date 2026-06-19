@@ -654,18 +654,19 @@ pub fn apply_instruction_concrete(
             signed,
         } => {
             let (effective, writeback) = compute_address(&state, addr);
+            let access_width = (*width).as_access_width();
             let bytes = width.bytes() as u64;
-            let raw1 = state.read_bytes(effective, *width);
-            let raw2 = state.read_bytes(effective.wrapping_add(bytes), *width);
+            let raw1 = state.read_bytes(effective, access_width);
+            let raw2 = state.read_bytes(effective.wrapping_add(bytes), access_width);
             let (v1, v2) = if *signed {
                 (
-                    sign_extend_load(raw1, *width),
-                    sign_extend_load(raw2, *width),
+                    sign_extend_load(raw1, access_width),
+                    sign_extend_load(raw2, access_width),
                 )
             } else {
                 (
-                    zero_extend_load(raw1, *width),
-                    zero_extend_load(raw2, *width),
+                    zero_extend_load(raw1, access_width),
+                    zero_extend_load(raw2, access_width),
                 )
             };
             state.set_register(*rt1, ConcreteValue::new(v1));
@@ -681,11 +682,12 @@ pub fn apply_instruction_concrete(
             width,
         } => {
             let (effective, writeback) = compute_address(&state, addr);
+            let access_width = (*width).as_access_width();
             let bytes = width.bytes() as u64;
             let v1 = state.get_register(*rt1).as_u64();
             let v2 = state.get_register(*rt2).as_u64();
-            state.write_bytes(effective, v1, *width);
-            state.write_bytes(effective.wrapping_add(bytes), v2, *width);
+            state.write_bytes(effective, v1, access_width);
+            state.write_bytes(effective.wrapping_add(bytes), v2, access_width);
             if let Some((base, new_base)) = writeback {
                 state.set_register(base, ConcreteValue::new(new_base));
             }
@@ -882,6 +884,7 @@ pub fn find_first_difference(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ir::types::PairAccessWidth;
     use std::collections::HashMap;
 
     fn state_with(values: Vec<(Register, u64)>) -> ConcreteMachineState {
@@ -2921,7 +2924,7 @@ mod tests {
                 offset: 0,
                 mode: IndexMode::Offset,
             },
-            width: AccessWidth::Extended,
+            width: PairAccessWidth::Extended,
             signed: false,
         };
         let after = apply_instruction_concrete(state, &instr);
@@ -2945,7 +2948,7 @@ mod tests {
                 offset: 0,
                 mode: IndexMode::Offset,
             },
-            width: AccessWidth::Extended,
+            width: PairAccessWidth::Extended,
         };
         let after = apply_instruction_concrete(state, &instr);
         assert_eq!(after.read_bytes(0x1000, AccessWidth::Extended), 0xAAAA);

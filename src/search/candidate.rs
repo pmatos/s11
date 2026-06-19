@@ -544,7 +544,7 @@ pub fn generate_all_instructions(registers: &[Register], immediates: &[i64]) -> 
     // the soundness argument; the SMT layer reasons over all widths
     // regardless of which forms search enumerates.
     {
-        use crate::ir::types::{AccessWidth, AddressOperand, IndexMode};
+        use crate::ir::types::{AccessWidth, AddressOperand, IndexMode, PairAccessWidth};
         const MEM_IMM_SAMPLES: [i64; 5] = [0, 8, 16, 32, -8];
         for &rt in registers {
             if rt == Register::SP || rt == Register::XZR {
@@ -619,14 +619,14 @@ pub fn generate_all_instructions(registers: &[Register], immediates: &[i64]) -> 
                             rt1,
                             rt2,
                             addr,
-                            width: AccessWidth::Extended,
+                            width: PairAccessWidth::Extended,
                             signed: false,
                         });
                         instrs.push(Instruction::Stp {
                             rt1,
                             rt2,
                             addr,
-                            width: AccessWidth::Extended,
+                            width: PairAccessWidth::Extended,
                         });
                     }
                 }

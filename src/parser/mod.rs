@@ -1176,6 +1176,8 @@ fn parse_pair_mem(
         }
         crate::ir::types::AddressOperand::Imm { .. } => {}
     }
+    let width = crate::ir::types::PairAccessWidth::try_from(width)
+        .map_err(|e| format!("{}: {}", mnem, e))?;
     if is_load {
         Ok(Instruction::Ldp {
             rt1,
@@ -4013,7 +4015,7 @@ mod tests {
 
     #[test]
     fn parse_ldp_yields_two_register_load() {
-        use crate::ir::types::{AccessWidth, AddressOperand, IndexMode};
+        use crate::ir::types::{AddressOperand, IndexMode, PairAccessWidth};
         let instr = parse_one("ldp x0, x1, [sp, #16]");
         assert_eq!(
             instr,
@@ -4025,7 +4027,7 @@ mod tests {
                     offset: 16,
                     mode: IndexMode::Offset,
                 },
-                width: AccessWidth::Extended,
+                width: PairAccessWidth::Extended,
                 signed: false,
             }
         );
@@ -4040,7 +4042,7 @@ mod tests {
                 width,
                 ..
             } => {
-                assert_eq!(width, crate::ir::types::AccessWidth::Word);
+                assert_eq!(width, crate::ir::types::PairAccessWidth::Word);
             }
             _ => panic!("expected Ldp with signed=true"),
         }

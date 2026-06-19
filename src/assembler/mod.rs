@@ -3,7 +3,8 @@ pub mod x86;
 use crate::ir::aarch64_encoding::logical_imm64_encodable;
 use crate::ir::instructions::logical_imm32_value;
 use crate::ir::types::{
-    AccessWidth, AddressOperand, Condition, ExtendKind, IndexMode, LabelId, ShiftKind,
+    AccessWidth, AddressOperand, Condition, ExtendKind, IndexMode, LabelId, PairAccessWidth,
+    ShiftKind,
 };
 use crate::ir::{Instruction, Operand, Register, RegisterWidth};
 use dynasmrt::{DynasmApi, dynasm};
@@ -587,9 +588,9 @@ macro_rules! encode_load_or_store_with {
     }};
 }
 
-/// Pair load/store dispatcher (LDP/STP/LDPSW). Pair operations support
-/// only the three immediate addressing modes; Reg/Ext are rejected at the
-/// IR layer (`is_encodable_pair`).
+/// Pair load/store dispatcher (LDP/STP/LDPSW). Pair operations support only
+/// Word/Extended transfer widths and the three immediate addressing modes;
+/// Reg/Ext addressing is rejected at the IR layer (`is_encodable_pair`).
 macro_rules! encode_pair_with {
     ($ops:expr, $addr:expr, $rt1_n:expr, $rt2_n:expr, $base_n:expr,
      $mnem:ident, $rt_tok:ident) => {{
@@ -2073,23 +2074,19 @@ impl AArch64Assembler {
                 let rt1_n = register_to_dynasm(*rt1)?;
                 let rt2_n = register_to_dynasm(*rt2)?;
                 let base_n = register_to_dynasm_xsp(address_base_of(addr))?;
-                match (width, signed) {
-                    (AccessWidth::Word, false) => {
+                match (*width, *signed) {
+                    (PairAccessWidth::Word, false) => {
                         encode_pair_with!(ops, addr, rt1_n, rt2_n, base_n, ldp, W)
                     }
-                    (AccessWidth::Word, true) => {
+                    (PairAccessWidth::Word, true) => {
                         encode_pair_with!(ops, addr, rt1_n, rt2_n, base_n, ldpsw, X)
                     }
-                    (AccessWidth::Extended, false) => {
+                    (PairAccessWidth::Extended, false) => {
                         encode_pair_with!(ops, addr, rt1_n, rt2_n, base_n, ldp, X)
                     }
-                    (AccessWidth::Extended, true) => {
+                    (PairAccessWidth::Extended, true) => {
                         Err("LDPSW only supports 32-bit access width".into())
                     }
-                    (AccessWidth::Byte, _) | (AccessWidth::Half, _) => Err(format!(
-                        "LDP {:?} access width not supported (Word/Extended only)",
-                        width
-                    )),
                 }
             }
             Instruction::Stp {
@@ -2101,17 +2098,13 @@ impl AArch64Assembler {
                 let rt1_n = register_to_dynasm(*rt1)?;
                 let rt2_n = register_to_dynasm(*rt2)?;
                 let base_n = register_to_dynasm_xsp(address_base_of(addr))?;
-                match width {
-                    AccessWidth::Word => {
+                match *width {
+                    PairAccessWidth::Word => {
                         encode_pair_with!(ops, addr, rt1_n, rt2_n, base_n, stp, W)
                     }
-                    AccessWidth::Extended => {
+                    PairAccessWidth::Extended => {
                         encode_pair_with!(ops, addr, rt1_n, rt2_n, base_n, stp, X)
                     }
-                    AccessWidth::Byte | AccessWidth::Half => Err(format!(
-                        "STP {:?} access width not supported (Word/Extended only)",
-                        width
-                    )),
                 }
             }
         }
@@ -5181,7 +5174,7 @@ mod tests {
                 offset: 0,
                 mode: IndexMode::Offset,
             },
-            width: AccessWidth::Extended,
+            width: PairAccessWidth::Extended,
             signed: false,
         });
         let (m, op) = disasm_mnem_op(&bytes);
@@ -5199,7 +5192,7 @@ mod tests {
                 offset: -16,
                 mode: IndexMode::PreIndex,
             },
-            width: AccessWidth::Extended,
+            width: PairAccessWidth::Extended,
             signed: false,
         });
         let (m, op) = disasm_mnem_op(&bytes);
@@ -5217,7 +5210,7 @@ mod tests {
                 offset: 16,
                 mode: IndexMode::PostIndex,
             },
-            width: AccessWidth::Extended,
+            width: PairAccessWidth::Extended,
         });
         let (m, op) = disasm_mnem_op(&bytes);
         assert_eq!(m, "stp");
@@ -5234,7 +5227,7 @@ mod tests {
                 offset: 0,
                 mode: IndexMode::Offset,
             },
-            width: AccessWidth::Word,
+            width: PairAccessWidth::Word,
             signed: true,
         });
         let (m, op) = disasm_mnem_op(&bytes);
@@ -5252,7 +5245,7 @@ mod tests {
                 offset: 8,
                 mode: IndexMode::Offset,
             },
-            width: AccessWidth::Word,
+            width: PairAccessWidth::Word,
             signed: false,
         });
         let (m, op) = disasm_mnem_op(&bytes);
@@ -5282,22 +5275,10 @@ mod tests {
     }
 
     #[test]
-    fn ldp_byte_width_is_rejected() {
-        let mut a = AArch64Assembler::new();
-        let res = a.assemble_instructions(
-            &[Instruction::Ldp {
-                rt1: Register::X0,
-                rt2: Register::X1,
-                addr: AddressOperand::Imm {
-                    base: Register::X2,
-                    offset: 0,
-                    mode: IndexMode::Offset,
-                },
-                width: AccessWidth::Byte,
-                signed: false,
-            }],
-            0,
+    fn ldp_byte_width_is_rejected_at_construction_boundary() {
+        assert!(
+            PairAccessWidth::try_from(AccessWidth::Byte).is_err(),
+            "LDP only supports Word/Extended widths"
         );
-        assert!(res.is_err(), "LDP only supports Word/Extended widths");
     }
 }
