@@ -1866,11 +1866,10 @@ mod tests {
         //   eor x2, x2, x2             ; x2 = 0
         // Live { X0, X2 }: post-state needs X0 = 0 AND X2 = 0. No single AArch64
         // instruction writes both registers, so length 1 is unreachable. The
-        // length-2 optimum (e.g. `mov x0, #0; mov x2, #0`) is found on the very
-        // first outer-loop iteration once length-2 search is implemented: both
-        // halves are MovImm — the first candidate the generator emits for each
-        // `rd` in `generate_all_encodable_instructions`. After the hit,
-        // cost-pruning collapses the remainder of the search to O(pool).
+        // minimal configured pool still contains the length-2 witness
+        // `mov x0, #0; mov x2, #0`, keeping this as an enabled regression for the
+        // real AArch64 length-2 enumerative path without the broader pool's CI
+        // runtime ceiling.
         let target = vec![
             Instruction::MovReg {
                 rd: Register::X0,
@@ -1892,9 +1891,13 @@ mod tests {
         let live_out = LiveOut::from_registers(vec![Register::X0, Register::X2]);
 
         let config = SearchConfig::default()
-            .with_registers(vec![Register::X0, Register::X1, Register::X2])
-            .with_immediates(vec![0, 1])
-            .with_timeout(std::time::Duration::from_secs(30));
+            .with_registers(vec![Register::X0, Register::X2])
+            .with_immediates(vec![0])
+            .with_cores(Some(1))
+            .with_symbolic(
+                SymbolicConfig::default().with_timeout(std::time::Duration::from_millis(250)),
+            )
+            .with_timeout(std::time::Duration::from_secs(10));
 
         let mut search = EnumerativeSearch::<crate::isa::AArch64>::new();
         let result = search.search(&target, &live_out, &config);
