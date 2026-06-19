@@ -744,8 +744,21 @@ mod tests {
 
         let result = run_parallel_search(&target, &live_out, &search_config, &parallel_config);
 
-        // Per the coordinator's worker-spawn logic, worker_id 0 runs the
-        // symbolic search and the remaining workers run stochastic.
+        // This regression protects statistics propagation by algorithm. Worker
+        // id dispatch order is covered separately by
+        // `test_two_workers_with_symbolic_reports_one_symbolic_one_stochastic`.
+        let mut worker_labels: Vec<(usize, Algorithm)> = result
+            .worker_statistics
+            .iter()
+            .map(|(id, alg, _)| (*id, *alg))
+            .collect();
+        worker_labels.sort_by_key(|(id, _)| *id);
+        assert_eq!(
+            result.worker_statistics.len(),
+            parallel_config.num_workers,
+            "expected one worker_statistics entry per configured worker, got {:?}",
+            worker_labels,
+        );
         let symbolic_entries: Vec<_> = result
             .worker_statistics
             .iter()
@@ -755,27 +768,17 @@ mod tests {
             symbolic_entries.len(),
             1,
             "expected exactly one Algorithm::Symbolic entry in worker_statistics, got {:?}",
-            result
-                .worker_statistics
-                .iter()
-                .map(|(id, alg, _)| (*id, *alg))
-                .collect::<Vec<_>>(),
+            worker_labels,
         );
         assert_eq!(
-            symbolic_entries[0].0, 0,
-            "symbolic worker should be worker_id 0",
+            worker_labels
+                .iter()
+                .filter(|(_, alg)| *alg == Algorithm::Stochastic)
+                .count(),
+            result.worker_statistics.len() - symbolic_entries.len(),
+            "expected all non-symbolic worker entries to be Stochastic, got {:?}",
+            worker_labels,
         );
-        for (id, alg, _) in &result.worker_statistics {
-            if *id != 0 {
-                assert_eq!(
-                    *alg,
-                    Algorithm::Stochastic,
-                    "non-symbolic workers must be labeled Stochastic, got {:?} for id {}",
-                    alg,
-                    id,
-                );
-            }
-        }
 
         // Symbolic worker reaches the solver to verify candidates, so
         // total_statistics.smt_queries must be nonzero — proving the
