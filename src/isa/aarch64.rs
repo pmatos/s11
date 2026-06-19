@@ -1769,7 +1769,10 @@ fn mutate_operand<R: RngExt>(
     immediates: &[i64],
     imm_max: i64,
 ) -> Operand {
-    debug_assert!(imm_max >= 0, "imm_max must be non-negative");
+    debug_assert!(
+        (0..i64::MAX).contains(&imm_max),
+        "imm_max must be non-negative and less than i64::MAX"
+    );
     let pick_imm = |rng: &mut R| {
         let v = immediates[rng.random_range(0..immediates.len())];
         // Issue #87: clamp to the caller's encodable upper bound. Mirrors
@@ -2377,6 +2380,17 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[cfg(debug_assertions)]
+    #[test]
+    #[should_panic(expected = "imm_max must be non-negative and less than i64::MAX")]
+    fn mutate_operand_rejects_i64_max_imm_max_in_debug() {
+        let regs = vec![Register::X0];
+        let imms = vec![0];
+        let mut rng = ChaCha8Rng::seed_from_u64(42);
+
+        super::mutate_operand(&mut rng, Operand::Immediate(0), &regs, &imms, i64::MAX);
     }
 
     #[test]
