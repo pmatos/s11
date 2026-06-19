@@ -1747,9 +1747,14 @@ fn build_x86_enumerative_search_config(
     width: u32,
     options: &OptimizationOptions,
 ) -> SearchConfig {
+    // Enumerative verification reads `config.symbolic.solver_timeout`, so the
+    // CLI --solver-timeout must be attached here even though the stochastic
+    // fields stay out of the enumerative config.
+    let symbolic_config = SymbolicConfig::default().with_timeout(options.solver_timeout);
     build_x86_base_search_config(target, width, options)
         .with_immediates(x86_enumerative_immediates_from_target(target))
         .with_cores(options.cores)
+        .with_symbolic(symbolic_config)
 }
 
 /// Run x86 enumerative search and return the optimized sequence if any.
@@ -3379,10 +3384,9 @@ mod cli_helper_tests {
         assert_eq!(config.stochastic.beta, default_stochastic.beta);
         assert_eq!(config.stochastic.iterations, default_stochastic.iterations);
         assert_eq!(config.stochastic.seed, default_stochastic.seed);
-        assert_eq!(
-            config.symbolic.solver_timeout,
-            SymbolicConfig::default().solver_timeout
-        );
+        // The enumerative path keeps stochastic fields out but still honors the
+        // CLI --solver-timeout for its SMT verification queries.
+        assert_eq!(config.symbolic.solver_timeout, Duration::from_millis(37));
     }
 
     #[test]
