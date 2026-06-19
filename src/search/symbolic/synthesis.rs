@@ -17,7 +17,7 @@ use crate::search::{Algorithm, SearchAlgorithm};
 use crate::semantics::EquivalenceResult;
 use std::marker::PhantomData;
 use std::sync::atomic::Ordering;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 /// Whether the symbolic search loop should exit at the next checkpoint.
 ///
@@ -311,7 +311,7 @@ where
         live_out: &<I as SymbolicBackend<I>>::LiveOut,
         config: &SearchConfig,
     ) -> bool {
-        let timeout = config.symbolic.effective_solver_timeout();
+        let timeout = config.solver_timeout.unwrap_or(Duration::from_secs(5));
         let width = <I as SymbolicBackend<I>>::width(config);
 
         let (verdict, metrics) = <I as SymbolicBackend<I>>::check_equivalence(
@@ -715,7 +715,7 @@ mod tests {
         let mut search: SymbolicSearch<AArch64> = SymbolicSearch::new();
 
         let config = SearchConfig::default()
-            .with_symbolic(SymbolicConfig::default().with_timeout(Duration::from_secs(10)))
+            .with_solver_timeout(Duration::from_secs(10))
             .with_registers(vec![Register::X0, Register::X1, Register::X2])
             .with_immediates(vec![-1, 0, 1, 2]);
 
@@ -742,11 +742,8 @@ mod tests {
         let mut search: SymbolicSearch<AArch64> = SymbolicSearch::new();
 
         let config = SearchConfig::default()
-            .with_symbolic(
-                SymbolicConfig::default()
-                    .with_cost_bound(0)
-                    .with_timeout(Duration::from_secs(10)),
-            )
+            .with_symbolic(SymbolicConfig::default().with_cost_bound(0))
+            .with_solver_timeout(Duration::from_secs(10))
             .with_registers(vec![Register::X0, Register::X1, Register::X2])
             .with_immediates(vec![-1, 0, 1, 2]);
 
@@ -816,7 +813,7 @@ mod tests {
     #[test]
     fn symbolic_search_drops_flag_writer_only_when_flags_are_dead() {
         let config = SearchConfig::default()
-            .with_symbolic(SymbolicConfig::default().with_timeout(Duration::from_secs(5)))
+            .with_solver_timeout(Duration::from_secs(5))
             .with_registers(vec![Register::X0, Register::X1])
             .with_immediates(vec![0, 7]);
         let target = vec![
@@ -919,7 +916,7 @@ mod tests {
             let config = SearchConfig::default()
                 .with_timeout_option(None)
                 .with_stop_flag(flag_for_search)
-                .with_symbolic(SymbolicConfig::default().with_timeout(Duration::from_secs(60)))
+                .with_solver_timeout(Duration::from_secs(60))
                 .with_registers(vec![
                     Register::X0,
                     Register::X1,
@@ -1256,7 +1253,24 @@ mod tests {
     }
 
     #[test]
-    fn symbolic_verify_equivalence_uses_effective_solver_timeout() {
+    fn symbolic_search_uses_top_level_solver_timeout_for_smt() {
+        let _guard = SYMBOLIC_INNER_LOOP_TEST_LOCK
+            .lock()
+            .expect("symbolic inner-loop test lock poisoned");
+        reset_symbolic_inner_loop_test_state();
+
+        let mut search: SymbolicSearch<TestIsa> = SymbolicSearch::new();
+        let config = SearchConfig::default().with_solver_timeout(Duration::from_millis(31));
+        let target = [TestInstruction(1)];
+        let candidate = [TestInstruction(2)];
+
+        let _ = search.verify_equivalence(&target, &candidate, &(), &config);
+
+        assert_eq!(TEST_RECORDED_TIMEOUT_MS.load(Ordering::SeqCst), 31);
+    }
+
+    #[test]
+    fn symbolic_verify_equivalence_falls_back_when_solver_timeout_unset() {
         let _guard = SYMBOLIC_INNER_LOOP_TEST_LOCK
             .lock()
             .expect("symbolic inner-loop test lock poisoned");
@@ -1266,18 +1280,15 @@ mod tests {
         let candidate = [TestInstruction(2)];
 
         reset_symbolic_inner_loop_test_state();
-        let explicit_config = SearchConfig::default()
-            .with_symbolic(SymbolicConfig::default().with_timeout(Duration::from_millis(17)));
+        let explicit_config =
+            SearchConfig::default().with_solver_timeout(Duration::from_millis(17));
         assert!(!search.verify_equivalence(&target, &candidate, &(), &explicit_config));
         assert_eq!(TEST_RECORDED_TIMEOUT_MS.load(Ordering::SeqCst), 17);
 
         reset_symbolic_inner_loop_test_state();
-        let defaulted_config = SearchConfig::default().with_symbolic(SymbolicConfig {
-            solver_timeout: None,
-            ..SymbolicConfig::default()
-        });
+        let defaulted_config = SearchConfig::default().with_solver_timeout_option(None);
         assert!(!search.verify_equivalence(&target, &candidate, &(), &defaulted_config));
-        assert_eq!(TEST_RECORDED_TIMEOUT_MS.load(Ordering::SeqCst), 30000);
+        assert_eq!(TEST_RECORDED_TIMEOUT_MS.load(Ordering::SeqCst), 5000);
     }
 
     #[test]

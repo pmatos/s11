@@ -915,16 +915,29 @@ fn build_stochastic_search_config(
         .with_iterations(options.iterations)
         .with_seed_option(options.seed);
 
-    let symbolic_config = SymbolicConfig::default().with_timeout(options.solver_timeout);
-
     SearchConfig::default()
         .with_stochastic(stochastic_config)
-        .with_symbolic(symbolic_config)
+        .with_solver_timeout(options.solver_timeout)
         .with_cost_metric(options.cost_metric)
         .with_timeout_option(options.timeout)
         .with_verbose(options.verbose)
         .with_registers(available_registers)
         .with_immediates(available_immediates)
+}
+
+fn build_enumerative_search_config(
+    options: &OptimizationOptions,
+    available_registers: Vec<Register>,
+    available_immediates: Vec<i64>,
+) -> SearchConfig {
+    SearchConfig::default()
+        .with_cost_metric(options.cost_metric)
+        .with_solver_timeout(options.solver_timeout)
+        .with_timeout_option(options.timeout)
+        .with_verbose(options.verbose)
+        .with_registers(available_registers)
+        .with_immediates(available_immediates)
+        .with_cores(options.cores)
 }
 
 /// Build the per-worker `SearchConfig` consumed by the hybrid parallel
@@ -945,13 +958,12 @@ fn build_hybrid_search_config(
         .with_beta(options.beta)
         .with_iterations(options.iterations);
 
-    let symbolic_config = SymbolicConfig::default()
-        .with_search_mode(options.search_mode)
-        .with_timeout(options.solver_timeout);
+    let symbolic_config = SymbolicConfig::default().with_search_mode(options.search_mode);
 
     SearchConfig::default()
         .with_stochastic(stochastic_config)
         .with_symbolic(symbolic_config)
+        .with_solver_timeout(options.solver_timeout)
         .with_cost_metric(options.cost_metric)
         .with_verbose(options.verbose)
         .with_registers(available_registers)
@@ -969,11 +981,9 @@ fn build_x86_stochastic_search_config(
         .with_iterations(options.iterations)
         .with_seed_option(options.seed);
 
-    let symbolic_config = SymbolicConfig::default().with_timeout(options.solver_timeout);
-
     SearchConfig::default()
         .with_stochastic(stochastic_config)
-        .with_symbolic(symbolic_config)
+        .with_solver_timeout(options.solver_timeout)
         .with_cost_metric(options.cost_metric)
         .with_timeout_option(options.timeout)
         .with_verbose(options.verbose)
@@ -987,12 +997,11 @@ fn build_x86_symbolic_search_config(
     width: u32,
     options: &OptimizationOptions,
 ) -> SearchConfig {
-    let symbolic_config = SymbolicConfig::default()
-        .with_search_mode(options.search_mode)
-        .with_timeout(options.solver_timeout);
+    let symbolic_config = SymbolicConfig::default().with_search_mode(options.search_mode);
 
     SearchConfig::default()
         .with_symbolic(symbolic_config)
+        .with_solver_timeout(options.solver_timeout)
         .with_cost_metric(options.cost_metric)
         .with_timeout_option(options.timeout)
         .with_verbose(options.verbose)
@@ -1062,13 +1071,8 @@ fn run_optimization(
                 println!("  Cores: {}", n);
             }
 
-            let config = SearchConfig::default()
-                .with_cost_metric(options.cost_metric)
-                .with_timeout_option(options.timeout)
-                .with_verbose(options.verbose)
-                .with_registers(available_registers)
-                .with_immediates(available_immediates)
-                .with_cores(options.cores);
+            let config =
+                build_enumerative_search_config(options, available_registers, available_immediates);
 
             let mut search = EnumerativeSearch::<isa::AArch64>::new();
             let result = search.search(prefix, &live_out, &config);
@@ -1109,12 +1113,11 @@ fn run_optimization(
             println!("  Search mode: {:?}", options.search_mode);
             println!("  Solver timeout: {:?}", options.solver_timeout);
 
-            let symbolic_config = SymbolicConfig::default()
-                .with_search_mode(options.search_mode)
-                .with_timeout(options.solver_timeout);
+            let symbolic_config = SymbolicConfig::default().with_search_mode(options.search_mode);
 
             let config = SearchConfig::default()
                 .with_symbolic(symbolic_config)
+                .with_solver_timeout(options.solver_timeout)
                 .with_cost_metric(options.cost_metric)
                 .with_timeout_option(options.timeout)
                 .with_verbose(options.verbose)
@@ -1144,6 +1147,7 @@ fn run_optimization(
 
             let config = SearchConfig::default()
                 .with_cost_metric(options.cost_metric)
+                .with_solver_timeout(options.solver_timeout)
                 .with_timeout_option(options.timeout)
                 .with_verbose(options.verbose)
                 .with_registers(available_registers)
@@ -3588,6 +3592,7 @@ mod cli_helper_tests {
     fn build_x86_enumerative_search_config_is_target_derived_and_honors_cores() {
         let mut opts = options_for(Algorithm::Enumerative);
         opts.cores = Some(3);
+        opts.solver_timeout = Duration::from_millis(37);
         let target = vec![
             X86Instruction::MovImm {
                 rd: X86Register::R11,
@@ -3604,6 +3609,7 @@ mod cli_helper_tests {
         ];
         let config = build_x86_enumerative_search_config(&target, 64, &opts);
         assert_eq!(config.cores, Some(3), "--cores must be threaded through");
+        assert_eq!(config.solver_timeout, Some(Duration::from_millis(37)));
         assert!(
             config.x86_available_registers.contains(&X86Register::R11)
                 && config.x86_available_registers.contains(&X86Register::R12),
@@ -3663,17 +3669,41 @@ mod cli_helper_tests {
     fn build_hybrid_search_config_propagates_timeout() {
         let mut opts = options_for(Algorithm::Hybrid);
         opts.timeout = Some(Duration::from_millis(7));
+        opts.solver_timeout = Duration::from_millis(17);
 
         let regs = vec![Register::X0];
         let imms = vec![0, 1];
         let config = build_hybrid_search_config(&opts, regs, imms);
 
         assert_eq!(config.timeout, Some(Duration::from_millis(7)));
+        assert_eq!(config.solver_timeout, Some(Duration::from_millis(17)));
 
         // None should propagate too.
         opts.timeout = None;
         let config = build_hybrid_search_config(&opts, vec![Register::X0], vec![0]);
         assert_eq!(config.timeout, None);
+    }
+
+    #[test]
+    fn build_enumerative_search_config_propagates_solver_timeout() {
+        let mut opts = options_for(Algorithm::Enumerative);
+        opts.timeout = Some(Duration::from_millis(9));
+        opts.solver_timeout = Duration::from_millis(13);
+        opts.cost_metric = CostMetric::Latency;
+        opts.verbose = true;
+        opts.cores = Some(2);
+
+        let regs = vec![Register::X0, Register::X1];
+        let imms = vec![0, 7];
+        let config = build_enumerative_search_config(&opts, regs.clone(), imms.clone());
+
+        assert_eq!(config.solver_timeout, Some(Duration::from_millis(13)));
+        assert_eq!(config.cost_metric, CostMetric::Latency);
+        assert_eq!(config.timeout, Some(Duration::from_millis(9)));
+        assert!(config.verbose);
+        assert_eq!(config.available_registers, regs);
+        assert_eq!(config.available_immediates, imms);
+        assert_eq!(config.cores, Some(2));
     }
 
     #[test]
@@ -3691,10 +3721,7 @@ mod cli_helper_tests {
         let imms = vec![0, 7];
         let config = build_stochastic_search_config(&opts, regs.clone(), imms.clone());
 
-        assert_eq!(
-            config.symbolic.solver_timeout,
-            Some(Duration::from_millis(17))
-        );
+        assert_eq!(config.solver_timeout, Some(Duration::from_millis(17)));
         assert_eq!(config.stochastic.beta, 2.5);
         assert_eq!(config.stochastic.iterations, 123);
         assert_eq!(config.stochastic.seed, Some(99));
@@ -3740,10 +3767,7 @@ mod cli_helper_tests {
         ];
         let config = build_x86_stochastic_search_config(&target, 32, &opts);
 
-        assert_eq!(
-            config.symbolic.solver_timeout,
-            Some(Duration::from_millis(19))
-        );
+        assert_eq!(config.solver_timeout, Some(Duration::from_millis(19)));
         assert_eq!(config.stochastic.beta, 3.5);
         assert_eq!(config.stochastic.iterations, 456);
         assert_eq!(config.stochastic.seed, Some(101));
@@ -3868,10 +3892,7 @@ mod cli_helper_tests {
             "all stack/frame targets must not fall back to writable defaults"
         );
         assert_eq!(config.symbolic.search_mode, SearchMode::Binary);
-        assert_eq!(
-            config.symbolic.solver_timeout,
-            Some(Duration::from_millis(29))
-        );
+        assert_eq!(config.solver_timeout, Some(Duration::from_millis(29)));
         assert_eq!(config.cost_metric, CostMetric::Latency);
         assert_eq!(config.timeout, Some(Duration::from_millis(23)));
         assert!(config.verbose);

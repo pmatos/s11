@@ -419,7 +419,7 @@ fn run_stochastic_worker(
 mod tests {
     use super::*;
     use crate::ir::{Operand, Register};
-    use crate::search::config::{SearchConfig, StochasticConfig, SymbolicConfig};
+    use crate::search::config::{SearchConfig, StochasticConfig};
 
     fn mov_add_sequence() -> Vec<Instruction> {
         vec![
@@ -529,13 +529,11 @@ mod tests {
 
         // Keep the symbolic worker's solver budget tight so it terminates
         // quickly under Z3 on this trivial target.
-        let symbolic_cfg = crate::search::config::SymbolicConfig::default()
-            .with_timeout(Duration::from_millis(250));
         let search_config = SearchConfig::default()
             .with_registers(vec![Register::X0, Register::X1])
             .with_immediates(vec![0, 1, 2])
             .with_stochastic(StochasticConfig::default().with_iterations(200))
-            .with_symbolic(symbolic_cfg);
+            .with_solver_timeout(Duration::from_millis(250));
 
         let parallel_config = ParallelConfig::default()
             .with_workers(2)
@@ -567,12 +565,11 @@ mod tests {
 
         // Keep the symbolic worker's solver budget tight so it terminates
         // quickly under Z3 on this trivial target.
-        let symbolic_cfg = SymbolicConfig::default().with_timeout(Duration::from_millis(250));
         let search_config = SearchConfig::default()
             .with_registers(vec![Register::X0, Register::X1])
             .with_immediates(vec![0, 1, 2])
             .with_stochastic(StochasticConfig::default().with_iterations(200))
-            .with_symbolic(symbolic_cfg);
+            .with_solver_timeout(Duration::from_millis(250));
 
         let parallel_config = ParallelConfig::default()
             .with_workers(4)
@@ -836,7 +833,7 @@ mod tests {
         let search_config = SearchConfig::default()
             .with_registers(vec![Register::X0, Register::X1, Register::X2])
             .with_immediates(vec![-1, 0, 1, 2])
-            .with_symbolic(SymbolicConfig::default().with_timeout(Duration::from_secs(10)))
+            .with_solver_timeout(Duration::from_secs(10))
             .with_stochastic(StochasticConfig::default().with_iterations(200))
             .with_timeout(ci_timeout);
 
