@@ -2864,41 +2864,48 @@ mod tests {
     /// `LSR tmp,rn,#lsb; LSL tmp,tmp,#(64-width); ASR rd,tmp,#(64-width)`.
     #[test]
     fn test_sbfx_equivalent_to_lsr_lsl_asr() {
-        let lsb = 4i64;
-        let width = 8u8;
-        let sign_extend_shift = 64i64 - width as i64;
+        fn assert_sbfx_equivalent_to_lsr_lsl_asr(lsb: u8, width: u8) {
+            let lsb = lsb as i64;
+            let sign_extend_shift = 64i64 - width as i64;
 
-        let sbfx = vec![Instruction::Sbfx {
-            rd: Register::X0,
-            rn: Register::X1,
-            lsb: lsb as u8,
-            width,
-            reg_width: crate::ir::RegisterWidth::X64,
-        }];
-
-        let lsr_lsl_asr = vec![
-            Instruction::Lsr {
-                rd: Register::X2,
-                rn: Register::X1,
-                shift: Operand::Immediate(lsb),
-            },
-            Instruction::Lsl {
-                rd: Register::X2,
-                rn: Register::X2,
-                shift: Operand::Immediate(sign_extend_shift),
-            },
-            Instruction::Asr {
+            let sbfx = vec![Instruction::Sbfx {
                 rd: Register::X0,
-                rn: Register::X2,
-                shift: Operand::Immediate(sign_extend_shift),
-            },
-        ];
+                rn: Register::X1,
+                lsb: lsb as u8,
+                width,
+                reg_width: crate::ir::RegisterWidth::X64,
+            }];
 
-        let config = EquivalenceConfig::with_live_out(LiveOut::from_registers(vec![Register::X0]));
-        assert_eq!(
-            check_equivalence_with_config(&sbfx, &lsr_lsl_asr, &config),
-            EquivalenceResult::Equivalent
-        );
+            let lsr_lsl_asr = vec![
+                Instruction::Lsr {
+                    rd: Register::X2,
+                    rn: Register::X1,
+                    shift: Operand::Immediate(lsb),
+                },
+                Instruction::Lsl {
+                    rd: Register::X2,
+                    rn: Register::X2,
+                    shift: Operand::Immediate(sign_extend_shift),
+                },
+                Instruction::Asr {
+                    rd: Register::X0,
+                    rn: Register::X2,
+                    shift: Operand::Immediate(sign_extend_shift),
+                },
+            ];
+
+            let config =
+                EquivalenceConfig::with_live_out(LiveOut::from_registers(vec![Register::X0]));
+            assert_eq!(
+                check_equivalence_with_config(&sbfx, &lsr_lsl_asr, &config),
+                EquivalenceResult::Equivalent,
+                "SBFX equivalence failed for lsb={lsb}, width={width}"
+            );
+        }
+
+        for (lsb, width) in [(4, 8), (0, 1), (60, 4), (0, 64)] {
+            assert_sbfx_equivalent_to_lsr_lsl_asr(lsb, width);
+        }
     }
 
     /// Acceptance criterion #1 from issue #61:
@@ -2936,6 +2943,14 @@ mod tests {
             check_equivalence_with_config(&ubfx, &lsr_and, &config),
             EquivalenceResult::Equivalent
         );
+    }
+
+    fn low_bit_mask(width: u8) -> i64 {
+        if width == 64 {
+            -1
+        } else {
+            ((1u64 << width) - 1) as i64
+        }
     }
 
     /// Acceptance (#145): the SMT lowering of a W-form bit-field op zeroes bits
@@ -3065,128 +3080,149 @@ mod tests {
     /// }.
     #[test]
     fn test_bfxil_equivalent_to_lsr_mask_clear_or() {
-        let lsb = 8i64;
-        let width = 8u8;
-        let low_mask = (1i64 << width) - 1;
-        let clear_mask = !low_mask;
+        fn assert_bfxil_equivalent_to_lsr_mask_clear_or(lsb: u8, width: u8) {
+            let lsb = lsb as i64;
+            let low_mask = low_bit_mask(width);
+            let clear_mask = !low_mask;
 
-        let bfxil = vec![Instruction::Bfxil {
-            rd: Register::X0,
-            rn: Register::X1,
-            lsb: lsb as u8,
-            width,
-            reg_width: crate::ir::RegisterWidth::X64,
-        }];
-
-        let expanded = vec![
-            Instruction::Lsr {
-                rd: Register::X2,
-                rn: Register::X1,
-                shift: Operand::Immediate(lsb),
-            },
-            Instruction::And {
-                rd: Register::X2,
-                rn: Register::X2,
-                rm: Operand::Immediate(low_mask),
-                width: crate::ir::RegisterWidth::X64,
-            },
-            Instruction::And {
-                rd: Register::X3,
-                rn: Register::X0,
-                rm: Operand::Immediate(clear_mask),
-                width: crate::ir::RegisterWidth::X64,
-            },
-            Instruction::Orr {
+            let bfxil = vec![Instruction::Bfxil {
                 rd: Register::X0,
-                rn: Register::X3,
-                rm: Operand::Register(Register::X2),
-                width: crate::ir::RegisterWidth::X64,
-            },
-        ];
+                rn: Register::X1,
+                lsb: lsb as u8,
+                width,
+                reg_width: crate::ir::RegisterWidth::X64,
+            }];
 
-        let config = EquivalenceConfig::with_live_out(LiveOut::from_registers(vec![Register::X0]));
-        assert_eq!(
-            check_equivalence_with_config(&bfxil, &expanded, &config),
-            EquivalenceResult::Equivalent
-        );
+            let expanded = vec![
+                Instruction::Lsr {
+                    rd: Register::X2,
+                    rn: Register::X1,
+                    shift: Operand::Immediate(lsb),
+                },
+                Instruction::And {
+                    rd: Register::X2,
+                    rn: Register::X2,
+                    rm: Operand::Immediate(low_mask),
+                    width: crate::ir::RegisterWidth::X64,
+                },
+                Instruction::And {
+                    rd: Register::X3,
+                    rn: Register::X0,
+                    rm: Operand::Immediate(clear_mask),
+                    width: crate::ir::RegisterWidth::X64,
+                },
+                Instruction::Orr {
+                    rd: Register::X0,
+                    rn: Register::X3,
+                    rm: Operand::Register(Register::X2),
+                    width: crate::ir::RegisterWidth::X64,
+                },
+            ];
+
+            let config =
+                EquivalenceConfig::with_live_out(LiveOut::from_registers(vec![Register::X0]));
+            assert_eq!(
+                check_equivalence_with_config(&bfxil, &expanded, &config),
+                EquivalenceResult::Equivalent,
+                "BFXIL equivalence failed for lsb={lsb}, width={width}"
+            );
+        }
+
+        for (lsb, width) in [(8, 8), (0, 1), (60, 4), (0, 64)] {
+            assert_bfxil_equivalent_to_lsr_mask_clear_or(lsb, width);
+        }
     }
 
     /// SMT proves `UBFIZ rd,rn,#lsb,#width` ≡
     /// `AND tmp,rn,#low_mask; LSL rd,tmp,#lsb`.
     #[test]
     fn test_ubfiz_equivalent_to_and_lsl() {
-        let lsb = 4i64;
-        let width = 8u8;
-        let low_mask = (1i64 << width) - 1;
+        fn assert_ubfiz_equivalent_to_and_lsl(lsb: u8, width: u8) {
+            let lsb = lsb as i64;
+            let low_mask = low_bit_mask(width);
 
-        let ubfiz = vec![Instruction::Ubfiz {
-            rd: Register::X0,
-            rn: Register::X1,
-            lsb: lsb as u8,
-            width,
-            reg_width: crate::ir::RegisterWidth::X64,
-        }];
-
-        let and_lsl = vec![
-            Instruction::And {
-                rd: Register::X2,
-                rn: Register::X1,
-                rm: Operand::Immediate(low_mask),
-                width: crate::ir::RegisterWidth::X64,
-            },
-            Instruction::Lsl {
+            let ubfiz = vec![Instruction::Ubfiz {
                 rd: Register::X0,
-                rn: Register::X2,
-                shift: Operand::Immediate(lsb),
-            },
-        ];
+                rn: Register::X1,
+                lsb: lsb as u8,
+                width,
+                reg_width: crate::ir::RegisterWidth::X64,
+            }];
 
-        let config = EquivalenceConfig::with_live_out(LiveOut::from_registers(vec![Register::X0]));
-        assert_eq!(
-            check_equivalence_with_config(&ubfiz, &and_lsl, &config),
-            EquivalenceResult::Equivalent
-        );
+            let and_lsl = vec![
+                Instruction::And {
+                    rd: Register::X2,
+                    rn: Register::X1,
+                    rm: Operand::Immediate(low_mask),
+                    width: crate::ir::RegisterWidth::X64,
+                },
+                Instruction::Lsl {
+                    rd: Register::X0,
+                    rn: Register::X2,
+                    shift: Operand::Immediate(lsb),
+                },
+            ];
+
+            let config =
+                EquivalenceConfig::with_live_out(LiveOut::from_registers(vec![Register::X0]));
+            assert_eq!(
+                check_equivalence_with_config(&ubfiz, &and_lsl, &config),
+                EquivalenceResult::Equivalent,
+                "UBFIZ equivalence failed for lsb={lsb}, width={width}"
+            );
+        }
+
+        for (lsb, width) in [(4, 8), (0, 1), (60, 4), (0, 64)] {
+            assert_ubfiz_equivalent_to_and_lsl(lsb, width);
+        }
     }
 
     /// SMT proves `SBFIZ rd,rn,#lsb,#width` ≡
     /// `LSL tmp,rn,#(64-width); ASR tmp,tmp,#(64-width); LSL rd,tmp,#lsb`.
     #[test]
     fn test_sbfiz_equivalent_to_lsl_asr_lsl() {
-        let lsb = 4i64;
-        let width = 8u8;
-        let sign_extend_shift = 64i64 - width as i64;
+        fn assert_sbfiz_equivalent_to_lsl_asr_lsl(lsb: u8, width: u8) {
+            let lsb = lsb as i64;
+            let sign_extend_shift = 64i64 - width as i64;
 
-        let sbfiz = vec![Instruction::Sbfiz {
-            rd: Register::X0,
-            rn: Register::X1,
-            lsb: lsb as u8,
-            width,
-            reg_width: crate::ir::RegisterWidth::X64,
-        }];
-
-        let lsl_asr_lsl = vec![
-            Instruction::Lsl {
-                rd: Register::X2,
-                rn: Register::X1,
-                shift: Operand::Immediate(sign_extend_shift),
-            },
-            Instruction::Asr {
-                rd: Register::X2,
-                rn: Register::X2,
-                shift: Operand::Immediate(sign_extend_shift),
-            },
-            Instruction::Lsl {
+            let sbfiz = vec![Instruction::Sbfiz {
                 rd: Register::X0,
-                rn: Register::X2,
-                shift: Operand::Immediate(lsb),
-            },
-        ];
+                rn: Register::X1,
+                lsb: lsb as u8,
+                width,
+                reg_width: crate::ir::RegisterWidth::X64,
+            }];
 
-        let config = EquivalenceConfig::with_live_out(LiveOut::from_registers(vec![Register::X0]));
-        assert_eq!(
-            check_equivalence_with_config(&sbfiz, &lsl_asr_lsl, &config),
-            EquivalenceResult::Equivalent
-        );
+            let lsl_asr_lsl = vec![
+                Instruction::Lsl {
+                    rd: Register::X2,
+                    rn: Register::X1,
+                    shift: Operand::Immediate(sign_extend_shift),
+                },
+                Instruction::Asr {
+                    rd: Register::X2,
+                    rn: Register::X2,
+                    shift: Operand::Immediate(sign_extend_shift),
+                },
+                Instruction::Lsl {
+                    rd: Register::X0,
+                    rn: Register::X2,
+                    shift: Operand::Immediate(lsb),
+                },
+            ];
+
+            let config =
+                EquivalenceConfig::with_live_out(LiveOut::from_registers(vec![Register::X0]));
+            assert_eq!(
+                check_equivalence_with_config(&sbfiz, &lsl_asr_lsl, &config),
+                EquivalenceResult::Equivalent,
+                "SBFIZ equivalence failed for lsb={lsb}, width={width}"
+            );
+        }
+
+        for (lsb, width) in [(4, 8), (0, 1), (60, 4), (0, 64)] {
+            assert_sbfiz_equivalent_to_lsl_asr_lsl(lsb, width);
+        }
     }
 
     /// Issue #241 regression: AArch64 variable LSL consumes only the low 6
