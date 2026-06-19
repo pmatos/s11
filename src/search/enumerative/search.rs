@@ -68,7 +68,7 @@ impl<I: ISA> SharedState<I> {
         // sequentially (worse first, better second) and then have the worse
         // thread acquire the mutex last and clobber the better candidate.
         //
-        // Ordering: the cost-prune fast path in `run_length_one`/`_two` loads
+        // Ordering: the cost-prune fast path in the length runners loads
         // `best_cost` with `Ordering::Acquire`. The store below is `Release`
         // (not `Relaxed`) so those loads observe the new value — the mutex
         // unlock would publish the mutex-protected `best`, but the atomic is
@@ -256,6 +256,8 @@ where
     I: ISA + EnumerativeBackend<I>,
 {
     let Some(smt_timeout) = candidate_solver_timeout(config, start) else {
+        // No millisecond-granularity SMT budget remains for this candidate, so
+        // stop the whole parallel enumerative search rather than just this arm.
         shared.stop.store(true, Ordering::Relaxed);
         return false;
     };
@@ -415,11 +417,56 @@ fn candidate_solver_timeout_for_elapsed(
         None => solver_timeout,
     };
 
+    // Z3 timeouts are configured in whole milliseconds; a sub-millisecond
+    // remainder cannot be represented usefully, so treat it as exhausted.
     (timeout.as_millis() > 0).then_some(timeout)
 }
 
 fn candidate_solver_timeout(config: &SearchConfig, start: Instant) -> Option<Duration> {
     candidate_solver_timeout_for_elapsed(config, start.elapsed())
+}
+
+fn evaluate_candidate<I>(
+    target: &[I::Instruction],
+    live_out: &<I as EnumerativeBackend<I>>::LiveOut,
+    config: &SearchConfig,
+    mut candidate: Vec<I::Instruction>,
+    terminator: Option<I::Instruction>,
+    shared: &SharedState<I>,
+    start: Instant,
+) where
+    I: ISA + EnumerativeBackend<I>,
+{
+    if let Some(t) = terminator {
+        candidate.push(t);
+    }
+    let candidate_cost = <I as EnumerativeBackend<I>>::sequence_cost(&candidate, config);
+    if candidate_cost >= shared.best_cost.load(Ordering::Acquire) {
+        return;
+    }
+    shared.candidates_evaluated.fetch_add(1, Ordering::Relaxed);
+    if verify_candidate::<I>(target, &candidate, live_out, config, shared, start) {
+        shared.record_improvement(candidate, candidate_cost);
+    }
+}
+
+fn minimum_generated_instruction_cost<I>(
+    config: &SearchConfig,
+    all_instructions: &[I::Instruction],
+) -> Option<u64>
+where
+    I: ISA + EnumerativeBackend<I>,
+{
+    all_instructions
+        .iter()
+        .map(|instr| <I as EnumerativeBackend<I>>::sequence_cost(&[*instr], config))
+        .min()
+}
+
+fn length_cost_lower_bound(length: usize, min_instruction_cost: u64, terminator_cost: u64) -> u64 {
+    min_instruction_cost
+        .saturating_mul(length as u64)
+        .saturating_add(terminator_cost)
 }
 
 fn run_length_one<I>(
@@ -441,18 +488,15 @@ fn run_length_one<I>(
             shared.stop.store(true, Ordering::Relaxed);
             return;
         }
-        let mut candidate = vec![*instr];
-        if let Some(t) = terminator {
-            candidate.push(t);
-        }
-        let candidate_cost = <I as EnumerativeBackend<I>>::sequence_cost(&candidate, config);
-        if candidate_cost >= shared.best_cost.load(Ordering::Acquire) {
-            return;
-        }
-        shared.candidates_evaluated.fetch_add(1, Ordering::Relaxed);
-        if verify_candidate::<I>(target, &candidate, live_out, config, shared, start) {
-            shared.record_improvement(candidate, candidate_cost);
-        }
+        evaluate_candidate::<I>(
+            target,
+            live_out,
+            config,
+            vec![*instr],
+            terminator,
+            shared,
+            start,
+        );
     });
 }
 
@@ -487,19 +531,94 @@ fn run_length_two<I>(
                 shared.stop.store(true, Ordering::Relaxed);
                 return;
             }
-            let mut candidate = vec![*instr1, *instr2];
-            if let Some(t) = terminator {
-                candidate.push(t);
-            }
-            let candidate_cost = <I as EnumerativeBackend<I>>::sequence_cost(&candidate, config);
-            if candidate_cost >= shared.best_cost.load(Ordering::Acquire) {
-                continue;
-            }
-            shared.candidates_evaluated.fetch_add(1, Ordering::Relaxed);
-            if verify_candidate::<I>(target, &candidate, live_out, config, shared, start) {
-                shared.record_improvement(candidate, candidate_cost);
-            }
+            evaluate_candidate::<I>(
+                target,
+                live_out,
+                config,
+                vec![*instr1, *instr2],
+                terminator,
+                shared,
+                start,
+            );
         }
+    });
+}
+
+struct ProductContext<'a, I>
+where
+    I: ISA + EnumerativeBackend<I>,
+{
+    length: usize,
+    target: &'a [I::Instruction],
+    live_out: &'a <I as EnumerativeBackend<I>>::LiveOut,
+    config: &'a SearchConfig,
+    all_instructions: &'a [I::Instruction],
+    terminator: Option<I::Instruction>,
+    shared: &'a SharedState<I>,
+    start: Instant,
+}
+
+impl<I> ProductContext<'_, I>
+where
+    I: ISA + EnumerativeBackend<I>,
+{
+    fn stop_if_timed_out(&self) -> bool {
+        if self.shared.stop.load(Ordering::Relaxed) {
+            return true;
+        }
+        if EnumerativeSearch::<I>::timed_out(self.start, self.config.timeout) {
+            self.shared.stop.store(true, Ordering::Relaxed);
+            return true;
+        }
+        false
+    }
+
+    fn enumerate_suffix(&self, candidate: &mut Vec<I::Instruction>) {
+        if self.stop_if_timed_out() {
+            return;
+        }
+
+        if candidate.len() == self.length {
+            evaluate_candidate::<I>(
+                self.target,
+                self.live_out,
+                self.config,
+                candidate.clone(),
+                self.terminator,
+                self.shared,
+                self.start,
+            );
+            return;
+        }
+
+        for instr in self.all_instructions {
+            if self.stop_if_timed_out() {
+                return;
+            }
+            candidate.push(*instr);
+            self.enumerate_suffix(candidate);
+            candidate.pop();
+        }
+    }
+}
+
+fn run_length_product<I>(context: ProductContext<'_, I>)
+where
+    I: ISA + EnumerativeBackend<I>,
+{
+    if context.length == 0 {
+        return;
+    }
+
+    context.all_instructions.par_iter().for_each(|instr| {
+        if context.stop_if_timed_out() {
+            return;
+        }
+
+        let mut candidate =
+            Vec::with_capacity(context.length + usize::from(context.terminator.is_some()));
+        candidate.push(*instr);
+        context.enumerate_suffix(&mut candidate);
     });
 }
 
@@ -541,14 +660,28 @@ where
         let all_instructions: &[I::Instruction] = &all_instructions_owned;
         let terminator = <I as EnumerativeBackend<I>>::target_terminator(target);
         let shared = SharedState::new(original_cost);
+        let min_instruction_cost =
+            minimum_generated_instruction_cost::<I>(config, all_instructions);
+        let terminator_cost = terminator
+            .map(|t| <I as EnumerativeBackend<I>>::sequence_cost(&[t], config))
+            .unwrap_or(0);
 
         let run_lengths = |s: &SharedState<I>| {
             // Search increasing lengths up to target.len()-1 so we never
-            // propose a candidate as long as the target. We keep going after a
-            // hit because length-1 may exist alongside length-2; cost-pruning
-            // enforces strict improvement.
+            // propose a candidate as long as the target. The per-length cost
+            // lower bound is non-decreasing in length and `best_cost` only
+            // falls, so once a length cannot beat the current best no longer
+            // length can either — break out instead of scanning the rest.
             for length in 1..target.len() {
                 if Self::timed_out(start, config.timeout) || s.stop.load(Ordering::Relaxed) {
+                    break;
+                }
+                let Some(min_instruction_cost) = min_instruction_cost else {
+                    break;
+                };
+                let lower_bound =
+                    length_cost_lower_bound(length, min_instruction_cost, terminator_cost);
+                if lower_bound >= s.best_cost.load(Ordering::Acquire) {
                     break;
                 }
                 match length {
@@ -570,7 +703,16 @@ where
                         s,
                         start,
                     ),
-                    _ => {} // length >= 3 lands in a follow-up TDD cycle.
+                    _ => run_length_product::<I>(ProductContext {
+                        length,
+                        target,
+                        live_out,
+                        config,
+                        all_instructions,
+                        terminator,
+                        shared: s,
+                        start,
+                    }),
                 }
             }
         };
@@ -641,7 +783,22 @@ mod tests {
     use crate::ir::{Instruction, Operand, Register};
     use crate::isa::{ISA, ISAMutator, InstructionType, OperandType, RegisterType, U64};
 
-    static LENGTH_TWO_COST_CALLS: AtomicU64 = AtomicU64::new(0);
+    std::thread_local! {
+        static LENGTH_TWO_COST_CALLS: std::cell::Cell<u64> =
+            const { std::cell::Cell::new(0) };
+    }
+
+    fn reset_length_two_cost_calls() {
+        LENGTH_TWO_COST_CALLS.with(|calls| calls.set(0));
+    }
+
+    fn increment_length_two_cost_calls() {
+        LENGTH_TWO_COST_CALLS.with(|calls| calls.set(calls.get() + 1));
+    }
+
+    fn length_two_cost_calls() -> u64 {
+        LENGTH_TWO_COST_CALLS.with(|calls| calls.get())
+    }
 
     impl EnumerativeBackend<crate::isa::RiscV64> for crate::isa::RiscV64 {
         type LiveOut = ();
@@ -665,7 +822,7 @@ mod tests {
             _seq: &[crate::isa::riscv::RiscVInstruction],
             _config: &SearchConfig,
         ) -> u64 {
-            LENGTH_TWO_COST_CALLS.fetch_add(1, Ordering::Relaxed);
+            increment_length_two_cost_calls();
             std::thread::sleep(std::time::Duration::from_millis(10));
             1
         }
@@ -678,6 +835,26 @@ mod tests {
         ) -> (EquivalenceResult, EquivalenceMetrics) {
             panic!("cost-pruned timeout regression must not verify candidates")
         }
+    }
+
+    #[test]
+    fn length_two_cost_counter_is_thread_local() {
+        use crate::isa::RiscV64;
+
+        let config = SearchConfig::default();
+        reset_length_two_cost_calls();
+
+        std::thread::spawn(move || {
+            <RiscV64 as EnumerativeBackend<RiscV64>>::sequence_cost(&[], &config);
+        })
+        .join()
+        .expect("cost counter probe thread should finish");
+
+        assert_eq!(
+            length_two_cost_calls(),
+            0,
+            "cost calls from another test thread must not affect this test thread"
+        );
     }
 
     static CACHE_PROBE_TEST_LOCK: TestMutex<()> = TestMutex::new(());
@@ -1307,7 +1484,16 @@ mod tests {
         }
     }
 
+    static INNER_TIMEOUT_TEST_LOCK: TestMutex<()> = TestMutex::new(());
     static INNER_TIMEOUT_COST_CALLS: AtomicUsize = AtomicUsize::new(0);
+
+    fn reset_inner_timeout_counter() -> MutexGuard<'static, ()> {
+        let guard = INNER_TIMEOUT_TEST_LOCK
+            .lock()
+            .expect("inner timeout test lock poisoned");
+        INNER_TIMEOUT_COST_CALLS.store(0, Ordering::Relaxed);
+        guard
+    }
 
     impl EnumerativeBackend<InnerTimeoutIsa> for InnerTimeoutIsa {
         type LiveOut = ();
@@ -1342,7 +1528,7 @@ mod tests {
 
     #[test]
     fn run_length_two_sets_stop_when_inner_deadline_expires() {
-        INNER_TIMEOUT_COST_CALLS.store(0, Ordering::Relaxed);
+        let _guard = reset_inner_timeout_counter();
 
         let config = SearchConfig::default().with_timeout(std::time::Duration::from_millis(25));
         let target = vec![InnerTimeoutInstruction(9), InnerTimeoutInstruction(8)];
@@ -1376,6 +1562,51 @@ mod tests {
             INNER_TIMEOUT_COST_CALLS.load(Ordering::Relaxed),
             1,
             "timeout should be checked before evaluating the second inner candidate"
+        );
+    }
+
+    #[test]
+    fn run_length_product_sets_stop_when_nested_deadline_expires() {
+        let _guard = reset_inner_timeout_counter();
+
+        let config = SearchConfig::default().with_timeout(std::time::Duration::from_millis(25));
+        let target = vec![
+            InnerTimeoutInstruction(9),
+            InnerTimeoutInstruction(8),
+            InnerTimeoutInstruction(7),
+            InnerTimeoutInstruction(6),
+        ];
+        let all_instructions =
+            <InnerTimeoutIsa as EnumerativeBackend<InnerTimeoutIsa>>::enumerate_all(&[], &[]);
+        // Positive candidate costs prune before equivalence, isolating timeout behavior.
+        let shared = SharedState::<InnerTimeoutIsa>::new(0);
+        let pool = rayon::ThreadPoolBuilder::new()
+            .num_threads(1)
+            .build()
+            .expect("private rayon pool should build");
+
+        pool.install(|| {
+            let start = Instant::now();
+            run_length_product::<InnerTimeoutIsa>(ProductContext {
+                length: 3,
+                target: &target,
+                live_out: &(),
+                config: &config,
+                all_instructions: &all_instructions,
+                terminator: None,
+                shared: &shared,
+                start,
+            });
+        });
+
+        let cost_calls = INNER_TIMEOUT_COST_CALLS.load(Ordering::Relaxed);
+        assert!(
+            shared.stop.load(Ordering::Relaxed),
+            "nested product loop should set stop after the timeout expires"
+        );
+        assert!(
+            cost_calls < 8,
+            "timeout should stop before the full length-three product sweep; saw {cost_calls} cost calls"
         );
     }
 
@@ -1456,6 +1687,8 @@ mod tests {
         let live_out = LiveOut::from_registers(vec![Register::X0]);
         let config = SearchConfig::default().with_timeout(std::time::Duration::from_millis(1));
         let shared = SharedState::<AArch64>::new(u64::MAX);
+        // Exactly 1ms elapsed under a 1ms search timeout leaves ZERO
+        // remaining; `as_millis() == 0` then disables the candidate SMT call.
         let expired_start = std::time::Instant::now() - std::time::Duration::from_millis(1);
 
         assert!(!verify_candidate::<AArch64>(
@@ -1573,14 +1806,14 @@ mod tests {
         let live_out = ();
         let config = SearchConfig::default().with_timeout(std::time::Duration::from_millis(5));
         let shared = SharedState::<RiscV64>::new(0);
-        LENGTH_TWO_COST_CALLS.store(0, Ordering::Relaxed);
 
         let pool = rayon::ThreadPoolBuilder::new()
             .num_threads(1)
             .build()
             .expect("private rayon pool");
-        let start = std::time::Instant::now();
-        pool.install(|| {
+        let cost_calls = pool.install(|| {
+            reset_length_two_cost_calls();
+            let start = std::time::Instant::now();
             run_length_two::<RiscV64>(
                 &target,
                 &live_out,
@@ -1589,13 +1822,17 @@ mod tests {
                 None,
                 &shared,
                 start,
-            )
+            );
+            length_two_cost_calls()
         });
 
-        let cost_calls = LENGTH_TWO_COST_CALLS.load(Ordering::Relaxed);
         assert!(
             shared.stop.load(Ordering::Relaxed),
             "timeout should set shared stop inside the inner length-two loop"
+        );
+        assert!(
+            cost_calls > 0,
+            "expected to observe cost calls from the worker running length-two search"
         );
         assert!(
             cost_calls < all_instructions.len() as u64,
@@ -1662,11 +1899,10 @@ mod tests {
         //   eor x2, x2, x2             ; x2 = 0
         // Live { X0, X2 }: post-state needs X0 = 0 AND X2 = 0. No single AArch64
         // instruction writes both registers, so length 1 is unreachable. The
-        // length-2 optimum (e.g. `mov x0, #0; mov x2, #0`) is found on the very
-        // first outer-loop iteration once length-2 search is implemented: both
-        // halves are MovImm — the first candidate the generator emits for each
-        // `rd` in `generate_all_encodable_instructions`. After the hit,
-        // cost-pruning collapses the remainder of the search to O(pool).
+        // minimal configured pool still contains the length-2 witness
+        // `mov x0, #0; mov x2, #0`, keeping this as an enabled regression for the
+        // real AArch64 length-2 enumerative path without the broader pool's CI
+        // runtime ceiling.
         let target = vec![
             Instruction::MovReg {
                 rd: Register::X0,
@@ -1688,9 +1924,11 @@ mod tests {
         let live_out = LiveOut::from_registers(vec![Register::X0, Register::X2]);
 
         let config = SearchConfig::default()
-            .with_registers(vec![Register::X0, Register::X1, Register::X2])
-            .with_immediates(vec![0, 1])
-            .with_timeout(std::time::Duration::from_secs(30));
+            .with_registers(vec![Register::X0, Register::X2])
+            .with_immediates(vec![0])
+            .with_cores(Some(1))
+            .with_solver_timeout(std::time::Duration::from_millis(250))
+            .with_timeout(std::time::Duration::from_secs(10));
 
         let mut search = EnumerativeSearch::<crate::isa::AArch64>::new();
         let result = search.search(&target, &live_out, &config);
@@ -1927,14 +2165,11 @@ mod tests {
     }
 
     #[test]
-    fn length_four_target_iterates_past_length_three_dispatch() {
-        // Pins the `_ => {}` arm of the per-length dispatch: a length-4
-        // target makes the outer loop iterate over lengths 1, 2, and 3, so
-        // length 3 must hit the not-yet-implemented arm without panicking.
-        // The target intentionally has a length-1 equivalent (`add x0, x1,
-        // #1`) so cost-pruning collapses the length-2 enumeration after the
-        // first hit and the test completes in well under a second; the
-        // assertion still proves we *reached and survived* length 3.
+    fn length_four_target_with_length_one_rewrite_returns_promptly() {
+        // This target intentionally has a length-1 equivalent (`add x0, x1,
+        // #1`). Once that best cost is found, longer lengths cannot strictly
+        // improve under the configured cost model, so the length-level lower
+        // bound should skip the expensive length-3 product sweep.
         let target = vec![
             Instruction::MovReg {
                 rd: Register::X0,
@@ -1961,12 +2196,157 @@ mod tests {
         let mut search = EnumerativeSearch::<crate::isa::AArch64>::new();
         let result = search.search(&target, &live_out, &small_config());
 
-        // The important assertion is that the search returned — i.e. the
-        // length-3 `_ => {}` arm did not panic, the loop iterated past it,
-        // and the result was assembled cleanly.
         assert!(result.statistics.elapsed_time > std::time::Duration::ZERO);
         assert!(result.found_optimization, "length-1 collapse should fire");
         assert_eq!(result.optimized_sequence.as_ref().map(Vec::len), Some(1));
+    }
+
+    #[derive(Clone)]
+    struct LengthThreeProbeIsa;
+
+    #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+    struct LengthThreeProbeInstruction(u8);
+
+    impl std::fmt::Display for LengthThreeProbeInstruction {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            write!(f, "probe{}", self.0)
+        }
+    }
+
+    impl InstructionType for LengthThreeProbeInstruction {
+        type Register = Register;
+        type Operand = Operand;
+
+        fn destination(&self) -> Option<Self::Register> {
+            None
+        }
+
+        fn source_registers(&self) -> Vec<Self::Register> {
+            Vec::new()
+        }
+
+        fn opcode_id(&self) -> u8 {
+            self.0
+        }
+
+        fn mnemonic(&self) -> &'static str {
+            "probe"
+        }
+    }
+
+    struct LengthThreeProbeMutator;
+
+    impl ISAMutator<LengthThreeProbeInstruction> for LengthThreeProbeMutator {
+        fn mutate<R: rand::RngExt>(
+            &self,
+            _rng: &mut R,
+            sequence: &[LengthThreeProbeInstruction],
+        ) -> Vec<LengthThreeProbeInstruction> {
+            sequence.to_vec()
+        }
+    }
+
+    impl ISA for LengthThreeProbeIsa {
+        type Register = Register;
+        type Operand = Operand;
+        type Instruction = LengthThreeProbeInstruction;
+        type Width = U64;
+        type Flags = ();
+        type Mutator = LengthThreeProbeMutator;
+
+        fn name(&self) -> &'static str {
+            "LengthThreeProbe"
+        }
+
+        fn register_count(&self) -> usize {
+            1
+        }
+
+        fn instruction_size(&self) -> Option<usize> {
+            Some(1)
+        }
+
+        fn general_registers(&self) -> Vec<Self::Register> {
+            vec![Register::X0]
+        }
+
+        fn zero_register(&self) -> Option<Self::Register> {
+            Some(Register::XZR)
+        }
+    }
+
+    impl EnumerativeBackend<LengthThreeProbeIsa> for LengthThreeProbeIsa {
+        type LiveOut = ();
+
+        fn registers_from_config(_config: &SearchConfig) -> Vec<Register> {
+            vec![Register::X0]
+        }
+
+        fn immediates_from_config(_config: &SearchConfig) -> Vec<i64> {
+            vec![0]
+        }
+
+        fn enumerate_all(_regs: &[Register], _imms: &[i64]) -> Vec<LengthThreeProbeInstruction> {
+            vec![
+                LengthThreeProbeInstruction(1),
+                LengthThreeProbeInstruction(2),
+                LengthThreeProbeInstruction(3),
+            ]
+        }
+
+        fn sequence_cost(seq: &[LengthThreeProbeInstruction], _config: &SearchConfig) -> u64 {
+            seq.len() as u64
+        }
+
+        fn check_equivalence(
+            _target: &[LengthThreeProbeInstruction],
+            candidate: &[LengthThreeProbeInstruction],
+            _live_out: &Self::LiveOut,
+            _smt_timeout: Duration,
+        ) -> (EquivalenceResult, EquivalenceMetrics) {
+            let expected = [
+                LengthThreeProbeInstruction(1),
+                LengthThreeProbeInstruction(2),
+                LengthThreeProbeInstruction(3),
+            ];
+            let verdict = if candidate == expected {
+                EquivalenceResult::Equivalent
+            } else {
+                EquivalenceResult::NotEquivalent
+            };
+
+            (verdict, EquivalenceMetrics::default())
+        }
+    }
+
+    #[test]
+    fn length_four_target_finds_length_three_only_rewrite() {
+        let target = vec![
+            LengthThreeProbeInstruction(9),
+            LengthThreeProbeInstruction(8),
+            LengthThreeProbeInstruction(7),
+            LengthThreeProbeInstruction(6),
+        ];
+        let config = SearchConfig::default()
+            .with_timeout_option(None)
+            .with_cores(Some(1));
+
+        let mut search = EnumerativeSearch::<LengthThreeProbeIsa>::new();
+        let result = search.search(&target, &(), &config);
+
+        assert!(
+            result.found_optimization,
+            "length-three candidate should be searched for a length-four target"
+        );
+        assert_eq!(
+            result.optimized_sequence,
+            Some(vec![
+                LengthThreeProbeInstruction(1),
+                LengthThreeProbeInstruction(2),
+                LengthThreeProbeInstruction(3),
+            ])
+        );
+        assert_eq!(result.optimized_sequence.as_ref().map(Vec::len), Some(3));
     }
 
     #[test]
