@@ -2418,7 +2418,7 @@ fn main() {
 mod cli_helper_tests {
     use super::*;
     use ir::Operand;
-    use isa::x86::{X86Instruction, X86Register};
+    use isa::x86::{X86Condition, X86Instruction, X86Register};
     use parser::x86::{parse_x86_operand, parse_x86_register};
     use search::llm::LlmTimings;
     use search::llm::ledger::UnsupportedMnemonicLedger;
@@ -3415,6 +3415,35 @@ mod cli_helper_tests {
                 .unwrap()
                 .is_none(),
             "x86-64 symbolic search must not same-count rewrite a partial-width source operand"
+        );
+
+        let partial_with_jcc_instructions = cs
+            .disasm_all(&[0x66, 0x83, 0xe0, 0x00, 0x74, 0x00], 0x1000)
+            .unwrap();
+        let partial_with_jcc_ir = backend.convert_ir(&partial_with_jcc_instructions).unwrap();
+        assert_eq!(
+            partial_with_jcc_ir,
+            vec![
+                X86Instruction::AndImm {
+                    rd: X86Register::RAX,
+                    imm: 0
+                },
+                X86Instruction::Jcc {
+                    cond: X86Condition::E
+                }
+            ]
+        );
+        assert!(
+            backend
+                .run_search(
+                    &partial_with_jcc_ir,
+                    &partial_with_jcc_instructions,
+                    &opts,
+                    context
+                )
+                .unwrap()
+                .is_none(),
+            "the operand-width gate must also suppress same-prefix-count rewrites before a pinned Jcc"
         );
 
         let full_instructions = cs

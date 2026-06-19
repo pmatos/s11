@@ -40,10 +40,14 @@ fn candidate_length_exclusive_end<I>(target: &[I::Instruction], config: &SearchC
 where
     I: ISA + SymbolicBackend<I>,
 {
+    let target_terminator = <I as SymbolicBackend<I>>::target_terminator(target);
+    // `search_at_length` reattaches pinned terminators itself, so the
+    // enumerable length is the mutable prefix length, not total target length.
+    let rewritable_len = target.len() - usize::from(target_terminator.is_some());
     let can_search_same_count =
-        <I as SymbolicBackend<I>>::can_improve_at_same_instruction_count(target, config)
-            && <I as SymbolicBackend<I>>::target_terminator(target).is_none();
-    target.len() + usize::from(can_search_same_count)
+        <I as SymbolicBackend<I>>::can_improve_at_same_instruction_count(target, config);
+
+    rewritable_len + usize::from(can_search_same_count)
 }
 
 /// Symbolic search using SMT-based synthesis, generic over ISA.
@@ -1362,6 +1366,41 @@ mod tests {
             candidate_length_exclusive_end::<X86_64>(&target, &config),
             target.len(),
             "Jcc terminators are appended by search_at_length, so the prefix range must not include target.len()"
+        );
+    }
+
+    #[test]
+    fn x86_symbolic_code_size_can_disable_same_prefix_count_before_jcc() {
+        use crate::isa::X86_64;
+        use crate::isa::x86::{X86Condition, X86Instruction, X86Register};
+        use crate::semantics::live_out::X86LiveOut;
+
+        let mut search: SymbolicSearch<X86_64> = SymbolicSearch::new();
+        let config = SearchConfig::default()
+            .with_x86_registers(vec![X86Register::RAX])
+            .with_immediates(vec![0])
+            .with_x86_width(64)
+            .with_x86_same_count_code_size_allowed(false)
+            .with_cost_metric(CostMetric::CodeSize)
+            .with_timeout_option(Some(Duration::from_secs(5)));
+        let target = vec![
+            X86Instruction::AndImm {
+                rd: X86Register::RAX,
+                imm: 0,
+            },
+            X86Instruction::Jcc {
+                cond: X86Condition::E,
+            },
+        ];
+        let live_out = X86LiveOut::from_registers(vec![X86Register::RAX]).with_flags(true);
+
+        let result = search.search(&target, &live_out, &config);
+
+        assert!(!result.found_optimization);
+        assert_eq!(result.statistics.candidates_evaluated, 0);
+        assert_eq!(
+            result.statistics.original_cost,
+            result.statistics.best_cost_found
         );
     }
 
