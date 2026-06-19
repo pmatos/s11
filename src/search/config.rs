@@ -211,12 +211,22 @@ impl std::str::FromStr for SearchMode {
     }
 }
 
+/// Default timeout for each symbolic SMT query.
+pub const DEFAULT_SYMBOLIC_SOLVER_TIMEOUT: Duration = Duration::from_secs(30);
+
 /// Configuration for symbolic (SMT) search
 #[derive(Debug, Clone)]
 pub struct SymbolicConfig {
-    /// Maximum window size for synthesis
+    /// Maximum number of synthesized non-terminator instructions to consider.
+    ///
+    /// A value of 0 disables candidate search. If the target ends in a fixed
+    /// terminator, that terminator is appended after synthesis and does not
+    /// count against this window.
     pub window_size: usize,
-    /// Initial cost bound (None = use target cost)
+    /// Exclusive initial cost bound.
+    ///
+    /// Candidate sequences must be strictly cheaper than this bound and the
+    /// original target cost. `None` uses the original target cost.
     pub cost_bound: Option<u64>,
     /// Search mode (linear or binary)
     pub search_mode: SearchMode,
@@ -230,7 +240,7 @@ impl Default for SymbolicConfig {
             window_size: 3,
             cost_bound: None,
             search_mode: SearchMode::Linear,
-            solver_timeout: Some(Duration::from_secs(30)),
+            solver_timeout: Some(DEFAULT_SYMBOLIC_SOLVER_TIMEOUT),
         }
     }
 }
@@ -254,6 +264,11 @@ impl SymbolicConfig {
     pub fn with_timeout(mut self, timeout: Duration) -> Self {
         self.solver_timeout = Some(timeout);
         self
+    }
+
+    pub fn effective_solver_timeout(&self) -> Duration {
+        self.solver_timeout
+            .unwrap_or(DEFAULT_SYMBOLIC_SOLVER_TIMEOUT)
     }
 }
 
@@ -336,8 +351,6 @@ pub struct SearchConfig {
     pub x86_available_registers: Vec<crate::isa::x86::X86Register>,
     /// x86 operand width: 64 for x86-64, 32 for x86-32.
     pub x86_width: u32,
-    /// x86 assembler mode. Mirrors `x86_width`.
-    pub x86_mode: crate::assembler::x86::X86Mode,
     /// Whether x86 symbolic code-size search may consider same-instruction-count
     /// candidates. Direct IR callers default to true; the ELF frontend can
     /// disable this when source operands used partial-register aliases that the
@@ -380,7 +393,6 @@ impl Default for SearchConfig {
             ],
             x86_available_registers: crate::isa::x86::default_x86_registers(),
             x86_width: 64,
-            x86_mode: crate::assembler::x86::X86Mode::Mode64,
             x86_same_count_code_size_allowed: true,
             stochastic: StochasticConfig::default(),
             symbolic: SymbolicConfig::default(),
@@ -474,22 +486,26 @@ impl SearchConfig {
         self
     }
 
-    /// Set the x86 width (32 or 64) and matching assembler mode.
+    /// Set the x86 operand width (32 or 64).
     pub fn with_x86_width(mut self, width: u32) -> Self {
-        // Only 32 and 64 are valid x86 widths; any other value would
-        // be silently coerced to Mode64 below, which is a misuse trap.
+        // Only 32 and 64 are valid x86 widths. Other values currently
+        // fall back to Mode64 through `x86_mode()`, which is a misuse trap.
         debug_assert!(
             width == 32 || width == 64,
             "with_x86_width: only 32 or 64 are valid; got {}",
             width
         );
         self.x86_width = width;
-        self.x86_mode = if width == 32 {
+        self
+    }
+
+    /// Return the x86 assembler mode derived from `x86_width`.
+    pub fn x86_mode(&self) -> crate::assembler::x86::X86Mode {
+        if self.x86_width == 32 {
             crate::assembler::x86::X86Mode::Mode32
         } else {
             crate::assembler::x86::X86Mode::Mode64
-        };
-        self
+        }
     }
 
     pub fn with_x86_same_count_code_size_allowed(mut self, allowed: bool) -> Self {
@@ -597,6 +613,22 @@ mod tests {
     }
 
     #[test]
+    fn search_config_derives_x86_mode_from_width() {
+        assert_eq!(
+            SearchConfig::default().x86_mode(),
+            crate::assembler::x86::X86Mode::Mode64
+        );
+        assert_eq!(
+            SearchConfig::default().with_x86_width(32).x86_mode(),
+            crate::assembler::x86::X86Mode::Mode32
+        );
+        assert_eq!(
+            SearchConfig::default().with_x86_width(64).x86_mode(),
+            crate::assembler::x86::X86Mode::Mode64
+        );
+    }
+
+    #[test]
     fn test_stochastic_config_builder() {
         let config = StochasticConfig::default()
             .with_beta(2.0)
@@ -623,6 +655,27 @@ mod tests {
         assert_eq!(config.cost_bound, Some(2));
         assert_eq!(config.search_mode, SearchMode::Binary);
         assert_eq!(config.solver_timeout, Some(Duration::from_millis(250)));
+    }
+
+    #[test]
+    fn symbolic_solver_timeout_none_uses_default_timeout() {
+        assert_eq!(
+            SymbolicConfig::default().effective_solver_timeout(),
+            Duration::from_secs(30)
+        );
+        assert_eq!(
+            SymbolicConfig::default()
+                .with_timeout(Duration::from_millis(250))
+                .effective_solver_timeout(),
+            Duration::from_millis(250)
+        );
+
+        let config = SymbolicConfig {
+            solver_timeout: None,
+            ..SymbolicConfig::default()
+        };
+
+        assert_eq!(config.effective_solver_timeout(), Duration::from_secs(30));
     }
 
     #[test]

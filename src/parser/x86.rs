@@ -40,22 +40,46 @@ pub fn parse_x86_condition(suffix: &str) -> Result<X86Condition, String> {
     }
 }
 
-/// Parse a single x86 register name (case-insensitive).
-///
-/// Width aliases (`eax`, `ax`, `al`) collapse to the canonical 64-bit
-/// variant. Legacy high-byte aliases (`ah`, `bh`, `ch`, `dh`) are
-/// intentionally excluded because the minimal x86 IR models the
-/// low-byte/REX alias set.
-pub fn parse_x86_register(reg_str: &str) -> Result<X86Register, String> {
-    parse_x86_register_with_width(reg_str).map(|(reg, _width)| reg)
+/// x86 parser mode for Capstone-derived binary input.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum X86ParseMode {
+    Mode64,
+    Mode32,
 }
 
-/// Parse a single x86 register name and report the textual alias width.
-///
-/// This is syntax metadata only: the returned register is still the
-/// canonical minimal-IR register, while the width preserves whether the
-/// source text named `rax`, `eax`, `ax`, or `al`.
-pub fn parse_x86_register_with_width(reg_str: &str) -> Result<(X86Register, u32), String> {
+impl X86ParseMode {
+    fn mode_width(self) -> u32 {
+        match self {
+            X86ParseMode::Mode64 => 64,
+            X86ParseMode::Mode32 => 32,
+        }
+    }
+
+    fn arch_label(self) -> &'static str {
+        match self {
+            X86ParseMode::Mode64 => "x86-64",
+            X86ParseMode::Mode32 => "x86-32",
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum X86RegisterParseError {
+    Unknown(String),
+    UnsupportedAlias(String),
+}
+
+impl std::fmt::Display for X86RegisterParseError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            X86RegisterParseError::Unknown(msg) | X86RegisterParseError::UnsupportedAlias(msg) => {
+                f.write_str(msg)
+            }
+        }
+    }
+}
+
+fn classify_x86_register_alias(reg_str: &str) -> Result<(X86Register, u32), X86RegisterParseError> {
     match reg_str.trim().to_lowercase().as_str() {
         "rax" => Ok((X86Register::RAX, 64)),
         "eax" => Ok((X86Register::RAX, 32)),
@@ -121,8 +145,32 @@ pub fn parse_x86_register_with_width(reg_str: &str) -> Result<(X86Register, u32)
         "r15d" => Ok((X86Register::R15, 32)),
         "r15w" => Ok((X86Register::R15, 16)),
         "r15b" => Ok((X86Register::R15, 8)),
-        _ => Err(format!("Unknown x86 register: {}", reg_str)),
+        _ => Err(X86RegisterParseError::Unknown(format!(
+            "Unknown x86 register: {}",
+            reg_str
+        ))),
     }
+}
+
+/// Parse a single x86 register name (case-insensitive).
+///
+/// Width aliases (`eax`, `ax`, `al`) collapse to the canonical 64-bit
+/// variant. Legacy high-byte aliases (`ah`, `bh`, `ch`, `dh`) are
+/// intentionally excluded because the minimal x86 IR models the
+/// low-byte/REX alias set.
+pub fn parse_x86_register(reg_str: &str) -> Result<X86Register, String> {
+    classify_x86_register_alias(reg_str)
+        .map(|(reg, _width)| reg)
+        .map_err(|err| err.to_string())
+}
+
+/// Parse a single x86 register name and report the textual alias width.
+///
+/// This is syntax metadata only: the returned register is still the
+/// canonical minimal-IR register, while the width preserves whether the
+/// source text named `rax`, `eax`, `ax`, or `al`.
+pub fn parse_x86_register_with_width(reg_str: &str) -> Result<(X86Register, u32), String> {
+    classify_x86_register_alias(reg_str).map_err(|err| err.to_string())
 }
 
 /// Parse an Intel-syntax operand string ("rax" or "42" or "0x2a").
@@ -133,6 +181,77 @@ pub fn parse_x86_operand(op_str: &str) -> Result<X86Operand, String> {
     }
     let imm = parse_x86_immediate(s)?;
     Ok(X86Operand::Immediate(imm))
+}
+
+fn parse_x86_register_for_mode(
+    reg_str: &str,
+    mode: X86ParseMode,
+) -> Result<X86Register, X86RegisterParseError> {
+    let (reg, alias_width) = classify_x86_register_alias(reg_str)?;
+    let trimmed = reg_str.trim();
+    if mode == X86ParseMode::Mode32
+        && matches!(
+            reg,
+            X86Register::R8
+                | X86Register::R9
+                | X86Register::R10
+                | X86Register::R11
+                | X86Register::R12
+                | X86Register::R13
+                | X86Register::R14
+                | X86Register::R15
+        )
+    {
+        return Err(X86RegisterParseError::UnsupportedAlias(format!(
+            "unsupported {} register alias: '{}' names an extended register, \
+             which is not encodable in x86-32",
+            mode.arch_label(),
+            trimmed
+        )));
+    }
+    if alias_width != mode.mode_width() {
+        return Err(X86RegisterParseError::UnsupportedAlias(format!(
+            "unsupported {} register alias width: '{}' is {}-bit, but the \
+             current x86 IR only models {}-bit operands from binary input",
+            mode.arch_label(),
+            trimmed,
+            alias_width,
+            mode.mode_width()
+        )));
+    }
+    Ok(reg)
+}
+
+fn parse_x86_operand_for_mode(op_str: &str, mode: X86ParseMode) -> Result<X86Operand, String> {
+    let s = op_str.trim();
+    match parse_x86_register_for_mode(s, mode) {
+        Ok(reg) => Ok(X86Operand::Register(reg)),
+        Err(X86RegisterParseError::UnsupportedAlias(msg)) => Err(msg),
+        Err(X86RegisterParseError::Unknown(_)) => {
+            let imm = parse_x86_immediate(s)?;
+            Ok(X86Operand::Immediate(imm))
+        }
+    }
+}
+
+fn parse_x86_register_with_mode(
+    reg_str: &str,
+    mode: Option<X86ParseMode>,
+) -> Result<X86Register, String> {
+    match mode {
+        Some(mode) => parse_x86_register_for_mode(reg_str, mode).map_err(|err| err.to_string()),
+        None => parse_x86_register(reg_str),
+    }
+}
+
+fn parse_x86_operand_with_mode(
+    op_str: &str,
+    mode: Option<X86ParseMode>,
+) -> Result<X86Operand, String> {
+    match mode {
+        Some(mode) => parse_x86_operand_for_mode(op_str, mode),
+        None => parse_x86_operand(op_str),
+    }
 }
 
 pub fn parse_x86_immediate(s: &str) -> Result<i64, String> {
@@ -171,6 +290,25 @@ pub fn x86_ir_from_mnemonic(
     mnemonic: &str,
     op_str: &str,
 ) -> Result<Option<X86Instruction>, String> {
+    x86_ir_from_mnemonic_impl(mnemonic, op_str, None)
+}
+
+/// Convert a `(mnemonic, op_str)` pair into x86 IR for binary input
+/// disassembled in a known mode. Until x86 IR carries operand width
+/// end-to-end, only mode-width register aliases are accepted.
+pub fn x86_ir_from_mnemonic_for_mode(
+    mnemonic: &str,
+    op_str: &str,
+    mode: X86ParseMode,
+) -> Result<Option<X86Instruction>, String> {
+    x86_ir_from_mnemonic_impl(mnemonic, op_str, Some(mode))
+}
+
+fn x86_ir_from_mnemonic_impl(
+    mnemonic: &str,
+    op_str: &str,
+    mode: Option<X86ParseMode>,
+) -> Result<Option<X86Instruction>, String> {
     let mnemonic = mnemonic.trim().to_lowercase();
 
     // CMOVcc — strip "cmov" prefix, parse suffix, expect
@@ -185,8 +323,8 @@ pub fn x86_ir_from_mnemonic(
                 parts.len()
             ));
         }
-        let rd = parse_x86_register(parts[0])?;
-        let rs = parse_x86_register(parts[1])?;
+        let rd = parse_x86_register_with_mode(parts[0], mode)?;
+        let rs = parse_x86_register_with_mode(parts[1], mode)?;
         return Ok(Some(X86Instruction::Cmov { rd, rs, cond }));
     }
 
@@ -235,8 +373,8 @@ pub fn x86_ir_from_mnemonic(
     if parts.len() != 2 {
         return Ok(None);
     }
-    let rd = parse_x86_register(parts[0])?;
-    let src_op = parse_x86_operand(parts[1])?;
+    let rd = parse_x86_register_with_mode(parts[0], mode)?;
+    let src_op = parse_x86_operand_with_mode(parts[1], mode)?;
     let make = |reg_form: fn(X86Register, X86Register) -> X86Instruction,
                 imm_form: fn(X86Register, i64) -> X86Instruction|
      -> Result<Option<X86Instruction>, String> {
@@ -321,7 +459,7 @@ pub fn parse_x86_assembly_string(
     }
     if instructions.is_empty() {
         return Err(ParseError::new(
-            0,
+            1,
             "no instructions found in input",
             source_name,
         ));
@@ -514,6 +652,91 @@ mod tests {
     }
 
     #[test]
+    fn x86_ir_for_mode64_rejects_narrow_register_aliases() {
+        assert_eq!(
+            x86_ir_from_mnemonic_for_mode("add", "rax, 0", X86ParseMode::Mode64)
+                .unwrap()
+                .unwrap(),
+            X86Instruction::AddImm {
+                rd: X86Register::RAX,
+                imm: 0,
+            }
+        );
+        assert_eq!(
+            x86_ir_from_mnemonic_for_mode("cmove", "rax, rbx", X86ParseMode::Mode64)
+                .unwrap()
+                .unwrap(),
+            X86Instruction::Cmov {
+                rd: X86Register::RAX,
+                rs: X86Register::RBX,
+                cond: X86Condition::E,
+            }
+        );
+
+        for (mnemonic, operands) in [
+            ("add", "eax, 0"),
+            ("mov", "ax, 1"),
+            ("mov", "al, 1"),
+            ("cmove", "eax, ebx"),
+        ] {
+            let err = x86_ir_from_mnemonic_for_mode(mnemonic, operands, X86ParseMode::Mode64)
+                .expect_err("narrow alias should be rejected in x86-64 binary parsing");
+            assert!(
+                err.contains("unsupported x86-64 register alias width"),
+                "unexpected error for {mnemonic} {operands}: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn x86_ir_for_mode32_accepts_only_i386_width_register_aliases() {
+        assert_eq!(
+            x86_ir_from_mnemonic_for_mode("add", "eax, 0", X86ParseMode::Mode32)
+                .unwrap()
+                .unwrap(),
+            X86Instruction::AddImm {
+                rd: X86Register::RAX,
+                imm: 0,
+            }
+        );
+        assert_eq!(
+            x86_ir_from_mnemonic_for_mode("mov", "ecx, edx", X86ParseMode::Mode32)
+                .unwrap()
+                .unwrap(),
+            X86Instruction::MovReg {
+                rd: X86Register::RCX,
+                rs: X86Register::RDX,
+            }
+        );
+        assert_eq!(
+            x86_ir_from_mnemonic_for_mode("cmove", "eax, ebx", X86ParseMode::Mode32)
+                .unwrap()
+                .unwrap(),
+            X86Instruction::Cmov {
+                rd: X86Register::RAX,
+                rs: X86Register::RBX,
+                cond: X86Condition::E,
+            }
+        );
+
+        for (mnemonic, operands) in [("mov", "ax, 1"), ("mov", "al, 1"), ("mov", "rax, 1")] {
+            let err = x86_ir_from_mnemonic_for_mode(mnemonic, operands, X86ParseMode::Mode32)
+                .expect_err("non-32-bit alias should be rejected in x86-32 binary parsing");
+            assert!(
+                err.contains("unsupported x86-32 register alias width"),
+                "unexpected error for {mnemonic} {operands}: {err}"
+            );
+        }
+
+        let err = x86_ir_from_mnemonic_for_mode("mov", "r8d, 1", X86ParseMode::Mode32)
+            .expect_err("x86-32 must reject extended registers");
+        assert!(
+            err.contains("not encodable in x86-32"),
+            "unexpected error for r8d: {err}"
+        );
+    }
+
+    #[test]
     fn x86_ir_unsupported_mnemonic_returns_none() {
         assert!(x86_ir_from_mnemonic("ret", "").unwrap().is_none());
         assert!(x86_ir_from_mnemonic("jmp", "0x1234").unwrap().is_none());
@@ -602,8 +825,16 @@ mod tests {
 
     #[test]
     fn assembly_string_rejects_empty_input() {
-        assert!(parse_x86_assembly_string("", "t".to_string()).is_err());
-        assert!(parse_x86_assembly_string("   \n\n; only comments\n", "t".to_string()).is_err());
+        let empty_err = parse_x86_assembly_string("", "t".to_string()).unwrap_err();
+        assert_eq!(empty_err.line_number, 1);
+        assert_eq!(empty_err.message, "no instructions found in input");
+        assert_eq!(empty_err.line_content, "t");
+
+        let skipped_err =
+            parse_x86_assembly_string("   \n\n; only comments\n", "t".to_string()).unwrap_err();
+        assert_eq!(skipped_err.line_number, 1);
+        assert_eq!(skipped_err.message, "no instructions found in input");
+        assert_eq!(skipped_err.line_content, "t");
     }
 
     #[test]
