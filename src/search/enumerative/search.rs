@@ -406,7 +406,7 @@ where
 }
 
 fn configured_solver_timeout(config: &SearchConfig) -> Duration {
-    config.symbolic.effective_solver_timeout()
+    config.solver_timeout.unwrap_or(Duration::from_secs(5))
 }
 
 fn candidate_solver_timeout_for_elapsed(
@@ -789,7 +789,6 @@ mod tests {
 
     use crate::ir::{Instruction, Operand, Register};
     use crate::isa::{ISA, ISAMutator, InstructionType, OperandType, RegisterType, U64};
-    use crate::search::config::SymbolicConfig;
 
     std::thread_local! {
         static LENGTH_TWO_COST_CALLS: std::cell::Cell<u64> =
@@ -1732,9 +1731,7 @@ mod tests {
     fn candidate_solver_timeout_is_bounded_by_search_budget() {
         let configured_solver = SearchConfig::default()
             .with_timeout(std::time::Duration::from_secs(10))
-            .with_symbolic(
-                SymbolicConfig::default().with_timeout(std::time::Duration::from_millis(250)),
-            );
+            .with_solver_timeout(std::time::Duration::from_millis(250));
         assert_eq!(
             candidate_solver_timeout_for_elapsed(
                 &configured_solver,
@@ -1745,9 +1742,7 @@ mod tests {
 
         let capped_by_remaining_search = SearchConfig::default()
             .with_timeout(std::time::Duration::from_millis(100))
-            .with_symbolic(
-                SymbolicConfig::default().with_timeout(std::time::Duration::from_secs(1)),
-            );
+            .with_solver_timeout(std::time::Duration::from_secs(1));
         assert_eq!(
             candidate_solver_timeout_for_elapsed(
                 &capped_by_remaining_search,
@@ -1770,19 +1765,15 @@ mod tests {
             None
         );
 
-        let symbolic_without_solver_timeout = SymbolicConfig {
-            solver_timeout: None,
-            ..SymbolicConfig::default()
-        };
         let no_search_timeout = SearchConfig::default()
             .with_timeout_option(None)
-            .with_symbolic(symbolic_without_solver_timeout);
+            .with_solver_timeout_option(None);
         assert_eq!(
             candidate_solver_timeout_for_elapsed(
                 &no_search_timeout,
                 std::time::Duration::from_secs(999)
             ),
-            Some(std::time::Duration::from_secs(30))
+            Some(std::time::Duration::from_secs(5))
         );
     }
 
@@ -2036,9 +2027,7 @@ mod tests {
             .with_registers(vec![Register::X0, Register::X2])
             .with_immediates(vec![0])
             .with_cores(Some(1))
-            .with_symbolic(
-                SymbolicConfig::default().with_timeout(std::time::Duration::from_millis(250)),
-            )
+            .with_solver_timeout(std::time::Duration::from_millis(250))
             .with_timeout(std::time::Duration::from_secs(10));
 
         let mut search = EnumerativeSearch::<crate::isa::AArch64>::new();
@@ -2488,9 +2477,7 @@ mod tests {
             .with_immediates(vec![0, 1])
             .with_timeout(std::time::Duration::from_millis(50))
             .with_cores(Some(1))
-            .with_symbolic(
-                SymbolicConfig::default().with_timeout(std::time::Duration::from_millis(200)),
-            );
+            .with_solver_timeout(std::time::Duration::from_millis(200));
 
         let start = std::time::Instant::now();
         let mut search = EnumerativeSearch::<crate::isa::AArch64>::new();

@@ -348,7 +348,8 @@ Uses an SMT solver to synthesize optimal instruction sequences. More principled 
 
 Options:
 - `--search-mode <linear|binary>`: How to search for cost bounds
-- `--solver-timeout <SECS>`: Timeout per SMT query (default: 5)
+- `--solver-timeout <SECS>`: Timeout per SMT verification/synthesis query (default: 5).
+  The same cap applies to SMT verification used by the other search algorithms.
 
 **Best for:** Finding provably optimal solutions when SMT queries succeed.
 

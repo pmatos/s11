@@ -29,8 +29,8 @@ pub enum WorkerMessage {
     },
     /// Worker has finished searching. Carries the full per-worker
     /// `SearchStatistics`; `statistics.algorithm` is the single source
-    /// of truth for which algorithm the worker ran, so the coordinator
-    /// reads it from there when labelling `worker_statistics`.
+    /// of truth for which algorithm the worker ran, and is stored inside
+    /// each coordinator `worker_statistics` entry.
     Finished {
         worker_id: usize,
         statistics: SearchStatistics,
