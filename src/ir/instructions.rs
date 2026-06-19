@@ -843,12 +843,7 @@ impl Instruction {
             Instruction::And { rd, rn, rm, width }
             | Instruction::Orr { rd, rn, rm, width }
             | Instruction::Eor { rd, rn, rm, width } => match rm {
-                Operand::Register(reg) => {
-                    *width == RegisterWidth::X64
-                        && is_x_or_xzr(*rd)
-                        && is_x_or_xzr(*rn)
-                        && is_x_or_xzr(*reg)
-                }
+                Operand::Register(reg) => is_x_or_xzr(*rd) && is_x_or_xzr(*rn) && is_x_or_xzr(*reg),
                 // rd in the Xn|SP slot (SP allowed, XZR forbidden); rn in the
                 // plain Xn slot (XZR allowed via reg 31, SP forbidden).
                 Operand::Immediate(imm) => match width {
@@ -860,8 +855,11 @@ impl Instruction {
                     }
                 },
                 Operand::ShiftedRegister { reg, amount, .. } => {
-                    *width == RegisterWidth::X64
-                        && *amount <= 63
+                    let max_amount = match width {
+                        RegisterWidth::X64 => 63,
+                        RegisterWidth::W32 => 31,
+                    };
+                    *amount <= max_amount
                         && is_x_or_xzr(*reg)
                         && is_x_or_xzr(*rd)
                         && is_x_or_xzr(*rn)
@@ -1486,21 +1484,21 @@ impl fmt::Display for Instruction {
                 "and {}, {}, {}",
                 width.register_name(*rd),
                 width.register_name(*rn),
-                rm
+                rm.display_with_width(*width)
             ),
             Instruction::Orr { rd, rn, rm, width } => write!(
                 f,
                 "orr {}, {}, {}",
                 width.register_name(*rd),
                 width.register_name(*rn),
-                rm
+                rm.display_with_width(*width)
             ),
             Instruction::Eor { rd, rn, rm, width } => write!(
                 f,
                 "eor {}, {}, {}",
                 width.register_name(*rd),
                 width.register_name(*rn),
-                rm
+                rm.display_with_width(*width)
             ),
             Instruction::Lsl { rd, rn, shift } => write!(f, "lsl {}, {}, {}", rd, rn, shift),
             Instruction::Lsr { rd, rn, shift } => write!(f, "lsr {}, {}, {}", rd, rn, shift),
@@ -2939,6 +2937,118 @@ mod tests {
                 "TST with {:?} must be encodable",
                 kind
             );
+        }
+    }
+
+    #[test]
+    fn test_is_encodable_w32_logical_register_and_shifted_register_forms() {
+        for instr in [
+            Instruction::And {
+                rd: Register::X0,
+                rn: Register::X1,
+                rm: Operand::Register(Register::X2),
+                width: RegisterWidth::W32,
+            },
+            Instruction::Orr {
+                rd: Register::X3,
+                rn: Register::X4,
+                rm: Operand::Register(Register::XZR),
+                width: RegisterWidth::W32,
+            },
+            Instruction::Eor {
+                rd: Register::XZR,
+                rn: Register::X7,
+                rm: Operand::Register(Register::X8),
+                width: RegisterWidth::W32,
+            },
+        ] {
+            assert!(instr.is_encodable_aarch64(), "{instr} must be encodable");
+        }
+
+        for kind in [
+            ShiftKind::Lsl,
+            ShiftKind::Lsr,
+            ShiftKind::Asr,
+            ShiftKind::Ror,
+        ] {
+            for instr in [
+                Instruction::And {
+                    rd: Register::X0,
+                    rn: Register::X1,
+                    rm: Operand::ShiftedRegister {
+                        reg: Register::X2,
+                        kind,
+                        amount: 31,
+                    },
+                    width: RegisterWidth::W32,
+                },
+                Instruction::Orr {
+                    rd: Register::X3,
+                    rn: Register::X4,
+                    rm: Operand::ShiftedRegister {
+                        reg: Register::X5,
+                        kind,
+                        amount: 31,
+                    },
+                    width: RegisterWidth::W32,
+                },
+                Instruction::Eor {
+                    rd: Register::X6,
+                    rn: Register::X7,
+                    rm: Operand::ShiftedRegister {
+                        reg: Register::X8,
+                        kind,
+                        amount: 31,
+                    },
+                    width: RegisterWidth::W32,
+                },
+            ] {
+                assert!(instr.is_encodable_aarch64(), "{instr} must be encodable");
+            }
+        }
+    }
+
+    #[test]
+    fn test_is_encodable_w32_logical_shifted_register_rejects_amount_32_and_sp() {
+        assert!(
+            !Instruction::And {
+                rd: Register::X0,
+                rn: Register::X1,
+                rm: Operand::ShiftedRegister {
+                    reg: Register::X2,
+                    kind: ShiftKind::Lsl,
+                    amount: 32,
+                },
+                width: RegisterWidth::W32,
+            }
+            .is_encodable_aarch64()
+        );
+
+        for instr in [
+            Instruction::And {
+                rd: Register::SP,
+                rn: Register::X1,
+                rm: Operand::Register(Register::X2),
+                width: RegisterWidth::W32,
+            },
+            Instruction::Orr {
+                rd: Register::X0,
+                rn: Register::SP,
+                rm: Operand::Register(Register::X2),
+                width: RegisterWidth::W32,
+            },
+            Instruction::Eor {
+                rd: Register::X0,
+                rn: Register::X1,
+                rm: Operand::ShiftedRegister {
+                    reg: Register::SP,
+                    kind: ShiftKind::Ror,
+                    amount: 7,
+                },
+                width: RegisterWidth::W32,
+            },
+        ] {
+            assert!(!instr.is_encodable_aarch64(), "{instr} must be rejected");
         }
     }
 
