@@ -818,9 +818,8 @@ pub fn apply_sequence_concrete(
 /// must be structurally equal (prune-on-write guarantees structural ==
 /// semantic equality).
 ///
-/// TODO(#282): The explicit `flags_live` parameter is now redundant with
-/// `live_out.flags_live()` for every caller except the stochastic backend
-/// (which deliberately passes `false`). Tracked for cleanup in issue #282.
+/// TODO(#282): Production callers now pass `live_out.flags_live()` here; the
+/// explicit parameter is retained for direct tests and future cleanup.
 pub fn states_equal_for_live_out(
     state1: &ConcreteMachineState,
     state2: &ConcreteMachineState,
@@ -846,8 +845,8 @@ pub fn states_equal_for_live_out(
 /// Flag divergence (when `flags_live` is set) is reported via the `XZR`
 /// sentinel since the function signature is register-typed.
 ///
-/// TODO(#282): see `states_equal_for_live_out` — the same `flags_live`
-/// redundancy applies here. Tracked for follow-up cleanup.
+/// TODO(#282): see `states_equal_for_live_out` — the same explicit
+/// `flags_live` parameter remains for follow-up cleanup.
 pub fn find_first_difference(
     state1: &ConcreteMachineState,
     state2: &ConcreteMachineState,
