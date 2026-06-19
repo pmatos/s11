@@ -241,8 +241,6 @@ where
             self.statistics.candidates_passed_fast += 1;
 
             if proposal_cost < best_cost {
-                self.statistics.smt_queries += 1;
-
                 let (verdict, metrics) = <I as StochasticBackend<I>>::check_equivalence(
                     target,
                     &proposal,
@@ -251,6 +249,9 @@ where
                     smt_timeout,
                 );
                 self.statistics.smt_elapsed += metrics.smt_elapsed;
+                if metrics.smt_called {
+                    self.statistics.smt_queries += 1;
+                }
                 if let EquivalenceResult::Equivalent = verdict {
                     self.statistics.smt_equivalent += 1;
                     self.statistics.improvements_found += 1;
@@ -339,6 +340,8 @@ mod tests {
     use crate::search::config::{StochasticConfig, SymbolicConfig};
     use crate::semantics::cost::CostMetric;
     use crate::semantics::live_out::LiveOut;
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering as AtomicOrdering};
+    use std::sync::{Mutex as TestMutex, MutexGuard};
 
     fn mov_add_sequence() -> Vec<Instruction> {
         vec![
@@ -526,6 +529,23 @@ mod tests {
             const { std::cell::Cell::new(None) };
     }
 
+    const TIMEOUT_PROBE_NOT_EQUIVALENT: usize = 0;
+    const TIMEOUT_PROBE_EQUIVALENT: usize = 1;
+
+    static TIMEOUT_PROBE_TEST_LOCK: TestMutex<()> = TestMutex::new(());
+    static TIMEOUT_PROBE_VERDICT: AtomicUsize = AtomicUsize::new(TIMEOUT_PROBE_EQUIVALENT);
+    static TIMEOUT_PROBE_SMT_CALLED: AtomicBool = AtomicBool::new(true);
+
+    fn set_timeout_probe_result(verdict: usize, smt_called: bool) -> MutexGuard<'static, ()> {
+        let guard = TIMEOUT_PROBE_TEST_LOCK
+            .lock()
+            .expect("timeout probe test lock poisoned");
+        TIMEOUT_PROBE_VERDICT.store(verdict, AtomicOrdering::SeqCst);
+        TIMEOUT_PROBE_SMT_CALLED.store(smt_called, AtomicOrdering::SeqCst);
+        RECORDED_SMT_TIMEOUT_MS.with(|recorded| recorded.set(None));
+        guard
+    }
+
     impl StochasticBackend<TimeoutProbeIsa> for TimeoutProbeIsa {
         type State = ();
         type LiveOut = ();
@@ -582,9 +602,16 @@ mod tests {
             timeout: Duration,
         ) -> (EquivalenceResult, crate::semantics::EquivalenceMetrics) {
             RECORDED_SMT_TIMEOUT_MS.with(|recorded| recorded.set(Some(timeout.as_millis() as u64)));
+            let metrics = crate::semantics::EquivalenceMetrics {
+                smt_called: TIMEOUT_PROBE_SMT_CALLED.load(AtomicOrdering::SeqCst),
+                ..crate::semantics::EquivalenceMetrics::default()
+            };
             (
-                EquivalenceResult::Equivalent,
-                crate::semantics::EquivalenceMetrics::default(),
+                match TIMEOUT_PROBE_VERDICT.load(AtomicOrdering::SeqCst) {
+                    TIMEOUT_PROBE_EQUIVALENT => EquivalenceResult::Equivalent,
+                    _ => EquivalenceResult::NotEquivalent,
+                },
+                metrics,
             )
         }
 
@@ -603,9 +630,12 @@ mod tests {
         }
     }
 
-    fn run_timeout_probe_search(symbolic_config: SymbolicConfig) -> Option<u64> {
-        RECORDED_SMT_TIMEOUT_MS.with(|recorded| recorded.set(None));
-
+    fn run_timeout_probe_search_with(
+        symbolic_config: SymbolicConfig,
+        verdict: usize,
+        smt_called: bool,
+    ) -> (SearchStatistics, Option<u64>) {
+        let _guard = set_timeout_probe_result(verdict, smt_called);
         let mut search: StochasticSearch<TimeoutProbeIsa> = StochasticSearch::new();
         let config = SearchConfig::default()
             .with_stochastic(
@@ -617,9 +647,19 @@ mod tests {
             .with_symbolic(symbolic_config);
         let target = [TimeoutProbeInstruction(1), TimeoutProbeInstruction(2)];
         let result = search.search(&target, &(), &config);
-        assert_eq!(result.statistics.smt_queries, 1);
+        let statistics = result.statistics;
 
-        RECORDED_SMT_TIMEOUT_MS.with(|recorded| recorded.get())
+        (
+            statistics,
+            RECORDED_SMT_TIMEOUT_MS.with(|recorded| recorded.get()),
+        )
+    }
+
+    fn run_timeout_probe_search(symbolic_config: SymbolicConfig) -> Option<u64> {
+        let (statistics, recorded_timeout) =
+            run_timeout_probe_search_with(symbolic_config, TIMEOUT_PROBE_EQUIVALENT, true);
+        assert_eq!(statistics.smt_queries, 1);
+        recorded_timeout
     }
 
     #[test]
@@ -641,6 +681,20 @@ mod tests {
         let recorded_timeout = run_timeout_probe_search(symbolic_config);
 
         assert_eq!(recorded_timeout, Some(5000));
+    }
+
+    #[test]
+    fn stochastic_search_does_not_count_pre_smt_refutation_as_smt_query() {
+        let (statistics, recorded_timeout) = run_timeout_probe_search_with(
+            SymbolicConfig::default().with_timeout(Duration::from_millis(17)),
+            TIMEOUT_PROBE_NOT_EQUIVALENT,
+            false,
+        );
+
+        assert_eq!(recorded_timeout, Some(17));
+        assert_eq!(statistics.candidates_passed_fast, 1);
+        assert_eq!(statistics.smt_queries, 0);
+        assert_eq!(statistics.smt_equivalent, 0);
     }
 
     #[test]
