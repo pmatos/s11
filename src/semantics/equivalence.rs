@@ -3111,6 +3111,93 @@ mod tests {
         );
     }
 
+    /// Issue #241 regression: variable LSR also masks the shift register before
+    /// applying Z3's `bvlshr`. Without the mask, this target would match a
+    /// candidate that forces x0 to zero whenever x2 >= 64.
+    #[test]
+    fn test_lsr_reg_shift_amount_masked_for_equivalence() {
+        use crate::ir::types::Condition;
+
+        let target = vec![Instruction::Lsr {
+            rd: Register::X0,
+            rn: Register::X1,
+            shift: Operand::Register(Register::X2),
+        }];
+        let candidate = vec![
+            Instruction::Lsr {
+                rd: Register::X0,
+                rn: Register::X1,
+                shift: Operand::Register(Register::X2),
+            },
+            Instruction::Cmp {
+                rn: Register::X2,
+                rm: Operand::Immediate(64),
+            },
+            Instruction::Csel {
+                rd: Register::X0,
+                rn: Register::XZR,
+                rm: Register::X0,
+                cond: Condition::CS,
+            },
+        ];
+        let config = EquivalenceConfig::with_live_out(LiveOut::from_registers(vec![Register::X0]));
+        let result = check_equivalence_with_config(&target, &candidate, &config);
+        assert!(
+            matches!(
+                result,
+                EquivalenceResult::NotEquivalent | EquivalenceResult::NotEquivalentFast(_)
+            ),
+            "expected NotEquivalent or NotEquivalentFast for shift-mask divergence, got {:?}",
+            result
+        );
+    }
+
+    /// Issue #241 regression: variable ASR masks the shift register before
+    /// applying Z3's `bvashr`. The candidate models the unmasked overshift case
+    /// by selecting the sign-fill value (`asr x1, #63`) when x2 >= 64.
+    #[test]
+    fn test_asr_reg_shift_amount_masked_for_equivalence() {
+        use crate::ir::types::Condition;
+
+        let target = vec![Instruction::Asr {
+            rd: Register::X0,
+            rn: Register::X1,
+            shift: Operand::Register(Register::X2),
+        }];
+        let candidate = vec![
+            Instruction::Asr {
+                rd: Register::X0,
+                rn: Register::X1,
+                shift: Operand::Register(Register::X2),
+            },
+            Instruction::Cmp {
+                rn: Register::X2,
+                rm: Operand::Immediate(64),
+            },
+            Instruction::Asr {
+                rd: Register::X3,
+                rn: Register::X1,
+                shift: Operand::Immediate(63),
+            },
+            Instruction::Csel {
+                rd: Register::X0,
+                rn: Register::X3,
+                rm: Register::X0,
+                cond: Condition::CS,
+            },
+        ];
+        let config = EquivalenceConfig::with_live_out(LiveOut::from_registers(vec![Register::X0]));
+        let result = check_equivalence_with_config(&target, &candidate, &config);
+        assert!(
+            matches!(
+                result,
+                EquivalenceResult::NotEquivalent | EquivalenceResult::NotEquivalentFast(_)
+            ),
+            "expected NotEquivalent or NotEquivalentFast for shift-mask divergence, got {:?}",
+            result
+        );
+    }
+
     // ===== Issue #69: terminator-identity precheck =====
 
     use crate::ir::LabelId;
