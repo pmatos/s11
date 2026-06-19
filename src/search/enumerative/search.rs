@@ -780,7 +780,22 @@ mod tests {
     use crate::isa::{ISA, ISAMutator, InstructionType, OperandType, RegisterType, U64};
     use crate::search::config::SymbolicConfig;
 
-    static LENGTH_TWO_COST_CALLS: AtomicU64 = AtomicU64::new(0);
+    std::thread_local! {
+        static LENGTH_TWO_COST_CALLS: std::cell::Cell<u64> =
+            const { std::cell::Cell::new(0) };
+    }
+
+    fn reset_length_two_cost_calls() {
+        LENGTH_TWO_COST_CALLS.with(|calls| calls.set(0));
+    }
+
+    fn increment_length_two_cost_calls() {
+        LENGTH_TWO_COST_CALLS.with(|calls| calls.set(calls.get() + 1));
+    }
+
+    fn length_two_cost_calls() -> u64 {
+        LENGTH_TWO_COST_CALLS.with(|calls| calls.get())
+    }
 
     impl EnumerativeBackend<crate::isa::RiscV64> for crate::isa::RiscV64 {
         type LiveOut = ();
@@ -804,7 +819,7 @@ mod tests {
             _seq: &[crate::isa::riscv::RiscVInstruction],
             _config: &SearchConfig,
         ) -> u64 {
-            LENGTH_TWO_COST_CALLS.fetch_add(1, Ordering::Relaxed);
+            increment_length_two_cost_calls();
             std::thread::sleep(std::time::Duration::from_millis(10));
             1
         }
@@ -817,6 +832,26 @@ mod tests {
         ) -> (EquivalenceResult, EquivalenceMetrics) {
             panic!("cost-pruned timeout regression must not verify candidates")
         }
+    }
+
+    #[test]
+    fn length_two_cost_counter_is_thread_local() {
+        use crate::isa::RiscV64;
+
+        let config = SearchConfig::default();
+        reset_length_two_cost_calls();
+
+        std::thread::spawn(move || {
+            <RiscV64 as EnumerativeBackend<RiscV64>>::sequence_cost(&[], &config);
+        })
+        .join()
+        .expect("cost counter probe thread should finish");
+
+        assert_eq!(
+            length_two_cost_calls(),
+            0,
+            "cost calls from another test thread must not affect this test thread"
+        );
     }
 
     static CACHE_PROBE_TEST_LOCK: TestMutex<()> = TestMutex::new(());
@@ -1774,14 +1809,14 @@ mod tests {
         let live_out = ();
         let config = SearchConfig::default().with_timeout(std::time::Duration::from_millis(5));
         let shared = SharedState::<RiscV64>::new(0);
-        LENGTH_TWO_COST_CALLS.store(0, Ordering::Relaxed);
 
         let pool = rayon::ThreadPoolBuilder::new()
             .num_threads(1)
             .build()
             .expect("private rayon pool");
-        let start = std::time::Instant::now();
-        pool.install(|| {
+        let cost_calls = pool.install(|| {
+            reset_length_two_cost_calls();
+            let start = std::time::Instant::now();
             run_length_two::<RiscV64>(
                 &target,
                 &live_out,
@@ -1790,13 +1825,17 @@ mod tests {
                 None,
                 &shared,
                 start,
-            )
+            );
+            length_two_cost_calls()
         });
 
-        let cost_calls = LENGTH_TWO_COST_CALLS.load(Ordering::Relaxed);
         assert!(
             shared.stop.load(Ordering::Relaxed),
             "timeout should set shared stop inside the inner length-two loop"
+        );
+        assert!(
+            cost_calls > 0,
+            "expected to observe cost calls from the worker running length-two search"
         );
         assert!(
             cost_calls < all_instructions.len() as u64,
