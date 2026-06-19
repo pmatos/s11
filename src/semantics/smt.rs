@@ -30,6 +30,10 @@ fn bv_swap_bytes(value: &BV, width: u32) -> BV {
     result
 }
 
+fn bv_shift_mask(width: u32) -> BV {
+    BV::from_u64((width - 1) as u64, width)
+}
+
 /// `width`-bit ROR composed as `(value lshr n) | (value shl (width - n))`.
 /// Caller is responsible for masking `n` to `log2(width)` bits when needed
 /// (immediate callers with `n` already in `0..width` may skip the mask).
@@ -39,7 +43,7 @@ fn bv_swap_bytes(value: &BV, width: u32) -> BV {
 /// bit-width zeroes the value). So `hi = 0` and the result is just
 /// `value lshr 0 = value`.
 fn bv_ror(value: &BV, n: &BV, width: u32) -> BV {
-    let mask = BV::from_u64((width - 1) as u64, width);
+    let mask = bv_shift_mask(width);
     let n_masked = n.bvand(&mask);
     let width_const = BV::from_u64(width as u64, width);
     let complement = width_const.bvsub(&n_masked);
@@ -408,6 +412,9 @@ impl MachineState {
             Operand::Immediate(imm) => BV::from_i64(*imm, self.width),
             Operand::ShiftedRegister { reg, kind, amount } => {
                 let value = self.get_register(*reg).clone();
+                // `amount` is the compile-time modifier on a shifted-register
+                // operand and is bounded by parsing/encodability. Runtime
+                // masking belongs to register-form LSL/LSR/ASR shift operands.
                 let amt = BV::from_u64(*amount as u64, self.width);
                 match kind {
                     crate::ir::ShiftKind::Lsl => value.bvshl(&amt),
@@ -662,21 +669,21 @@ pub fn apply_instruction(mut state: MachineState, instruction: &Instruction) -> 
             // (concrete.rs masks with `& 63`). Z3's `bvshl` zeroes the result
             // when the shift amount is >= width, so we must mask first to
             // keep SMT and concrete in agreement (issue #241).
-            let mask = BV::from_u64((width - 1) as u64, width);
+            let mask = bv_shift_mask(width);
             let shift_amount = state.eval_operand(shift).bvand(&mask);
             let result = value.bvshl(&shift_amount);
             state.set_register(*rd, result);
         }
         Instruction::Lsr { rd, rn, shift } => {
             let value = state.get_register(*rn).clone();
-            let mask = BV::from_u64((width - 1) as u64, width);
+            let mask = bv_shift_mask(width);
             let shift_amount = state.eval_operand(shift).bvand(&mask);
             let result = value.bvlshr(&shift_amount);
             state.set_register(*rd, result);
         }
         Instruction::Asr { rd, rn, shift } => {
             let value = state.get_register(*rn).clone();
-            let mask = BV::from_u64((width - 1) as u64, width);
+            let mask = bv_shift_mask(width);
             let shift_amount = state.eval_operand(shift).bvand(&mask);
             let result = value.bvashr(&shift_amount);
             state.set_register(*rd, result);
@@ -2745,10 +2752,10 @@ mod tests {
 
     #[test]
     fn test_lsl_imm_concrete_smt_parity() {
-        // LSL is width-sensitive: concrete (concrete.rs:84-88) masks the shift
-        // amount with `& 63` before applying. After the issue-#241 fix the
-        // SMT lowering masks the shift operand with `width - 1` too, so the
-        // two paths agree for all shift values including >= 64.
+        // LSL is width-sensitive: concrete semantics mask the shift amount
+        // with `& 63` before applying. Immediate shifts >= 64 are rejected by
+        // parser/encodability paths, but these IR-only samples verify internal
+        // concrete/SMT parity for the same issue-#241 mask rule.
         let values: &[u64] = &[
             0,
             1,
@@ -2771,7 +2778,9 @@ mod tests {
 
     #[test]
     fn test_lsr_imm_concrete_smt_parity() {
-        // Mirror of LSL but logical right shift (no sign extension).
+        // Mirror of LSL but logical right shift (no sign extension). The
+        // extended immediate samples are IR-only; normal AArch64 input rejects
+        // them before optimization.
         let values: &[u64] = &[
             0,
             1,
@@ -3931,10 +3940,10 @@ mod tests {
 
     #[test]
     fn test_asr_imm_concrete_smt_parity() {
-        // ASR is sign-sensitive: concrete (concrete.rs:96-101) routes through
-        // `as_i64() >> shift` then back to u64; SMT uses Z3 `bvashr` which
-        // sign-preserves. Negative inputs (MSB set) must keep the sign bit.
-        // Shifts >= 64 exercise the issue-#241 mask path.
+        // ASR is sign-sensitive: concrete semantics route through signed
+        // shifting; SMT uses Z3 `bvashr`, which sign-preserves. Immediate
+        // shifts >= 64 are IR-only parity cases that exercise the issue-#241
+        // mask path; parser/encodability reject them in normal input.
         let values: &[u64] = &[
             0,
             1,
