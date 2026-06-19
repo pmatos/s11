@@ -452,21 +452,18 @@ fn test_opt_rejects_unsupported_instruction_window() {
 /// Helper for memory-op integration tests: assert that `s11 opt` on the
 /// given single-instruction window succeeds.
 ///
-/// Each test copies the source ELF to a unique tmp path
-/// (`std::env::temp_dir` joined with the supplied `fixture_tag`) so
-/// concurrent `cargo test` runs don't collide on the
-/// `<input>_optimized` artifact the binary always writes alongside its
-/// input. The artifact is cleaned up before the test returns.
-fn assert_opt_succeeds_on_window(source_elf: &Path, fixture_tag: &str, start_addr: u64) {
+/// Each test copies the source ELF to a unique tempdir so concurrent
+/// `cargo test` runs don't collide on the `<input>_optimized` artifact
+/// the binary always writes alongside its input. The tempdir is cleaned
+/// up automatically when the helper returns or panics.
+fn assert_opt_succeeds_on_window(source_elf: &Path, start_addr: u64) {
     let binary = get_binary_path();
     let end_addr = start_addr + 4;
 
-    let tmp_dir = std::env::temp_dir().join(format!("s11_opt_{fixture_tag}"));
-    let _ = fs::remove_dir_all(&tmp_dir);
-    fs::create_dir_all(&tmp_dir).expect("create temp fixture dir");
-    let test_elf = tmp_dir.join("loops_debug");
+    let tmp_dir = tempfile::tempdir().expect("create temp fixture dir");
+    let test_elf = tmp_dir.path().join("loops_debug");
     fs::copy(source_elf, &test_elf).expect("copy ELF fixture to tmp");
-    let optimized_path = tmp_dir.join("loops_debug_optimized");
+    let optimized_path = tmp_dir.path().join("loops_debug_optimized");
 
     let output = Command::new(&binary)
         .arg("opt")
@@ -479,7 +476,6 @@ fn assert_opt_succeeds_on_window(source_elf: &Path, fixture_tag: &str, start_add
         .expect("Failed to execute s11");
 
     if !output.status.success() {
-        let _ = fs::remove_dir_all(&tmp_dir);
         panic!(
             "opt failed on memory-op window 0x{start_addr:x}.\nstdout: {}\nstderr: {}",
             String::from_utf8_lossy(&output.stdout),
@@ -490,7 +486,6 @@ fn assert_opt_succeeds_on_window(source_elf: &Path, fixture_tag: &str, start_add
     let stdout = String::from_utf8_lossy(&output.stdout);
     let ok = stdout.contains("Optimization completed successfully");
     let optimized_exists = optimized_path.exists();
-    let _ = fs::remove_dir_all(&tmp_dir);
 
     assert!(
         ok,
@@ -518,7 +513,7 @@ fn test_opt_accepts_stp_writeback_window() {
         &[0xff, 0xff, 0xff, 0xff],
         "stp x29, x30, [sp, #-16]!",
     );
-    assert_opt_succeeds_on_window(&source_elf, "stp_writeback", start_addr);
+    assert_opt_succeeds_on_window(&source_elf, start_addr);
 }
 
 #[test]
@@ -536,7 +531,7 @@ fn test_opt_accepts_ldp_postindex_window() {
         &[0xff, 0xff, 0xff, 0xff],
         "ldp x29, x30, [sp], #16",
     );
-    assert_opt_succeeds_on_window(&source_elf, "ldp_postindex", start_addr);
+    assert_opt_succeeds_on_window(&source_elf, start_addr);
 }
 
 #[test]
@@ -558,7 +553,7 @@ fn test_opt_accepts_ldr_positive_offset_window() {
         &[0x00, 0x00, 0xc0, 0xff],
         "ldr xN, [xM{, #imm}]",
     );
-    assert_opt_succeeds_on_window(&source_elf, "ldr_offset", start_addr);
+    assert_opt_succeeds_on_window(&source_elf, start_addr);
 }
 
 #[test]
