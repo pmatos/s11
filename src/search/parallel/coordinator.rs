@@ -28,11 +28,11 @@ use std::time::{Duration, Instant};
 /// target, so the max is robust to a worker that exited before recording
 /// it), and `best_cost_found` is the minimum nonzero across workers
 /// (falling back to `original_cost` when no worker recorded one).
-/// `worker_statistics` carries the per-worker, per-algorithm breakdown
-/// in arrival order. Each entry's `elapsed_time` is the coordinator
-/// wall-clock at message arrival (`start_time.elapsed()`), not the
-/// worker's own driver-reported duration; this gives every entry a
-/// common time origin.
+/// `worker_statistics` carries the per-worker statistics in arrival
+/// order; each entry's algorithm lives in `SearchStatistics::algorithm`.
+/// Each entry's `elapsed_time` is the coordinator wall-clock at message
+/// arrival (`start_time.elapsed()`), not the worker's own driver-reported
+/// duration; this gives every entry a common time origin.
 #[derive(Debug)]
 pub struct ParallelResult {
     /// The best result found across all workers.
@@ -44,7 +44,7 @@ pub struct ParallelResult {
     /// (`start_time.elapsed()`), not the worker's own driver-reported
     /// duration — see the struct-level doc for the full aggregation
     /// contract.
-    pub worker_statistics: Vec<(usize, Algorithm, SearchStatistics)>,
+    pub worker_statistics: Vec<(usize, SearchStatistics)>,
 }
 
 /// Run parallel search with the given configuration.
@@ -115,7 +115,7 @@ fn run_coordinator(
     start_time: Instant,
 ) -> ParallelResult {
     let mut best_result: Option<SearchResult> = None;
-    let mut worker_stats: Vec<(usize, Algorithm, SearchStatistics)> = Vec::new();
+    let mut worker_stats: Vec<(usize, SearchStatistics)> = Vec::new();
     let mut finished_count = 0;
     let mut winning_worker_id: Option<usize> = None;
     let total_workers = config.num_workers;
@@ -196,9 +196,9 @@ fn run_coordinator(
                     // statistics.algorithm is the single source of truth for
                     // which algorithm the worker ran (set by run_symbolic_worker
                     // / run_stochastic_worker, which themselves are routed by
-                    // worker_algorithm() below) — read the label from there.
+                    // worker_algorithm() below).
                     stats.elapsed_time = start_time.elapsed();
-                    worker_stats.push((worker_id, stats.algorithm, stats));
+                    worker_stats.push((worker_id, stats));
 
                     if finished_count >= total_workers {
                         break;
@@ -233,7 +233,7 @@ fn run_coordinator(
     let elapsed = start_time.elapsed();
     let mut total_stats = SearchStatistics::new(Algorithm::Hybrid);
     total_stats.elapsed_time = elapsed;
-    for (_, _, s) in &worker_stats {
+    for (_, s) in &worker_stats {
         total_stats.candidates_evaluated += s.candidates_evaluated;
         total_stats.candidates_passed_fast += s.candidates_passed_fast;
         total_stats.smt_queries += s.smt_queries;
@@ -245,12 +245,12 @@ fn run_coordinator(
     }
     total_stats.original_cost = worker_stats
         .iter()
-        .map(|(_, _, s)| s.original_cost)
+        .map(|(_, s)| s.original_cost)
         .max()
         .unwrap_or(0);
     total_stats.best_cost_found = worker_stats
         .iter()
-        .map(|(_, _, s)| s.best_cost_found)
+        .map(|(_, s)| s.best_cost_found)
         .filter(|&c| c > 0)
         .min()
         .unwrap_or(total_stats.original_cost);
@@ -260,7 +260,7 @@ fn run_coordinator(
     // than a fresh-zero placeholder.
     if let Some(ref mut br) = best_result {
         if let Some(winner) = winning_worker_id
-            && let Some((_, _, winner_stats)) = worker_stats.iter().find(|(id, _, _)| *id == winner)
+            && let Some((_, winner_stats)) = worker_stats.iter().find(|(id, _)| *id == winner)
         {
             br.statistics = winner_stats.clone();
         } else {
@@ -489,7 +489,7 @@ mod tests {
         let mut pairs: Vec<(usize, Algorithm)> = result
             .worker_statistics
             .iter()
-            .map(|(id, alg, _)| (*id, *alg))
+            .map(|(id, stats)| (*id, stats.algorithm))
             .collect();
         pairs.sort_by_key(|(id, _)| *id);
         assert_eq!(
@@ -525,10 +525,10 @@ mod tests {
         assert_eq!(result.worker_statistics.len(), 1);
         assert_eq!(result.worker_statistics[0].0, 0);
         assert_eq!(
-            result.worker_statistics[0].1,
+            result.worker_statistics[0].1.algorithm,
             Algorithm::Stochastic,
             "single hybrid worker must run stochastic, got {:?}",
-            result.worker_statistics[0].1,
+            result.worker_statistics[0].1.algorithm,
         );
     }
 
@@ -551,7 +551,10 @@ mod tests {
         let result = run_parallel_search(&target, &live_out, &search_config, &parallel_config);
 
         assert_eq!(result.worker_statistics.len(), 1);
-        assert_eq!(result.worker_statistics[0].1, Algorithm::Stochastic);
+        assert_eq!(
+            result.worker_statistics[0].1.algorithm,
+            Algorithm::Stochastic
+        );
     }
 
     #[test]
@@ -706,7 +709,7 @@ mod tests {
         let mut ids: Vec<usize> = result
             .worker_statistics
             .iter()
-            .map(|(id, _, _)| *id)
+            .map(|(id, _stats)| *id)
             .collect();
         ids.sort();
         let expected: Vec<usize> = (0..num_workers).collect();
@@ -749,7 +752,7 @@ mod tests {
         let symbolic_entries: Vec<_> = result
             .worker_statistics
             .iter()
-            .filter(|(_, alg, _)| *alg == Algorithm::Symbolic)
+            .filter(|(_, stats)| stats.algorithm == Algorithm::Symbolic)
             .collect();
         assert_eq!(
             symbolic_entries.len(),
@@ -758,20 +761,20 @@ mod tests {
             result
                 .worker_statistics
                 .iter()
-                .map(|(id, alg, _)| (*id, *alg))
+                .map(|(id, stats)| (*id, stats.algorithm))
                 .collect::<Vec<_>>(),
         );
         assert_eq!(
             symbolic_entries[0].0, 0,
             "symbolic worker should be worker_id 0",
         );
-        for (id, alg, _) in &result.worker_statistics {
+        for (id, stats) in &result.worker_statistics {
             if *id != 0 {
                 assert_eq!(
-                    *alg,
+                    stats.algorithm,
                     Algorithm::Stochastic,
                     "non-symbolic workers must be labeled Stochastic, got {:?} for id {}",
-                    alg,
+                    stats.algorithm,
                     id,
                 );
             }
