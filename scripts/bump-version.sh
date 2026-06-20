@@ -59,6 +59,10 @@ EOF
     ;;
   [0-9]*)
     new="$1"
+    if ! [[ "$new" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.]+)?(\+[0-9A-Za-z.]+)?$ ]]; then
+      log "error: '$new' is not a valid version (expected X.Y.Z, optionally -prerelease and/or +build)"
+      exit 2
+    fi
     ;;
   *)
     log "error: unknown bump '$1' (expected patch|minor|major or an explicit X.Y.Z)"
@@ -66,8 +70,10 @@ EOF
     ;;
 esac
 
-# Rewrite only the first `version = "..."` line.
-sed -i -E '0,/^version = "[^"]+"/s//version = "'"$new"'"/' "$MANIFEST"
+# Rewrite only the first `version = "..."` line. `$new` is validated above
+# (no `/`), and the substitution uses `|` as its delimiter so the replacement
+# text can never be mistaken for the end of the s command.
+sed -i -E "0,/^version = \"[^\"]+\"/s|^version = \"[^\"]+\"|version = \"${new}\"|" "$MANIFEST"
 
 log "bumped $current -> $new"
 echo "$new"
