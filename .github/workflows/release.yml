@@ -80,12 +80,15 @@ jobs:
 
       - name: Bump version
         id: bump
+        env:
+          BUMP: ${{ inputs.bump }}
+          VERSION: ${{ inputs.version }}
         run: |
           set -euo pipefail
-          if [ -n "${{ inputs.version }}" ]; then
-            NEW_VERSION="$(scripts/bump-version.sh "${{ inputs.version }}")"
+          if [ -n "$VERSION" ]; then
+            NEW_VERSION="$(scripts/bump-version.sh "$VERSION")"
           else
-            NEW_VERSION="$(scripts/bump-version.sh "${{ inputs.bump }}")"
+            NEW_VERSION="$(scripts/bump-version.sh "$BUMP")"
           fi
           echo "version=${NEW_VERSION}" >> "$GITHUB_OUTPUT"
           echo "tag=v${NEW_VERSION}" >> "$GITHUB_OUTPUT"
@@ -98,19 +101,22 @@ jobs:
         run: ./ci_check.sh
 
       - name: Commit + tag
+        env:
+          TAG: ${{ steps.bump.outputs.tag }}
         run: |
           git add Cargo.toml Cargo.lock
-          git commit -m "chore(release): ${{ steps.bump.outputs.tag }}"
-          git tag -a "${{ steps.bump.outputs.tag }}" -m "Release ${{ steps.bump.outputs.tag }}"
+          git commit -m "chore(release): ${TAG}"
+          git tag -a "${TAG}" -m "Release ${TAG}"
 
       - name: Build release binary
         run: cargo build --release --locked
 
       - name: Collect release artifacts
         id: artifacts
+        env:
+          TAG: ${{ steps.bump.outputs.tag }}
         run: |
           set -euo pipefail
-          TAG="${{ steps.bump.outputs.tag }}"
           STAGE="s11-${TAG}-${TARGET}"
           mkdir -p "release-upload/${STAGE}"
           cp target/release/s11 "release-upload/${STAGE}/"
@@ -121,28 +127,34 @@ jobs:
           ls -la release-upload
 
       - name: Push version bump + tag
+        env:
+          TAG: ${{ steps.bump.outputs.tag }}
         run: |
           git push origin "HEAD:${GITHUB_REF_NAME}"
-          git push origin "${{ steps.bump.outputs.tag }}"
+          git push origin "${TAG}"
 
       - name: Create GitHub Release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ steps.bump.outputs.tag }}
+          DRAFT: ${{ inputs.draft }}
+          PRERELEASE: ${{ inputs.prerelease }}
         run: |
           set -euo pipefail
-          args=(--generate-notes --title "${{ steps.bump.outputs.tag }}")
-          if [ "${{ inputs.draft }}" = "true" ]; then args+=(--draft); fi
-          if [ "${{ inputs.prerelease }}" = "true" ]; then args+=(--prerelease); fi
-          gh release create "${{ steps.bump.outputs.tag }}" \
+          args=(--generate-notes --title "${TAG}")
+          if [ "$DRAFT" = "true" ]; then args+=(--draft); fi
+          if [ "$PRERELEASE" = "true" ]; then args+=(--prerelease); fi
+          gh release create "${TAG}" \
             "${args[@]}" \
             ./release-upload/*
 
       - name: Open next dev cycle
         if: ${{ inputs.draft != true && inputs.prerelease != true }}
+        env:
+          VERSION: ${{ steps.bump.outputs.version }}
         run: |
           set -euo pipefail
-          BASE="${{ steps.bump.outputs.version }}"
-          BASE="${BASE%%-*}"
+          BASE="${VERSION%%-*}"
           IFS='.' read -r MA MI PA <<< "$BASE"
           NEXT="${MA}.${MI}.$((PA + 1))-dev"
           scripts/bump-version.sh "$NEXT"
