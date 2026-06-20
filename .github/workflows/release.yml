@@ -1,0 +1,174 @@
+name: Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      bump:
+        description: 'Semver bump (ignored if explicit `version` is set)'
+        type: choice
+        required: true
+        default: patch
+        options:
+          - patch
+          - minor
+          - major
+      version:
+        description: 'Explicit version (e.g. 1.2.3). Overrides `bump` if set.'
+        type: string
+        required: false
+        default: ''
+      draft:
+        description: 'Publish release as draft'
+        type: boolean
+        required: false
+        default: false
+      prerelease:
+        description: 'Mark release as pre-release'
+        type: boolean
+        required: false
+        default: false
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: "-D warnings"
+  TARGET: x86_64-unknown-linux-gnu
+
+jobs:
+  release:
+    name: Bump version and build Linux artifacts
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - name: Checkout (full history for tagging)
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Validate branch
+        run: |
+          if [ "${GITHUB_REF_NAME}" != "main" ]; then
+            echo "Release must be run from 'main' (got ${GITHUB_REF_NAME})." >&2
+            exit 1
+          fi
+
+      - name: Install system build deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libcapstone-dev gcc-aarch64-linux-gnu z3 libz3-dev
+          curl --proto '=https' --tlsv1.2 -sSf https://just.systems/install.sh \
+            | sudo bash -s -- --to /usr/local/bin
+
+      - name: Setup Rust
+        run: |
+          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
+            | sh -s -- -y --profile minimal --default-toolchain stable --component rustfmt
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+
+      - name: Configure git author
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+
+      - name: Bump version
+        id: bump
+        env:
+          BUMP: ${{ inputs.bump }}
+          VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          if [ -n "$VERSION" ]; then
+            NEW_VERSION="$(scripts/bump-version.sh "$VERSION")"
+          else
+            NEW_VERSION="$(scripts/bump-version.sh "$BUMP")"
+          fi
+          echo "version=${NEW_VERSION}" >> "$GITHUB_OUTPUT"
+          echo "tag=v${NEW_VERSION}" >> "$GITHUB_OUTPUT"
+          echo "Bumped to v${NEW_VERSION}"
+
+      - name: Verify tree (fmt + build + tests)
+        # ci_check.sh runs: cargo fmt --check, debug build, build_tests.sh,
+        # cargo test, and test_all.sh. It also refreshes Cargo.lock with the
+        # bumped version so the commit below stays in sync.
+        run: ./ci_check.sh
+
+      - name: Commit + tag
+        env:
+          TAG: ${{ steps.bump.outputs.tag }}
+        run: |
+          git add Cargo.toml Cargo.lock
+          git commit -m "chore(release): ${TAG}"
+          git tag -a "${TAG}" -m "Release ${TAG}"
+
+      - name: Build release binary
+        run: cargo build --release --locked
+
+      - name: Collect release artifacts
+        id: artifacts
+        env:
+          TAG: ${{ steps.bump.outputs.tag }}
+        run: |
+          set -euo pipefail
+          STAGE="s11-${TAG}-${TARGET}"
+          mkdir -p "release-upload/${STAGE}"
+          cp target/release/s11 "release-upload/${STAGE}/"
+          cp README.md LICENSE "release-upload/${STAGE}/"
+          tar -C release-upload -czf "release-upload/${STAGE}.tar.gz" "${STAGE}"
+          rm -rf "release-upload/${STAGE}"
+          (cd release-upload && sha256sum ./* > SHA256SUMS.txt)
+          ls -la release-upload
+
+      - name: Push version bump + tag
+        env:
+          TAG: ${{ steps.bump.outputs.tag }}
+        run: |
+          git push origin "HEAD:${GITHUB_REF_NAME}"
+          git push origin "${TAG}"
+
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ steps.bump.outputs.tag }}
+          DRAFT: ${{ inputs.draft }}
+          PRERELEASE: ${{ inputs.prerelease }}
+        run: |
+          set -euo pipefail
+          args=(--generate-notes --title "${TAG}")
+          if [ "$DRAFT" = "true" ]; then args+=(--draft); fi
+          if [ "$PRERELEASE" = "true" ]; then args+=(--prerelease); fi
+          gh release create "${TAG}" \
+            "${args[@]}" \
+            ./release-upload/*
+
+      - name: Open next dev cycle
+        if: ${{ inputs.draft != true && inputs.prerelease != true }}
+        env:
+          VERSION: ${{ steps.bump.outputs.version }}
+        run: |
+          set -euo pipefail
+          BASE="${VERSION%%-*}"
+          IFS='.' read -r MA MI PA <<< "$BASE"
+          NEXT="${MA}.${MI}.$((PA + 1))-dev"
+          scripts/bump-version.sh "$NEXT"
+          # Sync the s11 entry in Cargo.lock to the new manifest version.
+          cargo update --workspace
+          git add Cargo.toml Cargo.lock
+          git commit -m "chore: open ${NEXT} dev cycle"
+          git push origin "HEAD:${GITHUB_REF_NAME}"
+
+      - name: Upload build artifacts (for debugging / reruns)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: linux-artifacts-${{ steps.bump.outputs.tag }}
+          path: release-upload/
+          if-no-files-found: warn
+          retention-days: 14
