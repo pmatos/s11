@@ -168,7 +168,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: linux-artifacts-${{ steps.bump.outputs.tag }}
+          name: linux-artifacts-${{ steps.bump.outputs.tag || 'unknown' }}
           path: release-upload/
           if-no-files-found: warn
           retention-days: 14
