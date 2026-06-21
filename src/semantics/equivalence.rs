@@ -1303,6 +1303,10 @@ mod tests {
         let fast_cfg = EquivalenceConfigFor::<I>::fast_only().live_out(live_out.clone());
         let (fast_result, fast_metrics) =
             check_equivalence_for_metrics::<I>(&target, &candidate, &fast_cfg);
+        // The fast path seeds register i with `seed + i` for every seed
+        // (RAX=0, RCX=1, RDX=2), so target RAX = seed + (seed+1) = 2*seed+1 and
+        // candidate RAX = (seed + (seed+2)) - 1 = 2*seed+1 on every concrete
+        // trial. The pair is equal by construction here; only SMT can refute it.
         assert_eq!(fast_result, EquivalenceResult::Equivalent);
         assert!(!fast_metrics.smt_called);
 
@@ -1335,6 +1339,10 @@ mod tests {
         let fast_cfg = EquivalenceConfigFor::<I>::fast_only().live_out(live_out.clone());
         let (fast_result, fast_metrics) =
             check_equivalence_for_metrics::<I>(&target, &candidate, &fast_cfg);
+        // The fast path seeds register i with `seed + i` for every seed
+        // (RCX=1, RDX=2, RSI=6, RDI=7), so both compares compute -1 (RCX-RDX
+        // and RSI-RDI) and produce identical flags on every concrete trial.
+        // The pair is flag-equivalent by construction here; only SMT refutes it.
         assert_eq!(fast_result, EquivalenceResult::Equivalent);
         assert!(!fast_metrics.smt_called);
 
