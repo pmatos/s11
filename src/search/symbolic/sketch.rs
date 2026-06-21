@@ -59,64 +59,100 @@ impl SymbolicInstruction {
         let rn_valid = self.rn.ge(&zero) & self.rn.le(&max_reg);
         let rm_reg_valid = self.rm_reg.ge(&zero) & self.rm_reg.le(&max_reg);
         let rm_imm_valid = self.rm_imm_idx.ge(&zero) & self.rm_imm_idx.le(&max_imm);
+        let rm_is_immediate = self.rm_is_reg.not();
+        let rm_imm_valid_when_immediate = rm_is_immediate.implies(&rm_imm_valid);
+        let mov_reg_uses_register = self.opcode.eq(Int::from_i64(0)).implies(&self.rm_is_reg);
+        let mov_imm_uses_immediate = self.opcode.eq(Int::from_i64(1)).implies(&rm_is_immediate);
 
-        opcode_valid & rd_valid & rn_valid & rm_reg_valid & rm_imm_valid
+        opcode_valid
+            & rd_valid
+            & rn_valid
+            & rm_reg_valid
+            & rm_imm_valid_when_immediate
+            & mov_reg_uses_register
+            & mov_imm_uses_immediate
     }
 
     /// Extract a concrete instruction from a satisfying model
     pub fn extract_from_model(&self, model: &Model, immediates: &[i64]) -> Option<Instruction> {
         let opcode = model.eval(&self.opcode, true)?.as_i64()?;
-        let rd_idx = model.eval(&self.rd, true)?.as_i64()? as u8;
-        let rn_idx = model.eval(&self.rn, true)?.as_i64()? as u8;
+        let rd = Self::extract_register(model, &self.rd)?;
         let rm_is_reg = model.eval(&self.rm_is_reg, true)?.as_bool()?;
 
-        let rd = Register::from_index(rd_idx)?;
-        let rn = Register::from_index(rn_idx)?;
-
-        let rm = if rm_is_reg {
-            let rm_idx = model.eval(&self.rm_reg, true)?.as_i64()? as u8;
-            Operand::Register(Register::from_index(rm_idx)?)
-        } else {
-            let imm_idx = model.eval(&self.rm_imm_idx, true)?.as_i64()? as usize;
-            let imm = *immediates.get(imm_idx)?;
-            Operand::Immediate(imm)
-        };
-
         match opcode {
-            0 => Some(Instruction::MovReg { rd, rn }),
+            0 => {
+                if !rm_is_reg {
+                    return None;
+                }
+                let rn = Self::extract_register(model, &self.rn)?;
+                Some(Instruction::MovReg { rd, rn })
+            }
             1 => {
-                if let Operand::Immediate(imm) = rm {
-                    Some(Instruction::MovImm { rd, imm })
-                } else {
-                    // MovImm needs an immediate, but we got a register
-                    // This shouldn't happen if constraints are correct
-                    Some(Instruction::MovReg { rd, rn })
+                if rm_is_reg {
+                    return None;
+                }
+                let imm = self.extract_immediate(model, immediates)?;
+                Some(Instruction::MovImm { rd, imm })
+            }
+            2..=9 => {
+                let rn = Self::extract_register(model, &self.rn)?;
+                let rm = self.extract_rm_operand(model, immediates, rm_is_reg)?;
+                match opcode {
+                    2 => Some(Instruction::Add { rd, rn, rm }),
+                    3 => Some(Instruction::Sub { rd, rn, rm }),
+                    4 => Some(Instruction::And {
+                        rd,
+                        rn,
+                        rm,
+                        width: crate::ir::RegisterWidth::X64,
+                    }),
+                    5 => Some(Instruction::Orr {
+                        rd,
+                        rn,
+                        rm,
+                        width: crate::ir::RegisterWidth::X64,
+                    }),
+                    6 => Some(Instruction::Eor {
+                        rd,
+                        rn,
+                        rm,
+                        width: crate::ir::RegisterWidth::X64,
+                    }),
+                    7 => Some(Instruction::Lsl { rd, rn, shift: rm }),
+                    8 => Some(Instruction::Lsr { rd, rn, shift: rm }),
+                    9 => Some(Instruction::Asr { rd, rn, shift: rm }),
+                    _ => unreachable!(),
                 }
             }
-            2 => Some(Instruction::Add { rd, rn, rm }),
-            3 => Some(Instruction::Sub { rd, rn, rm }),
-            4 => Some(Instruction::And {
-                rd,
-                rn,
-                rm,
-                width: crate::ir::RegisterWidth::X64,
-            }),
-            5 => Some(Instruction::Orr {
-                rd,
-                rn,
-                rm,
-                width: crate::ir::RegisterWidth::X64,
-            }),
-            6 => Some(Instruction::Eor {
-                rd,
-                rn,
-                rm,
-                width: crate::ir::RegisterWidth::X64,
-            }),
-            7 => Some(Instruction::Lsl { rd, rn, shift: rm }),
-            8 => Some(Instruction::Lsr { rd, rn, shift: rm }),
-            9 => Some(Instruction::Asr { rd, rn, shift: rm }),
             _ => None,
+        }
+    }
+
+    fn extract_register(model: &Model, register: &Int) -> Option<Register> {
+        let idx = u8::try_from(model.eval(register, true)?.as_i64()?).ok()?;
+        Register::from_index(idx)
+    }
+
+    fn extract_immediate(&self, model: &Model, immediates: &[i64]) -> Option<i64> {
+        let imm_idx = usize::try_from(model.eval(&self.rm_imm_idx, true)?.as_i64()?).ok()?;
+        immediates.get(imm_idx).copied()
+    }
+
+    fn extract_rm_operand(
+        &self,
+        model: &Model,
+        immediates: &[i64],
+        rm_is_reg: bool,
+    ) -> Option<Operand> {
+        if rm_is_reg {
+            Some(Operand::Register(Self::extract_register(
+                model,
+                &self.rm_reg,
+            )?))
+        } else {
+            Some(Operand::Immediate(
+                self.extract_immediate(model, immediates)?,
+            ))
         }
     }
 }
@@ -171,6 +207,7 @@ impl SymbolicSketch {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use z3::{SatResult, Solver};
 
     #[test]
     fn test_symbolic_instruction_creation() {
@@ -194,5 +231,89 @@ mod tests {
 
         // Verify constraints are created
         assert!(!constraints.to_string().is_empty());
+    }
+
+    #[test]
+    fn register_operand_constraints_allow_empty_immediate_table() {
+        for (opcode, prefix) in [(0, "mov_reg"), (2, "add_reg")] {
+            let instr = SymbolicInstruction::new(prefix);
+            let solver = Solver::new();
+
+            solver.assert(instr.add_range_constraints(0));
+            solver.assert(instr.opcode.eq(Int::from_i64(opcode)));
+            solver.assert(instr.rd.eq(Int::from_i64(0)));
+            solver.assert(instr.rn.eq(Int::from_i64(1)));
+            solver.assert(instr.rm_reg.eq(Int::from_i64(2)));
+            solver.assert(&instr.rm_is_reg);
+
+            assert_eq!(solver.check(), SatResult::Sat, "{prefix}");
+        }
+    }
+
+    #[test]
+    fn mov_imm_constraints_require_immediate_operand() {
+        let instr = SymbolicInstruction::new("mov_imm_reg_operand");
+        let solver = Solver::new();
+        solver.assert(instr.add_range_constraints(1));
+        solver.assert(instr.opcode.eq(Int::from_i64(1)));
+        solver.assert(instr.rd.eq(Int::from_i64(0)));
+        solver.assert(instr.rn.eq(Int::from_i64(1)));
+        solver.assert(instr.rm_reg.eq(Int::from_i64(2)));
+        solver.assert(instr.rm_imm_idx.eq(Int::from_i64(0)));
+        solver.assert(&instr.rm_is_reg);
+        assert_eq!(solver.check(), SatResult::Unsat);
+
+        let instr = SymbolicInstruction::new("mov_imm_imm_operand");
+        let solver = Solver::new();
+        let immediate_operand = instr.rm_is_reg.not();
+        solver.assert(instr.add_range_constraints(1));
+        solver.assert(instr.opcode.eq(Int::from_i64(1)));
+        solver.assert(instr.rd.eq(Int::from_i64(0)));
+        solver.assert(instr.rn.eq(Int::from_i64(1)));
+        solver.assert(instr.rm_imm_idx.eq(Int::from_i64(0)));
+        solver.assert(&immediate_operand);
+        assert_eq!(solver.check(), SatResult::Sat);
+
+        let instr = SymbolicInstruction::new("mov_imm_no_immediates");
+        let solver = Solver::new();
+        solver.assert(instr.add_range_constraints(0));
+        solver.assert(instr.opcode.eq(Int::from_i64(1)));
+        solver.assert(instr.rd.eq(Int::from_i64(0)));
+        solver.assert(instr.rn.eq(Int::from_i64(1)));
+        solver.assert(instr.rm_reg.eq(Int::from_i64(2)));
+        assert_eq!(solver.check(), SatResult::Unsat);
+    }
+
+    #[test]
+    fn extract_mov_imm_rejects_register_operand_model() {
+        let instr = SymbolicInstruction::new("extract_mov_imm_reg_operand");
+        let solver = Solver::new();
+        solver.assert(instr.opcode.eq(Int::from_i64(1)));
+        solver.assert(instr.rd.eq(Int::from_i64(0)));
+        solver.assert(instr.rn.eq(Int::from_i64(1)));
+        solver.assert(instr.rm_reg.eq(Int::from_i64(2)));
+        solver.assert(&instr.rm_is_reg);
+
+        assert_eq!(solver.check(), SatResult::Sat);
+        let model = solver.get_model().unwrap();
+
+        assert!(instr.extract_from_model(&model, &[7]).is_none());
+    }
+
+    #[test]
+    fn extract_mov_reg_rejects_immediate_operand_model() {
+        let instr = SymbolicInstruction::new("extract_mov_reg_imm_operand");
+        let solver = Solver::new();
+        let immediate_operand = instr.rm_is_reg.not();
+        solver.assert(instr.opcode.eq(Int::from_i64(0)));
+        solver.assert(instr.rd.eq(Int::from_i64(0)));
+        solver.assert(instr.rn.eq(Int::from_i64(1)));
+        solver.assert(instr.rm_imm_idx.eq(Int::from_i64(0)));
+        solver.assert(&immediate_operand);
+
+        assert_eq!(solver.check(), SatResult::Sat);
+        let model = solver.get_model().unwrap();
+
+        assert!(instr.extract_from_model(&model, &[7]).is_none());
     }
 }
