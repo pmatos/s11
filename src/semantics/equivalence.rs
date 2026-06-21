@@ -1280,6 +1280,76 @@ mod tests {
         assert!(metrics.smt_formula_bytes.is_none());
     }
 
+    fn assert_x86_register_output_smt_only_refutation<I>()
+    where
+        I: EquivalenceBackend<Instruction = X86Instruction, Register = X86Register>,
+    {
+        let target = vec![X86Instruction::AddReg {
+            rd: X86Register::RAX,
+            rs: X86Register::RCX,
+        }];
+        let candidate = vec![
+            X86Instruction::AddReg {
+                rd: X86Register::RAX,
+                rs: X86Register::RDX,
+            },
+            X86Instruction::SubImm {
+                rd: X86Register::RAX,
+                imm: 1,
+            },
+        ];
+        let live_out = X86LiveOut::from_registers(vec![X86Register::RAX]);
+
+        let fast_cfg = EquivalenceConfigFor::<I>::fast_only().live_out(live_out.clone());
+        let (fast_result, fast_metrics) =
+            check_equivalence_for_metrics::<I>(&target, &candidate, &fast_cfg);
+        assert_eq!(fast_result, EquivalenceResult::Equivalent);
+        assert!(!fast_metrics.smt_called);
+
+        let cfg = EquivalenceConfigFor::<I>::default().live_out(live_out);
+        let (result, metrics) = check_equivalence_for_metrics::<I>(&target, &candidate, &cfg);
+        assert_eq!(result, EquivalenceResult::NotEquivalent);
+        assert!(metrics.smt_called);
+    }
+
+    #[test]
+    fn x86_register_output_smt_only_refutation() {
+        assert_x86_register_output_smt_only_refutation::<crate::isa::X86_64>();
+        assert_x86_register_output_smt_only_refutation::<crate::isa::X86_32>();
+    }
+
+    fn assert_x86_eflags_smt_only_refutation<I>()
+    where
+        I: EquivalenceBackend<Instruction = X86Instruction, Register = X86Register>,
+    {
+        let target = vec![X86Instruction::CmpReg {
+            rn: X86Register::RCX,
+            rs: X86Register::RDX,
+        }];
+        let candidate = vec![X86Instruction::CmpReg {
+            rn: X86Register::RSI,
+            rs: X86Register::RDI,
+        }];
+        let live_out = X86LiveOut::empty().with_flags(true);
+
+        let fast_cfg = EquivalenceConfigFor::<I>::fast_only().live_out(live_out.clone());
+        let (fast_result, fast_metrics) =
+            check_equivalence_for_metrics::<I>(&target, &candidate, &fast_cfg);
+        assert_eq!(fast_result, EquivalenceResult::Equivalent);
+        assert!(!fast_metrics.smt_called);
+
+        let cfg = EquivalenceConfigFor::<I>::default().live_out(live_out);
+        let (result, metrics) = check_equivalence_for_metrics::<I>(&target, &candidate, &cfg);
+        assert_eq!(result, EquivalenceResult::NotEquivalent);
+        assert!(metrics.smt_called);
+    }
+
+    #[test]
+    fn x86_eflags_smt_only_refutation() {
+        assert_x86_eflags_smt_only_refutation::<crate::isa::X86_64>();
+        assert_x86_eflags_smt_only_refutation::<crate::isa::X86_32>();
+    }
+
     #[test]
     fn x86_non_fast_equivalent_result_still_invokes_smt() {
         let seq_mov = vec![X86Instruction::MovImm {

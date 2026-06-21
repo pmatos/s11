@@ -1865,6 +1865,8 @@ mod tests {
                 rs: X86Register::RBX,
             }])
         );
+        assert!(result.statistics.smt_queries > 0);
+        assert!(result.statistics.smt_equivalent > 0);
     }
 
     #[test]
@@ -1904,5 +1906,7 @@ mod tests {
                 rs: X86Register::RBX,
             }])
         );
+        assert!(result.statistics.smt_queries > 0);
+        assert!(result.statistics.smt_equivalent > 0);
     }
 }
