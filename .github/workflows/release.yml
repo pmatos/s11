@@ -47,7 +47,7 @@ jobs:
     timeout-minutes: 60
     steps:
       - name: Checkout (full history for tagging)
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
         with:
           fetch-depth: 0
           token: ${{ secrets.GITHUB_TOKEN }}
