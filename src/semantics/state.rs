@@ -244,7 +244,7 @@ pub(crate) fn mask_to_width(value: u64, width: u32) -> u64 {
         32 => value & 0xffff_ffff,
         16 => value & 0xffff,
         8 => value & 0xff,
-        _ => value,
+        _ => unreachable!("unsupported BV width: {}", width),
     }
 }
 
@@ -254,7 +254,7 @@ fn top_bit(value: u64, width: u32) -> bool {
         32 => (value & 0x8000_0000) != 0,
         16 => (value & 0x8000) != 0,
         8 => (value & 0x80) != 0,
-        _ => (value as i64) < 0,
+        _ => unreachable!("unsupported BV width: {}", width),
     }
 }
 
@@ -611,15 +611,25 @@ mod tests {
     }
 
     #[test]
-    fn width_helpers_cover_small_and_fallback_widths() {
+    fn width_helpers_cover_small_widths() {
         assert_eq!(mask_to_width(0x12345, 16), 0x2345);
         assert_eq!(mask_to_width(0x12345, 8), 0x45);
-        assert_eq!(mask_to_width(0x12345, 24), 0x12345);
 
         assert!(top_bit(0x8000, 16));
         assert!(top_bit(0x80, 8));
         assert!(!top_bit(0x7f, 8));
-        assert!(!top_bit(0x7f, 24));
+    }
+
+    #[test]
+    #[should_panic(expected = "unsupported BV width: 24")]
+    fn mask_to_width_panics_on_unsupported_width() {
+        let _ = mask_to_width(0x12345, 24);
+    }
+
+    #[test]
+    #[should_panic(expected = "unsupported BV width: 24")]
+    fn top_bit_panics_on_unsupported_width() {
+        let _ = top_bit(0x7f, 24);
     }
 
     #[test]
