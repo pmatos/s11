@@ -919,28 +919,22 @@ impl X86Mutator {
             self.pick_non_mov_immediate(rng)
         };
         let cond = X86Condition::ALL[rng.random_range(0..X86Condition::ALL.len())];
-        Some(match opcode {
-            0 => X86Instruction::MovReg { rd, rs },
-            1 => X86Instruction::MovImm { rd, imm },
-            2 => X86Instruction::AddReg { rd, rs },
-            3 => X86Instruction::AddImm { rd, imm },
-            4 => X86Instruction::SubReg { rd, rs },
-            5 => X86Instruction::SubImm { rd, imm },
-            6 => X86Instruction::AndReg { rd, rs },
-            7 => X86Instruction::AndImm { rd, imm },
-            8 => X86Instruction::OrReg { rd, rs },
-            9 => X86Instruction::OrImm { rd, imm },
-            10 => X86Instruction::XorReg { rd, rs },
-            11 => X86Instruction::XorImm { rd, imm },
-            12 => X86Instruction::CmpReg { rn: rd, rs },
-            13 => X86Instruction::CmpImm { rn: rd, imm },
-            _ => X86Instruction::Cmov {
-                rd,
-                rs: pick_register_except(rng, &self.registers, rd)
-                    .expect("CMOV opcode requires a distinct register pair"),
-                cond,
-            },
-        })
+        // The CMOV slot resolves a distinct source register via an extra
+        // `pick_register_except` draw; every other opcode reuses the `rs`
+        // drawn above. This extra draw MUST stay conditional on the CMOV
+        // opcode to preserve the RNG stream that the parity test
+        // `x86_mutator_random_instruction_matches_shared_generator_stream`
+        // pins against `generate_random_rewritable_x86_instruction`.
+        let opcode = u8::try_from(opcode).expect("opcode index fits in u8");
+        let final_rs = if opcode == X86_REWRITABLE_OPCODE_COUNT - 1 {
+            pick_register_except(rng, &self.registers, rd)
+                .expect("CMOV opcode requires a distinct register pair")
+        } else {
+            rs
+        };
+        Some(build_x86_instruction_by_opcode(
+            opcode, rd, final_rs, imm, cond,
+        ))
     }
 
     fn mutate_operand<R: rand::RngExt>(&self, rng: &mut R, sequence: &mut [X86Instruction]) {
@@ -1193,6 +1187,44 @@ fn has_distinct_register_pair(registers: &[X86Register]) -> bool {
     registers.iter().any(|reg| reg != first)
 }
 
+/// Maps a rewritable opcode index in `0..X86_REWRITABLE_OPCODE_COUNT` to the
+/// `X86Instruction` variant it denotes, using operands the caller has already
+/// drawn. This is the single source of truth for the opcode → variant table;
+/// `X86Mutator::random_instruction` and
+/// `generate_random_rewritable_x86_instruction` both delegate here so the two
+/// dispatch tables cannot drift (see issue #348). Operand drawing and RNG draw
+/// order stay at the call sites; the CMOV slot (opcode 14) consumes the `rs`
+/// the caller resolved via `pick_register_except` so `rs != rd`.
+///
+/// Keep this in lock-step with `X86_REWRITABLE_OPCODE_COUNT` and the
+/// `opcode_dispatch_is_consistent` test, which pins the full mapping.
+pub(crate) fn build_x86_instruction_by_opcode(
+    opcode: u8,
+    rd: X86Register,
+    rs: X86Register,
+    imm: i64,
+    cond: X86Condition,
+) -> X86Instruction {
+    match opcode {
+        0 => X86Instruction::MovReg { rd, rs },
+        1 => X86Instruction::MovImm { rd, imm },
+        2 => X86Instruction::AddReg { rd, rs },
+        3 => X86Instruction::AddImm { rd, imm },
+        4 => X86Instruction::SubReg { rd, rs },
+        5 => X86Instruction::SubImm { rd, imm },
+        6 => X86Instruction::AndReg { rd, rs },
+        7 => X86Instruction::AndImm { rd, imm },
+        8 => X86Instruction::OrReg { rd, rs },
+        9 => X86Instruction::OrImm { rd, imm },
+        10 => X86Instruction::XorReg { rd, rs },
+        11 => X86Instruction::XorImm { rd, imm },
+        12 => X86Instruction::CmpReg { rn: rd, rs },
+        13 => X86Instruction::CmpImm { rn: rd, imm },
+        14 => X86Instruction::Cmov { rd, rs, cond },
+        _ => unreachable!("opcode out of range"),
+    }
+}
+
 fn pick_register_except<R: Rng + ?Sized>(
     rng: &mut R,
     registers: &[X86Register],
@@ -1237,29 +1269,17 @@ fn generate_random_rewritable_x86_instruction<R: Rng + ?Sized>(
     let rs = registers[rng.random_range(0..registers.len())];
     let imm = immediates[rng.random_range(0..immediates.len())];
     let cond = X86Condition::ALL[rng.random_range(0..X86Condition::ALL.len())];
-    match opcode {
-        0 => X86Instruction::MovReg { rd, rs },
-        1 => X86Instruction::MovImm { rd, imm },
-        2 => X86Instruction::AddReg { rd, rs },
-        3 => X86Instruction::AddImm { rd, imm },
-        4 => X86Instruction::SubReg { rd, rs },
-        5 => X86Instruction::SubImm { rd, imm },
-        6 => X86Instruction::AndReg { rd, rs },
-        7 => X86Instruction::AndImm { rd, imm },
-        8 => X86Instruction::OrReg { rd, rs },
-        9 => X86Instruction::OrImm { rd, imm },
-        10 => X86Instruction::XorReg { rd, rs },
-        11 => X86Instruction::XorImm { rd, imm },
-        12 => X86Instruction::CmpReg { rn: rd, rs },
-        13 => X86Instruction::CmpImm { rn: rd, imm },
-        14 => X86Instruction::Cmov {
-            rd,
-            rs: pick_register_except(rng, registers, rd)
-                .expect("CMOV opcode requires a distinct register pair"),
-            cond,
-        },
-        _ => unreachable!("opcode out of range"),
-    }
+    // Mirror `X86Mutator::random_instruction`: the CMOV slot draws a distinct
+    // source register; every other opcode reuses `rs`. Keep this draw
+    // conditional on the CMOV opcode so both paths share one RNG stream.
+    let opcode = u8::try_from(opcode).expect("opcode index fits in u8");
+    let final_rs = if opcode == X86_REWRITABLE_OPCODE_COUNT - 1 {
+        pick_register_except(rng, registers, rd)
+            .expect("CMOV opcode requires a distinct register pair")
+    } else {
+        rs
+    };
+    build_x86_instruction_by_opcode(opcode, rd, final_rs, imm, cond)
 }
 
 /// Default register pool for x86 stochastic / symbolic search.
@@ -2775,6 +2795,72 @@ mod tests {
                     "seed {seed} diverged from shared generator"
                 );
             }
+        }
+    }
+
+    #[test]
+    fn opcode_dispatch_is_consistent() {
+        // Pin the full opcode → instruction-family mapping that the shared
+        // `build_x86_instruction_by_opcode` constructor produces. Both
+        // `X86Mutator::random_instruction` and
+        // `generate_random_rewritable_x86_instruction` delegate here, so this
+        // guards the consolidated table against future drift (issue #348).
+        let rd = X86Register::RAX;
+        let rs = X86Register::RBX;
+        let imm = 7i64;
+        let cond = X86Condition::E;
+
+        let expected: [(u8, X86Instruction); X86_REWRITABLE_OPCODE_COUNT as usize] = [
+            (0, X86Instruction::MovReg { rd, rs }),
+            (1, X86Instruction::MovImm { rd, imm }),
+            (2, X86Instruction::AddReg { rd, rs }),
+            (3, X86Instruction::AddImm { rd, imm }),
+            (4, X86Instruction::SubReg { rd, rs }),
+            (5, X86Instruction::SubImm { rd, imm }),
+            (6, X86Instruction::AndReg { rd, rs }),
+            (7, X86Instruction::AndImm { rd, imm }),
+            (8, X86Instruction::OrReg { rd, rs }),
+            (9, X86Instruction::OrImm { rd, imm }),
+            (10, X86Instruction::XorReg { rd, rs }),
+            (11, X86Instruction::XorImm { rd, imm }),
+            (12, X86Instruction::CmpReg { rn: rd, rs }),
+            (13, X86Instruction::CmpImm { rn: rd, imm }),
+            (14, X86Instruction::Cmov { rd, rs, cond }),
+        ];
+
+        for (opcode, want) in expected {
+            assert_eq!(
+                build_x86_instruction_by_opcode(opcode, rd, rs, imm, cond),
+                want,
+                "opcode {opcode} built the wrong instruction"
+            );
+        }
+
+        // Sanity-check the mnemonic family for each opcode too, so a future
+        // variant swap that preserves struct shape still trips the guard.
+        let mnemonics: [(u8, &str); X86_REWRITABLE_OPCODE_COUNT as usize] = [
+            (0, "mov"),
+            (1, "mov"),
+            (2, "add"),
+            (3, "add"),
+            (4, "sub"),
+            (5, "sub"),
+            (6, "and"),
+            (7, "and"),
+            (8, "or"),
+            (9, "or"),
+            (10, "xor"),
+            (11, "xor"),
+            (12, "cmp"),
+            (13, "cmp"),
+            (14, "cmove"),
+        ];
+        for (opcode, mnem) in mnemonics {
+            assert_eq!(
+                build_x86_instruction_by_opcode(opcode, rd, rs, imm, cond).mnemonic(),
+                mnem,
+                "opcode {opcode} mnemonic drifted"
+            );
         }
     }
 
