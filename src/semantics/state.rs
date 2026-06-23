@@ -149,10 +149,11 @@ impl Eflags {
     /// unsigned overflow (low-`width` bits wrap).
     pub fn from_add(lhs: u64, rhs: u64, result: u64, width: u32) -> Self {
         let lhs_w = mask_to_width(lhs, width);
-        let rhs_w = mask_to_width(rhs, width);
         let result_w = mask_to_width(result, width);
-        // Unsigned carry: result < either operand (mod width).
-        let cf = result_w < lhs_w || result_w < rhs_w;
+        // Unsigned carry: the low-`width` sum wrapped, so `result < lhs` (mod
+        // width). `result < rhs` is the symmetric restatement of the same
+        // condition (both detect `lhs + rhs >= 2^width`), so it is redundant.
+        let cf = result_w < lhs_w;
         let zf = result_w == 0;
         let sf = top_bit(result, width);
         // Signed overflow on addition: input signs match AND result sign differs.
@@ -708,6 +709,19 @@ mod tests {
         assert!(f.zf, "result is 0");
         assert!(!f.sf);
         assert!(!f.of, "0xff..ff + 1 = 0 is not a signed overflow");
+    }
+
+    #[test]
+    fn eflags_from_add_carry_with_distinct_small_lhs() {
+        // Distinct operands (lhs != rhs, lhs small) whose sum wraps. Guards the
+        // single-clause `result < lhs` carry test: 3 + (2^64-1) = 2 (mod 2^64),
+        // and 2 < 3, so CF must be set.
+        let lhs = 3u64;
+        let rhs = u64::MAX;
+        let result = lhs.wrapping_add(rhs);
+        let f = Eflags::from_add(lhs, rhs, result, 64);
+        assert!(f.cf, "carry expected when the low-width sum wraps");
+        assert_eq!(result, 2);
     }
 
     #[test]
