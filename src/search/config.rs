@@ -338,8 +338,6 @@ pub struct SearchConfig {
     /// x86 symbolic / LLM backends. Defaults to the same 8 GPRs the
     /// AArch64 pool ships at the same cardinality.
     pub x86_available_registers: Vec<crate::isa::x86::X86Register>,
-    /// x86 operand width: 64 for x86-64, 32 for x86-32.
-    pub x86_width: u32,
     /// Whether x86 symbolic code-size search may consider same-instruction-count
     /// candidates. Direct IR callers default to true; the ELF frontend can
     /// disable this when source operands used partial-register aliases that the
@@ -382,7 +380,6 @@ impl Default for SearchConfig {
                 0, 1, 2, 3, 4, 5, 7, 8, 10, 15, 16, 31, 32, 63, 64, 100, 255, 256, 1000, 4095,
             ],
             x86_available_registers: crate::isa::x86::default_x86_registers(),
-            x86_width: 64,
             x86_same_count_code_size_allowed: true,
             stochastic: StochasticConfig::default(),
             symbolic: SymbolicConfig::default(),
@@ -484,28 +481,6 @@ impl SearchConfig {
     pub fn with_stop_flag(mut self, flag: Arc<AtomicBool>) -> Self {
         self.stop_flag = Some(flag);
         self
-    }
-
-    /// Set the x86 operand width (32 or 64).
-    pub fn with_x86_width(mut self, width: u32) -> Self {
-        // Only 32 and 64 are valid x86 widths. Other values currently
-        // fall back to Mode64 through `x86_mode()`, which is a misuse trap.
-        debug_assert!(
-            width == 32 || width == 64,
-            "with_x86_width: only 32 or 64 are valid; got {}",
-            width
-        );
-        self.x86_width = width;
-        self
-    }
-
-    /// Return the x86 assembler mode derived from `x86_width`.
-    pub fn x86_mode(&self) -> crate::assembler::x86::X86Mode {
-        if self.x86_width == 32 {
-            crate::assembler::x86::X86Mode::Mode32
-        } else {
-            crate::assembler::x86::X86Mode::Mode64
-        }
     }
 
     pub fn with_x86_same_count_code_size_allowed(mut self, allowed: bool) -> Self {
@@ -622,22 +597,6 @@ mod tests {
 
         let unset = SearchConfig::default().with_solver_timeout_option(None);
         assert_eq!(unset.solver_timeout, None);
-    }
-
-    #[test]
-    fn search_config_derives_x86_mode_from_width() {
-        assert_eq!(
-            SearchConfig::default().x86_mode(),
-            crate::assembler::x86::X86Mode::Mode64
-        );
-        assert_eq!(
-            SearchConfig::default().with_x86_width(32).x86_mode(),
-            crate::assembler::x86::X86Mode::Mode32
-        );
-        assert_eq!(
-            SearchConfig::default().with_x86_width(64).x86_mode(),
-            crate::assembler::x86::X86Mode::Mode64
-        );
     }
 
     #[test]

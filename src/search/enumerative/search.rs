@@ -2579,7 +2579,6 @@ mod tests {
             .with_x86_registers(vec![X86Register::RAX, X86Register::RBX])
             .with_immediates(vec![0])
             .with_cost_metric(CostMetric::CodeSize)
-            .with_x86_width(64)
             // No wall-clock deadline: the length-1 search over a tiny pool is
             // bounded and terminates on its own. A finite timeout here is
             // nondeterministic under coverage instrumentation (the slow
@@ -2623,7 +2622,6 @@ mod tests {
             .with_x86_registers(vec![X86Register::RAX, X86Register::RBX, X86Register::R8])
             .with_immediates(vec![0])
             .with_cost_metric(CostMetric::CodeSize)
-            .with_x86_width(32)
             // See the x86-64 sibling test: a bounded length-1 search needs no
             // wall-clock deadline, and a finite one flakes under coverage.
             .with_timeout_option(None);

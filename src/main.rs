@@ -1075,12 +1075,12 @@ fn build_hybrid_search_config(
 
 /// Shared base `SearchConfig` for the x86 stochastic/symbolic/enumerative
 /// builders. Sets the fields they configure identically — cost metric, overall
-/// and SMT solver timeouts, verbosity, the target-derived register pool, the
-/// default immediate pool, and operand width — so each builder only layers on
-/// its algorithm-specific pieces.
+/// and SMT solver timeouts, verbosity, the target-derived register pool, and the
+/// default immediate pool — so each builder only layers on its
+/// algorithm-specific pieces. Operand width is architectural (owned by the ISA
+/// marker), not a config field.
 fn build_x86_base_search_config(
     target: &[isa::x86::X86Instruction],
-    width: u32,
     options: &OptimizationOptions,
 ) -> SearchConfig {
     SearchConfig::default()
@@ -1090,12 +1090,10 @@ fn build_x86_base_search_config(
         .with_verbose(options.verbose)
         .with_x86_registers(x86_registers_from_target(target))
         .with_immediates(isa::x86::default_x86_immediates())
-        .with_x86_width(width)
 }
 
 fn build_x86_stochastic_search_config(
     target: &[isa::x86::X86Instruction],
-    width: u32,
     options: &OptimizationOptions,
 ) -> SearchConfig {
     let stochastic_config = StochasticConfig::default()
@@ -1103,12 +1101,11 @@ fn build_x86_stochastic_search_config(
         .with_iterations(options.iterations)
         .with_seed_option(options.seed);
 
-    build_x86_base_search_config(target, width, options).with_stochastic(stochastic_config)
+    build_x86_base_search_config(target, options).with_stochastic(stochastic_config)
 }
 
 fn build_x86_symbolic_search_config(
     target: &[isa::x86::X86Instruction],
-    width: u32,
     options: &OptimizationOptions,
     // Binary-patching guard: direct IR callers can allow same-count CodeSize
     // search, but the ELF frontend disables it when Capstone exposed
@@ -1117,7 +1114,7 @@ fn build_x86_symbolic_search_config(
 ) -> SearchConfig {
     let symbolic_config = SymbolicConfig::default().with_search_mode(options.search_mode);
 
-    build_x86_base_search_config(target, width, options)
+    build_x86_base_search_config(target, options)
         .with_symbolic(symbolic_config)
         .with_x86_same_count_code_size_allowed(same_count_code_size_allowed)
 }
@@ -2040,10 +2037,9 @@ fn x86_live_out_for_optimization(
 /// solver timeout (`--solver-timeout`) wiring.
 fn build_x86_enumerative_search_config(
     target: &[isa::x86::X86Instruction],
-    width: u32,
     options: &OptimizationOptions,
 ) -> SearchConfig {
-    build_x86_stochastic_search_config(target, width, options)
+    build_x86_stochastic_search_config(target, options)
         .with_immediates(x86_enumerative_immediates_from_target(target))
         .with_cores(options.cores)
 }
@@ -2057,7 +2053,7 @@ fn run_x86_enumerative(
 ) -> Option<Vec<isa::x86::X86Instruction>> {
     use search::SearchAlgorithm;
 
-    let config = build_x86_enumerative_search_config(target, width, options);
+    let config = build_x86_enumerative_search_config(target, options);
     let live_out = x86_live_out_for_optimization(target, downstream_flags_live);
 
     let (optimized, statistics) = if width == 32 {
@@ -2099,7 +2095,7 @@ fn run_x86_stochastic(
     use search::SearchAlgorithm;
     use search::stochastic::StochasticSearch;
 
-    let config = build_x86_stochastic_search_config(target, width, options);
+    let config = build_x86_stochastic_search_config(target, options);
     if config.x86_available_registers.is_empty() {
         return None;
     }
@@ -2146,8 +2142,7 @@ fn run_x86_symbolic(
     use search::SearchAlgorithm;
     use search::symbolic::SymbolicSearch;
 
-    let config =
-        build_x86_symbolic_search_config(target, width, options, same_count_code_size_allowed);
+    let config = build_x86_symbolic_search_config(target, options, same_count_code_size_allowed);
     let live_out = x86_live_out_for_optimization(target, downstream_flags_live);
 
     let (optimized, statistics) = if width == 32 {
@@ -4020,7 +4015,7 @@ mod cli_helper_tests {
                 imm: 1,
             },
         ];
-        let config = build_x86_enumerative_search_config(&target, 64, &opts);
+        let config = build_x86_enumerative_search_config(&target, &opts);
         assert_eq!(config.x86_available_registers, vec![X86Register::RBX]);
         assert!(
             !config.x86_available_registers.contains(&X86Register::RAX),
@@ -4199,7 +4194,7 @@ mod cli_helper_tests {
                 imm: 1,
             },
         ];
-        let config = build_x86_enumerative_search_config(&target, 64, &opts);
+        let config = build_x86_enumerative_search_config(&target, &opts);
         assert_eq!(config.cores, Some(3), "--cores must be threaded through");
         assert_eq!(config.solver_timeout, Some(Duration::from_millis(37)));
         assert!(
@@ -4247,7 +4242,7 @@ mod cli_helper_tests {
                 imm: 3,
             },
         ];
-        let config = build_x86_enumerative_search_config(&target, 32, &opts);
+        let config = build_x86_enumerative_search_config(&target, &opts);
 
         assert_eq!(
             config.x86_available_registers,
@@ -4261,8 +4256,6 @@ mod cli_helper_tests {
         assert_eq!(config.cost_metric, CostMetric::Latency);
         assert_eq!(config.timeout, Some(Duration::from_millis(31)));
         assert!(config.verbose);
-        assert_eq!(config.x86_width, 32);
-        assert_eq!(config.x86_mode(), assembler::x86::X86Mode::Mode32);
 
         // The enumerative builder reuses the stochastic builder, so the
         // stochastic fields are populated from the CLI options. They are inert
@@ -4412,7 +4405,7 @@ mod cli_helper_tests {
                 rs: X86Register::RSP,
             },
         ];
-        let config = build_x86_stochastic_search_config(&target, 32, &opts);
+        let config = build_x86_stochastic_search_config(&target, &opts);
 
         assert_eq!(config.solver_timeout, Some(Duration::from_millis(19)));
         assert_eq!(config.stochastic.beta, 3.5);
@@ -4453,7 +4446,6 @@ mod cli_helper_tests {
                         rs: X86Register::RBP,
                     },
                 ],
-                64,
                 &opts,
             )
             .x86_available_registers
@@ -4464,8 +4456,6 @@ mod cli_helper_tests {
             config.available_immediates,
             isa::x86::default_x86_immediates()
         );
-        assert_eq!(config.x86_width, 32);
-        assert_eq!(config.x86_mode(), assembler::x86::X86Mode::Mode32);
     }
 
     #[test]
@@ -4499,7 +4489,7 @@ mod cli_helper_tests {
                 imm: 0,
             },
         ];
-        let config = build_x86_symbolic_search_config(&target, 64, &opts, true);
+        let config = build_x86_symbolic_search_config(&target, &opts, true);
 
         assert_eq!(config.x86_available_registers, vec![X86Register::R12]);
         assert!(
@@ -4531,7 +4521,6 @@ mod cli_helper_tests {
                         rs: X86Register::RBP,
                     },
                 ],
-                64,
                 &opts,
                 true,
             )
@@ -4548,11 +4537,9 @@ mod cli_helper_tests {
             config.available_immediates,
             isa::x86::default_x86_immediates()
         );
-        assert_eq!(config.x86_width, 64);
-        assert_eq!(config.x86_mode(), assembler::x86::X86Mode::Mode64);
         assert!(config.x86_same_count_code_size_allowed);
         assert!(
-            !build_x86_symbolic_search_config(&target, 64, &opts, false)
+            !build_x86_symbolic_search_config(&target, &opts, false)
                 .x86_same_count_code_size_allowed
         );
     }
