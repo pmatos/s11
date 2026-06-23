@@ -64,10 +64,9 @@ pub trait SymbolicBackend<I: ISA>: Sized {
     ) -> (EquivalenceResult, EquivalenceMetrics);
 
     /// Width parameter for cost + state masking. Architecture markers own
-    /// this width so a mismatched config cannot silently change semantics.
-    /// `config` is retained only for API symmetry; implementations are
-    /// expected to return an architectural constant and must not read it.
-    fn width(config: &SearchConfig) -> u32;
+    /// this width so a mismatched config cannot silently change semantics;
+    /// implementations return an architectural constant.
+    fn width() -> u32;
 }
 
 // ---- AArch64 backend ----
@@ -116,7 +115,7 @@ impl SymbolicBackend<crate::isa::AArch64> for crate::isa::AArch64 {
         crate::semantics::equivalence::check_equivalence_with_config_metrics(target, proposal, &cfg)
     }
 
-    fn width(_config: &SearchConfig) -> u32 {
+    fn width() -> u32 {
         64
     }
 }
@@ -185,7 +184,7 @@ impl SymbolicBackend<crate::isa::X86_64> for crate::isa::X86_64 {
         )
     }
 
-    fn width(_config: &SearchConfig) -> u32 {
+    fn width() -> u32 {
         64
     }
 }
@@ -263,7 +262,7 @@ impl SymbolicBackend<crate::isa::X86_32> for crate::isa::X86_32 {
         )
     }
 
-    fn width(_config: &SearchConfig) -> u32 {
+    fn width() -> u32 {
         crate::isa::X86_32.register_width()
     }
 }
@@ -315,21 +314,19 @@ mod tests {
     }
 
     #[test]
-    fn x86_32_symbolic_width_is_architectural_even_with_default_config() {
-        let config = SearchConfig::default();
-        assert_eq!(config.x86_width, 64);
-
+    fn symbolic_width_is_architectural() {
+        // Width is owned by the ISA marker, not configuration: each backend
+        // returns its architectural constant from the no-arg `width()`.
         assert_eq!(
-            <crate::isa::X86_32 as SymbolicBackend<crate::isa::X86_32>>::width(&config),
+            <crate::isa::X86_32 as SymbolicBackend<crate::isa::X86_32>>::width(),
             32
         );
-
-        // X86_64 was already correct; this cross-check guards against a
-        // future regression and is not part of the x86-32 bug being fixed.
         assert_eq!(
-            <crate::isa::X86_64 as SymbolicBackend<crate::isa::X86_64>>::width(
-                &SearchConfig::default().with_x86_width(32),
-            ),
+            <crate::isa::X86_64 as SymbolicBackend<crate::isa::X86_64>>::width(),
+            64
+        );
+        assert_eq!(
+            <crate::isa::AArch64 as SymbolicBackend<crate::isa::AArch64>>::width(),
             64
         );
     }

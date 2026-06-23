@@ -93,7 +93,7 @@ where
     ) -> Option<Vec<I::Instruction>> {
         let regs = <I as SymbolicBackend<I>>::registers_from_config(config);
         let imms = <I as SymbolicBackend<I>>::immediates_from_config(config);
-        let width = <I as SymbolicBackend<I>>::width(config);
+        let width = <I as SymbolicBackend<I>>::width();
         let all_instructions = <I as SymbolicBackend<I>>::enumerate_all(&regs, &imms);
 
         let original_cost =
@@ -153,7 +153,7 @@ where
         best_cost: &mut u64,
         start_time: Instant,
     ) -> Option<Vec<I::Instruction>> {
-        let width = <I as SymbolicBackend<I>>::width(config);
+        let width = <I as SymbolicBackend<I>>::width();
         let mut best_at_length: Option<Vec<I::Instruction>> = None;
         // If the target ends in a terminator (x86 Jcc, AArch64 branch),
         // candidate proposals must end in the same terminator for the
@@ -332,7 +332,7 @@ where
         config: &SearchConfig,
     ) -> bool {
         let timeout = config.solver_timeout.unwrap_or(Duration::from_secs(5));
-        let width = <I as SymbolicBackend<I>>::width(config);
+        let width = <I as SymbolicBackend<I>>::width();
 
         let (verdict, metrics) = <I as SymbolicBackend<I>>::check_equivalence(
             target, candidate, live_out, width, timeout,
@@ -389,7 +389,7 @@ where
     ) -> Self::Result {
         self.reset();
         let start_time = Instant::now();
-        let width = <I as SymbolicBackend<I>>::width(config);
+        let width = <I as SymbolicBackend<I>>::width();
 
         let original_cost =
             <I as SymbolicBackend<I>>::sequence_cost(target, &config.cost_metric, width);
@@ -676,7 +676,7 @@ mod tests {
             (EquivalenceResult::NotEquivalent, metrics)
         }
 
-        fn width(_config: &SearchConfig) -> u32 {
+        fn width() -> u32 {
             64
         }
     }
@@ -1462,7 +1462,6 @@ mod tests {
         let config = SearchConfig::default()
             .with_x86_registers(vec![X86Register::RAX, X86Register::RBX])
             .with_immediates(vec![0])
-            .with_x86_width(64)
             .with_timeout_option(Some(Duration::from_secs(30)));
 
         let live_out = X86LiveOut::from_registers(vec![X86Register::RAX]).with_flags(false);
@@ -1504,7 +1503,6 @@ mod tests {
         let config = SearchConfig::default()
             .with_x86_registers(vec![X86Register::RAX])
             .with_immediates(vec![0])
-            .with_x86_width(64)
             .with_cost_metric(CostMetric::CodeSize)
             .with_timeout_option(Some(Duration::from_secs(5)));
 
@@ -1535,7 +1533,6 @@ mod tests {
         let config = SearchConfig::default()
             .with_x86_registers(vec![X86Register::RAX])
             .with_immediates(vec![0])
-            .with_x86_width(64)
             .with_x86_same_count_code_size_allowed(false)
             .with_cost_metric(CostMetric::CodeSize)
             .with_timeout_option(Some(Duration::from_secs(5)));
@@ -1566,7 +1563,6 @@ mod tests {
         let config = SearchConfig::default()
             .with_x86_registers(vec![X86Register::RAX])
             .with_immediates(vec![0])
-            .with_x86_width(64)
             .with_cost_metric(CostMetric::InstructionCount)
             .with_timeout_option(Some(Duration::from_secs(5)));
 
@@ -1594,7 +1590,6 @@ mod tests {
         let config = SearchConfig::default()
             .with_x86_registers(vec![X86Register::RAX])
             .with_immediates(vec![0])
-            .with_x86_width(64)
             .with_cost_metric(CostMetric::CodeSize);
         let target = vec![
             X86Instruction::MovImm {
@@ -1623,7 +1618,6 @@ mod tests {
         let config = SearchConfig::default()
             .with_x86_registers(vec![X86Register::RAX])
             .with_immediates(vec![0])
-            .with_x86_width(64)
             .with_x86_same_count_code_size_allowed(false)
             .with_cost_metric(CostMetric::CodeSize)
             .with_timeout_option(Some(Duration::from_secs(5)));
@@ -1662,7 +1656,6 @@ mod tests {
         let config = SearchConfig::default()
             .with_x86_registers(vec![X86Register::RAX, X86Register::RBX])
             .with_immediates(vec![0])
-            .with_x86_width(32)
             .with_timeout_option(Some(Duration::from_secs(5)));
 
         let live_out = X86LiveOut::from_registers(vec![X86Register::RAX]).with_flags(false);
@@ -1692,7 +1685,6 @@ mod tests {
         let config = SearchConfig::default()
             .with_x86_registers(vec![X86Register::RAX])
             .with_immediates(vec![0])
-            .with_x86_width(32)
             .with_cost_metric(CostMetric::CodeSize)
             .with_timeout_option(Some(Duration::from_secs(5)));
 

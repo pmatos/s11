@@ -79,7 +79,7 @@ where
     ) -> Self::Result {
         self.reset();
         let start_time = Instant::now();
-        let width = <I as StochasticBackend<I>>::width(config);
+        let width = <I as StochasticBackend<I>>::width();
 
         let original_cost =
             <I as StochasticBackend<I>>::sequence_cost(target, &config.cost_metric, width);
@@ -642,7 +642,7 @@ mod tests {
             vec![TimeoutProbeInstruction(1); len]
         }
 
-        fn width(_config: &SearchConfig) -> u32 {
+        fn width() -> u32 {
             64
         }
     }
@@ -1033,8 +1033,7 @@ mod tests {
                     .with_seed(7),
             )
             .with_x86_registers(vec![X86Register::RAX, X86Register::RBX, X86Register::RCX])
-            .with_immediates(vec![0, 1])
-            .with_x86_width(64);
+            .with_immediates(vec![0, 1]);
 
         let live_out = X86LiveOut::from_registers(vec![X86Register::RAX]).with_flags(false);
 
@@ -1086,8 +1085,7 @@ mod tests {
             )
             // Mode32 restricts to the low-8 GPRs.
             .with_x86_registers(vec![X86Register::RAX, X86Register::RBX, X86Register::RCX])
-            .with_immediates(vec![0, 1])
-            .with_x86_width(32);
+            .with_immediates(vec![0, 1]);
 
         let live_out = X86LiveOut::from_registers(vec![X86Register::RAX]).with_flags(false);
         let target = vec![
