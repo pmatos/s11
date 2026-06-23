@@ -287,6 +287,35 @@ fn x86_random_sequence<R: RngExt>(
         .collect()
 }
 
+/// Registers to randomize during x86 stochastic fast validation. Mirrors
+/// the AArch64 override: seeds a set from `configured`, then unions the
+/// live-out registers and every target instruction's source registers, so
+/// validation exercises registers the target reads even if they aren't in
+/// the configured mutation pool.
+fn x86_validation_registers(
+    configured: &[crate::isa::x86::X86Register],
+    target: &[crate::isa::x86::X86Instruction],
+    live_out: &crate::semantics::live_out::X86LiveOut,
+) -> Vec<crate::isa::x86::X86Register> {
+    let mut regs = std::collections::HashSet::new();
+
+    for reg in configured {
+        regs.insert(*reg);
+    }
+    for reg in live_out.iter() {
+        regs.insert(*reg);
+    }
+    for instr in target {
+        for reg in instr.source_registers() {
+            regs.insert(reg);
+        }
+    }
+
+    let mut regs: Vec<_> = regs.into_iter().collect();
+    regs.sort_by_key(|reg| reg.index().unwrap_or(u8::MAX));
+    regs
+}
+
 impl StochasticBackend<crate::isa::X86_64> for crate::isa::X86_64 {
     type State = crate::semantics::state::X86ConcreteMachineState;
     type LiveOut = crate::semantics::live_out::X86LiveOut;
@@ -301,6 +330,14 @@ impl StochasticBackend<crate::isa::X86_64> for crate::isa::X86_64 {
 
     fn make_mutator(config: &SearchConfig) -> crate::isa::x86::X86Mutator {
         x86_make_mutator(config, crate::assembler::x86::X86Mode::Mode64)
+    }
+
+    fn validation_registers(
+        configured: &[crate::isa::x86::X86Register],
+        target: &[crate::isa::x86::X86Instruction],
+        live_out: &Self::LiveOut,
+    ) -> Vec<crate::isa::x86::X86Register> {
+        x86_validation_registers(configured, target, live_out)
     }
 
     fn make_test_inputs(
@@ -392,6 +429,14 @@ impl StochasticBackend<crate::isa::X86_32> for crate::isa::X86_32 {
 
     fn make_mutator(config: &SearchConfig) -> crate::isa::x86::X86Mutator {
         x86_make_mutator(config, crate::assembler::x86::X86Mode::Mode32)
+    }
+
+    fn validation_registers(
+        configured: &[crate::isa::x86::X86Register],
+        target: &[crate::isa::x86::X86Instruction],
+        live_out: &Self::LiveOut,
+    ) -> Vec<crate::isa::x86::X86Register> {
+        x86_validation_registers(configured, target, live_out)
     }
 
     fn make_test_inputs(
@@ -548,6 +593,34 @@ mod tests {
         );
 
         assert_eq!(regs, vec![Register::X0, Register::X1]);
+    }
+
+    #[test]
+    fn x86_validation_registers_include_target_sources() {
+        // RBX is a target source register and RDX is live-out; neither is in
+        // the configured pool, so the x86 default would omit both. The
+        // override must union them in.
+        let target = vec![X86Instruction::MovReg {
+            rd: X86Register::RAX,
+            rs: X86Register::RBX,
+        }];
+        let live_out = X86LiveOut::from_registers(vec![X86Register::RDX]);
+
+        let regs =
+            <crate::isa::X86_64 as StochasticBackend<crate::isa::X86_64>>::validation_registers(
+                &[X86Register::RAX],
+                &target,
+                &live_out,
+            );
+
+        assert!(regs.contains(&X86Register::RAX), "configured register kept");
+        assert!(regs.contains(&X86Register::RBX), "target source unioned");
+        assert!(regs.contains(&X86Register::RDX), "live-out unioned");
+        // Sorted by register index (RAX=0, RDX=2, RBX=3).
+        assert_eq!(
+            regs,
+            vec![X86Register::RAX, X86Register::RDX, X86Register::RBX]
+        );
     }
 
     #[test]
