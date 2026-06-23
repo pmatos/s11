@@ -605,29 +605,65 @@ impl ElfOptimizationBackend for AArch64OptimizationBackend {
     }
 }
 
+/// The closed set of architectures the x86 optimization backend can
+/// actually handle. Distinct from `DetectedArch` (which also includes
+/// `Aarch64`) so the backend's match arms are exhaustive over exactly
+/// the two x86 modes — no `unreachable!()` arms for an AArch64 variant
+/// that can never reach this code.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum X86Arch {
+    X86_64,
+    X86_32,
+}
+
+impl X86Arch {
+    fn width(self) -> u32 {
+        match self {
+            X86Arch::X86_64 => 64,
+            X86Arch::X86_32 => 32,
+        }
+    }
+
+    fn parse_mode(self) -> parser::x86::X86ParseMode {
+        match self {
+            X86Arch::X86_64 => parser::x86::X86ParseMode::Mode64,
+            X86Arch::X86_32 => parser::x86::X86ParseMode::Mode32,
+        }
+    }
+}
+
+impl From<X86Arch> for DetectedArch {
+    fn from(arch: X86Arch) -> Self {
+        match arch {
+            X86Arch::X86_64 => DetectedArch::X86_64,
+            X86Arch::X86_32 => DetectedArch::X86_32,
+        }
+    }
+}
+
+impl TryFrom<DetectedArch> for X86Arch {
+    type Error = String;
+
+    fn try_from(arch: DetectedArch) -> Result<Self, Self::Error> {
+        match arch {
+            DetectedArch::X86_64 => Ok(X86Arch::X86_64),
+            DetectedArch::X86_32 => Ok(X86Arch::X86_32),
+            DetectedArch::Aarch64 => Err("expected x86 binary; got AArch64".to_string()),
+        }
+    }
+}
+
 struct X86OptimizationBackend {
-    arch: DetectedArch,
-    width: u32,
+    arch: X86Arch,
 }
 
 impl X86OptimizationBackend {
-    fn new(arch: DetectedArch) -> Result<Self, Box<dyn std::error::Error>> {
-        let width = match arch {
-            DetectedArch::X86_64 => 64,
-            DetectedArch::X86_32 => 32,
-            DetectedArch::Aarch64 => {
-                return Err("expected x86 binary; got AArch64".into());
-            }
-        };
-        Ok(Self { arch, width })
+    fn new(arch: X86Arch) -> Self {
+        Self { arch }
     }
 
     fn parse_mode(&self) -> parser::x86::X86ParseMode {
-        match self.arch {
-            DetectedArch::X86_64 => parser::x86::X86ParseMode::Mode64,
-            DetectedArch::X86_32 => parser::x86::X86ParseMode::Mode32,
-            DetectedArch::Aarch64 => unreachable!("x86 backend never receives AArch64"),
-        }
+        self.arch.parse_mode()
     }
 }
 
@@ -635,11 +671,11 @@ impl ElfOptimizationBackend for X86OptimizationBackend {
     type Instruction = isa::x86::X86Instruction;
 
     fn arch(&self) -> DetectedArch {
-        self.arch
+        DetectedArch::from(self.arch)
     }
 
     fn arch_description(&self) -> String {
-        format!("{:?} (width {})", self.arch, self.width)
+        format!("{:?} (width {})", self.arch, self.arch.width())
     }
 
     fn ir_label(&self) -> &'static str {
@@ -649,9 +685,8 @@ impl ElfOptimizationBackend for X86OptimizationBackend {
     fn disassembler(&self) -> Result<Capstone, Box<dyn std::error::Error>> {
         let mut builder = Capstone::new().x86();
         builder = match self.arch {
-            DetectedArch::X86_64 => builder.mode(capstone::arch::x86::ArchMode::Mode64),
-            DetectedArch::X86_32 => builder.mode(capstone::arch::x86::ArchMode::Mode32),
-            DetectedArch::Aarch64 => unreachable!("x86 backend never receives AArch64"),
+            X86Arch::X86_64 => builder.mode(capstone::arch::x86::ArchMode::Mode64),
+            X86Arch::X86_32 => builder.mode(capstone::arch::x86::ArchMode::Mode32),
         };
         Ok(builder
             .syntax(capstone::arch::x86::ArchSyntax::Intel)
@@ -676,21 +711,22 @@ impl ElfOptimizationBackend for X86OptimizationBackend {
         options: &OptimizationOptions,
         context: OptimizationContext,
     ) -> Result<Option<Vec<Self::Instruction>>, Box<dyn std::error::Error>> {
+        let width = self.arch.width();
         let optimized = match options.algorithm {
             Algorithm::Enumerative => {
-                run_x86_enumerative(ir, self.width, options, context.downstream_flags_live)
+                run_x86_enumerative(ir, width, options, context.downstream_flags_live)
             }
             Algorithm::Stochastic => {
-                run_x86_stochastic(ir, self.width, options, context.downstream_flags_live)
+                run_x86_stochastic(ir, width, options, context.downstream_flags_live)
             }
             Algorithm::Symbolic => run_x86_symbolic(
                 ir,
-                self.width,
+                width,
                 options,
                 context.downstream_flags_live,
                 x86_capstone_window_uses_only_full_width_register_operands(
                     capstone_instructions,
-                    self.width,
+                    width,
                 ),
             ),
             Algorithm::Hybrid | Algorithm::Llm => {
@@ -821,7 +857,8 @@ fn optimize_elf_binary(
             options,
         ),
         DetectedArch::X86_64 | DetectedArch::X86_32 => optimize_elf_binary_with_backend(
-            X86OptimizationBackend::new(patcher.arch())?,
+            // TryFrom cannot fail in this arm — the match already excluded Aarch64.
+            X86OptimizationBackend::new(X86Arch::try_from(patcher.arch())?),
             patcher,
             path,
             start_addr,
@@ -2155,16 +2192,13 @@ fn run_x86_symbolic(
 /// branch target.
 fn reassemble_x86_prefix_with_pinned_terminator(
     final_prefix_ir: &[isa::x86::X86Instruction],
-    arch: DetectedArch,
+    arch: X86Arch,
     pinned_terminator: Option<&[u8]>,
     original_prefix_byte_size: usize,
 ) -> Result<Vec<u8>, String> {
     let mut asm = match arch {
-        DetectedArch::X86_64 => assembler::x86::X86Assembler::new_64(),
-        DetectedArch::X86_32 => assembler::x86::X86Assembler::new_32(),
-        DetectedArch::Aarch64 => {
-            return Err("reassemble helper is x86-only".to_string());
-        }
+        X86Arch::X86_64 => assembler::x86::X86Assembler::new_64(),
+        X86Arch::X86_32 => assembler::x86::X86Assembler::new_32(),
     };
     let mut out = asm.assemble_instructions(final_prefix_ir)?;
 
@@ -2183,8 +2217,9 @@ fn reassemble_x86_prefix_with_pinned_terminator(
     }
 
     let gap = original_prefix_byte_size - out.len();
-    append_nop_padding(&mut out, gap, arch, |remaining| {
-        arch.nop_sequence(remaining)
+    let nop_arch = DetectedArch::from(arch);
+    append_nop_padding(&mut out, gap, nop_arch, |remaining| {
+        nop_arch.nop_sequence(remaining)
     })?;
     out.extend_from_slice(jcc_bytes);
     Ok(out)
@@ -2788,8 +2823,7 @@ mod cli_helper_tests {
             .into_iter()
             .next()
             .expect("minimal ELF should contain .text");
-        let backend =
-            X86OptimizationBackend::new(DetectedArch::X86_64).expect("x86-64 backend should build");
+        let backend = X86OptimizationBackend::new(X86Arch::X86_64);
         let cs = backend
             .disassembler()
             .expect("x86-64 disassembler should build");
@@ -3828,7 +3862,7 @@ mod cli_helper_tests {
 
     #[test]
     fn x86_symbolic_backend_gates_same_count_code_size_from_capstone_operands() {
-        let backend = X86OptimizationBackend::new(DetectedArch::X86_64).unwrap();
+        let backend = X86OptimizationBackend::new(X86Arch::X86_64);
         let cs = backend.disassembler().unwrap();
         let mut opts = options_for(Algorithm::Symbolic);
         opts.timeout = Some(Duration::from_secs(5));
@@ -5038,6 +5072,23 @@ mod cli_helper_tests {
         );
     }
 
+    #[test]
+    fn x86arch_detectedarch_roundtrip() {
+        assert_eq!(DetectedArch::from(X86Arch::X86_64), DetectedArch::X86_64);
+        assert_eq!(DetectedArch::from(X86Arch::X86_32), DetectedArch::X86_32);
+        assert_eq!(
+            X86Arch::try_from(DetectedArch::X86_64).unwrap(),
+            X86Arch::X86_64
+        );
+        assert_eq!(
+            X86Arch::try_from(DetectedArch::X86_32).unwrap(),
+            X86Arch::X86_32
+        );
+        assert!(X86Arch::try_from(DetectedArch::Aarch64).is_err());
+        assert_eq!(X86Arch::X86_64.width(), 64);
+        assert_eq!(X86Arch::X86_32.width(), 32);
+    }
+
     // --- x86 Jcc-byte preservation across reassembly ---
 
     #[test]
@@ -5048,7 +5099,7 @@ mod cli_helper_tests {
             rs: X86Register::RBX,
         }];
         let bytes =
-            reassemble_x86_prefix_with_pinned_terminator(&final_ir, DetectedArch::X86_64, None, 3)
+            reassemble_x86_prefix_with_pinned_terminator(&final_ir, X86Arch::X86_64, None, 3)
                 .expect("reassemble succeeds");
         // No splice, no padding: just the assembled prefix.
         assert_eq!(bytes.len(), 3);
@@ -5068,7 +5119,7 @@ mod cli_helper_tests {
         }];
         let out = reassemble_x86_prefix_with_pinned_terminator(
             &final_ir,
-            DetectedArch::X86_64,
+            X86Arch::X86_64,
             Some(&original_jcc_bytes),
             3,
         )
@@ -5091,7 +5142,7 @@ mod cli_helper_tests {
         }];
         let out = reassemble_x86_prefix_with_pinned_terminator(
             &final_ir,
-            DetectedArch::X86_64,
+            X86Arch::X86_64,
             Some(&original_jcc_bytes),
             7,
         )
@@ -5123,7 +5174,7 @@ mod cli_helper_tests {
         // 2-byte je at offset 5 — total 7 bytes.
         let out = reassemble_x86_prefix_with_pinned_terminator(
             &final_ir,
-            DetectedArch::X86_32,
+            X86Arch::X86_32,
             Some(&original_jcc_bytes),
             5,
         )
@@ -5161,7 +5212,7 @@ mod cli_helper_tests {
         }];
         let err = reassemble_x86_prefix_with_pinned_terminator(
             &final_ir,
-            DetectedArch::X86_64,
+            X86Arch::X86_64,
             Some(&original_jcc_bytes),
             1,
         )
