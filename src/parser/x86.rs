@@ -234,6 +234,12 @@ fn parse_x86_operand_for_mode(op_str: &str, mode: X86ParseMode) -> Result<X86Ope
     }
 }
 
+/// Parse a register, dispatching on whether an operand width is known.
+///
+/// `Some(mode)` is the binary/Capstone path: it width-checks the alias and
+/// rejects spellings that are not the mode's native width (see
+/// `parse_x86_register_for_mode`). `None` is the assembly-text path, which
+/// is width-agnostic (`parse_x86_register`).
 fn parse_x86_register_with_mode(
     reg_str: &str,
     mode: Option<X86ParseMode>,
@@ -244,6 +250,8 @@ fn parse_x86_register_with_mode(
     }
 }
 
+/// Operand sibling of [`parse_x86_register_with_mode`]: `Some(mode)` enforces
+/// the mode's register width, `None` is the width-agnostic assembly-text path.
 fn parse_x86_operand_with_mode(
     op_str: &str,
     mode: Option<X86ParseMode>,
@@ -652,7 +660,7 @@ mod tests {
     }
 
     #[test]
-    fn x86_ir_for_mode64_rejects_narrow_register_aliases() {
+    fn x86_ir_for_mode64_accepts_mode_width_and_rejects_narrow_aliases() {
         assert_eq!(
             x86_ir_from_mnemonic_for_mode("add", "rax, 0", X86ParseMode::Mode64)
                 .unwrap()
