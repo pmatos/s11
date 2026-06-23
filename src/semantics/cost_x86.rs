@@ -31,16 +31,24 @@ fn instruction_latency(_instr: &X86Instruction) -> u64 {
 ///   = 3 bytes.
 /// - Register-immediate (32-bit imm): opcode + ModR/M + 4-byte imm
 ///   = 6 bytes plus REX for x86-64 = 7 bytes.
-/// - MOV reg, imm32: opcode + ModR/M + 4-byte imm = 6 bytes (x86-32)
-///   or 7 bytes (x86-64 with REX.W); for full 64-bit immediates the
-///   MOV reg, imm64 encoding takes 10 bytes — we use 7 as an upper
-///   bound for small/sign-extendable immediates and document the
-///   approximation.
+/// - MOV reg, imm is immediate-dependent (see `MovImm` arm): x86-32 uses the
+///   5-byte `B8+rd id`; x86-64 uses the 7-byte `REX.W C7 /0 id` when the
+///   immediate fits in i32, else the 10-byte `REX.W B8+rd io` movabs. These
+///   match the assembler exactly (a flat cost previously underestimated
+///   movabs, which is unsound for length-based pruning).
 fn instruction_code_size(instr: &X86Instruction, width: u32) -> u64 {
     let rex = if width == 64 { 1 } else { 0 };
     match instr {
         X86Instruction::MovReg { .. } => 2 + rex,
-        X86Instruction::MovImm { .. } => 5 + rex,
+        // See the module doc-comment: immediate-dependent to stay a valid
+        // upper bound on the assembler's MovImm encoding (issue #225).
+        X86Instruction::MovImm { imm, .. } => {
+            if width == 64 {
+                if i32::try_from(*imm).is_ok() { 7 } else { 10 }
+            } else {
+                5
+            }
+        }
         X86Instruction::AddReg { .. }
         | X86Instruction::SubReg { .. }
         | X86Instruction::AndReg { .. }
@@ -149,6 +157,32 @@ mod tests {
         assert_eq!(sequence_cost(&seq, &CostMetric::CodeSize, 64), 6);
         // 2 + 2 = 4 bytes on x86-32.
         assert_eq!(sequence_cost(&seq, &CostMetric::CodeSize, 32), 4);
+    }
+
+    #[test]
+    fn mov_imm_code_size_is_immediate_dependent() {
+        let zero = X86Instruction::MovImm {
+            rd: X86Register::RAX,
+            imm: 0,
+        };
+        let small = X86Instruction::MovImm {
+            rd: X86Register::RAX,
+            imm: i32::MAX as i64,
+        };
+        let big = X86Instruction::MovImm {
+            rd: X86Register::RAX,
+            imm: i64::MAX,
+        };
+        // x86-64: imm fitting i32 -> 7-byte `REX.W C7 /0 id`; full 64-bit imm
+        // -> 10-byte `REX.W B8+rd io` movabs. (The old flat `5 + rex` = 6
+        // underestimated both, breaking length-pruning soundness.)
+        assert_eq!(instruction_cost(&zero, &CostMetric::CodeSize, 64), 7);
+        assert_eq!(instruction_cost(&small, &CostMetric::CodeSize, 64), 7);
+        assert_eq!(instruction_cost(&big, &CostMetric::CodeSize, 64), 10);
+        // x86-32: `B8+rd id` is 5 bytes (no REX; the assembler rejects
+        // immediates that do not fit imm32 rather than emitting movabs).
+        assert_eq!(instruction_cost(&zero, &CostMetric::CodeSize, 32), 5);
+        assert_eq!(instruction_cost(&small, &CostMetric::CodeSize, 32), 5);
     }
 
     // --- CMOV / Jcc cost ---
