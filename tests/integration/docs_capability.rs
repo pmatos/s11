@@ -2,7 +2,8 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use s11::docs_support::{
-    AARCH64_FIXED_TERMINATORS, AARCH64_REWRITABLE_MNEMONICS, X86_SUPPORTED_MNEMONICS,
+    AARCH64_FIXED_TERMINATORS, AARCH64_REWRITABLE_MNEMONICS, X86_FIXED_TERMINATORS,
+    X86_REWRITABLE_MNEMONICS,
 };
 
 fn repo_file(relative: &str) -> PathBuf {
@@ -302,10 +303,16 @@ fn x86_support_is_visible_in_public_docs() {
         !matrix.contains("parallel x86 pipeline"),
         "docs/capability.md must not describe x86 as a parallel pipeline"
     );
-    for mnemonic in X86_SUPPORTED_MNEMONICS {
+    for mnemonic in X86_REWRITABLE_MNEMONICS {
         assert!(
             matrix.contains(&format!("`{mnemonic}`")),
-            "docs/capability.md must list x86 mnemonic `{mnemonic}`"
+            "docs/capability.md must list x86 rewritable mnemonic `{mnemonic}`"
+        );
+    }
+    for terminator in X86_FIXED_TERMINATORS {
+        assert!(
+            matrix.contains(&format!("`{terminator}`")),
+            "docs/capability.md must list x86 fixed terminator `{terminator}`"
         );
     }
 
