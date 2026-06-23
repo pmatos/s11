@@ -3436,6 +3436,40 @@ mod tests {
     }
 
     #[test]
+    fn jcc_display_emits_target_placeholder() {
+        // The branch target is opaque to the IR, so Display renders a fixed
+        // `<target>` placeholder rather than a concrete address/offset.
+        let jcc = X86Instruction::Jcc {
+            cond: X86Condition::E,
+        };
+        let rendered = jcc.to_string();
+        assert_eq!(rendered, "je <target>");
+        assert!(rendered.ends_with("<target>"));
+    }
+
+    #[test]
+    fn jcc_display_output_does_not_parse_back() {
+        // The `<target>` placeholder is intentionally non-parseable: a Jcc
+        // terminator must never round-trip from its Display text back into
+        // rewritable IR (the search holds terminators fixed). Splitting the
+        // Display output and feeding it to the parser must NOT yield a Jcc.
+        let jcc = X86Instruction::Jcc {
+            cond: X86Condition::E,
+        };
+        let rendered = jcc.to_string();
+        let (mnemonic, operand) = rendered
+            .split_once(' ')
+            .expect("Jcc Display has a mnemonic and an operand placeholder");
+        assert_eq!(mnemonic, "je");
+        assert_eq!(operand, "<target>");
+        let parsed = crate::parser::x86::x86_ir_from_mnemonic(mnemonic, operand);
+        assert!(
+            !matches!(parsed, Ok(Some(_))),
+            "Jcc Display placeholder must not parse back into an instruction, got {parsed:?}"
+        );
+    }
+
+    #[test]
     fn non_jcc_x86_instructions_are_not_terminators() {
         assert!(
             !X86Instruction::MovImm {
