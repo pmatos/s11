@@ -102,10 +102,11 @@ fn encode_64(ops: &mut dynasmrt::x64::Assembler, instr: &X86Instruction) -> Resu
         }
         X86Instruction::MovImm { rd, imm } => {
             let rd = reg_index(*rd)?;
-            // Prefer the imm32 sign-extended encoding (5 bytes including
-            // REX) when the immediate fits — Capstone shows this as
-            // canonical "mov rax, 0x...". Fall back to MOVABS (10 bytes)
-            // for the rare full 64-bit immediate case.
+            // Prefer the imm32 sign-extended encoding (`REX.W C7 /0 id`,
+            // 7 bytes) when the immediate fits — Capstone shows this as
+            // canonical "mov rax, 0x...". Fall back to MOVABS
+            // (`REX.W B8+rd io`, 10 bytes) for the full 64-bit immediate
+            // case. The CodeSize cost model mirrors these lengths (issue #225).
             if let Ok(i32_imm) = i32::try_from(*imm) {
                 dynasm!(ops ; .arch x64 ; mov Rq(rd), i32_imm);
             } else {
@@ -827,6 +828,54 @@ mod tests {
             }])
             .expect_err("x86-32 mov imm requires imm32");
         assert!(err.contains("does not fit in 32 bits"));
+    }
+
+    #[test]
+    fn movimm_code_size_is_upper_bound_on_assembled_length() {
+        // Cross-layer guard (issue #225): the CodeSize cost model must never
+        // underestimate the assembler's real MovImm encoding, or length-based
+        // search pruning becomes unsound. Assemble boundary immediates and
+        // assert cost >= actual bytes for both modes.
+        use crate::semantics::cost::CostMetric;
+        use crate::semantics::cost_x86::instruction_cost;
+
+        let mut a64 = X86Assembler::new_64();
+        for imm in [
+            0i64,
+            1,
+            -1,
+            i32::MAX as i64,
+            i32::MIN as i64,
+            i64::MAX,
+            i64::MIN,
+        ] {
+            let instr = X86Instruction::MovImm {
+                rd: X86Register::RAX,
+                imm,
+            };
+            let bytes = a64.assemble_instructions(&[instr]).unwrap();
+            let cost = instruction_cost(&instr, &CostMetric::CodeSize, 64);
+            assert!(
+                cost >= bytes.len() as u64,
+                "x64 MovImm cost {cost} < assembled {} for imm {imm}",
+                bytes.len()
+            );
+        }
+
+        let mut a32 = X86Assembler::new_32();
+        for imm in [0i64, 1, -1, i32::MAX as i64, i32::MIN as i64] {
+            let instr = X86Instruction::MovImm {
+                rd: X86Register::RAX,
+                imm,
+            };
+            let bytes = a32.assemble_instructions(&[instr]).unwrap();
+            let cost = instruction_cost(&instr, &CostMetric::CodeSize, 32);
+            assert!(
+                cost >= bytes.len() as u64,
+                "x86-32 MovImm cost {cost} < assembled {} for imm {imm}",
+                bytes.len()
+            );
+        }
     }
 
     // --- CMOV encoding round-trips through Capstone ---
