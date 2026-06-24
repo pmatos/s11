@@ -940,6 +940,130 @@ fn test_opt_x86_stochastic_is_no_longer_rejected_at_cli() {
     let _ = fs::remove_file(optimized_path);
 }
 
+/// Scan every executable section of `path` for the first occurrence of the
+/// raw byte sequence `needle`, returning its virtual address. Used by the x86
+/// end-to-end opt test to locate a known instruction window by its exact
+/// encoding so the test survives toolchain layout drift.
+fn x86_find_byte_sequence(path: &Path, needle: &[u8]) -> u64 {
+    let data = std::fs::read(path).expect("read test ELF");
+    let elf =
+        elf::ElfBytes::<elf::endian::AnyEndian>::minimal_parse(&data).expect("parse test ELF");
+    let section_headers = elf.section_headers().expect("read section headers");
+
+    for section in section_headers.iter() {
+        if section.sh_flags & elf::abi::SHF_EXECINSTR as u64 == 0 {
+            continue;
+        }
+        let start = section.sh_offset as usize;
+        let size = section.sh_size as usize;
+        if size < needle.len() {
+            continue;
+        }
+        let bytes = &data[start..start + size];
+        if let Some(off) = bytes.windows(needle.len()).position(|w| w == needle) {
+            return section.sh_addr + off as u64;
+        }
+    }
+
+    panic!("byte sequence {needle:02x?} not found in any executable section of {path:?}");
+}
+
+/// End-to-end x86-64 opt test (issue #91): run the `s11 opt` CLI on a real
+/// x86-64 ELF and assert a *known* one-instruction shortening is found and
+/// reported.
+///
+/// The `binaries/x86_64/dup_mov_imm` fixture (assembled from
+/// `tests/x86_asm/dup_mov_imm.s` by `build_tests.sh`) contains two identical
+/// `mov rax, 5` instructions. Only RAX is live-out and neither MOV touches
+/// EFLAGS, so the enumerative (deterministic) search collapses the redundant
+/// pair to a single `mov rax, 5`. The window is located by its exact encoding
+/// (`48 c7 c0 05 00 00 00` twice) so the assertion is stable across rebuilds.
+///
+/// Mirrors `test_opt_basic_functionality` (AArch64) but pins the *result*: the
+/// opt path must report "Optimized to 1 instructions" and complete, not merely
+/// run. If the fixture is absent (e.g. no host x86-64 gcc), the test skips
+/// rather than failing, matching the other x86 opt tests here.
+#[test]
+fn test_opt_x86_64_known_shortening() {
+    let binary = get_binary_path();
+    let source_elf = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("binaries")
+        .join("x86_64")
+        .join("dup_mov_imm");
+    if !source_elf.exists() {
+        eprintln!(
+            "Skipping x86-64 known-shortening opt test: {:?} not present (run build_tests.sh)",
+            source_elf
+        );
+        return;
+    }
+
+    // `mov rax, 5` == 48 c7 c0 05 00 00 00; find the first of the redundant
+    // pair and take a 14-byte (two-instruction) window over both.
+    let mov_rax_5: [u8; 7] = [0x48, 0xc7, 0xc0, 0x05, 0x00, 0x00, 0x00];
+    let pair: Vec<u8> = mov_rax_5.iter().chain(mov_rax_5.iter()).copied().collect();
+    let start_addr = x86_find_byte_sequence(&source_elf, &pair);
+    let end_addr = start_addr + pair.len() as u64;
+
+    // Copy to a unique tempdir so concurrent `cargo test` runs don't collide
+    // on the `<input>_optimized` artifact the binary always writes.
+    let tmp_dir = tempfile::tempdir().expect("create temp fixture dir");
+    let test_elf = tmp_dir.path().join("dup_mov_imm");
+    fs::copy(&source_elf, &test_elf).expect("copy x86-64 fixture to tmp");
+    let optimized_path = tmp_dir.path().join("dup_mov_imm_optimized");
+
+    let output = Command::new(&binary)
+        .arg("opt")
+        .arg(&test_elf)
+        .arg("--arch")
+        .arg("x86-64")
+        .arg("--algorithm")
+        .arg("enumerative")
+        .arg("--timeout")
+        .arg("30")
+        .arg("--start-addr")
+        .arg(format!("0x{start_addr:x}"))
+        .arg("--end-addr")
+        .arg(format!("0x{end_addr:x}"))
+        .output()
+        .expect("Failed to execute s11");
+
+    assert!(
+        output.status.success(),
+        "x86-64 opt should succeed.\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr),
+    );
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("Detected: X86_64"),
+        "should run the x86-64 opt path; stdout: {stdout}"
+    );
+    assert!(
+        stdout.contains("Disassembled 2 instructions"),
+        "should disassemble the two-instruction window; stdout: {stdout}"
+    );
+    // The known shortening: 2 instructions collapse to 1.
+    assert!(
+        stdout.contains("Optimized to 1 instructions"),
+        "x86-64 opt must find the one-instruction shortening; stdout: {stdout}"
+    );
+    assert!(
+        stdout.contains("Created optimized binary"),
+        "should write the optimized binary; stdout: {stdout}"
+    );
+    assert!(
+        stdout.contains("Optimization completed successfully"),
+        "should complete the optimization; stdout: {stdout}"
+    );
+    assert!(
+        optimized_path.exists(),
+        "optimized binary should be created at {:?}",
+        optimized_path,
+    );
+}
+
 #[test]
 fn test_opt_x86_symbolic_is_no_longer_rejected_at_cli() {
     // Companion to the stochastic regression test: symbolic must
