@@ -622,11 +622,27 @@ impl ElfOptimizationBackend for AArch64OptimizationBackend {
         // that becomes the default (all-live) live-out contract. The
         // terminator (held fixed) is not a candidate: its reads are pinned
         // separately by `live_out_for_optimization_prefix`.
-        let (prefix, _terminator) = split_terminator(ir);
-        let candidates = validation::live_out::compute_written_registers(prefix);
-        let downstream_live_regs = DownstreamLiveRegs::Aarch64(
-            aarch64_downstream_regs_live_from_section(patcher, section, end_addr, cs, &candidates),
-        );
+        //
+        // Soundness gate: the downstream scan only follows the linear
+        // fall-through successor. If the window has a held-fixed terminator,
+        // the fall-through is not the sole successor (a conditional branch has
+        // a branch-taken target; b/br/bl/ret transfer elsewhere), so we must
+        // NOT narrow — leave `downstream_live_regs` Unknown (all written live),
+        // matching the flags blanket. `live_out_for_optimization_prefix`
+        // independently re-applies the same veto as defense in depth.
+        let (prefix, terminator) = split_terminator(ir);
+        let downstream_live_regs = if terminator.is_some() {
+            DownstreamLiveRegs::Unknown
+        } else {
+            let candidates = validation::live_out::compute_written_registers(prefix);
+            DownstreamLiveRegs::Aarch64(aarch64_downstream_regs_live_from_section(
+                patcher,
+                section,
+                end_addr,
+                cs,
+                &candidates,
+            ))
+        };
         OptimizationContext {
             downstream_flags_live: aarch64_downstream_flags_live_from_section(
                 patcher, section, end_addr, cs,
@@ -778,17 +794,30 @@ impl ElfOptimizationBackend for X86OptimizationBackend {
         // Candidates: every register the window writes (the trailing Jcc, if
         // any, has no destination and contributes nothing). This is the same
         // set `x86_live_out_from_target` marks live by default.
-        let candidates = semantics::live_out::RegisterSet::from_registers(
-            ir.iter().filter_map(|i| i.destination()).collect(),
-        );
-        let downstream_live_regs = DownstreamLiveRegs::X86(x86_downstream_regs_live_from_section(
-            self.arch(),
-            patcher,
-            section,
-            end_addr,
-            cs,
-            &candidates,
-        ));
+        //
+        // Soundness gate (same as AArch64): the downstream scan only follows
+        // the linear fall-through successor, so a held-fixed terminator (the
+        // trailing Jcc, with its unscanned branch-taken target) vetoes
+        // narrowing. We leave `downstream_live_regs` Unknown in that case.
+        // x86 narrowing is additionally inert today (#75 — no operand width),
+        // but the gate is applied for consistency and future-safety once #75
+        // turns the kill rule on.
+        let has_terminator = ir.last().is_some_and(|i| i.is_terminator());
+        let downstream_live_regs = if has_terminator {
+            DownstreamLiveRegs::Unknown
+        } else {
+            let candidates = semantics::live_out::RegisterSet::from_registers(
+                ir.iter().filter_map(|i| i.destination()).collect(),
+            );
+            DownstreamLiveRegs::X86(x86_downstream_regs_live_from_section(
+                self.arch(),
+                patcher,
+                section,
+                end_addr,
+                cs,
+                &candidates,
+            ))
+        };
         OptimizationContext {
             downstream_flags_live: x86_downstream_flags_live_from_section(
                 self.arch(),
@@ -1103,18 +1132,39 @@ fn optimize_elf_binary_with_backend<B: ElfOptimizationBackend>(
 /// pre-#621 default. Registers the fixed terminator reads are always pinned,
 /// independent of the downstream scan, since they are consumed before control
 /// transfers.
+///
+/// **Conditional/branch soundness gate (no-terminator narrowing).** The
+/// downstream register scan only follows the *linear fall-through* successor
+/// from `end_addr`. A held-fixed terminator (conditional or unconditional)
+/// means the fall-through is NOT the sole successor: a conditional branch also
+/// has a branch-taken target, and `b`/`br`/`bl`/`ret` transfer elsewhere
+/// entirely. A register killed on the fall-through may still be read on the
+/// other path, and `terminator.source_registers()` does not re-pin it
+/// (`BCond`/`B`/`Ret` source-register sets are empty for the value registers).
+/// So register narrowing applies ONLY when there is no terminator — exactly
+/// mirroring the `flags_live = if terminator.is_some() { true }` blanket. When
+/// a terminator is present we ignore `downstream_live` and keep every
+/// window-written register live.
 fn live_out_for_optimization_prefix(
     prefix: &[Instruction],
     terminator: Option<&Instruction>,
     downstream_flags_live: bool,
     downstream_live: Option<&semantics::live_out::RegisterSet<Register>>,
 ) -> LiveOut {
-    let mut live_registers: Vec<Register> = match downstream_live {
+    // A terminator vetoes register narrowing (its other successor is unscanned).
+    let narrowing = if terminator.is_some() {
+        None
+    } else {
+        downstream_live
+    };
+
+    let mut live_registers: Vec<Register> = match narrowing {
         // Narrow to (written ∩ proven-live). The downstream set is already a
         // subset of the window-written registers (it is computed from exactly
         // that candidate set), so iterating it is sufficient.
         Some(live) => live.iter().copied().collect(),
-        // No downstream analysis: keep every written register live.
+        // No downstream analysis (or vetoed by a terminator): keep every
+        // written register live.
         None => prefix
             .iter()
             .flat_map(|instr| instr.destinations())
@@ -2437,6 +2487,13 @@ fn x86_enumerative_immediates_from_target(target: &[isa::x86::X86Instruction]) -
 /// operand width — see `validation::live_out::x86_reg_downstream_liveness`),
 /// the proven-live subset is, today, always the full window-written set. The
 /// narrowing wiring is in place so that #75 enables it with no further change.
+///
+/// **Conditional/branch soundness gate (defense in depth).** Like the AArch64
+/// builder, register narrowing applies only when the window has no terminator:
+/// the downstream scan follows only the linear fall-through successor, so a
+/// trailing Jcc (with its unscanned branch-taken target) vetoes narrowing.
+/// The backend already withholds the narrowed set in that case; this is a
+/// second, local guard so the function is sound regardless of caller.
 fn x86_live_out_for_optimization(
     target: &[isa::x86::X86Instruction],
     downstream_flags_live: bool,
@@ -2444,7 +2501,13 @@ fn x86_live_out_for_optimization(
 ) -> semantics::live_out::X86LiveOut {
     let live_out = validation::live_out::x86_live_out_from_target(target);
     let flags_live = live_out.flags_live() || downstream_flags_live;
-    let narrowed = match downstream_live {
+    let has_terminator = target.last().is_some_and(|i| i.is_terminator());
+    let narrowing = if has_terminator {
+        None
+    } else {
+        downstream_live
+    };
+    let narrowed = match narrowing {
         Some(live) => {
             semantics::live_out::RegisterSet::from_registers(live.iter().copied().collect())
         }
@@ -4491,6 +4554,100 @@ mod cli_helper_tests {
             narrowed.contains(Register::X1),
             "a downstream-live window register must stay pinned"
         );
+    }
+
+    /// Soundness regression: a window whose held-fixed terminator is a
+    /// CONDITIONAL branch must NOT narrow window-written registers, even if the
+    /// linear fall-through suffix proved one dead. The downstream-regs scan only
+    /// follows the fall-through successor; the branch-TAKEN successor is never
+    /// inspected and may read the register's window value.
+    ///
+    /// Counterexample being guarded against:
+    ///   window:       mov x0, #7 ; b.eq TARGET
+    ///   fall-through: mov x0, #0 ; ret           (kills x0 -> scan says Dead)
+    ///   elsewhere:    TARGET: add x9, x0, #1     (READS x0 on the taken path)
+    /// If x0 were narrowed to dead, `mov x0, #7` could be deleted and the
+    /// b.eq-taken path would read a stale x0. `BCond::source_registers()` is
+    /// empty, so the terminator does not re-pin x0 either — the only correct
+    /// fix is to not narrow at all when a terminator is present.
+    #[test]
+    fn live_out_for_optimization_prefix_does_not_narrow_with_conditional_terminator() {
+        let prefix = [Instruction::MovImm {
+            rd: Register::X0,
+            imm: 7,
+        }];
+        let b_eq = Instruction::BCond {
+            target: s11::ir::LabelId(0x2000),
+            cond: s11::ir::Condition::EQ,
+        };
+
+        // The fall-through scan "proved" x0 dead (empty proven-live set).
+        let downstream_live_fall_through = semantics::live_out::RegisterSet::<Register>::empty();
+
+        let live_out = live_out_for_optimization_prefix(
+            &prefix,
+            Some(&b_eq),
+            false,
+            Some(&downstream_live_fall_through),
+        );
+
+        assert!(
+            live_out.contains(Register::X0),
+            "x0 must stay live: a conditional terminator has a branch-taken successor \
+             the fall-through scan never inspected, so register narrowing must not apply"
+        );
+    }
+
+    /// x86 sibling of the conditional-terminator soundness gate. The x86 path
+    /// is inert under #75 today, but the gate must still hold so it stays sound
+    /// when #75 turns the kill rule on: a target ending in a Jcc must NOT narrow
+    /// even if the (future) proven-live set excludes a written register.
+    #[test]
+    fn x86_live_out_for_optimization_does_not_narrow_with_trailing_jcc() {
+        use isa::x86::X86Condition;
+        let target = [
+            X86Instruction::MovImm {
+                rd: X86Register::RAX,
+                imm: 7,
+            },
+            X86Instruction::Jcc {
+                cond: X86Condition::E,
+            },
+        ];
+        // Pretend the fall-through scan proved RAX dead (empty set).
+        let dead = semantics::live_out::RegisterSet::<X86Register>::empty();
+        let live_out = x86_live_out_for_optimization(&target, false, Some(&dead));
+        assert!(
+            live_out.contains(X86Register::RAX),
+            "RAX must stay live: a trailing Jcc has an unscanned branch-taken successor, \
+             so register narrowing must not apply"
+        );
+    }
+
+    /// Same soundness gate for unconditional terminators: the instruction at
+    /// `end_addr` is not the real/only successor, so narrowing must not apply.
+    #[test]
+    fn live_out_for_optimization_prefix_does_not_narrow_with_unconditional_terminator() {
+        let prefix = [Instruction::MovImm {
+            rd: Register::X0,
+            imm: 7,
+        }];
+        let cases = [
+            Instruction::B {
+                target: s11::ir::LabelId(0x2000),
+            },
+            Instruction::Ret { rn: Register::X30 },
+        ];
+        let dead = semantics::live_out::RegisterSet::<Register>::empty();
+        for terminator in cases {
+            let live_out =
+                live_out_for_optimization_prefix(&prefix, Some(&terminator), false, Some(&dead));
+            assert!(
+                live_out.contains(Register::X0),
+                "x0 must stay live with a {:?} terminator: narrowing must not apply",
+                terminator
+            );
+        }
     }
 
     #[test]
