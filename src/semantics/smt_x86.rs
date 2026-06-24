@@ -608,6 +608,16 @@ pub fn apply_instruction(
             let rhs = state.imm_bv(*imm);
             apply_imul_smt(&mut state, *rd, &lhs, &rhs);
         }
+        // LEA computes `rd = base + disp` (wrapping at width) and leaves EFLAGS
+        // UNCHANGED — pure address arithmetic, exactly like MOV/NOT, which write
+        // only their register and carry the incoming flag BVs forward untouched.
+        // `disp` lowers as an immediate at the operand width.
+        X86Instruction::Lea { rd, base, disp } => {
+            let base = state.get_register(*base).clone();
+            let disp = state.imm_bv(*disp);
+            let result = base.bvadd(&disp);
+            state.set_register(*rd, result);
+        }
         X86Instruction::Cmov { rd, rs, cond } => {
             let pred = x86_condition_to_smt(*cond, state.get_flags());
             let rs_val = state.get_register(*rs).clone();
@@ -960,6 +970,102 @@ mod tests {
             solver.check(),
             SatResult::Unsat,
             "NOT must leave every EFLAGS bit unchanged"
+        );
+    }
+
+    // --- symbolic LEA (DoD theorem) ---
+
+    // The KEY LEA theorem (issue #627 DoD): `lea rd, [rs + imm]` agrees with
+    // `mov rd, rs; add rd, imm` on the RESULT (rd == rs + imm). They differ on
+    // FLAGS — LEA writes none while the mov+add sets them from the addition —
+    // so we prove RESULT-equivalence here and flag-preservation separately
+    // below. Both sides run over states with the same symbolic prefix, so the
+    // incoming rs (rbx) and the incoming flags are shared.
+    #[test]
+    fn lea_result_equals_mov_then_add_immediate() {
+        for imm in [
+            0i64,
+            1,
+            -8,
+            0x1000,
+            -0x1000,
+            i32::MAX as i64,
+            i32::MIN as i64,
+        ] {
+            let prefix = "shared";
+            let s_lea = MachineStateX86::new_symbolic(prefix, 64);
+            let s_movadd = MachineStateX86::new_symbolic(prefix, 64);
+
+            let after_lea = apply_instruction(
+                s_lea,
+                &X86Instruction::Lea {
+                    rd: X86Register::RAX,
+                    base: X86Register::RBX,
+                    disp: imm,
+                },
+            );
+            let after_movadd = apply_sequence(
+                s_movadd,
+                &[
+                    X86Instruction::MovReg {
+                        rd: X86Register::RAX,
+                        rs: X86Register::RBX,
+                    },
+                    X86Instruction::AddImm {
+                        rd: X86Register::RAX,
+                        imm,
+                    },
+                ],
+            );
+
+            let solver = Solver::new();
+            solver.assert(
+                after_lea
+                    .get_register(X86Register::RAX)
+                    .eq(after_movadd.get_register(X86Register::RAX))
+                    .not(),
+            );
+            assert_eq!(
+                solver.check(),
+                SatResult::Unsat,
+                "lea rd,[rs+{imm}] must equal mov rd,rs; add rd,{imm} on the result"
+            );
+        }
+    }
+
+    #[test]
+    fn lea_leaves_all_flags_unchanged() {
+        // LEA is pure address arithmetic: every tracked flag BV after LEA must
+        // be identical to the incoming one (unlike the mov+add it rewrites,
+        // whose ADD sets CF/OF/SF/ZF/PF). This is why the equivalence above is
+        // result-only.
+        let s0 = MachineStateX86::new_symbolic("s", 64);
+        let cf0 = s0.get_flags().cf.clone();
+        let pf0 = s0.get_flags().pf.clone();
+        let zf0 = s0.get_flags().zf.clone();
+        let sf0 = s0.get_flags().sf.clone();
+        let of0 = s0.get_flags().of.clone();
+        let s1 = apply_instruction(
+            s0,
+            &X86Instruction::Lea {
+                rd: X86Register::RAX,
+                base: X86Register::RBX,
+                disp: 0x10,
+            },
+        );
+        let f = s1.get_flags();
+        let solver = Solver::new();
+        solver.assert(z3::ast::Bool::or(&[
+            &f.cf.eq(&cf0).not(),
+            &f.pf.eq(&pf0).not(),
+            &f.zf.eq(&zf0).not(),
+            &f.sf.eq(&sf0).not(),
+            &f.of.eq(&of0).not(),
+        ]));
+        assert_eq!(
+            solver.check(),
+            SatResult::Unsat,
+            "LEA must leave every EFLAGS bit unchanged"
         );
     }
 

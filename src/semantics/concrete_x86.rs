@@ -60,6 +60,14 @@ pub fn apply_instruction_concrete_x86(
             let rhs = *imm as u64;
             apply_imul(&mut state, *rd, lhs, rhs);
         }
+        // LEA computes `rd = base + disp` (wrapping at width) and writes NO
+        // flags — pure address arithmetic, like MovReg. `set_register` masks
+        // the result to the state width.
+        X86Instruction::Lea { rd, base, disp } => {
+            let base = state.get_register(*base).as_u64();
+            let result = base.wrapping_add(*disp as u64);
+            state.set_register(*rd, ConcreteValue::new(result));
+        }
         X86Instruction::Cmov { rd, rs, cond } => {
             if state.get_flags().evaluate(*cond) {
                 let v = state.get_register(*rs);
@@ -1506,5 +1514,67 @@ mod tests {
             },
         );
         assert_eq!(after.get_register(X86Register::RAX).as_u64(), 0xaa);
+    }
+
+    #[test]
+    fn lea_computes_base_plus_disp_and_leaves_flags_unchanged() {
+        // LEA writes `rd = base + disp` (wrapping at width) and must NOT touch
+        // EFLAGS. Establish a non-trivial incoming flag state, then assert it
+        // survives the LEA byte-for-byte while rd takes the address value.
+        let mut state = X86ConcreteMachineState::new_zeroed(64);
+        state.set_register(X86Register::RBX, ConcreteValue::new(0x1000));
+        state.set_register(X86Register::RCX, ConcreteValue::new(5));
+        let state = apply_instruction_concrete_x86(
+            state,
+            &X86Instruction::CmpImm {
+                rn: X86Register::RCX,
+                imm: 9,
+            },
+        );
+        let flags_before = state.get_flags();
+
+        // Positive displacement.
+        let after = apply_instruction_concrete_x86(
+            state.clone(),
+            &X86Instruction::Lea {
+                rd: X86Register::RAX,
+                base: X86Register::RBX,
+                disp: 0x20,
+            },
+        );
+        assert_eq!(after.get_register(X86Register::RAX).as_u64(), 0x1020);
+        assert_eq!(
+            after.get_flags(),
+            flags_before,
+            "LEA must leave EFLAGS unchanged"
+        );
+
+        // Negative displacement wraps via two's complement add.
+        let after_neg = apply_instruction_concrete_x86(
+            state,
+            &X86Instruction::Lea {
+                rd: X86Register::RAX,
+                base: X86Register::RBX,
+                disp: -0x10,
+            },
+        );
+        assert_eq!(after_neg.get_register(X86Register::RAX).as_u64(), 0x0ff0);
+    }
+
+    #[test]
+    fn lea_wraps_at_width_32() {
+        // At width 32 the result is masked to the low 32 bits.
+        let mut state = X86ConcreteMachineState::new_zeroed(32);
+        state.set_register(X86Register::RBX, ConcreteValue::new(0xffff_fff8));
+        let after = apply_instruction_concrete_x86(
+            state,
+            &X86Instruction::Lea {
+                rd: X86Register::RAX,
+                base: X86Register::RBX,
+                disp: 0x10,
+            },
+        );
+        // 0xffff_fff8 + 0x10 = 0x1_0000_0008, masked to 32 bits = 0x8.
+        assert_eq!(after.get_register(X86Register::RAX).as_u64(), 0x8);
     }
 }

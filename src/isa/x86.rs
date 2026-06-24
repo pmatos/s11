@@ -385,6 +385,17 @@ pub enum X86Instruction {
         rs: X86Register,
         imm: i64,
     },
+    /// `lea rd, [base + disp]` — load effective address in its minimal
+    /// register-base + displacement form: `rd = base + disp` (wrapping at
+    /// width). NON-destructive: `base` is read, `rd` is purely WRITTEN (not
+    /// read), exactly like `MovReg`. Affects NO flags. The `index*scale` and
+    /// RIP-relative addressing forms are deferred; the parser rejects them as
+    /// unsupported shapes.
+    Lea {
+        rd: X86Register,
+        base: X86Register,
+        disp: i64,
+    },
     /// `cmovCC rd, rs` — conditional move. Reads EFLAGS;
     /// when `cond` holds, writes `rd = rs`; otherwise `rd` is unchanged.
     /// Does not modify EFLAGS.
@@ -426,6 +437,7 @@ impl X86Instruction {
             | X86Instruction::Ror { rd, .. }
             | X86Instruction::ImulReg { rd, .. }
             | X86Instruction::ImulRegImm { rd, .. }
+            | X86Instruction::Lea { rd, .. }
             | X86Instruction::Cmov { rd, .. } => Some(*rd),
             // CMP and TEST discard their result; only EFLAGS is written.
             X86Instruction::CmpReg { .. }
@@ -456,6 +468,7 @@ impl X86Instruction {
             X86Instruction::Rol { .. } => "rol",
             X86Instruction::Ror { .. } => "ror",
             X86Instruction::ImulReg { .. } | X86Instruction::ImulRegImm { .. } => "imul",
+            X86Instruction::Lea { .. } => "lea",
             X86Instruction::Cmov { cond, .. } => cond.cmov_mnemonic(),
             X86Instruction::Jcc { cond } => cond.jcc_mnemonic(),
         }
@@ -480,6 +493,9 @@ impl X86Instruction {
             | X86Instruction::XorReg { rd, rs } => vec![*rd, *rs],
             // IMUL rd, rs, imm writes rd purely from `rs * imm`; rd is NOT read.
             X86Instruction::ImulRegImm { rs, .. } => vec![*rs],
+            // LEA writes rd purely from `base + disp`; rd is NOT read (it is
+            // non-destructive, like MovReg). Only `base` is a source.
+            X86Instruction::Lea { base, .. } => vec![*base],
             X86Instruction::AddImm { rd, .. }
             | X86Instruction::SubImm { rd, .. }
             | X86Instruction::AndImm { rd, .. }
@@ -559,11 +575,12 @@ impl InstructionType for X86Instruction {
             X86Instruction::Ror { .. } => 24,
             X86Instruction::ImulReg { .. } => 25,
             X86Instruction::ImulRegImm { .. } => 26,
-            // Cmov MUST stay the last rewritable opcode (COUNT - 1 == 27):
+            X86Instruction::Lea { .. } => 27,
+            // Cmov MUST stay the last rewritable opcode (COUNT - 1 == 28):
             // the CMOV distinct-register draw at both generation sites is
             // gated on `opcode == X86_REWRITABLE_OPCODE_COUNT - 1`.
-            X86Instruction::Cmov { .. } => 27,
-            X86Instruction::Jcc { .. } => 28,
+            X86Instruction::Cmov { .. } => 28,
+            X86Instruction::Jcc { .. } => 29,
         }
     }
 
@@ -572,16 +589,18 @@ impl InstructionType for X86Instruction {
     }
 
     fn has_side_effects(&self) -> bool {
-        // MOV / NOT / CMOV / Jcc do not write EFLAGS (CMOV and Jcc read
+        // MOV / NOT / LEA / CMOV / Jcc do not write EFLAGS (CMOV and Jcc read
         // them, but reading is not a side effect on observable state; NOT
         // is bitwise complement and leaves EFLAGS untouched, exactly like
-        // MOV). Every other variant — including NEG — sets or clobbers flag
-        // bits, which is observable state beyond the destination register.
+        // MOV; LEA is pure address arithmetic that writes only its destination
+        // register). Every other variant — including NEG — sets or clobbers
+        // flag bits, which is observable state beyond the destination register.
         !matches!(
             self,
             X86Instruction::MovReg { .. }
                 | X86Instruction::MovImm { .. }
                 | X86Instruction::Not { .. }
+                | X86Instruction::Lea { .. }
                 | X86Instruction::Cmov { .. }
                 | X86Instruction::Jcc { .. }
         )
@@ -602,6 +621,18 @@ impl fmt::Display for X86Instruction {
             | X86Instruction::XorReg { rd, rs } => write!(f, "{} {}, {}", mn, rd, rs),
             // The 3-operand IMUL renders `imul rd, rs, imm`.
             X86Instruction::ImulRegImm { rd, rs, imm } => write!(f, "{} {}, {}, {}", mn, rd, rs, imm),
+            // LEA renders its memory operand in Intel bracket syntax. A zero
+            // displacement renders as bare `[base]`; a positive disp as
+            // `[base + disp]`; a negative disp as `[base - |disp|]`. All three
+            // forms round-trip through the bracket parse path in
+            // `parser::x86::x86_ir_from_mnemonic`.
+            X86Instruction::Lea { rd, base, disp } => match (*disp).cmp(&0) {
+                std::cmp::Ordering::Equal => write!(f, "{} {}, [{}]", mn, rd, base),
+                std::cmp::Ordering::Greater => write!(f, "{} {}, [{} + {}]", mn, rd, base, disp),
+                std::cmp::Ordering::Less => {
+                    write!(f, "{} {}, [{} - {}]", mn, rd, base, disp.unsigned_abs())
+                }
+            },
             X86Instruction::MovImm { rd, imm }
             | X86Instruction::AddImm { rd, imm }
             | X86Instruction::SubImm { rd, imm }
@@ -705,15 +736,17 @@ impl ISA for X86_32 {
 }
 
 /// Helper used by both `FlagsAnalysis<X86Instruction> for X86_64` and
-/// `for X86_32`. MOV / CMOV / Jcc do not write EFLAGS — CMOV and Jcc
-/// read them via `x86_reads_flags` but do not modify any flag bit.
-/// Every other variant in the current set writes EFLAGS.
+/// `for X86_32`. MOV / NOT / LEA / CMOV / Jcc do not write EFLAGS — CMOV and
+/// Jcc read them via `x86_reads_flags` but do not modify any flag bit; LEA is
+/// pure address arithmetic. Every other variant in the current set writes
+/// EFLAGS.
 fn x86_modifies_flags(instr: &X86Instruction) -> bool {
     !matches!(
         instr,
         X86Instruction::MovReg { .. }
             | X86Instruction::MovImm { .. }
             | X86Instruction::Not { .. }
+            | X86Instruction::Lea { .. }
             | X86Instruction::Cmov { .. }
             | X86Instruction::Jcc { .. }
     )
@@ -908,6 +941,8 @@ impl crate::isa::traits::Assembler<X86Instruction> for X86_64 {
             | X86Instruction::CmpImm { imm, .. }
             // The 3-operand IMUL immediate encodes as imm32 (`69 /r id`).
             | X86Instruction::ImulRegImm { imm, .. }
+            // LEA's displacement encodes as a signed disp32 in the ModRM/SIB.
+            | X86Instruction::Lea { disp: imm, .. }
             | X86Instruction::TestImm { imm, .. } => x86_signed_imm32_ok(*imm),
             // SHL / SHR / SAR / ROL / ROR encode their count as imm8: reject any
             // count that does not fit a single byte so the search never proposes
@@ -962,6 +997,10 @@ impl crate::isa::traits::Assembler<X86Instruction> for X86_32 {
             // IMUL rd, rs, imm: low-8 registers plus an imm32 immediate.
             X86Instruction::ImulRegImm { rd, rs, imm } => {
                 reg_ok_32(*rd) && reg_ok_32(*rs) && x86_signed_imm32_ok(*imm)
+            }
+            // LEA rd, [base + disp]: low-8 registers plus a signed disp32.
+            X86Instruction::Lea { rd, base, disp } => {
+                reg_ok_32(*rd) && reg_ok_32(*base) && x86_signed_imm32_ok(*disp)
             }
             X86Instruction::MovImm { rd, imm }
             | X86Instruction::AddImm { rd, imm }
@@ -1193,6 +1232,9 @@ impl X86Mutator {
                 // The 3-operand IMUL immediate draws from the imm32 pool too.
                 | X86Instruction::ImulRegImm { imm, .. }
                 | X86Instruction::TestImm { imm, .. } => *imm = self.pick_non_mov_immediate(rng),
+                // LEA's displacement is a signed disp32; mutate it from the
+                // non-MOV (imm32) pool even with no register pool.
+                X86Instruction::Lea { disp, .. } => *disp = self.pick_non_mov_immediate(rng),
                 // SHL / SHR / SAR / ROL / ROR carry an imm8 count; mutate it
                 // from the imm8-encodable pool even with no register pool.
                 X86Instruction::Shl { imm, .. }
@@ -1253,6 +1295,13 @@ impl X86Mutator {
                 0 => *rd = self.pick_register(rng).expect("register pool is non-empty"),
                 1 => *rs = self.pick_register(rng).expect("register pool is non-empty"),
                 _ => *imm = self.pick_non_mov_immediate(rng),
+            },
+            // LEA rd, [base + disp] mutates one of the three operand slots: the
+            // destination register, the base register, or the disp32.
+            X86Instruction::Lea { rd, base, disp } => match rng.random_range(0..3u32) {
+                0 => *rd = self.pick_register(rng).expect("register pool is non-empty"),
+                1 => *base = self.pick_register(rng).expect("register pool is non-empty"),
+                _ => *disp = self.pick_non_mov_immediate(rng),
             },
             X86Instruction::AddImm { rd, imm }
             | X86Instruction::SubImm { rd, imm }
@@ -1444,6 +1493,11 @@ impl X86Mutator {
             // bridge to. Keep both IMUL forms unchanged here; operand mutation
             // and whole-instruction replacement still explore them.
             X86Instruction::ImulReg { .. } | X86Instruction::ImulRegImm { .. } => current,
+            // LEA has a unique (rd, base, disp) shape and a flag-free model that
+            // no other family shares, so — like IMUL and Cmov — it has no
+            // opcode-shape sibling to bridge to. Keep it unchanged; operand
+            // mutation and whole-instruction replacement still explore it.
+            X86Instruction::Lea { .. } => current,
             // Cmov has a unique shape (rd, rs, cond) with no opcode-shape
             // siblings; keep it unchanged in the opcode-bridge mutator.
             X86Instruction::Cmov { .. } => current,
@@ -1524,15 +1578,15 @@ pub struct X86InstructionGenerator;
 // even though `generate_all` expands it across all 16 `X86Condition::ALL`
 // variants per register pair.
 //
-// CMOV MUST remain the LAST opcode (index COUNT - 1 == 27): both
+// CMOV MUST remain the LAST opcode (index COUNT - 1 == 28): both
 // `X86Mutator::random_instruction` and
 // `generate_random_rewritable_x86_instruction` gate the extra distinct-source
 // CMOV draw on `opcode == X86_REWRITABLE_OPCODE_COUNT - 1`. New flag-only
 // families (CMP, TEST), single-operand families (NEG, NOT, INC, DEC), the
 // immediate-count shift families (SHL, SHR, SAR), the immediate-count
-// rotate families (ROL, ROR), and the two IMUL forms are inserted before CMOV
-// in `build_x86_instruction_by_opcode` to preserve that invariant.
-const X86_REWRITABLE_OPCODE_COUNT: u8 = 28;
+// rotate families (ROL, ROR), the two IMUL forms, and LEA are inserted before
+// CMOV in `build_x86_instruction_by_opcode` to preserve that invariant.
+const X86_REWRITABLE_OPCODE_COUNT: u8 = 29;
 
 fn has_distinct_register_pair(registers: &[X86Register]) -> bool {
     let Some(first) = registers.first() else {
@@ -1547,9 +1601,9 @@ fn has_distinct_register_pair(registers: &[X86Register]) -> bool {
 /// `X86Mutator::random_instruction` and
 /// `generate_random_rewritable_x86_instruction` both delegate here so the two
 /// dispatch tables cannot drift (see issue #348). Operand drawing and RNG draw
-/// order stay at the call sites; the CMOV slot (opcode 25, the last index)
-/// consumes the `rs` the caller resolved via `pick_register_except` so
-/// `rs != rd`.
+/// order stay at the call sites; the CMOV slot (the last index,
+/// `X86_REWRITABLE_OPCODE_COUNT - 1`) consumes the `rs` the caller resolved
+/// via `pick_register_except` so `rs != rd`.
 ///
 /// Keep this in lock-step with `X86_REWRITABLE_OPCODE_COUNT` and the
 /// `opcode_dispatch_is_consistent` test, which pins the full mapping.
@@ -1600,9 +1654,17 @@ pub(crate) fn build_x86_instruction_by_opcode(
         // lock-step on the shared operands.
         25 => X86Instruction::ImulReg { rd, rs },
         26 => X86Instruction::ImulRegImm { rd, rs, imm },
-        // Cmov stays last (index 27 == X86_REWRITABLE_OPCODE_COUNT - 1) so the
+        // LEA consumes rd as the destination, rs as the base register, and the
+        // shared `imm` as the displacement. No extra RNG draw, so the two
+        // dispatch sites stay in lock-step on the shared operands.
+        27 => X86Instruction::Lea {
+            rd,
+            base: rs,
+            disp: imm,
+        },
+        // Cmov stays last (index 28 == X86_REWRITABLE_OPCODE_COUNT - 1) so the
         // CMOV distinct-register draw at the two generation sites stays correct.
-        27 => X86Instruction::Cmov { rd, rs, cond },
+        28 => X86Instruction::Cmov { rd, rs, cond },
         _ => unreachable!("opcode out of range"),
     }
 }
@@ -1770,6 +1832,21 @@ impl InstructionGenerator<X86Instruction> for X86InstructionGenerator {
                 }
             }
         }
+        // LEA: `lea rd, [base + disp]` for every (rd, base, disp) triple,
+        // including rd == base (self-base is meaningful: it adds disp to rd).
+        // The displacement encodes as a signed disp32, so non-imm32 pool
+        // entries are skipped here rather than emitted and later rejected by
+        // `can_assemble`.
+        for &rd in registers {
+            for &base in registers {
+                for &disp in immediates {
+                    if i32::try_from(disp).is_err() {
+                        continue;
+                    }
+                    out.push(X86Instruction::Lea { rd, base, disp });
+                }
+            }
+        }
         // CMOVcc is rewritable and reads flags, so enumerate every
         // condition for each non-identical register pair. Jcc remains
         // excluded.
@@ -1878,6 +1955,12 @@ fn with_destination(instr: X86Instruction, new_rd: X86Register) -> X86Instructio
             rs,
             imm,
         },
+        // LEA redirects the destination, carrying the base and displacement.
+        X86Instruction::Lea { base, disp, .. } => X86Instruction::Lea {
+            rd: new_rd,
+            base,
+            disp,
+        },
         X86Instruction::Cmov { rd, rs, cond } => X86Instruction::Cmov {
             rd: if new_rd == rs { rd } else { new_rd },
             rs,
@@ -1965,6 +2048,12 @@ fn with_sources(instr: X86Instruction, new_rs: X86Register, new_imm: i64) -> X86
             rs: new_rs,
             imm: new_imm,
         },
+        // LEA varies both its base register and the displacement.
+        X86Instruction::Lea { rd, .. } => X86Instruction::Lea {
+            rd,
+            base: new_rs,
+            disp: new_imm,
+        },
         // Cmov's `rs` is mutated; `cond` and `rd` carry through unchanged.
         X86Instruction::Cmov { rd, rs, cond } => X86Instruction::Cmov {
             rd,
@@ -2022,16 +2111,18 @@ mod tests {
             .iter()
             .filter(|&&imm| u8::try_from(imm).is_ok())
             .count();
-        // The 3-operand IMUL only enumerates over imm32-encodable immediates.
+        // The 3-operand IMUL only enumerates over imm32-encodable immediates;
+        // LEA enumerates over imm32-encodable displacements with the same filter.
         let imul_m = imms
             .iter()
             .filter(|&&imm| i32::try_from(imm).is_ok())
             .count();
+        let lea_m = imul_m;
         // 8 reg-reg families + 8 reg-imm families + 4 single-operand families
         // (NEG, NOT, INC, DEC) + 3 shift families (SHL, SHR, SAR over imm8
         // counts) + 2 rotate families (ROL, ROR over imm8 counts) + IMUL 2-op
         // (every register pair) + IMUL 3-op (every (rd, rs, imm32) triple) +
-        // CMOVcc over distinct pairs.
+        // LEA (every (rd, base, disp32) triple) + CMOVcc over distinct pairs.
         let expected_len = 8 * n * n
             + 8 * n * m
             + 4 * n
@@ -2039,11 +2130,12 @@ mod tests {
             + 2 * n * shift_m
             + n * n
             + n * n * imul_m
+            + n * n * lea_m
             + n * (n - 1) * X86Condition::ALL.len();
         assert_eq!(
             all.len(),
             expected_len,
-            "generate_all should only prune CMOV self-pairs and non-imm8 shift/rotate / non-imm32 imul counts from the full pool"
+            "generate_all should only prune CMOV self-pairs and non-imm8 shift/rotate / non-imm32 imul/lea counts from the full pool"
         );
 
         // For each opcode_id, at least one variant must appear.
@@ -2220,7 +2312,9 @@ mod tests {
                 | X86Instruction::Rol { imm, .. }
                 | X86Instruction::Ror { imm, .. }
                 // The 3-operand IMUL draws its immediate from the shared pool.
-                | X86Instruction::ImulRegImm { imm, .. } => {
+                | X86Instruction::ImulRegImm { imm, .. }
+                // LEA draws its displacement from the same shared `imm` slot.
+                | X86Instruction::Lea { disp: imm, .. } => {
                     assert!(imms.contains(&imm), "immediate {} outside pool", imm);
                 }
                 X86Instruction::MovReg { .. }
@@ -3341,7 +3435,9 @@ mod tests {
                 | X86Instruction::Ror { imm, .. }
                 // The 3-operand IMUL draws its immediate from the same shared
                 // slot, so the empty pool yields 0 here too.
-                | X86Instruction::ImulRegImm { imm, .. } => {
+                | X86Instruction::ImulRegImm { imm, .. }
+                // LEA's displacement comes from the same shared slot (0 here).
+                | X86Instruction::Lea { disp: imm, .. } => {
                     saw_immediate_form = true;
                     assert_eq!(imm, 0);
                 }
@@ -3442,8 +3538,16 @@ mod tests {
             (24, X86Instruction::Ror { rd, imm }),
             (25, X86Instruction::ImulReg { rd, rs }),
             (26, X86Instruction::ImulRegImm { rd, rs, imm }),
-            // Cmov stays last at COUNT - 1 == 27.
-            (27, X86Instruction::Cmov { rd, rs, cond }),
+            (
+                27,
+                X86Instruction::Lea {
+                    rd,
+                    base: rs,
+                    disp: imm,
+                },
+            ),
+            // Cmov stays last at COUNT - 1 == 28.
+            (28, X86Instruction::Cmov { rd, rs, cond }),
         ];
 
         for (opcode, want) in expected {
@@ -3484,7 +3588,8 @@ mod tests {
             (24, "ror"),
             (25, "imul"),
             (26, "imul"),
-            (27, "cmove"),
+            (27, "lea"),
+            (28, "cmove"),
         ];
         for (opcode, mnem) in mnemonics {
             assert_eq!(
@@ -3935,8 +4040,10 @@ mod tests {
                     | X86Instruction::Rol { .. }
                     | X86Instruction::Ror { .. }
                     // The 3-operand IMUL immediate is imm32; same encodability
-                    // invariant.
-                    | X86Instruction::ImulRegImm { .. } => {
+                    // invariant. LEA's displacement is also a disp32 with the
+                    // same encodability requirement.
+                    | X86Instruction::ImulRegImm { .. }
+                    | X86Instruction::Lea { .. } => {
                         saw_non_mov_immediate = true;
                         assert!(
                             <X86_64 as Assembler<X86Instruction>>::can_assemble(&X86_64, instr),

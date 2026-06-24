@@ -102,6 +102,7 @@ Rewritable straight-line mnemonic families:
 - Immediate-count shifts: `shl`/`sal`, `shr`, `sar`
 - Immediate-count rotates: `rol`, `ror`
 - Signed multiply: `imul` (2-operand `imul rd, rs` and 3-operand `imul rd, rs, imm`)
+- Load effective address: `lea` (register-base + displacement only)
 - Conditional moves: `cmov<cond>`
 
 The data-movement/arithmetic/logical/comparison families have register and
@@ -139,8 +140,13 @@ SF/ZF/PF are Intel-UNDEFINED; the model derives them deterministically from the
 truncated result (SF = MSB, ZF = result == 0, PF = low-byte parity) so the
 shared concrete/SMT lowering stays internally consistent (target and candidate
 agree), and AF follows the existing convention. The one-operand widening form
-(`imul rs`, writing RDX:RAX) is deferred. `cmov<cond>` has register operands and
-reads EFLAGS without modifying them.
+(`imul rs`, writing RDX:RAX) is deferred. `lea` is modelled only in its minimal
+register-base + displacement form, `lea rd, [base + disp]`, computing
+`rd = base + disp` (wrapping at width). It is non-destructive (`base` is read,
+`rd` is purely written, like `mov`) and affects NO flags. The index*scale
+(`[base + index*scale + disp]`) and RIP/EIP-relative addressing forms are
+deferred and rejected as unsupported shapes. `cmov<cond>` has register operands
+and reads EFLAGS without modifying them.
 
 The x86 IR does not yet carry operand width. To avoid rewriting partial-width
 operations as full-width operations, the binary optimization path currently
