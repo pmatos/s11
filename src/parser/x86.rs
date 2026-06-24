@@ -411,10 +411,29 @@ fn x86_ir_from_mnemonic_impl(
         }
     }
 
+    // LEA is the FIRST x86 instruction with a memory (bracket) operand. Only
+    // the minimal register-base + displacement form is modelled:
+    //   * `lea rd, [base]`        -> Lea { rd, base, disp: 0 }
+    //   * `lea rd, [base + disp]` -> Lea { rd, base, disp }
+    //   * `lea rd, [base - disp]` -> Lea { rd, base, disp: -disp }
+    // The index*scale, second-register, and RIP-relative forms are DEFERRED and
+    // surface as `Ok(None)` (an unsupported shape), like an unknown mnemonic.
+    // See `parse_x86_lea_memory_operand` for the bracket grammar and rejections.
+    if mnemonic == "lea" {
+        let parts: Vec<&str> = op_str.split(',').map(|s| s.trim()).collect();
+        if parts.len() != 2 {
+            return Ok(None);
+        }
+        let rd = parse_x86_register_with_mode(parts[0], mode)?;
+        let Some((base, disp)) = parse_x86_lea_memory_operand(parts[1], mode)? else {
+            return Ok(None);
+        };
+        return Ok(Some(X86Instruction::Lea { rd, base, disp }));
+    }
+
     // Reject unsupported mnemonics before attempting operand parsing so
-    // shapes outside the minimal core (e.g. LEA `rax, [rbx+1]`) surface
-    // as "unsupported mnemonic" rather than a confusing downstream
-    // immediate parse error.
+    // shapes outside the minimal core surface as "unsupported mnemonic"
+    // rather than a confusing downstream immediate parse error.
     if !matches!(
         mnemonic.as_str(),
         "mov"
@@ -512,6 +531,82 @@ fn x86_ir_from_mnemonic_impl(
     }
 }
 
+/// Parse the LEA memory operand in its minimal register-base + displacement
+/// form. The accepted grammar (Intel bracket syntax, as Capstone emits) is:
+///
+/// ```text
+///   mem  := '[' base ']'
+///         | '[' base '+' disp ']'
+///         | '[' base '-' disp ']'
+///   base := <register>
+///   disp := <immediate>   (decimal or hex, fits a signed 32-bit displacement)
+/// ```
+///
+/// Returns `Ok(Some((base, disp)))` on a match, or `Ok(None)` for any DEFERRED
+/// shape so the caller surfaces it as an unsupported instruction (like an
+/// unknown mnemonic). The deferred shapes that yield `Ok(None)` are: anything
+/// without the surrounding brackets; an index*scale term (`*`); a second
+/// register (`[base + index]`); a compound `[base + index + disp]`; and
+/// RIP/EIP-relative bases (the register parse rejects `rip`/`eip`).
+///
+/// A register parse error on the base (e.g. an extended register in 32-bit
+/// mode) propagates as `Err`, matching the other register-operand families.
+fn parse_x86_lea_memory_operand(
+    op_str: &str,
+    mode: Option<X86ParseMode>,
+) -> Result<Option<(X86Register, i64)>, String> {
+    let trimmed = op_str.trim();
+    // Must be a bracketed memory operand: `[ ... ]`.
+    let Some(inner) = trimmed.strip_prefix('[').and_then(|s| s.strip_suffix(']')) else {
+        return Ok(None);
+    };
+    let inner = inner.trim();
+
+    // index*scale is a deferred form.
+    if inner.contains('*') {
+        return Ok(None);
+    }
+
+    // Split into a base term and an optional signed displacement. A `+`/`-`
+    // separates the base from the displacement; more than one separator (e.g.
+    // `[base + index + disp]`) is a deferred compound form.
+    let (base_str, disp) = match inner.find(['+', '-']) {
+        None => (inner, 0i64),
+        Some(pos) => {
+            let base_str = inner[..pos].trim();
+            let rest = inner[pos..].trim();
+            // A second `+`/`-` in the remainder means a compound term — deferred.
+            if rest[1..].contains(['+', '-']) {
+                return Ok(None);
+            }
+            // The displacement must parse as an immediate. If it instead names a
+            // register (`[base + index]`), it is a deferred second-register form,
+            // not a parse error.
+            let sign = &rest[..1];
+            let magnitude = rest[1..].trim();
+            let Ok(mag) = parse_x86_immediate(magnitude) else {
+                return Ok(None);
+            };
+            let disp = if sign == "-" { -mag } else { mag };
+            (base_str, disp)
+        }
+    };
+
+    if base_str.is_empty() {
+        return Ok(None);
+    }
+    // RIP/EIP-relative addressing is a deferred form; surface it as `Ok(None)`
+    // rather than a register-parse error so it is treated as an unsupported
+    // shape like the index*scale and second-register forms above.
+    if matches!(base_str.to_lowercase().as_str(), "rip" | "eip") {
+        return Ok(None);
+    }
+    // The base must be a register; a register parse error (e.g. width/mode
+    // mismatch) propagates as `Err`.
+    let base = parse_x86_register_with_mode(base_str, mode)?;
+    Ok(Some((base, disp)))
+}
+
 /// Parse an Intel-syntax x86 assembly text into a sequence of
 /// `X86Instruction`s. Mirrors `crate::parser::parse_assembly_string`
 /// for the AArch64 path.
@@ -521,8 +616,9 @@ fn x86_ir_from_mnemonic_impl(
 /// one of the supported families (mov, add, sub, and, or, xor, cmp,
 /// test, the single-operand neg/not/inc/dec, the immediate-count shifts
 /// shl/sal/shr/sar, the immediate-count rotates rol/ror, the two- and
-/// three-operand signed multiply imul, plus the conditional cmovCC and jCC
-/// variants). Anything else is a parse error.
+/// three-operand signed multiply imul, lea in its register-base +
+/// displacement form, plus the conditional cmovCC and jCC variants).
+/// Anything else is a parse error.
 pub fn parse_x86_assembly_string(
     content: &str,
     source_name: String,
@@ -1267,9 +1363,11 @@ mod tests {
     fn x86_ir_unsupported_mnemonic_returns_none() {
         assert!(x86_ir_from_mnemonic("ret", "").unwrap().is_none());
         assert!(x86_ir_from_mnemonic("jmp", "0x1234").unwrap().is_none());
-        // `lea` is outside the supported set (memory operands unmodelled).
+        // `lea` in the minimal register-base + displacement form is now
+        // supported; its DEFERRED shapes (index*scale, second register,
+        // RIP-relative) still surface as `Ok(None)`.
         assert!(
-            x86_ir_from_mnemonic("lea", "rax, [rbx+1]")
+            x86_ir_from_mnemonic("lea", "rax, [rbx + rcx*4]")
                 .unwrap()
                 .is_none()
         );
@@ -1344,8 +1442,11 @@ mod tests {
 
     #[test]
     fn assembly_string_rejects_unsupported_mnemonic() {
-        let err = parse_x86_assembly_string("mov rax, rbx\nlea rax, [rbx+1]", "t".to_string())
-            .unwrap_err();
+        // `lea` with a deferred index*scale memory operand is an unsupported
+        // shape (the minimal register-base + displacement LEA is supported).
+        let err =
+            parse_x86_assembly_string("mov rax, rbx\nlea rax, [rbx + rcx*4]", "t".to_string())
+                .unwrap_err();
         assert_eq!(err.line_number, 2);
         assert!(
             err.message.contains("unsupported"),
@@ -1567,5 +1668,130 @@ mod tests {
                 mn
             );
         }
+    }
+
+    // ---- LEA (register-base + displacement) ----
+
+    #[test]
+    fn lea_parses_base_plus_disp_forms_and_round_trips_display() {
+        // `[base + disp]`, bare `[base]`, and `[base - disp]` parse to Lea.
+        let cases = [
+            (
+                "rax, [rbx + 1]",
+                X86Instruction::Lea {
+                    rd: X86Register::RAX,
+                    base: X86Register::RBX,
+                    disp: 1,
+                },
+            ),
+            (
+                "rax, [rbx]",
+                X86Instruction::Lea {
+                    rd: X86Register::RAX,
+                    base: X86Register::RBX,
+                    disp: 0,
+                },
+            ),
+            (
+                "rax, [rbx - 8]",
+                X86Instruction::Lea {
+                    rd: X86Register::RAX,
+                    base: X86Register::RBX,
+                    disp: -8,
+                },
+            ),
+        ];
+        for (ops, want) in cases {
+            let got = x86_ir_from_mnemonic("lea", ops)
+                .unwrap_or_else(|e| panic!("parse `lea {ops}`: {e}"))
+                .unwrap_or_else(|| panic!("parse `lea {ops}` produced None"));
+            assert_eq!(got, want, "parse mismatch for `lea {ops}`");
+        }
+
+        // Display → parse round-trip for each of the three displacement signs.
+        for instr in cases.map(|(_, want)| want) {
+            let text = instr.to_string();
+            let (mnemonic, rest) = text.split_once(char::is_whitespace).unwrap();
+            assert_eq!(
+                x86_ir_from_mnemonic(mnemonic, rest).unwrap().unwrap(),
+                instr,
+                "Display round-trip failed for `{text}`"
+            );
+        }
+
+        // Pin the exact Display rendering of each sign.
+        assert_eq!(
+            X86Instruction::Lea {
+                rd: X86Register::RAX,
+                base: X86Register::RBX,
+                disp: 1,
+            }
+            .to_string(),
+            "lea rax, [rbx + 1]"
+        );
+        assert_eq!(
+            X86Instruction::Lea {
+                rd: X86Register::RAX,
+                base: X86Register::RBX,
+                disp: 0,
+            }
+            .to_string(),
+            "lea rax, [rbx]"
+        );
+        assert_eq!(
+            X86Instruction::Lea {
+                rd: X86Register::RAX,
+                base: X86Register::RBX,
+                disp: -8,
+            }
+            .to_string(),
+            "lea rax, [rbx - 8]"
+        );
+    }
+
+    #[test]
+    fn lea_accepts_capstone_hex_displacements_in_binary_path() {
+        // Capstone emits hex displacements in Intel syntax; the mode-aware
+        // binary path must accept them.
+        assert_eq!(
+            x86_ir_from_mnemonic_for_mode("lea", "rax, [rbx + 0x10]", X86ParseMode::Mode64)
+                .unwrap()
+                .unwrap(),
+            X86Instruction::Lea {
+                rd: X86Register::RAX,
+                base: X86Register::RBX,
+                disp: 0x10,
+            }
+        );
+        assert_eq!(
+            x86_ir_from_mnemonic_for_mode("lea", "eax, [ebx - 0x10]", X86ParseMode::Mode32)
+                .unwrap()
+                .unwrap(),
+            X86Instruction::Lea {
+                rd: X86Register::RAX,
+                base: X86Register::RBX,
+                disp: -0x10,
+            }
+        );
+    }
+
+    #[test]
+    fn lea_rejects_deferred_memory_operand_forms_as_unsupported() {
+        // Index*scale, a second register, a compound base+index+disp, and
+        // RIP-relative addressing are DEFERRED — each surfaces as `Ok(None)`
+        // (an unsupported shape), not a parse error.
+        for ops in [
+            "rax, [rbx + rcx]",
+            "rax, [rbx + rcx*4]",
+            "rax, [rbx + rcx + 1]",
+            "rax, [rip + 0x100]",
+        ] {
+            assert!(
+                x86_ir_from_mnemonic("lea", ops).unwrap().is_none(),
+                "`lea {ops}` should be an unsupported (deferred) shape"
+            );
+        }
+        // A non-bracket second operand is also unsupported.
+        assert!(x86_ir_from_mnemonic("lea", "rax, rbx").unwrap().is_none());
     }
 }
