@@ -62,11 +62,13 @@ fn instruction_code_size(instr: &X86Instruction, width: u32) -> u64 {
         // INC / DEC are single-operand `FF /0` / `FF /1` = 2 bytes (+REX.W).
         | X86Instruction::Inc { .. }
         | X86Instruction::Dec { .. } => 2 + rex,
-        // SHL / SHR / SAR by imm8 are `C1 /n ib` = opcode + ModR/M + imm8
-        // = 3 bytes (+REX.W).
+        // SHL / SHR / SAR / ROL / ROR by imm8 are `C1 /n ib` = opcode + ModR/M
+        // + imm8 = 3 bytes (+REX.W).
         X86Instruction::Shl { .. }
         | X86Instruction::Shr { .. }
-        | X86Instruction::Sar { .. } => 3 + rex,
+        | X86Instruction::Sar { .. }
+        | X86Instruction::Rol { .. }
+        | X86Instruction::Ror { .. } => 3 + rex,
         X86Instruction::AddImm { .. }
         | X86Instruction::SubImm { .. }
         | X86Instruction::AndImm { .. }
@@ -230,6 +232,35 @@ mod tests {
         // CMOV is `0F 4x ModR/M` = 3 bytes, +1 for REX.W on x86-64.
         assert_eq!(instruction_cost(&cmov, &CostMetric::CodeSize, 64), 4);
         assert_eq!(instruction_cost(&cmov, &CostMetric::CodeSize, 32), 3);
+    }
+
+    #[test]
+    fn rotate_code_size_and_latency_mirror_shifts() {
+        // ROL / ROR by imm8 are `C1 /n ib` = 3 bytes (+REX.W on x86-64 -> 4),
+        // identical to the shifts; latency 1.
+        for instr in [
+            X86Instruction::Rol {
+                rd: X86Register::RAX,
+                imm: 3,
+            },
+            X86Instruction::Ror {
+                rd: X86Register::RBX,
+                imm: 5,
+            },
+        ] {
+            // Mirror the shift cost exactly.
+            let shift = X86Instruction::Shl {
+                rd: X86Register::RAX,
+                imm: 3,
+            };
+            assert_eq!(
+                instruction_cost(&instr, &CostMetric::CodeSize, 64),
+                instruction_cost(&shift, &CostMetric::CodeSize, 64),
+            );
+            assert_eq!(instruction_cost(&instr, &CostMetric::CodeSize, 64), 4);
+            assert_eq!(instruction_cost(&instr, &CostMetric::CodeSize, 32), 3);
+            assert_eq!(instruction_cost(&instr, &CostMetric::Latency, 64), 1);
+        }
     }
 
     #[test]

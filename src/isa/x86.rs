@@ -348,6 +348,25 @@ pub enum X86Instruction {
     /// original bit `eff - 1`, OF (count 1 only) = 0. The CL-register-count form
     /// is not modelled.
     Sar { rd: X86Register, imm: i64 },
+    /// `rol rd, imm` — rotate left by a compile-time COUNT. Reads and writes
+    /// `rd`. `imm` is masked to `width-1` like the shifts. **Unlike the shifts,
+    /// rotates touch ONLY CF (plus OF for count 1); SF/ZF/PF/AF are PRESERVED**.
+    /// A masked count of 0 leaves `rd` and ALL flags unchanged. Otherwise
+    /// `rd = rotate_left(rd, eff)`, CF = bit 0 of the result (the bit rotated
+    /// from the MSB into the LSB), and OF (architecturally defined only for
+    /// count 1) = `MSB(result) XOR CF`. For count != 1 OF is UNDEFINED, so the
+    /// model preserves the incoming OF. The CL-register-count form is not
+    /// modelled.
+    Rol { rd: X86Register, imm: i64 },
+    /// `ror rd, imm` — rotate right by a compile-time COUNT. Reads and writes
+    /// `rd`. `imm` is masked like `rol`, and the same partial-flag model
+    /// applies: only CF (plus OF for count 1) changes; SF/ZF/PF/AF are
+    /// PRESERVED; a masked count of 0 is a full no-op. Otherwise
+    /// `rd = rotate_right(rd, eff)`, CF = the MSB (bit `width-1`) of the result,
+    /// and OF (count 1 only) = XOR of the result's two most-significant bits
+    /// (`MSB(result) XOR bit width-2`). For count != 1 OF is UNDEFINED so the
+    /// incoming OF is preserved. The CL-register-count form is not modelled.
+    Ror { rd: X86Register, imm: i64 },
     /// `cmovCC rd, rs` — conditional move. Reads EFLAGS;
     /// when `cond` holds, writes `rd = rs`; otherwise `rd` is unchanged.
     /// Does not modify EFLAGS.
@@ -385,6 +404,8 @@ impl X86Instruction {
             | X86Instruction::Shl { rd, .. }
             | X86Instruction::Shr { rd, .. }
             | X86Instruction::Sar { rd, .. }
+            | X86Instruction::Rol { rd, .. }
+            | X86Instruction::Ror { rd, .. }
             | X86Instruction::Cmov { rd, .. } => Some(*rd),
             // CMP and TEST discard their result; only EFLAGS is written.
             X86Instruction::CmpReg { .. }
@@ -412,6 +433,8 @@ impl X86Instruction {
             X86Instruction::Shl { .. } => "shl",
             X86Instruction::Shr { .. } => "shr",
             X86Instruction::Sar { .. } => "sar",
+            X86Instruction::Rol { .. } => "rol",
+            X86Instruction::Ror { .. } => "ror",
             X86Instruction::Cmov { cond, .. } => cond.cmov_mnemonic(),
             X86Instruction::Jcc { cond } => cond.jcc_mnemonic(),
         }
@@ -440,7 +463,10 @@ impl X86Instruction {
             // SHL / SHR / SAR read and write rd; the count is an immediate.
             | X86Instruction::Shl { rd, .. }
             | X86Instruction::Shr { rd, .. }
-            | X86Instruction::Sar { rd, .. } => vec![*rd],
+            | X86Instruction::Sar { rd, .. }
+            // ROL / ROR read and write rd; the rotate count is an immediate.
+            | X86Instruction::Rol { rd, .. }
+            | X86Instruction::Ror { rd, .. } => vec![*rd],
             X86Instruction::CmpReg { rn, rs } => vec![*rn, *rs],
             X86Instruction::CmpImm { rn, .. } => vec![*rn],
             // TEST reads both operands (or just rn for the immediate form) and
@@ -504,11 +530,13 @@ impl InstructionType for X86Instruction {
             X86Instruction::Shl { .. } => 20,
             X86Instruction::Shr { .. } => 21,
             X86Instruction::Sar { .. } => 22,
-            // Cmov MUST stay the last rewritable opcode (COUNT - 1 == 23):
+            X86Instruction::Rol { .. } => 23,
+            X86Instruction::Ror { .. } => 24,
+            // Cmov MUST stay the last rewritable opcode (COUNT - 1 == 25):
             // the CMOV distinct-register draw at both generation sites is
             // gated on `opcode == X86_REWRITABLE_OPCODE_COUNT - 1`.
-            X86Instruction::Cmov { .. } => 23,
-            X86Instruction::Jcc { .. } => 24,
+            X86Instruction::Cmov { .. } => 25,
+            X86Instruction::Jcc { .. } => 26,
         }
     }
 
@@ -549,10 +577,12 @@ impl fmt::Display for X86Instruction {
             | X86Instruction::AndImm { rd, imm }
             | X86Instruction::OrImm { rd, imm }
             | X86Instruction::XorImm { rd, imm }
-            // SHL / SHR / SAR render `mnemonic rd, count`.
+            // SHL / SHR / SAR / ROL / ROR render `mnemonic rd, count`.
             | X86Instruction::Shl { rd, imm }
             | X86Instruction::Shr { rd, imm }
-            | X86Instruction::Sar { rd, imm } => write!(f, "{} {}, {}", mn, rd, imm),
+            | X86Instruction::Sar { rd, imm }
+            | X86Instruction::Rol { rd, imm }
+            | X86Instruction::Ror { rd, imm } => write!(f, "{} {}, {}", mn, rd, imm),
             X86Instruction::CmpReg { rn, rs } | X86Instruction::TestReg { rn, rs } => {
                 write!(f, "{} {}, {}", mn, rn, rs)
             }
@@ -846,12 +876,14 @@ impl crate::isa::traits::Assembler<X86Instruction> for X86_64 {
             | X86Instruction::XorImm { imm, .. }
             | X86Instruction::CmpImm { imm, .. }
             | X86Instruction::TestImm { imm, .. } => x86_signed_imm32_ok(*imm),
-            // SHL / SHR / SAR encode their count as imm8: reject any count that
-            // does not fit a single byte so the search never proposes an
-            // unencodable shift.
+            // SHL / SHR / SAR / ROL / ROR encode their count as imm8: reject any
+            // count that does not fit a single byte so the search never proposes
+            // an unencodable shift or rotate.
             X86Instruction::Shl { imm, .. }
             | X86Instruction::Shr { imm, .. }
-            | X86Instruction::Sar { imm, .. } => x86_shift_count_imm8_ok(*imm),
+            | X86Instruction::Sar { imm, .. }
+            | X86Instruction::Rol { imm, .. }
+            | X86Instruction::Ror { imm, .. } => x86_shift_count_imm8_ok(*imm),
             X86Instruction::MovReg { .. }
             | X86Instruction::MovImm { .. }
             | X86Instruction::AddReg { .. }
@@ -902,10 +934,13 @@ impl crate::isa::traits::Assembler<X86Instruction> for X86_32 {
             X86Instruction::CmpImm { rn, imm } | X86Instruction::TestImm { rn, imm } => {
                 reg_ok_32(*rn) && x86_imm32_bitpattern_ok(*imm)
             }
-            // SHL / SHR / SAR: legal 32-bit register plus an imm8 count.
+            // SHL / SHR / SAR / ROL / ROR: legal 32-bit register plus an imm8
+            // count.
             X86Instruction::Shl { rd, imm }
             | X86Instruction::Shr { rd, imm }
-            | X86Instruction::Sar { rd, imm } => reg_ok_32(*rd) && x86_shift_count_imm8_ok(*imm),
+            | X86Instruction::Sar { rd, imm }
+            | X86Instruction::Rol { rd, imm }
+            | X86Instruction::Ror { rd, imm } => reg_ok_32(*rd) && x86_shift_count_imm8_ok(*imm),
             X86Instruction::Neg { rd }
             | X86Instruction::Not { rd }
             | X86Instruction::Inc { rd }
@@ -1115,11 +1150,13 @@ impl X86Mutator {
                 | X86Instruction::XorImm { imm, .. }
                 | X86Instruction::CmpImm { imm, .. }
                 | X86Instruction::TestImm { imm, .. } => *imm = self.pick_non_mov_immediate(rng),
-                // SHL / SHR / SAR carry a shift count; mutate it from the
-                // imm8-encodable pool even with no register pool.
+                // SHL / SHR / SAR / ROL / ROR carry an imm8 count; mutate it
+                // from the imm8-encodable pool even with no register pool.
                 X86Instruction::Shl { imm, .. }
                 | X86Instruction::Shr { imm, .. }
-                | X86Instruction::Sar { imm, .. } => *imm = self.pick_shift_count(rng),
+                | X86Instruction::Sar { imm, .. }
+                | X86Instruction::Rol { imm, .. }
+                | X86Instruction::Ror { imm, .. } => *imm = self.pick_shift_count(rng),
                 X86Instruction::MovReg { .. }
                 | X86Instruction::AddReg { .. }
                 | X86Instruction::SubReg { .. }
@@ -1188,11 +1225,13 @@ impl X86Mutator {
                     *imm = self.pick_non_mov_immediate(rng);
                 }
             }
-            // SHL / SHR / SAR mutate either the destination register or the
-            // imm8 shift count.
+            // SHL / SHR / SAR / ROL / ROR mutate either the destination register
+            // or the imm8 count.
             X86Instruction::Shl { rd, imm }
             | X86Instruction::Shr { rd, imm }
-            | X86Instruction::Sar { rd, imm } => {
+            | X86Instruction::Sar { rd, imm }
+            | X86Instruction::Rol { rd, imm }
+            | X86Instruction::Ror { rd, imm } => {
                 if rng.random_bool(0.5) {
                     *rd = self.pick_register(rng).expect("register pool is non-empty");
                 } else {
@@ -1332,6 +1371,20 @@ impl X86Mutator {
                     _ => X86Instruction::Sar { rd, imm },
                 }
             }
+            // ROL / ROR share the reg-plus-count shape but a distinct
+            // (CF/OF-only) flag model, so they bridge only to each other —
+            // never to a shift, whose SF/ZF/PF semantics differ. Carry the
+            // current count through, re-drawing only if it became unencodable.
+            // The draw range includes the current variant, so it may be an
+            // identity mutation.
+            X86Instruction::Rol { rd, imm } | X86Instruction::Ror { rd, imm } => {
+                let imm = self.keep_or_pick_shift_count(rng, imm);
+                if rng.random_bool(0.5) {
+                    X86Instruction::Rol { rd, imm }
+                } else {
+                    X86Instruction::Ror { rd, imm }
+                }
+            }
             // Cmov has a unique shape (rd, rs, cond) with no opcode-shape
             // siblings; keep it unchanged in the opcode-bridge mutator.
             X86Instruction::Cmov { .. } => current,
@@ -1407,18 +1460,19 @@ impl crate::isa::traits::ISAMutator<X86Instruction> for X86Mutator {
 pub struct X86InstructionGenerator;
 
 // One entry per rewritable opcode family: 6 reg-reg + 6 reg-imm + CMP + TEST
-// (each reg/imm) + NEG + NOT + INC + DEC + SHL + SHR + SAR + CMOVcc. CMOVcc
-// counts as a single family here even though `generate_all` expands it across
-// all 16 `X86Condition::ALL` variants per register pair.
+// (each reg/imm) + NEG + NOT + INC + DEC + SHL + SHR + SAR + ROL + ROR +
+// CMOVcc. CMOVcc counts as a single family here even though `generate_all`
+// expands it across all 16 `X86Condition::ALL` variants per register pair.
 //
-// CMOV MUST remain the LAST opcode (index COUNT - 1 == 23): both
+// CMOV MUST remain the LAST opcode (index COUNT - 1 == 25): both
 // `X86Mutator::random_instruction` and
 // `generate_random_rewritable_x86_instruction` gate the extra distinct-source
 // CMOV draw on `opcode == X86_REWRITABLE_OPCODE_COUNT - 1`. New flag-only
-// families (CMP, TEST), single-operand families (NEG, NOT, INC, DEC), and the
-// immediate-count shift families (SHL, SHR, SAR) are inserted before CMOV in
+// families (CMP, TEST), single-operand families (NEG, NOT, INC, DEC), the
+// immediate-count shift families (SHL, SHR, SAR), and the immediate-count
+// rotate families (ROL, ROR) are inserted before CMOV in
 // `build_x86_instruction_by_opcode` to preserve that invariant.
-const X86_REWRITABLE_OPCODE_COUNT: u8 = 24;
+const X86_REWRITABLE_OPCODE_COUNT: u8 = 26;
 
 fn has_distinct_register_pair(registers: &[X86Register]) -> bool {
     let Some(first) = registers.first() else {
@@ -1433,7 +1487,7 @@ fn has_distinct_register_pair(registers: &[X86Register]) -> bool {
 /// `X86Mutator::random_instruction` and
 /// `generate_random_rewritable_x86_instruction` both delegate here so the two
 /// dispatch tables cannot drift (see issue #348). Operand drawing and RNG draw
-/// order stay at the call sites; the CMOV slot (opcode 23, the last index)
+/// order stay at the call sites; the CMOV slot (opcode 25, the last index)
 /// consumes the `rs` the caller resolved via `pick_register_except` so
 /// `rs != rd`.
 ///
@@ -1476,9 +1530,14 @@ pub(crate) fn build_x86_instruction_by_opcode(
         20 => X86Instruction::Shl { rd, imm },
         21 => X86Instruction::Shr { rd, imm },
         22 => X86Instruction::Sar { rd, imm },
-        // Cmov stays last (index 23 == X86_REWRITABLE_OPCODE_COUNT - 1) so the
+        // ROL / ROR consume `rd` plus the shared `imm` rotate count, exactly
+        // like the shifts — no extra RNG draw, so the two dispatch sites stay
+        // in lock-step on the shared `imm`.
+        23 => X86Instruction::Rol { rd, imm },
+        24 => X86Instruction::Ror { rd, imm },
+        // Cmov stays last (index 25 == X86_REWRITABLE_OPCODE_COUNT - 1) so the
         // CMOV distinct-register draw at the two generation sites stays correct.
-        23 => X86Instruction::Cmov { rd, rs, cond },
+        25 => X86Instruction::Cmov { rd, rs, cond },
         _ => unreachable!("opcode out of range"),
     }
 }
@@ -1615,6 +1674,17 @@ impl InstructionGenerator<X86Instruction> for X86InstructionGenerator {
                 out.push(X86Instruction::Sar { rd, imm });
             }
         }
+        // Immediate-count rotates (ROL, ROR): same imm8-count shape as the
+        // shifts, so only imm8-encodable counts yield a candidate.
+        for &rd in registers {
+            for &imm in immediates {
+                if !x86_shift_count_imm8_ok(imm) {
+                    continue;
+                }
+                out.push(X86Instruction::Rol { rd, imm });
+                out.push(X86Instruction::Ror { rd, imm });
+            }
+        }
         // CMOVcc is rewritable and reads flags, so enumerate every
         // condition for each non-identical register pair. Jcc remains
         // excluded.
@@ -1713,6 +1783,9 @@ fn with_destination(instr: X86Instruction, new_rd: X86Register) -> X86Instructio
         X86Instruction::Shl { imm, .. } => X86Instruction::Shl { rd: new_rd, imm },
         X86Instruction::Shr { imm, .. } => X86Instruction::Shr { rd: new_rd, imm },
         X86Instruction::Sar { imm, .. } => X86Instruction::Sar { rd: new_rd, imm },
+        // ROL / ROR likewise redirect the destination, carrying the count.
+        X86Instruction::Rol { imm, .. } => X86Instruction::Rol { rd: new_rd, imm },
+        X86Instruction::Ror { imm, .. } => X86Instruction::Ror { rd: new_rd, imm },
         X86Instruction::Cmov { rd, rs, cond } => X86Instruction::Cmov {
             rd: if new_rd == rs { rd } else { new_rd },
             rs,
@@ -1767,6 +1840,24 @@ fn with_sources(instr: X86Instruction, new_rs: X86Register, new_imm: i64) -> X86
             },
         },
         X86Instruction::Sar { rd, imm } => X86Instruction::Sar {
+            rd,
+            imm: if x86_shift_count_imm8_ok(new_imm) {
+                new_imm
+            } else {
+                imm
+            },
+        },
+        // ROL / ROR vary the rotate count via `new_imm` when it is imm8-encodable;
+        // otherwise keep the existing count so the result stays assemblable.
+        X86Instruction::Rol { rd, imm } => X86Instruction::Rol {
+            rd,
+            imm: if x86_shift_count_imm8_ok(new_imm) {
+                new_imm
+            } else {
+                imm
+            },
+        },
+        X86Instruction::Ror { rd, imm } => X86Instruction::Ror {
             rd,
             imm: if x86_shift_count_imm8_ok(new_imm) {
                 new_imm
@@ -1833,13 +1924,18 @@ mod tests {
             .count();
         // 8 reg-reg families + 8 reg-imm families + 4 single-operand families
         // (NEG, NOT, INC, DEC) + 3 shift families (SHL, SHR, SAR over imm8
-        // counts) + CMOVcc over distinct pairs.
-        let expected_len =
-            8 * n * n + 8 * n * m + 4 * n + 3 * n * shift_m + n * (n - 1) * X86Condition::ALL.len();
+        // counts) + 2 rotate families (ROL, ROR over imm8 counts) + CMOVcc over
+        // distinct pairs.
+        let expected_len = 8 * n * n
+            + 8 * n * m
+            + 4 * n
+            + 3 * n * shift_m
+            + 2 * n * shift_m
+            + n * (n - 1) * X86Condition::ALL.len();
         assert_eq!(
             all.len(),
             expected_len,
-            "generate_all should only prune CMOV self-pairs and non-imm8 shift counts from the full pool"
+            "generate_all should only prune CMOV self-pairs and non-imm8 shift/rotate counts from the full pool"
         );
 
         // For each opcode_id, at least one variant must appear.
@@ -2007,12 +2103,14 @@ mod tests {
                 | X86Instruction::XorImm { imm, .. }
                 | X86Instruction::CmpImm { imm, .. }
                 | X86Instruction::TestImm { imm, .. }
-                // Shifts draw their count from the same shared `imm` slot in
-                // `generate_random_rewritable_x86_instruction`, so it is in the
-                // pool too.
+                // Shifts and rotates draw their count from the same shared
+                // `imm` slot in `generate_random_rewritable_x86_instruction`,
+                // so it is in the pool too.
                 | X86Instruction::Shl { imm, .. }
                 | X86Instruction::Shr { imm, .. }
-                | X86Instruction::Sar { imm, .. } => {
+                | X86Instruction::Sar { imm, .. }
+                | X86Instruction::Rol { imm, .. }
+                | X86Instruction::Ror { imm, .. } => {
                     assert!(imms.contains(&imm), "immediate {} outside pool", imm);
                 }
                 X86Instruction::MovReg { .. }
@@ -3123,10 +3221,13 @@ mod tests {
                 | X86Instruction::XorImm { imm, .. }
                 | X86Instruction::CmpImm { imm, .. }
                 | X86Instruction::TestImm { imm, .. }
-                // Shifts carry the same shared `imm` draw (0 for an empty pool).
+                // Shifts and rotates carry the same shared `imm` draw (0 for an
+                // empty pool).
                 | X86Instruction::Shl { imm, .. }
                 | X86Instruction::Shr { imm, .. }
-                | X86Instruction::Sar { imm, .. } => {
+                | X86Instruction::Sar { imm, .. }
+                | X86Instruction::Rol { imm, .. }
+                | X86Instruction::Ror { imm, .. } => {
                     saw_immediate_form = true;
                     assert_eq!(imm, 0);
                 }
@@ -3222,8 +3323,10 @@ mod tests {
             (20, X86Instruction::Shl { rd, imm }),
             (21, X86Instruction::Shr { rd, imm }),
             (22, X86Instruction::Sar { rd, imm }),
-            // Cmov stays last at COUNT - 1 == 23.
-            (23, X86Instruction::Cmov { rd, rs, cond }),
+            (23, X86Instruction::Rol { rd, imm }),
+            (24, X86Instruction::Ror { rd, imm }),
+            // Cmov stays last at COUNT - 1 == 25.
+            (25, X86Instruction::Cmov { rd, rs, cond }),
         ];
 
         for (opcode, want) in expected {
@@ -3260,7 +3363,9 @@ mod tests {
             (20, "shl"),
             (21, "shr"),
             (22, "sar"),
-            (23, "cmove"),
+            (23, "rol"),
+            (24, "ror"),
+            (25, "cmove"),
         ];
         for (opcode, mnem) in mnemonics {
             assert_eq!(
@@ -3702,11 +3807,14 @@ mod tests {
                     | X86Instruction::XorImm { .. }
                     | X86Instruction::CmpImm { .. }
                     | X86Instruction::TestImm { .. }
-                    // Shifts carry an imm8 count; the same encodability
-                    // invariant applies — `can_assemble` must accept them.
+                    // Shifts and rotates carry an imm8 count; the same
+                    // encodability invariant applies — `can_assemble` must
+                    // accept them.
                     | X86Instruction::Shl { .. }
                     | X86Instruction::Shr { .. }
-                    | X86Instruction::Sar { .. } => {
+                    | X86Instruction::Sar { .. }
+                    | X86Instruction::Rol { .. }
+                    | X86Instruction::Ror { .. } => {
                         saw_non_mov_immediate = true;
                         assert!(
                             <X86_64 as Assembler<X86Instruction>>::can_assemble(&X86_64, instr),
