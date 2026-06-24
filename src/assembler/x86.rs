@@ -187,6 +187,18 @@ fn encode_64(ops: &mut dynasmrt::x64::Assembler, instr: &X86Instruction) -> Resu
             dynasm!(ops ; .arch x64 ; cmp Rq(rn), imm);
             Ok(())
         }
+        X86Instruction::TestReg { rn, rs } => {
+            let rn = reg_index(*rn)?;
+            let rs = reg_index(*rs)?;
+            dynasm!(ops ; .arch x64 ; test Rq(rn), Rq(rs));
+            Ok(())
+        }
+        X86Instruction::TestImm { rn, imm } => {
+            let rn = reg_index(*rn)?;
+            let imm = signed_imm_i32(*imm)?;
+            dynasm!(ops ; .arch x64 ; test Rq(rn), imm);
+            Ok(())
+        }
         X86Instruction::Cmov { rd, rs, cond } => {
             let rd = reg_index(*rd)?;
             let rs = reg_index(*rs)?;
@@ -339,6 +351,18 @@ fn encode_32(ops: &mut dynasmrt::x86::Assembler, instr: &X86Instruction) -> Resu
             let rn = reg_index_32(*rn)?;
             let imm = imm32_bitpattern_i32(*imm)?;
             dynasm!(ops ; .arch x86 ; cmp Rd(rn), imm);
+            Ok(())
+        }
+        X86Instruction::TestReg { rn, rs } => {
+            let rn = reg_index_32(*rn)?;
+            let rs = reg_index_32(*rs)?;
+            dynasm!(ops ; .arch x86 ; test Rd(rn), Rd(rs));
+            Ok(())
+        }
+        X86Instruction::TestImm { rn, imm } => {
+            let rn = reg_index_32(*rn)?;
+            let imm = imm32_bitpattern_i32(*imm)?;
+            dynasm!(ops ; .arch x86 ; test Rd(rn), imm);
             Ok(())
         }
         X86Instruction::Cmov { rd, rs, cond } => {
@@ -636,6 +660,46 @@ mod tests {
             },
             "cmp",
             &["rax", "7"],
+        );
+    }
+
+    #[test]
+    fn test_variants_x86_64() {
+        check_x86_64(
+            X86Instruction::TestReg {
+                rn: X86Register::RAX,
+                rs: X86Register::RBX,
+            },
+            "test",
+            &["rax", "rbx"],
+        );
+        check_x86_64(
+            X86Instruction::TestImm {
+                rn: X86Register::RAX,
+                imm: 5,
+            },
+            "test",
+            &["rax", "5"],
+        );
+    }
+
+    #[test]
+    fn test_variants_x86_32() {
+        check_x86_32(
+            X86Instruction::TestReg {
+                rn: X86Register::RAX,
+                rs: X86Register::RBX,
+            },
+            "test",
+            &["eax", "ebx"],
+        );
+        check_x86_32(
+            X86Instruction::TestImm {
+                rn: X86Register::RAX,
+                imm: 5,
+            },
+            "test",
+            &["eax", "5"],
         );
     }
 

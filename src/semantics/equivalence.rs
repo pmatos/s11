@@ -981,16 +981,21 @@ where
     use crate::semantics::concrete_x86::apply_instruction_concrete_x86;
     use crate::semantics::state::X86ConcreteMachineState;
 
-    // Detect any CMP in either sequence — that's the trigger to also
-    // compare EFLAGS even if the caller didn't declare flags live.
-    let cmp_present = seq1.iter().chain(seq2.iter()).any(|i| {
+    // Detect any flags-only instruction (CMP or TEST) in either sequence —
+    // that's the trigger to also compare EFLAGS even if the caller didn't
+    // declare flags live. Both discard their result and exist solely for
+    // their EFLAGS effect, so a rewrite that drops or alters them must be
+    // caught on the flags even when no register is live-out.
+    let flags_only_present = seq1.iter().chain(seq2.iter()).any(|i| {
         matches!(
             i,
             crate::isa::x86::X86Instruction::CmpReg { .. }
                 | crate::isa::x86::X86Instruction::CmpImm { .. }
+                | crate::isa::x86::X86Instruction::TestReg { .. }
+                | crate::isa::x86::X86Instruction::TestImm { .. }
         )
     });
-    let flags_must_match = cmp_present || config.live_out.flags_live();
+    let flags_must_match = flags_only_present || config.live_out.flags_live();
 
     // Deterministic seed sequence: the first four are hand-picked
     // boundary cases (zero, one, an asymmetric bit pattern, all-ones);

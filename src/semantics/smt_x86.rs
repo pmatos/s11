@@ -336,6 +336,23 @@ pub fn apply_instruction(
             let flags = compute_eflags_sub(&lhs, &rhs, state.width());
             state.set_flags(flags);
         }
+        // TEST sets EFLAGS from `rn & rhs` (the AND/logical path: CF=OF=0,
+        // SF/ZF/PF from the result) without writing a register — the
+        // non-destructive sibling of AND, mirroring how CMP is to SUB.
+        X86Instruction::TestReg { rn, rs } => {
+            let lhs = state.get_register(*rn).clone();
+            let rhs = state.get_register(*rs).clone();
+            let result = lhs.bvand(&rhs);
+            let flags = compute_eflags_logical(&result, state.width());
+            state.set_flags(flags);
+        }
+        X86Instruction::TestImm { rn, imm } => {
+            let lhs = state.get_register(*rn).clone();
+            let rhs = state.imm_bv(*imm);
+            let result = lhs.bvand(&rhs);
+            let flags = compute_eflags_logical(&result, state.width());
+            state.set_flags(flags);
+        }
         X86Instruction::Cmov { rd, rs, cond } => {
             let pred = x86_condition_to_smt(*cond, state.get_flags());
             let rs_val = state.get_register(*rs).clone();
@@ -522,6 +539,74 @@ mod tests {
             solver.check(),
             SatResult::Unsat,
             "CF after CMP must equal (rax <u rbx)"
+        );
+    }
+
+    // --- symbolic TEST ---
+
+    #[test]
+    fn test_does_not_change_register_state() {
+        // TEST discards its result, so no register may change symbolically.
+        let s0 = MachineStateX86::new_symbolic("s", 64);
+        let rax_before = s0.get_register(X86Register::RAX).clone();
+        let s1 = apply_instruction(
+            s0,
+            &X86Instruction::TestReg {
+                rn: X86Register::RAX,
+                rs: X86Register::RBX,
+            },
+        );
+        let solver = Solver::new();
+        solver.assert(s1.get_register(X86Register::RAX).eq(&rax_before).not());
+        assert_eq!(
+            solver.check(),
+            SatResult::Unsat,
+            "TEST must leave RAX symbolically unchanged"
+        );
+    }
+
+    #[test]
+    fn test_rax_rax_equivalent_to_cmp_rax_zero_on_zf_sf_and_clears_cf_of() {
+        // The key correctness theorem for TEST. Both `test rax, rax` (computing
+        // `rax & rax == rax`) and `cmp rax, 0` (computing `rax - 0 == rax`)
+        // observe the value `rax`, so they must agree on the result-derived
+        // flags. We run both over states built with the SAME symbolic prefix,
+        // so both derive from one shared `rax` constant, then assert (by
+        // unsat-of-negation):
+        //   * ZF agrees  — both are 1 iff rax == 0,
+        //   * SF agrees  — both equal the top (sign) bit of rax, and
+        //   * CF and OF are constant-zero after TEST (logical semantics).
+        let after_test = apply_instruction(
+            MachineStateX86::new_symbolic("shared", 64),
+            &X86Instruction::TestReg {
+                rn: X86Register::RAX,
+                rs: X86Register::RAX,
+            },
+        );
+        let after_cmp = apply_instruction(
+            MachineStateX86::new_symbolic("shared", 64),
+            &X86Instruction::CmpImm {
+                rn: X86Register::RAX,
+                imm: 0,
+            },
+        );
+
+        let test_flags = after_test.get_flags();
+        let cmp_flags = after_cmp.get_flags();
+        let zero1 = BV::from_u64(0, 1);
+
+        // ZF and SF must match the CMP-with-zero baseline; CF/OF are zero.
+        let solver = Solver::new();
+        solver.assert(z3::ast::Bool::or(&[
+            &test_flags.zf.eq(cmp_flags.zf).not(),
+            &test_flags.sf.eq(cmp_flags.sf).not(),
+            &test_flags.cf.eq(&zero1).not(),
+            &test_flags.of.eq(&zero1).not(),
+        ]));
+        assert_eq!(
+            solver.check(),
+            SatResult::Unsat,
+            "TEST rax,rax must agree with CMP rax,0 on ZF/SF and clear CF/OF"
         );
     }
 
@@ -803,6 +888,17 @@ mod tests {
     #[test]
     fn parity_cmp_reg() {
         let instr = X86Instruction::CmpReg {
+            rn: X86Register::RAX,
+            rs: X86Register::RBX,
+        };
+        for &(a, b) in PARITY_SAMPLES {
+            assert_x86_concrete_smt_parity(&instr, a, b);
+        }
+    }
+
+    #[test]
+    fn parity_test_reg() {
+        let instr = X86Instruction::TestReg {
             rn: X86Register::RAX,
             rs: X86Register::RBX,
         };
