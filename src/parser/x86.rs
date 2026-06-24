@@ -382,6 +382,35 @@ fn x86_ir_from_mnemonic_impl(
         }));
     }
 
+    // IMUL is the FIRST x86 instruction with both a two-operand and a
+    // three-operand single-destination form, so it gets its own arity-aware
+    // branch ahead of the strictly-two-operand families below.
+    //   * `imul rd, rs`       -> ImulReg     (rd = rd * rs; rd read + written)
+    //   * `imul rd, rs, imm`  -> ImulRegImm  (rd = rs * imm; rd written only)
+    // The 1-operand RDX:RAX widening form (`imul rax`) is deferred and surfaces
+    // as `Ok(None)` (an unsupported shape), like an unknown mnemonic. The
+    // 3-operand register-source-with-register-count is not an IMUL shape; a
+    // third register operand is rejected here.
+    if mnemonic == "imul" {
+        let parts: Vec<&str> = op_str.split(',').map(|s| s.trim()).collect();
+        match parts.len() {
+            2 => {
+                let rd = parse_x86_register_with_mode(parts[0], mode)?;
+                let rs = parse_x86_register_with_mode(parts[1], mode)?;
+                return Ok(Some(X86Instruction::ImulReg { rd, rs }));
+            }
+            3 => {
+                let rd = parse_x86_register_with_mode(parts[0], mode)?;
+                let rs = parse_x86_register_with_mode(parts[1], mode)?;
+                let imm = parse_x86_immediate(parts[2])?;
+                return Ok(Some(X86Instruction::ImulRegImm { rd, rs, imm }));
+            }
+            // 1-operand widening form (deferred) and any other arity are
+            // unsupported shapes.
+            _ => return Ok(None),
+        }
+    }
+
     // Reject unsupported mnemonics before attempting operand parsing so
     // shapes outside the minimal core (e.g. LEA `rax, [rbx+1]`) surface
     // as "unsupported mnemonic" rather than a confusing downstream
@@ -491,8 +520,9 @@ fn x86_ir_from_mnemonic_impl(
 /// (`name:`), directives (`.foo`), and instructions whose mnemonic is
 /// one of the supported families (mov, add, sub, and, or, xor, cmp,
 /// test, the single-operand neg/not/inc/dec, the immediate-count shifts
-/// shl/sal/shr/sar, the immediate-count rotates rol/ror, plus the conditional
-/// cmovCC and jCC variants). Anything else is a parse error.
+/// shl/sal/shr/sar, the immediate-count rotates rol/ror, the two- and
+/// three-operand signed multiply imul, plus the conditional cmovCC and jCC
+/// variants). Anything else is a parse error.
 pub fn parse_x86_assembly_string(
     content: &str,
     source_name: String,
@@ -1135,6 +1165,80 @@ mod tests {
             X86Instruction::Ror {
                 rd: X86Register::RAX,
                 imm: 4
+            }
+        );
+    }
+
+    #[test]
+    fn imul_parses_two_and_three_operand_forms_and_round_trips_display() {
+        // `imul rax, rbx` -> ImulReg; `imul rax, rbx, 4` -> ImulRegImm. Display
+        // output round-trips back to the same IR for both forms.
+        let two = x86_ir_from_mnemonic("imul", "rax, rbx").unwrap().unwrap();
+        assert_eq!(
+            two,
+            X86Instruction::ImulReg {
+                rd: X86Register::RAX,
+                rs: X86Register::RBX,
+            }
+        );
+        assert_eq!(two.to_string(), "imul rax, rbx");
+
+        let three = x86_ir_from_mnemonic("imul", "rax, rbx, 4")
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            three,
+            X86Instruction::ImulRegImm {
+                rd: X86Register::RAX,
+                rs: X86Register::RBX,
+                imm: 4,
+            }
+        );
+        assert_eq!(three.to_string(), "imul rax, rbx, 4");
+
+        for instr in [two, three] {
+            let text = instr.to_string();
+            let (mnemonic, ops) = text.split_once(char::is_whitespace).unwrap();
+            assert_eq!(
+                x86_ir_from_mnemonic(mnemonic, ops).unwrap().unwrap(),
+                instr,
+                "round-trip failed for {text}"
+            );
+        }
+    }
+
+    #[test]
+    fn imul_one_operand_widening_form_is_rejected() {
+        // The 1-operand RDX:RAX widening IMUL is deferred: `imul rax` is an
+        // unsupported shape and surfaces as Ok(None), not an ImulReg.
+        assert!(x86_ir_from_mnemonic("imul", "rax").unwrap().is_none());
+        // A 4-operand shape is also unsupported.
+        assert!(
+            x86_ir_from_mnemonic("imul", "rax, rbx, 4, 5")
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn imul_round_trips_through_mode_aware_binary_path() {
+        assert_eq!(
+            x86_ir_from_mnemonic_for_mode("imul", "rax, rbx", X86ParseMode::Mode64)
+                .unwrap()
+                .unwrap(),
+            X86Instruction::ImulReg {
+                rd: X86Register::RAX,
+                rs: X86Register::RBX,
+            }
+        );
+        assert_eq!(
+            x86_ir_from_mnemonic_for_mode("imul", "eax, ebx, 4", X86ParseMode::Mode32)
+                .unwrap()
+                .unwrap(),
+            X86Instruction::ImulRegImm {
+                rd: X86Register::RAX,
+                rs: X86Register::RBX,
+                imm: 4,
             }
         );
     }

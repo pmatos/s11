@@ -372,6 +372,47 @@ fn apply_rotate_smt(
     state.set_flags(flags);
 }
 
+/// Lower a signed multiply (IMUL) symbolically — shared by the 2-operand
+/// (`rd = rd * rs`) and 3-operand (`rd = rs * imm`) forms. `lhs`/`rhs` are the
+/// width-`width` operand BVs; the result is the low `width` bits of the signed
+/// product written to `rd`.
+///
+/// FLAG MODEL (mirrors `concrete_x86::apply_imul` bit-for-bit): only CF and OF
+/// are architecturally defined. We detect signed overflow with a WIDE multiply:
+/// sign-extend both operands to `2*width`, `bvmul`, and check whether the full
+/// product equals the sign-extension of the truncated `width`-bit result. CF =
+/// OF = NOT(fits).
+///
+/// SF/ZF/PF are Intel-UNDEFINED; we model them deterministically from the
+/// truncated result via `compute_eflags_logical` (SF = MSB, ZF = result == 0,
+/// PF = low-byte parity). Both target and candidate share this lowering, so
+/// equivalence stays internally consistent and conservative. AF is not modelled
+/// (see module docs).
+fn apply_imul_smt(
+    state: &mut MachineStateX86,
+    rd: crate::isa::x86::X86Register,
+    lhs: &BV,
+    rhs: &BV,
+) {
+    let width = state.width();
+    // `sign_ext(width)` adds `width` bits, giving a 2*width-bit BV.
+    let wide = lhs.sign_ext(width).bvmul(rhs.sign_ext(width));
+    let result = lhs.bvmul(rhs);
+
+    // `result fits` iff the full 2*width product equals the sign-extension of
+    // the truncated low-`width` result; signed overflow is the negation.
+    let fits = wide.eq(result.sign_ext(width));
+    let overflow = fits.ite(&bv_zero(), &bv_one());
+
+    // SF/ZF/PF from the truncated result (Intel-undefined; modelled
+    // deterministically). CF/OF then overridden with the overflow bit.
+    let mut flags = compute_eflags_logical(&result, width);
+    flags.cf = overflow.clone();
+    flags.of = overflow;
+    state.set_register(rd, result);
+    state.set_flags(flags);
+}
+
 /// Apply a single x86 instruction symbolically. Arithmetic / logic /
 /// CMP arms bind the five tracked flag BVs via `compute_eflags_*`;
 /// CMOV reads them via `x86_condition_to_smt`.
@@ -555,6 +596,18 @@ pub fn apply_instruction(
         // `apply_rotate_smt`.
         X86Instruction::Rol { rd, imm } => apply_rotate_smt(&mut state, *rd, *imm, RotateKind::Rol),
         X86Instruction::Ror { rd, imm } => apply_rotate_smt(&mut state, *rd, *imm, RotateKind::Ror),
+        // IMUL (2-op): `rd = rd * rs`. rd is both source and destination.
+        X86Instruction::ImulReg { rd, rs } => {
+            let lhs = state.get_register(*rd).clone();
+            let rhs = state.get_register(*rs).clone();
+            apply_imul_smt(&mut state, *rd, &lhs, &rhs);
+        }
+        // IMUL (3-op): `rd = rs * imm`. rd is purely written.
+        X86Instruction::ImulRegImm { rd, rs, imm } => {
+            let lhs = state.get_register(*rs).clone();
+            let rhs = state.imm_bv(*imm);
+            apply_imul_smt(&mut state, *rd, &lhs, &rhs);
+        }
         X86Instruction::Cmov { rd, rs, cond } => {
             let pred = x86_condition_to_smt(*cond, state.get_flags());
             let rs_val = state.get_register(*rs).clone();
@@ -1769,6 +1822,149 @@ mod tests {
             0x1111_2222_3333_4444,
             0xAAAA_BBBB_CCCC_DDDD,
         );
+    }
+
+    // --- symbolic IMUL ---
+
+    // The DoD IMUL theorem: `imul rd, rs, 4` produces the same RESULT as the
+    // power-of-two shift `rs << 2`. We prove the negation of the truncated
+    // result equality is unsat over a shared symbolic input.
+    #[test]
+    fn imul_reg_imm_by_four_matches_shift_left_two() {
+        let state = MachineStateX86::new_symbolic("s", 64);
+        let rbx = state.get_register(X86Register::RBX).clone();
+        // rs << 2 at width 64.
+        let shifted = rbx.bvshl(BV::from_u64(2, 64));
+        let after = apply_instruction(
+            state,
+            &X86Instruction::ImulRegImm {
+                rd: X86Register::RAX,
+                rs: X86Register::RBX,
+                imm: 4,
+            },
+        );
+        let solver = Solver::new();
+        solver.assert(after.get_register(X86Register::RAX).eq(&shifted).not());
+        assert_eq!(
+            solver.check(),
+            SatResult::Unsat,
+            "imul rd, rbx, 4 must equal rbx << 2 on the truncated result"
+        );
+    }
+
+    // IMUL result is a plain bvmul of the (sign-irrelevant for the low bits)
+    // operands: `imul rax, rbx` writes `rax * rbx` truncated.
+    #[test]
+    fn imul_reg_result_equals_bvmul() {
+        let state = MachineStateX86::new_symbolic("s", 64);
+        let rax = state.get_register(X86Register::RAX).clone();
+        let rbx = state.get_register(X86Register::RBX).clone();
+        let product = rax.bvmul(&rbx);
+        let after = apply_instruction(
+            state,
+            &X86Instruction::ImulReg {
+                rd: X86Register::RAX,
+                rs: X86Register::RBX,
+            },
+        );
+        let solver = Solver::new();
+        solver.assert(after.get_register(X86Register::RAX).eq(&product).not());
+        assert_eq!(
+            solver.check(),
+            SatResult::Unsat,
+            "imul rax, rbx must write rax * rbx (truncated)"
+        );
+    }
+
+    // CF/OF overflow correctness: CF = OF, and CF = 1 iff the FULL signed
+    // product does not fit the truncated destination. We prove CF == OF always,
+    // and that CF == (signext64(rax)*signext64(rbx) != signext64(low64 product))
+    // — i.e. the wide-multiply overflow predicate — over a shared symbolic input.
+    #[test]
+    fn imul_reg_cf_of_track_signed_overflow() {
+        let state = MachineStateX86::new_symbolic("s", 64);
+        let rax = state.get_register(X86Register::RAX).clone();
+        let rbx = state.get_register(X86Register::RBX).clone();
+        let after = apply_instruction(
+            state,
+            &X86Instruction::ImulReg {
+                rd: X86Register::RAX,
+                rs: X86Register::RBX,
+            },
+        );
+        let cf = after.get_flags().cf.clone();
+        let of = after.get_flags().of.clone();
+
+        // Reference overflow predicate built independently of the lowering.
+        let wide = rax.sign_ext(64).bvmul(rbx.sign_ext(64));
+        let low = rax.bvmul(&rbx);
+        let fits = wide.eq(low.sign_ext(64));
+        let cf_one = BV::from_u64(1, 1);
+
+        // (1) CF == OF always.
+        {
+            let solver = Solver::new();
+            solver.assert(cf.eq(&of).not());
+            assert_eq!(solver.check(), SatResult::Unsat, "IMUL CF must equal OF");
+        }
+        // (2) CF == 1 iff NOT fits (signed overflow).
+        {
+            let solver = Solver::new();
+            let overflow = fits.not();
+            let iff = cf.eq(&cf_one).iff(&overflow);
+            solver.assert(iff.not());
+            assert_eq!(
+                solver.check(),
+                SatResult::Unsat,
+                "IMUL CF must be set iff the full signed product overflows the destination"
+            );
+        }
+    }
+
+    // Concrete/SMT parity for the 2-operand IMUL (rd = rax, rs = rbx) over the
+    // shared sample grid, covering result + all five tracked flags. This pins
+    // that the SMT lowering agrees with the concrete interpreter (including the
+    // deterministically-modelled SF/ZF/PF) for non-overflowing and overflowing
+    // inputs alike.
+    #[test]
+    fn parity_imul_reg() {
+        let instr = X86Instruction::ImulReg {
+            rd: X86Register::RAX,
+            rs: X86Register::RBX,
+        };
+        for &(a, b) in PARITY_SAMPLES {
+            assert_x86_concrete_smt_parity(&instr, a, b);
+        }
+    }
+
+    // Concrete/SMT parity for the 3-operand IMUL. The generic harness assumes
+    // `rd = rax`, `rs = rbx`, so `imul rax, rbx, imm` fits it directly: rax is
+    // purely written from rbx*imm.
+    #[test]
+    fn parity_imul_reg_imm() {
+        for imm in [
+            0i64,
+            1,
+            2,
+            4,
+            -1,
+            -4,
+            1000,
+            i32::MAX as i64,
+            i32::MIN as i64,
+        ] {
+            let instr = X86Instruction::ImulRegImm {
+                rd: X86Register::RAX,
+                rs: X86Register::RBX,
+                imm,
+            };
+            for &(a, b) in PARITY_SAMPLES {
+                // `a` (the rax pre-value) is irrelevant to the 3-operand form;
+                // the harness still seeds it, which is harmless since rd is
+                // purely written.
+                assert_x86_concrete_smt_parity(&instr, a, b);
+            }
+        }
     }
 
     #[test]

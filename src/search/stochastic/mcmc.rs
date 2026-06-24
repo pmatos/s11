@@ -1028,12 +1028,14 @@ mod tests {
         let mut search: StochasticSearch<X86_64> = StochasticSearch::new();
         let config = SearchConfig::default()
             .with_stochastic(
-                // Seed retuned from 1 to 2 when INC/DEC raised the rewritable
-                // opcode count to 21, shifting the seeded mutation trajectory
-                // so seed 1 no longer reached `mov rax, rbx` within 500 iters.
+                // Seed retuned to 1 when the two IMUL forms raised the
+                // rewritable opcode count to 28, shifting the seeded mutation
+                // trajectory. A 0..64 seed sweep confirms seed 1 reaches
+                // `mov rax, rbx` within 500 iters (many other seeds also work;
+                // 1 was picked as the lowest passing value).
                 StochasticConfig::default()
                     .with_iterations(500)
-                    .with_seed(2),
+                    .with_seed(1),
             )
             .with_x86_registers(vec![X86Register::RAX, X86Register::RBX, X86Register::RCX])
             .with_immediates(vec![0, 1]);

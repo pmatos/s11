@@ -101,6 +101,7 @@ Rewritable straight-line mnemonic families:
 - Single-operand: `neg`, `not`, `inc`, `dec`
 - Immediate-count shifts: `shl`/`sal`, `shr`, `sar`
 - Immediate-count rotates: `rol`, `ror`
+- Signed multiply: `imul` (2-operand `imul rd, rs` and 3-operand `imul rd, rs, imm`)
 - Conditional moves: `cmov<cond>`
 
 The data-movement/arithmetic/logical/comparison families have register and
@@ -128,8 +129,18 @@ unchanged. For a nonzero count, `rol` sets CF to bit 0 of the result (the bit
 rotated out of the MSB) and `ror` sets CF to the result's MSB; OF is defined only
 for a count of 1 (`rol`: `MSB(result) XOR CF`; `ror`: XOR of the result's two
 most-significant bits) and, like the shifts, is preserved (left at its incoming
-value) for count > 1. `cmov<cond>` has register operands and reads EFLAGS without
-modifying them.
+value) for count > 1. `imul` is signed multiply in two single-destination forms:
+the two-operand `imul rd, rs` computes `rd = rd * rs` (low `width` bits, `rd`
+read and written) and the three-operand `imul rd, rs, imm` computes
+`rd = rs * imm` (`rd` written only). For both, only CF and OF are
+architecturally defined: they are set iff the FULL signed product does not fit
+the truncated `width`-bit destination (signed overflow), and cleared otherwise.
+SF/ZF/PF are Intel-UNDEFINED; the model derives them deterministically from the
+truncated result (SF = MSB, ZF = result == 0, PF = low-byte parity) so the
+shared concrete/SMT lowering stays internally consistent (target and candidate
+agree), and AF follows the existing convention. The one-operand widening form
+(`imul rs`, writing RDX:RAX) is deferred. `cmov<cond>` has register operands and
+reads EFLAGS without modifying them.
 
 The x86 IR does not yet carry operand width. To avoid rewriting partial-width
 operations as full-width operations, the binary optimization path currently

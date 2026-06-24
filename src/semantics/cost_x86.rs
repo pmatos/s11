@@ -68,7 +68,12 @@ fn instruction_code_size(instr: &X86Instruction, width: u32) -> u64 {
         | X86Instruction::Shr { .. }
         | X86Instruction::Sar { .. }
         | X86Instruction::Rol { .. }
+        // IMUL rd, rs is `0F AF /r` = opcode (2) + ModR/M = 3 bytes (+REX.W).
+        | X86Instruction::ImulReg { .. }
         | X86Instruction::Ror { .. } => 3 + rex,
+        // IMUL rd, rs, imm is `69 /r id` = opcode + ModR/M + 4-byte imm
+        // = 6 bytes (+REX.W), mirroring the reg-imm arithmetic sizing.
+        X86Instruction::ImulRegImm { .. } => 6 + rex,
         X86Instruction::AddImm { .. }
         | X86Instruction::SubImm { .. }
         | X86Instruction::AndImm { .. }
