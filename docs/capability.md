@@ -98,7 +98,7 @@ with width-parameterised SMT equivalence.
 Rewritable straight-line mnemonic families:
 
 - `mov`, `add`, `sub`, `and`, `or`, `xor`, `cmp`, `test`
-- Single-operand: `neg`, `not`
+- Single-operand: `neg`, `not`, `inc`, `dec`
 - Conditional moves: `cmov<cond>`
 
 The data-movement/arithmetic/logical/comparison families have register and
@@ -107,7 +107,10 @@ flag-setting: each discards its result and writes only EFLAGS (`cmp` from a
 subtraction, `test` from a bitwise AND that clears CF/OF). `neg` and `not`
 are single-operand: `neg` computes `rd = -rd` and sets EFLAGS as if from
 `0 - rd` (CF = rd != 0), whereas `not` computes `rd = !rd` and leaves EFLAGS
-unchanged (like `mov`). `cmov<cond>` has register operands and reads EFLAGS
+unchanged (like `mov`). `inc` (`rd = rd + 1`) and `dec` (`rd = rd - 1`) are
+also single-operand and set OF/SF/ZF/PF as the corresponding `add`/`sub` by 1
+would, but — unlike `add`/`sub` — they preserve CF (the incoming carry flows
+through unchanged). `cmov<cond>` has register operands and reads EFLAGS
 without modifying them.
 
 The x86 IR does not yet carry operand width. To avoid rewriting partial-width
