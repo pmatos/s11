@@ -147,6 +147,10 @@ fn instruction_code_size(instr: &X86Instruction, width: u32) -> u64 {
         // IMUL rd, rs, imm is `69 /r id` = opcode + ModR/M + 4-byte imm
         // = 6 bytes (+REX.W), mirroring the reg-imm arithmetic sizing.
         X86Instruction::ImulRegImm { .. } => 6 + rex,
+        // LEA rd, [base + disp] is `8D /r` = opcode + ModR/M, plus a possible
+        // SIB byte (when base is RSP/R12) and a 4-byte disp32 = up to 7 bytes
+        // (+REX.W). A conservative upper bound for length-based pruning.
+        X86Instruction::Lea { .. } => 7 + rex,
         X86Instruction::AddImm { .. }
         | X86Instruction::SubImm { .. }
         | X86Instruction::AndImm { .. }
