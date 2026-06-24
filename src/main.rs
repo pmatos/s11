@@ -3902,6 +3902,107 @@ mod cli_helper_tests {
         );
     }
 
+    /// Dispatch coverage: `run_search` with `Algorithm::Stochastic` must route
+    /// to `run_x86_stochastic` and return `Ok`. Asserts only that the arm runs
+    /// and yields a well-typed result; a stochastic search is non-deterministic
+    /// in shape so we do not pin a specific optimization.
+    #[test]
+    fn x86_run_search_dispatches_stochastic_arm() {
+        let backend = X86OptimizationBackend::new(X86Arch::X86_64);
+        let cs = backend.disassembler().unwrap();
+        let mut opts = options_for(Algorithm::Stochastic);
+        opts.timeout = Some(Duration::from_millis(200));
+        opts.solver_timeout = Duration::from_millis(200);
+        opts.iterations = 50;
+        opts.cost_metric = CostMetric::CodeSize;
+        let context = OptimizationContext {
+            downstream_flags_live: false,
+        };
+
+        // 48 c7 c0 00 00 00 00 = mov rax, 0 (full-width source operand).
+        let instructions = cs
+            .disasm_all(&[0x48, 0xc7, 0xc0, 0x00, 0x00, 0x00, 0x00], 0x1000)
+            .unwrap();
+        let ir = backend.convert_ir(&instructions).unwrap();
+        let result = backend.run_search(&ir, &instructions, &opts, context);
+        let optimized = result.expect("stochastic dispatch arm must return Ok");
+        if let Some(seq) = optimized {
+            assert!(
+                !seq.is_empty(),
+                "a returned stochastic rewrite must be non-empty"
+            );
+        }
+    }
+
+    /// Dispatch coverage: `run_search` with `Algorithm::Enumerative` must route
+    /// to `run_x86_enumerative` and return `Ok`. A duplicate `mov rax, 0;
+    /// mov rax, 0` window has a dead first write, so the code-size enumerative
+    /// search deterministically collapses it to a single instruction.
+    #[test]
+    fn x86_run_search_dispatches_enumerative_arm() {
+        let backend = X86OptimizationBackend::new(X86Arch::X86_64);
+        let cs = backend.disassembler().unwrap();
+        let mut opts = options_for(Algorithm::Enumerative);
+        opts.timeout = Some(Duration::from_secs(5));
+        opts.solver_timeout = Duration::from_secs(5);
+        opts.cost_metric = CostMetric::CodeSize;
+        let context = OptimizationContext {
+            downstream_flags_live: false,
+        };
+
+        // 48 c7 c0 00 00 00 00 = mov rax, 0, written twice. The first write is
+        // dead, so the two-instruction window collapses to one.
+        let instructions = cs
+            .disasm_all(
+                &[
+                    0x48, 0xc7, 0xc0, 0x00, 0x00, 0x00, 0x00, // mov rax, 0
+                    0x48, 0xc7, 0xc0, 0x00, 0x00, 0x00, 0x00, // mov rax, 0
+                ],
+                0x1000,
+            )
+            .unwrap();
+        let ir = backend.convert_ir(&instructions).unwrap();
+        let optimized = backend
+            .run_search(&ir, &instructions, &opts, context)
+            .expect("enumerative dispatch arm must return Ok")
+            .expect("enumerative arm should collapse the duplicate-write window");
+        assert!(
+            optimized.len() < ir.len(),
+            "enumerative rewrite should be shorter than the duplicate window"
+        );
+    }
+
+    /// Dispatch coverage: the `Hybrid` and `Llm` arms are AArch64-only and must
+    /// be rejected by `run_search` even when a programmatic caller bypasses the
+    /// CLI-layer gate.
+    #[test]
+    fn x86_run_search_rejects_hybrid_arm() {
+        let backend = X86OptimizationBackend::new(X86Arch::X86_64);
+        let cs = backend.disassembler().unwrap();
+        let context = OptimizationContext {
+            downstream_flags_live: false,
+        };
+
+        // 48 c7 c0 00 00 00 00 = mov rax, 0.
+        let instructions = cs
+            .disasm_all(&[0x48, 0xc7, 0xc0, 0x00, 0x00, 0x00, 0x00], 0x1000)
+            .unwrap();
+        let ir = backend.convert_ir(&instructions).unwrap();
+
+        for algorithm in [Algorithm::Hybrid, Algorithm::Llm] {
+            let opts = options_for(algorithm);
+            let err = backend
+                .run_search(&ir, &instructions, &opts, context)
+                .expect_err("hybrid/llm arms are AArch64-only and must be rejected");
+            assert!(
+                err.to_string().contains("AArch64-only"),
+                "unexpected error for {:?}: {}",
+                algorithm,
+                err
+            );
+        }
+    }
+
     #[test]
     fn validate_x86_window_rejects_mid_window_jcc() {
         use isa::x86::{X86Condition, X86Instruction, X86Register};
