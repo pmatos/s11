@@ -371,6 +371,34 @@ pub fn apply_instruction(
             let result = state.get_register(*rd).bvnot();
             state.set_register(*rd, result);
         }
+        // INC computes `rd = rd + 1` and sets OF/SF/ZF/PF exactly as `add rd, 1`
+        // would, but — the load-bearing subtlety — leaves CF UNCHANGED (the
+        // incoming carry flows through). Capture the prior CF BV FIRST, compute
+        // the ADD flag path for `rd + 1`, then override CF back to the captured
+        // BV so it equals the incoming CF.
+        X86Instruction::Inc { rd } => {
+            let prev_cf = state.get_flags().cf.clone();
+            let old = state.get_register(*rd).clone();
+            let one = BV::from_u64(1, state.width());
+            let result = old.bvadd(&one);
+            let mut flags = compute_eflags_add(&old, &one, state.width());
+            flags.cf = prev_cf;
+            state.set_register(*rd, result);
+            state.set_flags(flags);
+        }
+        // DEC computes `rd = rd - 1`. Like INC it sets OF/SF/ZF/PF as `sub rd, 1`
+        // would while leaving CF UNCHANGED. Capture the prior CF BV first, derive
+        // flags from the SUB path for `rd - 1`, then restore CF.
+        X86Instruction::Dec { rd } => {
+            let prev_cf = state.get_flags().cf.clone();
+            let old = state.get_register(*rd).clone();
+            let one = BV::from_u64(1, state.width());
+            let result = old.bvsub(&one);
+            let mut flags = compute_eflags_sub(&old, &one, state.width());
+            flags.cf = prev_cf;
+            state.set_register(*rd, result);
+            state.set_flags(flags);
+        }
         X86Instruction::Cmov { rd, rs, cond } => {
             let pred = x86_condition_to_smt(*cond, state.get_flags());
             let rs_val = state.get_register(*rs).clone();
@@ -724,6 +752,150 @@ mod tests {
             SatResult::Unsat,
             "NOT must leave every EFLAGS bit unchanged"
         );
+    }
+
+    // --- symbolic INC / DEC ---
+
+    // The KEY INC theorem: `inc rd` and `add rd, 1` AGREE on the result and on
+    // OF/SF/ZF/PF, and differ EXACTLY in CF — `inc` leaves CF equal to the
+    // incoming CF, while `add rd, 1` derives CF from the addition (so it can
+    // differ from the incoming CF). We prove all three claims over one shared
+    // symbolic state (same incoming rax AND same incoming CF).
+    #[test]
+    fn inc_matches_add_one_except_cf_which_inc_preserves() {
+        let prefix = "shared";
+        let s_inc = MachineStateX86::new_symbolic(prefix, 64);
+        let s_add = MachineStateX86::new_symbolic(prefix, 64);
+        // Both share the same symbolic incoming CF (identical const name).
+        let incoming_cf = s_inc.get_flags().cf.clone();
+
+        let after_inc = apply_instruction(
+            s_inc,
+            &X86Instruction::Inc {
+                rd: X86Register::RAX,
+            },
+        );
+        let after_add = apply_instruction(
+            s_add,
+            &X86Instruction::AddImm {
+                rd: X86Register::RAX,
+                imm: 1,
+            },
+        );
+
+        let inc_flags = after_inc.get_flags();
+        let add_flags = after_add.get_flags();
+
+        // (1) result and OF/SF/ZF/PF agree: negation is unsat.
+        {
+            let solver = Solver::new();
+            solver.assert(z3::ast::Bool::or(&[
+                &after_inc
+                    .get_register(X86Register::RAX)
+                    .eq(after_add.get_register(X86Register::RAX))
+                    .not(),
+                &inc_flags.of.eq(add_flags.of).not(),
+                &inc_flags.sf.eq(add_flags.sf).not(),
+                &inc_flags.zf.eq(add_flags.zf).not(),
+                &inc_flags.pf.eq(add_flags.pf).not(),
+            ]));
+            assert_eq!(
+                solver.check(),
+                SatResult::Unsat,
+                "INC and ADD-1 must agree on result and OF/SF/ZF/PF"
+            );
+        }
+
+        // (2) INC's CF equals the incoming CF: negation is unsat.
+        {
+            let solver = Solver::new();
+            solver.assert(inc_flags.cf.eq(&incoming_cf).not());
+            assert_eq!(
+                solver.check(),
+                SatResult::Unsat,
+                "INC must leave CF == the incoming CF"
+            );
+        }
+
+        // (3) ADD-1's CF is NOT pinned to the incoming CF: there exists a model
+        // where they differ (e.g. rax = u64::MAX makes ADD carry to CF=1 while
+        // the incoming CF can be 0). A SAT result proves INC genuinely diverges
+        // from ADD-1 on CF.
+        {
+            let solver = Solver::new();
+            solver.assert(add_flags.cf.eq(&incoming_cf).not());
+            assert_eq!(
+                solver.check(),
+                SatResult::Sat,
+                "ADD-1's CF must be able to differ from the incoming CF"
+            );
+        }
+    }
+
+    // The DEC sibling theorem: `dec rd` and `sub rd, 1` agree on result and
+    // OF/SF/ZF/PF, but DEC preserves CF while SUB-1 derives it.
+    #[test]
+    fn dec_matches_sub_one_except_cf_which_dec_preserves() {
+        let prefix = "shared";
+        let s_dec = MachineStateX86::new_symbolic(prefix, 64);
+        let s_sub = MachineStateX86::new_symbolic(prefix, 64);
+        let incoming_cf = s_dec.get_flags().cf.clone();
+
+        let after_dec = apply_instruction(
+            s_dec,
+            &X86Instruction::Dec {
+                rd: X86Register::RAX,
+            },
+        );
+        let after_sub = apply_instruction(
+            s_sub,
+            &X86Instruction::SubImm {
+                rd: X86Register::RAX,
+                imm: 1,
+            },
+        );
+
+        let dec_flags = after_dec.get_flags();
+        let sub_flags = after_sub.get_flags();
+
+        {
+            let solver = Solver::new();
+            solver.assert(z3::ast::Bool::or(&[
+                &after_dec
+                    .get_register(X86Register::RAX)
+                    .eq(after_sub.get_register(X86Register::RAX))
+                    .not(),
+                &dec_flags.of.eq(sub_flags.of).not(),
+                &dec_flags.sf.eq(sub_flags.sf).not(),
+                &dec_flags.zf.eq(sub_flags.zf).not(),
+                &dec_flags.pf.eq(sub_flags.pf).not(),
+            ]));
+            assert_eq!(
+                solver.check(),
+                SatResult::Unsat,
+                "DEC and SUB-1 must agree on result and OF/SF/ZF/PF"
+            );
+        }
+
+        {
+            let solver = Solver::new();
+            solver.assert(dec_flags.cf.eq(&incoming_cf).not());
+            assert_eq!(
+                solver.check(),
+                SatResult::Unsat,
+                "DEC must leave CF == the incoming CF"
+            );
+        }
+
+        {
+            let solver = Solver::new();
+            solver.assert(sub_flags.cf.eq(&incoming_cf).not());
+            assert_eq!(
+                solver.check(),
+                SatResult::Sat,
+                "SUB-1's CF must be able to differ from the incoming CF"
+            );
+        }
     }
 
     // --- symbolic CMOV ---

@@ -209,6 +209,16 @@ fn encode_64(ops: &mut dynasmrt::x64::Assembler, instr: &X86Instruction) -> Resu
             dynasm!(ops ; .arch x64 ; not Rq(rd));
             Ok(())
         }
+        X86Instruction::Inc { rd } => {
+            let rd = reg_index(*rd)?;
+            dynasm!(ops ; .arch x64 ; inc Rq(rd));
+            Ok(())
+        }
+        X86Instruction::Dec { rd } => {
+            let rd = reg_index(*rd)?;
+            dynasm!(ops ; .arch x64 ; dec Rq(rd));
+            Ok(())
+        }
         X86Instruction::Cmov { rd, rs, cond } => {
             let rd = reg_index(*rd)?;
             let rs = reg_index(*rs)?;
@@ -383,6 +393,16 @@ fn encode_32(ops: &mut dynasmrt::x86::Assembler, instr: &X86Instruction) -> Resu
         X86Instruction::Not { rd } => {
             let rd = reg_index_32(*rd)?;
             dynasm!(ops ; .arch x86 ; not Rd(rd));
+            Ok(())
+        }
+        X86Instruction::Inc { rd } => {
+            let rd = reg_index_32(*rd)?;
+            dynasm!(ops ; .arch x86 ; inc Rd(rd));
+            Ok(())
+        }
+        X86Instruction::Dec { rd } => {
+            let rd = reg_index_32(*rd)?;
+            dynasm!(ops ; .arch x86 ; dec Rd(rd));
             Ok(())
         }
         X86Instruction::Cmov { rd, rs, cond } => {
@@ -755,6 +775,42 @@ mod tests {
                 rd: X86Register::RBX,
             },
             "not",
+            &["ebx"],
+        );
+    }
+
+    #[test]
+    fn inc_dec_variants_x86_64() {
+        check_x86_64(
+            X86Instruction::Inc {
+                rd: X86Register::RAX,
+            },
+            "inc",
+            &["rax"],
+        );
+        check_x86_64(
+            X86Instruction::Dec {
+                rd: X86Register::RBX,
+            },
+            "dec",
+            &["rbx"],
+        );
+    }
+
+    #[test]
+    fn inc_dec_variants_x86_32() {
+        check_x86_32(
+            X86Instruction::Inc {
+                rd: X86Register::RAX,
+            },
+            "inc",
+            &["eax"],
+        );
+        check_x86_32(
+            X86Instruction::Dec {
+                rd: X86Register::RBX,
+            },
+            "dec",
             &["ebx"],
         );
     }

@@ -43,6 +43,8 @@ pub fn apply_instruction_concrete_x86(
         X86Instruction::TestImm { rn, imm } => apply_test_imm(&mut state, *rn, *imm),
         X86Instruction::Neg { rd } => apply_neg(&mut state, *rd),
         X86Instruction::Not { rd } => apply_not(&mut state, *rd),
+        X86Instruction::Inc { rd } => apply_inc(&mut state, *rd),
+        X86Instruction::Dec { rd } => apply_dec(&mut state, *rd),
         X86Instruction::Cmov { rd, rs, cond } => {
             if state.get_flags().evaluate(*cond) {
                 let v = state.get_register(*rs);
@@ -113,6 +115,33 @@ fn apply_neg(state: &mut X86ConcreteMachineState, rd: crate::isa::x86::X86Regist
 fn apply_not(state: &mut X86ConcreteMachineState, rd: crate::isa::x86::X86Register) {
     let old = state.get_register(rd).as_u64();
     state.set_register(rd, ConcreteValue::new(!old));
+}
+
+// INC computes `rd = rd + 1`. It sets OF/SF/ZF/PF exactly as `add rd, 1` would,
+// but — the load-bearing subtlety — it leaves CF UNCHANGED (the incoming carry
+// flows through untouched). We capture the prior CF FIRST, compute the ADD flag
+// path for `rd + 1`, then override CF back to the captured value.
+fn apply_inc(state: &mut X86ConcreteMachineState, rd: crate::isa::x86::X86Register) {
+    let prev_cf = state.get_flags().cf;
+    let old = state.get_register(rd).as_u64();
+    let result = old.wrapping_add(1);
+    state.set_register(rd, ConcreteValue::new(result));
+    let mut flags = Eflags::from_add(old, 1, result, state.width());
+    flags.cf = prev_cf;
+    state.set_flags(flags);
+}
+
+// DEC computes `rd = rd - 1`. Like INC it sets OF/SF/ZF/PF as `sub rd, 1` would
+// while leaving CF UNCHANGED. Capture the prior CF first, derive flags from the
+// SUB path for `rd - 1`, then restore CF.
+fn apply_dec(state: &mut X86ConcreteMachineState, rd: crate::isa::x86::X86Register) {
+    let prev_cf = state.get_flags().cf;
+    let old = state.get_register(rd).as_u64();
+    let result = old.wrapping_sub(1);
+    state.set_register(rd, ConcreteValue::new(result));
+    let mut flags = Eflags::from_sub(old, 1, result, state.width());
+    flags.cf = prev_cf;
+    state.set_flags(flags);
 }
 
 #[derive(Clone, Copy)]
@@ -382,6 +411,97 @@ mod tests {
             flags_before,
             "NOT must leave EFLAGS unchanged"
         );
+    }
+
+    #[test]
+    fn inc_adds_one_and_sets_zf_sf_pf_of() {
+        // INC 0xFF -> 0x100: result nonzero, ZF clear, SF clear, no signed
+        // overflow.
+        let mut state = X86ConcreteMachineState::new_zeroed(64);
+        state.set_register(X86Register::RAX, ConcreteValue::new(0xFF));
+        let after = apply_instruction_concrete_x86(
+            state,
+            &X86Instruction::Inc {
+                rd: X86Register::RAX,
+            },
+        );
+        assert_eq!(after.get_register(X86Register::RAX).as_u64(), 0x100);
+        let flags = after.get_flags();
+        assert!(!flags.zf);
+        assert!(!flags.sf);
+        assert!(!flags.of);
+
+        // INC of -1 (all ones) wraps to 0: ZF set.
+        let mut state = X86ConcreteMachineState::new_zeroed(64);
+        state.set_register(X86Register::RAX, ConcreteValue::new(u64::MAX));
+        let after = apply_instruction_concrete_x86(
+            state,
+            &X86Instruction::Inc {
+                rd: X86Register::RAX,
+            },
+        );
+        assert_eq!(after.get_register(X86Register::RAX).as_u64(), 0);
+        assert!(after.get_flags().zf, "INC of -1 wraps to 0 -> ZF set");
+    }
+
+    #[test]
+    fn dec_subtracts_one_and_sets_zf_sf() {
+        // DEC 1 -> 0: ZF set.
+        let mut state = X86ConcreteMachineState::new_zeroed(64);
+        state.set_register(X86Register::RAX, ConcreteValue::new(1));
+        let after = apply_instruction_concrete_x86(
+            state,
+            &X86Instruction::Dec {
+                rd: X86Register::RAX,
+            },
+        );
+        assert_eq!(after.get_register(X86Register::RAX).as_u64(), 0);
+        assert!(after.get_flags().zf, "dec 1 -> 0 -> ZF set");
+
+        // DEC 0 -> -1 (all ones): SF set, ZF clear.
+        let state = X86ConcreteMachineState::new_zeroed(64);
+        let after = apply_instruction_concrete_x86(
+            state,
+            &X86Instruction::Dec {
+                rd: X86Register::RAX,
+            },
+        );
+        assert_eq!(after.get_register(X86Register::RAX).as_u64(), u64::MAX);
+        let flags = after.get_flags();
+        assert!(flags.sf, "dec 0 -> -1 -> SF set");
+        assert!(!flags.zf);
+    }
+
+    // The load-bearing INC/DEC subtlety: CF is preserved across the operation,
+    // unlike ADD/SUB which derive CF from the arithmetic. We assert this in
+    // both directions (CF=1 stays 1, CF=0 stays 0) for both INC and DEC.
+    #[test]
+    fn inc_dec_preserve_carry_flag() {
+        for instr in [
+            X86Instruction::Inc {
+                rd: X86Register::RAX,
+            },
+            X86Instruction::Dec {
+                rd: X86Register::RAX,
+            },
+        ] {
+            for cf_in in [true, false] {
+                let mut state = X86ConcreteMachineState::new_zeroed(64);
+                // Use a value where ADD/SUB by 1 would *change* CF if it were
+                // derived (e.g. u64::MAX: add 1 carries; sub 1 from 0 borrows),
+                // so a preserved CF is genuinely distinguishable.
+                state.set_register(X86Register::RAX, ConcreteValue::new(u64::MAX));
+                let mut flags = state.get_flags();
+                flags.cf = cf_in;
+                state.set_flags(flags);
+                let after = apply_instruction_concrete_x86(state, &instr);
+                assert_eq!(
+                    after.get_flags().cf,
+                    cf_in,
+                    "{instr:?} must preserve CF (incoming CF = {cf_in})"
+                );
+            }
+        }
     }
 
     #[test]

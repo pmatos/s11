@@ -363,12 +363,12 @@ fn x86_ir_from_mnemonic_impl(
         return Ok(Some(X86Instruction::Jcc { cond }));
     }
 
-    // NEG / NOT are the only SINGLE-operand families. They expect exactly
-    // one register operand: a comma in the operand string (e.g. the
+    // NEG / NOT / INC / DEC are the SINGLE-operand families. They expect
+    // exactly one register operand: a comma in the operand string (e.g. the
     // two-operand `neg rax, rbx`) is rejected as an unsupported shape via
     // `Ok(None)`, the same way an unknown mnemonic is. Handled here, ahead
     // of the two-operand families below which hard-require `parts.len() == 2`.
-    if matches!(mnemonic.as_str(), "neg" | "not") {
+    if matches!(mnemonic.as_str(), "neg" | "not" | "inc" | "dec") {
         let parts: Vec<&str> = op_str.split(',').map(|s| s.trim()).collect();
         if parts.len() != 1 {
             return Ok(None);
@@ -376,7 +376,9 @@ fn x86_ir_from_mnemonic_impl(
         let rd = parse_x86_register_with_mode(parts[0], mode)?;
         return Ok(Some(match mnemonic.as_str() {
             "neg" => X86Instruction::Neg { rd },
-            _ => X86Instruction::Not { rd },
+            "not" => X86Instruction::Not { rd },
+            "inc" => X86Instruction::Inc { rd },
+            _ => X86Instruction::Dec { rd },
         }));
     }
 
@@ -452,8 +454,8 @@ fn x86_ir_from_mnemonic_impl(
 /// Recognised lines: empty, comments (`;`, `//`, `#`), labels
 /// (`name:`), directives (`.foo`), and instructions whose mnemonic is
 /// one of the supported families (mov, add, sub, and, or, xor, cmp,
-/// test, the single-operand neg/not, plus the conditional cmovCC and
-/// jCC variants). Anything else is a parse error.
+/// test, the single-operand neg/not/inc/dec, plus the conditional cmovCC
+/// and jCC variants). Anything else is a parse error.
 pub fn parse_x86_assembly_string(
     content: &str,
     source_name: String,
@@ -881,6 +883,67 @@ mod tests {
         // rbx` is an unsupported shape and surfaces as Ok(None), not a Neg.
         assert!(x86_ir_from_mnemonic("neg", "rax, rbx").unwrap().is_none());
         assert!(x86_ir_from_mnemonic("not", "rax, rbx").unwrap().is_none());
+    }
+
+    #[test]
+    fn inc_dec_parse_single_operand_and_round_trip_display() {
+        // `inc rax` / `dec rax` parse to the single-operand variants and
+        // their Display output round-trips back to the same IR.
+        let inc = x86_ir_from_mnemonic("inc", "rax").unwrap().unwrap();
+        assert_eq!(
+            inc,
+            X86Instruction::Inc {
+                rd: X86Register::RAX
+            }
+        );
+        assert_eq!(inc.to_string(), "inc rax");
+
+        let dec = x86_ir_from_mnemonic("dec", "rax").unwrap().unwrap();
+        assert_eq!(
+            dec,
+            X86Instruction::Dec {
+                rd: X86Register::RAX
+            }
+        );
+        assert_eq!(dec.to_string(), "dec rax");
+
+        for instr in [inc, dec] {
+            let text = instr.to_string();
+            let (mnemonic, ops) = text.split_once(char::is_whitespace).unwrap();
+            assert_eq!(
+                x86_ir_from_mnemonic(mnemonic, ops).unwrap().unwrap(),
+                instr,
+                "round-trip failed for {text}"
+            );
+        }
+    }
+
+    #[test]
+    fn inc_dec_with_two_operands_is_rejected() {
+        // The single-operand families must reject a second operand: `inc rax,
+        // rbx` is an unsupported shape and surfaces as Ok(None), not an Inc.
+        assert!(x86_ir_from_mnemonic("inc", "rax, rbx").unwrap().is_none());
+        assert!(x86_ir_from_mnemonic("dec", "rax, rbx").unwrap().is_none());
+    }
+
+    #[test]
+    fn inc_dec_round_trip_through_mode_aware_binary_path() {
+        assert_eq!(
+            x86_ir_from_mnemonic_for_mode("inc", "rax", X86ParseMode::Mode64)
+                .unwrap()
+                .unwrap(),
+            X86Instruction::Inc {
+                rd: X86Register::RAX
+            }
+        );
+        assert_eq!(
+            x86_ir_from_mnemonic_for_mode("dec", "eax", X86ParseMode::Mode32)
+                .unwrap()
+                .unwrap(),
+            X86Instruction::Dec {
+                rd: X86Register::RAX
+            }
+        );
     }
 
     #[test]

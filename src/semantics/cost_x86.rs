@@ -58,7 +58,10 @@ fn instruction_code_size(instr: &X86Instruction, width: u32) -> u64 {
         | X86Instruction::TestReg { .. }
         // NEG / NOT are single-operand `F7 /3` / `F7 /2` = 2 bytes (+REX.W).
         | X86Instruction::Neg { .. }
-        | X86Instruction::Not { .. } => 2 + rex,
+        | X86Instruction::Not { .. }
+        // INC / DEC are single-operand `FF /0` / `FF /1` = 2 bytes (+REX.W).
+        | X86Instruction::Inc { .. }
+        | X86Instruction::Dec { .. } => 2 + rex,
         X86Instruction::AddImm { .. }
         | X86Instruction::SubImm { .. }
         | X86Instruction::AndImm { .. }
