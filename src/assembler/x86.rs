@@ -262,6 +262,13 @@ fn encode_64(ops: &mut dynasmrt::x64::Assembler, instr: &X86Instruction) -> Resu
             dynasm!(ops ; .arch x64 ; imul Rq(rd), Rq(rs), imm);
             Ok(())
         }
+        X86Instruction::Lea { rd, base, disp } => {
+            let rd = reg_index(*rd)?;
+            let base = reg_index(*base)?;
+            let disp = signed_imm_i32(*disp)?;
+            dynasm!(ops ; .arch x64 ; lea Rq(rd), [Rq(base) + disp]);
+            Ok(())
+        }
         X86Instruction::Cmov { rd, rs, cond } => {
             let rd = reg_index(*rd)?;
             let rs = reg_index(*rs)?;
@@ -499,6 +506,13 @@ fn encode_32(ops: &mut dynasmrt::x86::Assembler, instr: &X86Instruction) -> Resu
             let rs = reg_index_32(*rs)?;
             let imm = signed_imm_i32(*imm)?;
             dynasm!(ops ; .arch x86 ; imul Rd(rd), Rd(rs), imm);
+            Ok(())
+        }
+        X86Instruction::Lea { rd, base, disp } => {
+            let rd = reg_index_32(*rd)?;
+            let base = reg_index_32(*base)?;
+            let disp = signed_imm_i32(*disp)?;
+            dynasm!(ops ; .arch x86 ; lea Rd(rd), [Rd(base) + disp]);
             Ok(())
         }
         X86Instruction::Cmov { rd, rs, cond } => {
@@ -1058,6 +1072,66 @@ mod tests {
             },
             "imul",
             &["ecx", "edx", "7"],
+        );
+    }
+
+    // LEA `rd, [base + disp]` (8D /r). Capstone may canonicalize the disp
+    // formatting (hex, sign placement), so we assert the mnemonic is `lea` and
+    // the operand string mentions the destination and base registers plus the
+    // displacement magnitude — robust against `1` vs `0x1` rendering.
+    #[test]
+    fn lea_variants_x86_64() {
+        // Bare base (disp == 0).
+        check_x86_64(
+            X86Instruction::Lea {
+                rd: X86Register::RAX,
+                base: X86Register::RBX,
+                disp: 0,
+            },
+            "lea",
+            &["rax", "rbx"],
+        );
+        // Positive displacement.
+        check_x86_64(
+            X86Instruction::Lea {
+                rd: X86Register::RAX,
+                base: X86Register::RBX,
+                disp: 0x10,
+            },
+            "lea",
+            &["rax", "rbx", "0x10"],
+        );
+        // Extended base register round-trips.
+        check_x86_64(
+            X86Instruction::Lea {
+                rd: X86Register::R9,
+                base: X86Register::RAX,
+                disp: 1,
+            },
+            "lea",
+            &["r9", "rax"],
+        );
+    }
+
+    #[test]
+    fn lea_variants_x86_32() {
+        check_x86_32(
+            X86Instruction::Lea {
+                rd: X86Register::RAX,
+                base: X86Register::RBX,
+                disp: 0,
+            },
+            "lea",
+            &["eax", "ebx"],
+        );
+        check_x86_32(
+            X86Instruction::Lea {
+                rd: X86Register::RCX,
+                base: X86Register::RDX,
+                disp: 0x20,
+            },
+            "lea",
+            &["ecx", "edx", "0x20"],
         );
     }
 

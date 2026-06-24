@@ -17,6 +17,7 @@ use crate::search::SearchAlgorithm;
 use crate::search::candidate::generate_all_encodable_instructions;
 use crate::search::config::{Algorithm, SearchConfig};
 use crate::search::result::{SearchResultFor, SearchStatistics};
+use crate::semantics::cost::CostMetric;
 use crate::semantics::equivalence::{
     EquivalenceConfigFor, check_equivalence_for_metrics, check_equivalence_with_config_metrics,
 };
@@ -468,10 +469,47 @@ where
         .min()
 }
 
-fn length_cost_lower_bound(length: usize, min_instruction_cost: u64, terminator_cost: u64) -> u64 {
-    min_instruction_cost
-        .saturating_mul(length as u64)
-        .saturating_add(terminator_cost)
+/// Valid lower bound on the cost of any candidate of `length` instructions
+/// (plus the pinned terminator), used to prune whole lengths in the search.
+///
+/// **This MUST never exceed the real cost of any sequence of that length**, or
+/// the search would prune valid candidates and become unsound.
+///
+/// - `InstructionCount` / `CodeSize` are monotone per-instruction *sums*, so the
+///   tight, valid bound is `min_per_instruction_cost * length + terminator_cost`.
+/// - `Latency` is NOT a sum: it is the sequence's critical path
+///   (`cost_x86::critical_path_latency`, issue #622). A length-`L` candidate can
+///   have a critical path as small as the latency of a single independent
+///   instruction (e.g. `L` independent 1-cycle ops cost ~1, not `L`), so the
+///   multiply-by-length / add-terminator bound is INVALID here. The only
+///   provably-valid bound is the minimum single-instruction latency in the
+///   candidate pool: every non-empty sequence's critical path is
+///   `>= max_i latency(i) >= min_i latency(i)`, and `min_instruction_cost` /
+///   `terminator_cost` are exactly single-instruction critical paths
+///   (= isolated latencies). The bound is constant in `length` (looser, but
+///   correct — correctness over tightness).
+fn length_cost_lower_bound(
+    metric: &CostMetric,
+    length: usize,
+    min_instruction_cost: u64,
+    terminator_cost: u64,
+) -> u64 {
+    match metric {
+        CostMetric::Latency => {
+            // Critical-path cost: the cheapest non-empty sequence's critical
+            // path is the minimum single-instruction latency over the pool and
+            // the pinned terminator. Never grows with `length` and never
+            // exceeds the real critical path.
+            if terminator_cost == 0 {
+                min_instruction_cost
+            } else {
+                min_instruction_cost.min(terminator_cost)
+            }
+        }
+        CostMetric::InstructionCount | CostMetric::CodeSize => min_instruction_cost
+            .saturating_mul(length as u64)
+            .saturating_add(terminator_cost),
+    }
 }
 
 fn run_length_one<I>(
@@ -674,9 +712,11 @@ where
         let run_lengths = |s: &SharedState<I>| {
             // Search increasing lengths up to target.len()-1 so we never
             // propose a candidate as long as the target. The per-length cost
-            // lower bound is non-decreasing in length and `best_cost` only
-            // falls, so once a length cannot beat the current best no longer
-            // length can either — break out instead of scanning the rest.
+            // lower bound is non-decreasing in length (for the additive metrics
+            // it grows with length; for the critical-path `Latency` metric it is
+            // constant — still non-decreasing) and `best_cost` only falls, so
+            // once a length cannot beat the current best no longer length can
+            // either — break out instead of scanning the rest.
             for length in 1..target.len() {
                 if Self::timed_out(start, config.timeout) || s.stop.load(Ordering::Relaxed) {
                     break;
@@ -684,8 +724,12 @@ where
                 let Some(min_instruction_cost) = min_instruction_cost else {
                     break;
                 };
-                let lower_bound =
-                    length_cost_lower_bound(length, min_instruction_cost, terminator_cost);
+                let lower_bound = length_cost_lower_bound(
+                    &config.cost_metric,
+                    length,
+                    min_instruction_cost,
+                    terminator_cost,
+                );
                 if lower_bound >= s.best_cost.load(Ordering::Acquire) {
                     break;
                 }
@@ -2639,5 +2683,123 @@ mod tests {
         );
         assert!(result.statistics.smt_queries > 0);
         assert!(result.statistics.smt_equivalent > 0);
+    }
+
+    // --- Latency pruning-soundness (issue #622) ---
+    //
+    // The enumerative search prunes whole lengths via `length_cost_lower_bound`.
+    // Under the critical-path `Latency` cost this bound MUST still be a valid
+    // lower bound on the real cost of any sequence of that length, or the search
+    // would prune valid candidates. These tests guard that invariant.
+
+    #[test]
+    fn latency_lower_bound_is_constant_in_length() {
+        use crate::semantics::cost::CostMetric;
+        // For Latency the bound ignores `length` (the critical path of a
+        // length-L independent run is just the cheapest instruction's latency),
+        // so it must NOT grow with length the way the additive metrics do.
+        let m = CostMetric::Latency;
+        let min_instr = 1;
+        let term = 0;
+        assert_eq!(length_cost_lower_bound(&m, 1, min_instr, term), 1);
+        assert_eq!(length_cost_lower_bound(&m, 5, min_instr, term), 1);
+        assert_eq!(length_cost_lower_bound(&m, 50, min_instr, term), 1);
+        // With a terminator the bound is the min of the two single-instruction
+        // latencies, never their sum.
+        assert_eq!(length_cost_lower_bound(&m, 10, 3, 1), 1);
+        assert_eq!(length_cost_lower_bound(&m, 10, 1, 4), 1);
+        // The additive metrics still scale with length.
+        assert_eq!(length_cost_lower_bound(&CostMetric::CodeSize, 5, 2, 1), 11);
+        assert_eq!(
+            length_cost_lower_bound(&CostMetric::InstructionCount, 5, 1, 1),
+            6
+        );
+    }
+
+    proptest::proptest! {
+        #![proptest_config(proptest::prelude::ProptestConfig::with_cases(256))]
+
+        /// Pruning-soundness property: for many random supported x86 sequences,
+        /// the Latency `length_cost_lower_bound` for EVERY length up to the
+        /// sequence length must be `<=` the sequence's real critical-path cost.
+        /// A bound that ever exceeded the real cost would make the enumerative
+        /// search prune valid candidates.
+        #[test]
+        fn latency_length_lower_bound_never_exceeds_real_cost(
+            // Indices into the candidate pool; up to 6 instructions.
+            indices in proptest::collection::vec(proptest::prelude::any::<proptest::sample::Index>(), 1..=6),
+            with_terminator in proptest::prelude::any::<bool>(),
+        ) {
+            use crate::isa::X86_64;
+            use crate::isa::x86::{X86Instruction, X86Register, X86Condition};
+            use crate::semantics::cost::CostMetric;
+
+            let regs = vec![
+                X86Register::RAX,
+                X86Register::RBX,
+                X86Register::RCX,
+                X86Register::RDX,
+            ];
+            let imms = vec![0i64, 1, 7];
+            let pool: Vec<X86Instruction> =
+                <X86_64 as EnumerativeBackend<X86_64>>::enumerate_all(&regs, &imms);
+            proptest::prop_assume!(!pool.is_empty());
+
+            let seq: Vec<X86Instruction> =
+                indices.iter().map(|idx| *idx.get(&pool)).collect();
+
+            // The pinned terminator (x86 Jcc) the search would reattach.
+            let terminator = if with_terminator {
+                Some(X86Instruction::Jcc { cond: X86Condition::NE })
+            } else {
+                None
+            };
+
+            let m = CostMetric::Latency;
+            let cfg = SearchConfig::default().with_cost_metric(m);
+            // Reproduce exactly what `search()` computes for the bound inputs.
+            let min_instruction_cost = pool
+                .iter()
+                .map(|i| {
+                    <X86_64 as EnumerativeBackend<X86_64>>::sequence_cost(
+                        std::slice::from_ref(i),
+                        &cfg,
+                    )
+                })
+                .min()
+                .unwrap();
+            let terminator_cost = terminator
+                .map(|t| {
+                    <X86_64 as EnumerativeBackend<X86_64>>::sequence_cost(
+                        std::slice::from_ref(&t),
+                        &cfg,
+                    )
+                })
+                .unwrap_or(0);
+
+            // The search evaluates candidates of EXACTLY `length` instructions at
+            // each length (plus the pinned terminator). The bound for that length
+            // must not exceed the real cost of any such candidate; we sample one
+            // real candidate per length — the random prefix of that length.
+            for length in 1..=seq.len() {
+                let lb = length_cost_lower_bound(
+                    &m,
+                    length,
+                    min_instruction_cost,
+                    terminator_cost,
+                );
+                let mut candidate = seq[..length].to_vec();
+                if let Some(t) = terminator {
+                    candidate.push(t);
+                }
+                let real_cost =
+                    <X86_64 as EnumerativeBackend<X86_64>>::sequence_cost(&candidate, &cfg);
+                proptest::prop_assert!(
+                    lb <= real_cost,
+                    "Latency lower bound {lb} exceeded real critical-path cost \
+                     {real_cost} at length {length} (candidate={candidate:?})"
+                );
+            }
+        }
     }
 }

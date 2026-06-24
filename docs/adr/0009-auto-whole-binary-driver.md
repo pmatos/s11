@@ -154,9 +154,15 @@ can reconstruct *why* the window-selection rules are as conservative as they are
     `src/semantics/cost_x86.rs`). Crucially, the driver does **not** introduce any
     new notion of "faster": it inherits the current cost model verbatim, and that
     model's fidelity is a real limit (see Open questions). Calling `--auto` a
-    "speed optimizer" is therefore only as true as the chosen metric — and on x86
-    today the `latency` metric is a stub equal to instruction count, so `--auto`
-    on `/bin/ls` optimizes *instruction count*, not measured speed.
+    "speed optimizer" is therefore only as true as the chosen metric. The x86
+    `latency` metric is no longer a stub: as of issue #622 it is a critical-path /
+    dependency-aware sequence cost (`critical_path_latency` in
+    `src/semantics/cost_x86.rs`) over an Agner-Fog Skylake per-opcode table, so a
+    serial dependency chain costs more than the same number of independent
+    instructions. It is still an *idealized* out-of-order model (unbounded ports,
+    no front-end / memory effects), but `--auto --cost-metric latency` on x86 now
+    genuinely discriminates dependency-bound from parallel code rather than
+    re-deriving instruction count.
 
 11. **Initial ISA scope is whatever the per-window path already supports.** The
     driver is ISA-agnostic by construction, so it lights up for AArch64 and x86
@@ -221,11 +227,25 @@ maintenance cost, deleting the `--auto` arm leaves the rest of the tool intact.
 - **Cost-model fidelity is the precondition for honestly calling this a speed
   optimizer.** The search accepts a window only when an equivalent candidate has
   strictly lower cost under the selected metric, so "we know it is better" reduces
-  to "the metric says so". Today the `latency` metric is a static, additive
-  per-opcode sum with no modelling of dependency chains, superscalar/out-of-order
-  issue, micro-op fusion, port/throughput contention, or memory latency
-  (`instruction_latency` in `src/semantics/cost.rs` is a hand-tuned Cortex-A72/A76
-  table; the x86 `instruction_latency` in `src/semantics/cost_x86.rs` returns 1
-  for every opcode, i.e. it is identical to instruction count). A real
-  microarchitectural cost model is out of scope for this ADR but is tracked as a
-  separate issue, and `--auto`'s "speed" claim is bounded by it.
+  to "the metric says so". The AArch64 `latency` metric is still a static,
+  additive per-opcode sum (`instruction_latency` in `src/semantics/cost.rs`, a
+  hand-tuned Cortex-A72/A76 table) with no modelling of dependency chains,
+  superscalar/out-of-order issue, micro-op fusion, port/throughput contention, or
+  memory latency. The x86 `latency` metric was a per-opcode flat sum identical to
+  instruction count until issue #622, which replaced it with a critical-path
+  sequence cost (`critical_path_latency` in `src/semantics/cost_x86.rs`): it walks
+  register/EFLAGS def-use chains over an Agner-Fog Skylake per-opcode latency
+  table, so dependency-bound code costs more than independent code, and IMUL
+  (3-cycle) costs more than ADD (1-cycle). It still abstracts away port
+  contention, the front end, and memory latency, so it is an idealized OoO model,
+  not a cycle-accurate one. A fuller microarchitectural cost model (and lifting
+  the same treatment to AArch64) remains out of scope for this ADR and is tracked
+  separately; `--auto`'s "speed" claim is bounded by the model's fidelity.
+
+  Note on pruning: because the x86 critical-path cost is no longer a monotone sum,
+  the enumerative search's per-length pruning lower bound was re-derived to stay a
+  valid lower bound under it — for `latency` the bound is the minimum
+  single-instruction latency in the candidate pool (constant in length), which is
+  `<=` every non-empty sequence's critical path. See the "Pruning soundness"
+  section of the `src/semantics/cost_x86.rs` module doc-comment and
+  `length_cost_lower_bound` in `src/search/enumerative/search.rs`.
