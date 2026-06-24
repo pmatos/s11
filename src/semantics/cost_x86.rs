@@ -62,6 +62,11 @@ fn instruction_code_size(instr: &X86Instruction, width: u32) -> u64 {
         // INC / DEC are single-operand `FF /0` / `FF /1` = 2 bytes (+REX.W).
         | X86Instruction::Inc { .. }
         | X86Instruction::Dec { .. } => 2 + rex,
+        // SHL / SHR / SAR by imm8 are `C1 /n ib` = opcode + ModR/M + imm8
+        // = 3 bytes (+REX.W).
+        X86Instruction::Shl { .. }
+        | X86Instruction::Shr { .. }
+        | X86Instruction::Sar { .. } => 3 + rex,
         X86Instruction::AddImm { .. }
         | X86Instruction::SubImm { .. }
         | X86Instruction::AndImm { .. }

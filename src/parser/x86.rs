@@ -388,7 +388,19 @@ fn x86_ir_from_mnemonic_impl(
     // immediate parse error.
     if !matches!(
         mnemonic.as_str(),
-        "mov" | "movabs" | "add" | "sub" | "and" | "or" | "xor" | "cmp" | "test"
+        "mov"
+            | "movabs"
+            | "add"
+            | "sub"
+            | "and"
+            | "or"
+            | "xor"
+            | "cmp"
+            | "test"
+            | "shl"
+            | "sal"
+            | "shr"
+            | "sar"
     ) {
         return Ok(None);
     }
@@ -443,6 +455,18 @@ fn x86_ir_from_mnemonic_impl(
             |rn, rs| X86Instruction::TestReg { rn, rs },
             |rn, imm| X86Instruction::TestImm { rn, imm },
         ),
+        // SHL/SAL, SHR, SAR take a register plus an immediate COUNT. `sal`
+        // assembles identically to `shl`, so it parses to `Shl`. Only the
+        // immediate-count form is modelled — the register (CL) count form is
+        // deferred and surfaces as `Ok(None)` (an unsupported shape).
+        "shl" | "sal" | "shr" | "sar" => match src_op {
+            X86Operand::Immediate(imm) => Ok(Some(match mnemonic.as_str() {
+                "shl" | "sal" => X86Instruction::Shl { rd, imm },
+                "shr" => X86Instruction::Shr { rd, imm },
+                _ => X86Instruction::Sar { rd, imm },
+            })),
+            X86Operand::Register(_) => Ok(None),
+        },
         _ => Ok(None),
     }
 }
@@ -454,8 +478,9 @@ fn x86_ir_from_mnemonic_impl(
 /// Recognised lines: empty, comments (`;`, `//`, `#`), labels
 /// (`name:`), directives (`.foo`), and instructions whose mnemonic is
 /// one of the supported families (mov, add, sub, and, or, xor, cmp,
-/// test, the single-operand neg/not/inc/dec, plus the conditional cmovCC
-/// and jCC variants). Anything else is a parse error.
+/// test, the single-operand neg/not/inc/dec, the immediate-count shifts
+/// shl/sal/shr/sar, plus the conditional cmovCC and jCC variants). Anything
+/// else is a parse error.
 pub fn parse_x86_assembly_string(
     content: &str,
     source_name: String,
@@ -947,6 +972,94 @@ mod tests {
     }
 
     #[test]
+    fn shift_parse_register_plus_count_and_round_trip_display() {
+        // shl / shr / sar parse to the immediate-count variants and Display
+        // round-trips back to the same IR.
+        let shl = x86_ir_from_mnemonic("shl", "rax, 1").unwrap().unwrap();
+        assert_eq!(
+            shl,
+            X86Instruction::Shl {
+                rd: X86Register::RAX,
+                imm: 1
+            }
+        );
+        assert_eq!(shl.to_string(), "shl rax, 1");
+
+        let shr = x86_ir_from_mnemonic("shr", "rbx, 3").unwrap().unwrap();
+        assert_eq!(
+            shr,
+            X86Instruction::Shr {
+                rd: X86Register::RBX,
+                imm: 3
+            }
+        );
+
+        let sar = x86_ir_from_mnemonic("sar", "rcx, 7").unwrap().unwrap();
+        assert_eq!(
+            sar,
+            X86Instruction::Sar {
+                rd: X86Register::RCX,
+                imm: 7
+            }
+        );
+
+        for instr in [shl, shr, sar] {
+            let text = instr.to_string();
+            let (mnemonic, ops) = text.split_once(char::is_whitespace).unwrap();
+            assert_eq!(
+                x86_ir_from_mnemonic(mnemonic, ops).unwrap().unwrap(),
+                instr,
+                "round-trip failed for {text}"
+            );
+        }
+    }
+
+    #[test]
+    fn sal_parses_to_shl() {
+        // SAL and SHL assemble identically; the parser folds `sal` into `Shl`.
+        assert_eq!(
+            x86_ir_from_mnemonic("sal", "rax, 2").unwrap().unwrap(),
+            X86Instruction::Shl {
+                rd: X86Register::RAX,
+                imm: 2
+            }
+        );
+    }
+
+    #[test]
+    fn shift_with_register_count_is_rejected() {
+        // The CL-register-count form is deferred: `shl rax, rcx` is an
+        // unsupported shape and surfaces as Ok(None), not a Shl.
+        assert!(x86_ir_from_mnemonic("shl", "rax, rcx").unwrap().is_none());
+        assert!(x86_ir_from_mnemonic("shr", "rax, rcx").unwrap().is_none());
+        assert!(x86_ir_from_mnemonic("sar", "rax, rcx").unwrap().is_none());
+        // A single operand (no count) is also an unsupported shape.
+        assert!(x86_ir_from_mnemonic("shl", "rax").unwrap().is_none());
+    }
+
+    #[test]
+    fn shift_round_trip_through_mode_aware_binary_path() {
+        assert_eq!(
+            x86_ir_from_mnemonic_for_mode("shl", "rax, 1", X86ParseMode::Mode64)
+                .unwrap()
+                .unwrap(),
+            X86Instruction::Shl {
+                rd: X86Register::RAX,
+                imm: 1
+            }
+        );
+        assert_eq!(
+            x86_ir_from_mnemonic_for_mode("sar", "eax, 4", X86ParseMode::Mode32)
+                .unwrap()
+                .unwrap(),
+            X86Instruction::Sar {
+                rd: X86Register::RAX,
+                imm: 4
+            }
+        );
+    }
+
+    #[test]
     fn neg_not_round_trip_through_mode_aware_binary_path() {
         assert_eq!(
             x86_ir_from_mnemonic_for_mode("neg", "rax", X86ParseMode::Mode64)
@@ -970,8 +1083,12 @@ mod tests {
     fn x86_ir_unsupported_mnemonic_returns_none() {
         assert!(x86_ir_from_mnemonic("ret", "").unwrap().is_none());
         assert!(x86_ir_from_mnemonic("jmp", "0x1234").unwrap().is_none());
-        // Two-operand "shl" not in the minimal set.
-        assert!(x86_ir_from_mnemonic("shl", "rax, 1").unwrap().is_none());
+        // `lea` is outside the supported set (memory operands unmodelled).
+        assert!(
+            x86_ir_from_mnemonic("lea", "rax, [rbx+1]")
+                .unwrap()
+                .is_none()
+        );
     }
 
     // ---- New: parse_x86_assembly_string ----

@@ -99,6 +99,7 @@ Rewritable straight-line mnemonic families:
 
 - `mov`, `add`, `sub`, `and`, `or`, `xor`, `cmp`, `test`
 - Single-operand: `neg`, `not`, `inc`, `dec`
+- Immediate-count shifts: `shl`/`sal`, `shr`, `sar`
 - Conditional moves: `cmov<cond>`
 
 The data-movement/arithmetic/logical/comparison families have register and
@@ -110,8 +111,16 @@ are single-operand: `neg` computes `rd = -rd` and sets EFLAGS as if from
 unchanged (like `mov`). `inc` (`rd = rd + 1`) and `dec` (`rd = rd - 1`) are
 also single-operand and set OF/SF/ZF/PF as the corresponding `add`/`sub` by 1
 would, but — unlike `add`/`sub` — they preserve CF (the incoming carry flows
-through unchanged). `cmov<cond>` has register operands and reads EFLAGS
-without modifying them.
+through unchanged). `shl`/`sal`, `shr`, and `sar` are immediate-count shifts:
+the count is a compile-time constant masked to `width-1` (the CL-register-count
+form is not yet modelled). A masked count of 0 leaves the register and ALL
+flags unchanged; for a nonzero count SF/ZF/PF come from the result and CF is the
+last bit shifted out. OF is architecturally defined only for a count of 1 and
+is UNDEFINED for larger counts; the model uses the count-1 OF formula for every
+nonzero count as a deterministic, internally-consistent value, so downstream
+code must not rely on OF after a count > 1 shift. `sal` assembles identically to
+`shl` and parses to the same IR. `cmov<cond>` has register operands and reads
+EFLAGS without modifying them.
 
 The x86 IR does not yet carry operand width. To avoid rewriting partial-width
 operations as full-width operations, the binary optimization path currently

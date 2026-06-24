@@ -227,6 +227,77 @@ pub fn compute_eflags_logical(result: &BV, width: u32) -> EflagsBvs {
     }
 }
 
+#[derive(Clone, Copy)]
+enum ShiftKind {
+    Shl,
+    Shr,
+    Sar,
+}
+
+/// Lower an immediate-count shift symbolically. The count is a CONCRETE IR
+/// value, so we mask it in Rust and branch on the result — there is no
+/// symbolic-count handling. The flag model mirrors the concrete interpreter
+/// (`semantics::concrete_x86::apply_shift`) bit-for-bit:
+///
+/// * `eff == 0`: leave `rd` and ALL flags untouched (a shift by 0 is a no-op).
+/// * `eff != 0`: SF/ZF/PF from the result; CF is the last bit shifted out
+///   (`extract` of the exact source bit index); OF is architecturally defined
+///   only for count 1. For count > 1 OF is UNDEFINED on hardware — we model it
+///   with the SAME formula as count 1 (a deterministic value). Target and
+///   candidate share this lowering, so equivalence stays internally
+///   consistent; downstream code must not rely on OF after a count > 1 shift.
+fn apply_shift_smt(
+    state: &mut MachineStateX86,
+    rd: crate::isa::x86::X86Register,
+    imm: i64,
+    kind: ShiftKind,
+) {
+    let width = state.width();
+    let mask = u64::from(width - 1);
+    let eff = (imm as u64) & mask;
+
+    // Count masks to 0: no register or flag change.
+    if eff == 0 {
+        return;
+    }
+
+    let old = state.get_register(rd).clone();
+    let amount = BV::from_u64(eff, width);
+    let result = match kind {
+        ShiftKind::Shl => old.bvshl(&amount),
+        ShiftKind::Shr => old.bvlshr(&amount),
+        ShiftKind::Sar => old.bvashr(&amount),
+    };
+
+    // CF is the last bit shifted out of the original operand. Since `eff` is
+    // concrete we extract the exact bit index.
+    let cf = match kind {
+        // SHL: original bit at index `width - eff`.
+        ShiftKind::Shl => {
+            let bit = width - eff as u32;
+            old.extract(bit, bit)
+        }
+        // SHR / SAR: original bit at index `eff - 1`.
+        ShiftKind::Shr | ShiftKind::Sar => {
+            let bit = eff as u32 - 1;
+            old.extract(bit, bit)
+        }
+    };
+
+    // OF: count-1 formula, reused for all nonzero counts (see doc comment).
+    let of = match kind {
+        ShiftKind::Shl => top_bit_bv(&result, width).bvxor(&cf),
+        ShiftKind::Shr => top_bit_bv(&old, width),
+        ShiftKind::Sar => bv_zero(),
+    };
+
+    let mut flags = compute_eflags_logical(&result, width);
+    flags.cf = cf;
+    flags.of = of;
+    state.set_register(rd, result);
+    state.set_flags(flags);
+}
+
 /// Apply a single x86 instruction symbolically. Arithmetic / logic /
 /// CMP arms bind the five tracked flag BVs via `compute_eflags_*`;
 /// CMOV reads them via `x86_condition_to_smt`.
@@ -399,6 +470,12 @@ pub fn apply_instruction(
             state.set_register(*rd, result);
             state.set_flags(flags);
         }
+        // Immediate-count shifts. The count is a concrete IR value, so we branch
+        // on the masked count at lowering time — no symbolic-count handling is
+        // needed. See `apply_shift_smt`.
+        X86Instruction::Shl { rd, imm } => apply_shift_smt(&mut state, *rd, *imm, ShiftKind::Shl),
+        X86Instruction::Shr { rd, imm } => apply_shift_smt(&mut state, *rd, *imm, ShiftKind::Shr),
+        X86Instruction::Sar { rd, imm } => apply_shift_smt(&mut state, *rd, *imm, ShiftKind::Sar),
         X86Instruction::Cmov { rd, rs, cond } => {
             let pred = x86_condition_to_smt(*cond, state.get_flags());
             let rs_val = state.get_register(*rs).clone();
@@ -896,6 +973,132 @@ mod tests {
                 "SUB-1's CF must be able to differ from the incoming CF"
             );
         }
+    }
+
+    // --- symbolic SHL / SHR / SAR ---
+
+    // The DoD SHL theorem: `shl rd, 1` is equivalent to `add rd, rd` on the
+    // RESULT, ZF, and SF. (CF, OF, and PF may differ — `add` derives CF from
+    // the addition and OF from signed overflow, while SHL's CF is the bit
+    // shifted out and OF is `MSB(result) XOR CF`; we deliberately assert only
+    // result + ZF + SF agree.) We prove the negation of that conjunction is
+    // unsat over a shared symbolic input.
+    #[test]
+    fn shl_one_matches_add_self_on_result_zf_sf() {
+        let prefix = "shared";
+        let s_shl = MachineStateX86::new_symbolic(prefix, 64);
+        let s_add = MachineStateX86::new_symbolic(prefix, 64);
+
+        let after_shl = apply_instruction(
+            s_shl,
+            &X86Instruction::Shl {
+                rd: X86Register::RAX,
+                imm: 1,
+            },
+        );
+        // `add rax, rax` doubles rax, exactly like a 1-bit left shift.
+        let after_add = apply_instruction(
+            s_add,
+            &X86Instruction::AddReg {
+                rd: X86Register::RAX,
+                rs: X86Register::RAX,
+            },
+        );
+
+        let shl_flags = after_shl.get_flags();
+        let add_flags = after_add.get_flags();
+
+        let solver = Solver::new();
+        solver.assert(z3::ast::Bool::or(&[
+            &after_shl
+                .get_register(X86Register::RAX)
+                .eq(after_add.get_register(X86Register::RAX))
+                .not(),
+            &shl_flags.zf.eq(add_flags.zf).not(),
+            &shl_flags.sf.eq(add_flags.sf).not(),
+        ]));
+        assert_eq!(
+            solver.check(),
+            SatResult::Unsat,
+            "shl rax, 1 and add rax, rax must agree on result, ZF and SF"
+        );
+    }
+
+    // The eff == 0 case: a shift whose masked count is 0 must leave the
+    // register AND all five tracked flags BIT-IDENTICAL to the incoming state.
+    // We prove the disjunction "rd changed OR any flag changed" is unsat.
+    #[test]
+    fn shift_by_zero_preserves_register_and_all_flags_smt() {
+        for instr in [
+            X86Instruction::Shl {
+                rd: X86Register::RAX,
+                imm: 0,
+            },
+            X86Instruction::Shr {
+                rd: X86Register::RAX,
+                imm: 0,
+            },
+            X86Instruction::Sar {
+                rd: X86Register::RAX,
+                imm: 0,
+            },
+            // 64 masks to 0 at width 64.
+            X86Instruction::Sar {
+                rd: X86Register::RAX,
+                imm: 64,
+            },
+        ] {
+            let before = MachineStateX86::new_symbolic("s", 64);
+            let old_reg = before.get_register(X86Register::RAX).clone();
+            let old_flags = before.get_flags();
+            let (old_cf, old_pf, old_zf, old_sf, old_of) = (
+                old_flags.cf.clone(),
+                old_flags.pf.clone(),
+                old_flags.zf.clone(),
+                old_flags.sf.clone(),
+                old_flags.of.clone(),
+            );
+
+            let after = apply_instruction(before, &instr);
+            let after_flags = after.get_flags();
+
+            let solver = Solver::new();
+            solver.assert(z3::ast::Bool::or(&[
+                &after.get_register(X86Register::RAX).eq(&old_reg).not(),
+                &after_flags.cf.eq(&old_cf).not(),
+                &after_flags.pf.eq(&old_pf).not(),
+                &after_flags.zf.eq(&old_zf).not(),
+                &after_flags.sf.eq(&old_sf).not(),
+                &after_flags.of.eq(&old_of).not(),
+            ]));
+            assert_eq!(
+                solver.check(),
+                SatResult::Unsat,
+                "{instr:?} (eff==0) must preserve rd and every flag"
+            );
+        }
+    }
+
+    // CF correctness for SHR: `shr rax, 1` sets CF to the original low bit.
+    // We prove `cf == rax[0]` is always true (negation unsat).
+    #[test]
+    fn shr_one_cf_equals_original_low_bit() {
+        let state = MachineStateX86::new_symbolic("s", 64);
+        let orig_low = state.get_register(X86Register::RAX).extract(0, 0);
+        let after = apply_instruction(
+            state,
+            &X86Instruction::Shr {
+                rd: X86Register::RAX,
+                imm: 1,
+            },
+        );
+        let solver = Solver::new();
+        solver.assert(after.get_flags().cf.eq(&orig_low).not());
+        assert_eq!(
+            solver.check(),
+            SatResult::Unsat,
+            "shr rax, 1 must set CF to the original low bit"
+        );
     }
 
     // --- symbolic CMOV ---
