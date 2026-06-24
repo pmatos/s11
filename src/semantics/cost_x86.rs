@@ -1,15 +1,73 @@
 //! Cost model for the x86 backend.
 //!
 //! x86 is variable-length, so `CodeSize` is an approximation per variant.
-//! `InstructionCount` and `Latency` mirror the AArch64 module's shape.
+//! `InstructionCount` is a flat per-instruction sum.
 //! Width-aware: x86-32 encodings save one byte per REX prefix.
+//!
+//! # Latency model (issue #622)
+//!
+//! `Latency` is NOT a flat per-instruction sum. It is a **critical-path**
+//! (dependency-aware) sequence cost so that a serial dependency chain costs
+//! more than the same number of independent instructions — which is the whole
+//! point of the metric as a "faster sequence" discriminator for `--auto` (see
+//! `docs/adr/0009-auto-whole-binary-driver.md`).
+//!
+//! Two layers:
+//!
+//! 1. **Per-opcode latency table** ([`instruction_latency`]). Latencies are
+//!    sourced from Agner Fog's "Instruction Tables" (<https://agner.org/optimize/>,
+//!    accessed 2026-06) for the Intel **Skylake** microarchitecture, cross-checked
+//!    against <https://uops.info/>. On Skylake the simple integer ALU ops
+//!    (MOV/ADD/SUB/AND/OR/XOR/INC/DEC/NEG/NOT/CMP/TEST/shift-by-imm/rotate-by-imm
+//!    and CMOV) have **1-cycle** latency, while two-operand/three-operand integer
+//!    multiply (`IMUL r,r` / `IMUL r,r,imm`) has **3-cycle** latency. A
+//!    register-to-register MOV is special-cased to **0** because Skylake (and all
+//!    Sandy-Bridge-and-later cores) eliminate it at rename — it never sits on a
+//!    dependency chain. `MovImm` is a real 1-cycle op (it is not move-elimination
+//!    eligible).
+//!
+//! 2. **Critical-path sequence latency** ([`critical_path_latency`]). The
+//!    sequence cost for `Latency` walks the def-use chains: for each instruction
+//!    its issue time is the max completion time over the last writer of every
+//!    register it reads (plus EFLAGS when it reads flags); its completion time is
+//!    that issue time plus its per-opcode latency. The sequence cost is the
+//!    maximum completion time over all instructions, i.e. the length of the
+//!    longest dependency chain. This is a pure critical path (no port-pressure /
+//!    reciprocal-throughput term) so that the per-instruction lower bound used by
+//!    the enumerative pruner stays provably valid — see "Pruning soundness"
+//!    below. A throughput term is a possible future refinement but is *not* free:
+//!    it would force the pruner's per-instruction lower bound to drop the
+//!    throughput contribution (a single instruction's throughput cost can exceed
+//!    a long independent sequence's marginal throughput), so it is deferred.
+//!
+//! ## Pruning soundness (the critical invariant)
+//!
+//! The enumerative search prunes whole *lengths* using
+//! `length_cost_lower_bound`, which must be a VALID LOWER BOUND on the real cost
+//! of any sequence of that length — a bound that ever *exceeded* the real cost
+//! would prune valid candidates and make the search unsound. Under the
+//! critical-path cost a length-`L` sequence can have a critical path as small as
+//! the latency of its single cheapest independent instruction (e.g. `L`
+//! independent 1-cycle ops cost ~1 on the critical path, NOT `L`). The flat
+//! `min_per_instr_cost * L` bound used for the additive metrics is therefore
+//! INVALID for `Latency`. The search switches to a trivially-valid constant
+//! lower bound for `Latency` — the minimum single-instruction latency in the
+//! candidate pool (which is `<=` every non-empty sequence's critical path). See
+//! `length_cost_lower_bound` in `src/search/enumerative/search.rs`. The symbolic
+//! search prunes per fully-formed candidate against the exact `sequence_cost`, so
+//! it stays sound under any cost function with no change.
 
 #![allow(dead_code)]
 
-use crate::isa::x86::X86Instruction;
+use crate::isa::x86::{X86Instruction, X86Register, x86_reads_flags};
 use crate::semantics::cost::CostMetric;
 
 /// Cost of a single x86 instruction at the given operand width.
+///
+/// For `Latency` this returns the instruction's *isolated* latency (its
+/// per-opcode table value). The sequence-level critical-path combination lives
+/// in [`sequence_cost`] / [`critical_path_latency`]; a single instruction's
+/// critical path equals its own latency, so the two agree on length-1 inputs.
 pub fn instruction_cost(instr: &X86Instruction, metric: &CostMetric, width: u32) -> u64 {
     match metric {
         CostMetric::InstructionCount => 1,
@@ -18,10 +76,25 @@ pub fn instruction_cost(instr: &X86Instruction, metric: &CostMetric, width: u32)
     }
 }
 
-fn instruction_latency(_instr: &X86Instruction) -> u64 {
-    // Every variant in the minimal core set is a single-cycle ALU op on
-    // modern x86 cores. Refine when MUL / IDIV / shifts arrive.
-    1
+/// Isolated per-opcode latency in cycles, sourced from Agner Fog's Skylake
+/// instruction tables (see the module doc-comment).
+///
+/// - Register-to-register `mov` is **0**: Skylake eliminates it at rename, so it
+///   never extends a dependency chain.
+/// - Simple integer ALU ops (everything except multiply) are **1** cycle.
+/// - `IMUL` (two- and three-operand) is **3** cycles on Skylake.
+fn instruction_latency(instr: &X86Instruction) -> u64 {
+    match instr {
+        // Register-rename move elimination: zero-latency on the critical path.
+        X86Instruction::MovReg { .. } => 0,
+        // Two-/three-operand signed multiply: 3-cycle latency on Skylake.
+        X86Instruction::ImulReg { .. } | X86Instruction::ImulRegImm { .. } => 3,
+        // Everything else in the supported set is a 1-cycle integer ALU op:
+        // MovImm, ADD/SUB/AND/OR/XOR (reg and imm), CMP/TEST, NEG/NOT/INC/DEC,
+        // SHL/SHR/SAR/ROL/ROR by immediate, CMOV, and the Jcc terminator
+        // (taken-branch latency; misprediction is not modelled).
+        _ => 1,
+    }
 }
 
 /// Approximate encoded length in bytes. Conservative upper bounds.
@@ -93,8 +166,85 @@ fn instruction_code_size(instr: &X86Instruction, width: u32) -> u64 {
 }
 
 /// Total cost of a sequence at the given width.
+///
+/// `InstructionCount` and `CodeSize` are flat per-instruction sums.
+/// `Latency` is the sequence's **critical path** (see [`critical_path_latency`]),
+/// which is NOT a sum: a serial dependency chain costs more than the same number
+/// of independent instructions. The two agree only on the empty and single-
+/// instruction cases (a single instruction's critical path equals its latency).
 pub fn sequence_cost(seq: &[X86Instruction], metric: &CostMetric, width: u32) -> u64 {
-    seq.iter().map(|i| instruction_cost(i, metric, width)).sum()
+    match metric {
+        CostMetric::Latency => critical_path_latency(seq),
+        CostMetric::InstructionCount | CostMetric::CodeSize => {
+            seq.iter().map(|i| instruction_cost(i, metric, width)).sum()
+        }
+    }
+}
+
+/// EFLAGS is tracked as a synthetic "register" slot beyond the 16 GPRs so that
+/// flag def-use edges (e.g. `cmp` → `cmovCC`, `add` → `jcc`) land on the
+/// dependency graph alongside register edges.
+const FLAGS_SLOT: usize = 16;
+const DEP_SLOTS: usize = 17; // 16 GPRs + EFLAGS.
+
+/// Critical-path latency of a sequence, in cycles (issue #622).
+///
+/// Models an idealized out-of-order core with unbounded execution resources:
+/// the only thing that serializes two instructions is a true data dependency
+/// (a later instruction reading a register or EFLAGS written by an earlier one).
+/// Independent instructions issue in the same cycle, so their latencies overlap
+/// rather than add.
+///
+/// Algorithm (single forward pass, O(n · operands)):
+/// - `ready[slot]` holds the completion cycle of the last writer of each
+///   register slot (and EFLAGS). All slots start ready at cycle 0.
+/// - For instruction `i`: `issue = max(ready[s])` over every source register
+///   `s` it reads, plus `ready[FLAGS_SLOT]` when it reads flags. With no tracked
+///   inputs `issue = 0`.
+/// - `complete = issue + latency(i)`.
+/// - Update `ready[d] = complete` for every register `d` it writes, and
+///   `ready[FLAGS_SLOT] = complete` when it modifies flags.
+/// - The sequence cost is `max(complete)` over all instructions (0 for empty).
+///
+/// This is a valid lower-bound-friendly cost: the critical path of any non-empty
+/// sequence is `>= max_i latency(i) >= min_i latency(i)`, which is what keeps the
+/// enumerative pruner's per-instruction lower bound sound (module doc-comment).
+pub fn critical_path_latency(seq: &[X86Instruction]) -> u64 {
+    let mut ready = [0u64; DEP_SLOTS];
+    let mut max_complete = 0u64;
+
+    for instr in seq {
+        let mut issue = 0u64;
+        for src in instr.source_registers() {
+            if let Some(idx) = reg_slot(src) {
+                issue = issue.max(ready[idx]);
+            }
+        }
+        if x86_reads_flags(instr) {
+            issue = issue.max(ready[FLAGS_SLOT]);
+        }
+
+        let complete = issue.saturating_add(instruction_latency(instr));
+        max_complete = max_complete.max(complete);
+
+        if let Some(dst) = instr.destination()
+            && let Some(idx) = reg_slot(dst)
+        {
+            ready[idx] = complete;
+        }
+        if crate::isa::x86::x86_modifies_flags(instr) {
+            ready[FLAGS_SLOT] = complete;
+        }
+    }
+
+    max_complete
+}
+
+/// Map a register to its dependency-graph slot (0..=15). Returns `None` only if
+/// the register has no architectural index (none do today), defensively keeping
+/// the indexer total.
+fn reg_slot(reg: X86Register) -> Option<usize> {
+    reg.index().map(usize::from)
 }
 
 #[cfg(test)]
@@ -112,25 +262,159 @@ mod tests {
         assert_eq!(instruction_cost(&i, &CostMetric::InstructionCount, 32), 1);
     }
 
+    // --- Layer 1: per-opcode latency table (Agner Fog, Skylake) ---
+
+    /// IMUL has strictly higher isolated latency than ADD on Skylake (3 vs 1),
+    /// per Agner Fog's instruction tables (module doc-comment). This pins the
+    /// documented per-opcode reference value the search relies on.
     #[test]
-    fn latency_is_one_for_minimal_set() {
-        let cases = [
+    fn imul_latency_exceeds_add_latency() {
+        let add = X86Instruction::AddReg {
+            rd: X86Register::RAX,
+            rs: X86Register::RBX,
+        };
+        let imul = X86Instruction::ImulReg {
+            rd: X86Register::RAX,
+            rs: X86Register::RBX,
+        };
+        let imul3 = X86Instruction::ImulRegImm {
+            rd: X86Register::RAX,
+            rs: X86Register::RBX,
+            imm: 7,
+        };
+        assert_eq!(instruction_latency(&add), 1);
+        assert_eq!(instruction_latency(&imul), 3);
+        assert_eq!(instruction_latency(&imul3), 3);
+        assert!(instruction_latency(&imul) > instruction_latency(&add));
+        // Register-to-register MOV is move-eliminated (0 cycles); MovImm is a
+        // real 1-cycle op.
+        let mov_reg = X86Instruction::MovReg {
+            rd: X86Register::RAX,
+            rs: X86Register::RBX,
+        };
+        let mov_imm = X86Instruction::MovImm {
+            rd: X86Register::RAX,
+            imm: 7,
+        };
+        assert_eq!(instruction_latency(&mov_reg), 0);
+        assert_eq!(instruction_latency(&mov_imm), 1);
+    }
+
+    // --- Layer 2: critical-path sequence latency rewards parallelism ---
+
+    /// A serial dependency chain (each op reads the result of the previous one)
+    /// must cost MORE than the same number of fully independent ops, even though
+    /// they have identical length and identical per-instruction latencies. This
+    /// is the whole point of the critical-path model: with the old flat-sum stub
+    /// both sequences cost 3 and this test failed.
+    #[test]
+    fn sequence_latency_rewards_parallelism() {
+        // Serial: rax = rax+rbx; rax = rax+rcx; rax = rax+rdx.
+        // Each instruction reads rax written by the previous one -> chain of 3.
+        let serial = [
+            X86Instruction::AddReg {
+                rd: X86Register::RAX,
+                rs: X86Register::RBX,
+            },
+            X86Instruction::AddReg {
+                rd: X86Register::RAX,
+                rs: X86Register::RCX,
+            },
+            X86Instruction::AddReg {
+                rd: X86Register::RAX,
+                rs: X86Register::RDX,
+            },
+        ];
+        // Independent: three distinct destinations, no def-use edge between them.
+        let independent = [
+            X86Instruction::AddReg {
+                rd: X86Register::RAX,
+                rs: X86Register::RSI,
+            },
+            X86Instruction::AddReg {
+                rd: X86Register::RBX,
+                rs: X86Register::RSI,
+            },
+            X86Instruction::AddReg {
+                rd: X86Register::RCX,
+                rs: X86Register::RSI,
+            },
+        ];
+
+        let serial_cost = sequence_cost(&serial, &CostMetric::Latency, 64);
+        let independent_cost = sequence_cost(&independent, &CostMetric::Latency, 64);
+
+        // Serial chain: 1 + 1 + 1 = 3 cycles on the critical path.
+        assert_eq!(serial_cost, 3);
+        // Independent ops all issue at cycle 0, complete at cycle 1.
+        assert_eq!(independent_cost, 1);
+        assert!(
+            serial_cost > independent_cost,
+            "critical-path latency must penalize the serial dependency chain: \
+             serial={serial_cost} independent={independent_cost}"
+        );
+    }
+
+    /// Flag def-use edges serialize too: `cmp` writes EFLAGS, `cmovCC` reads
+    /// them, so the pair forms a 2-cycle chain even though they touch different
+    /// registers.
+    #[test]
+    fn critical_path_tracks_flag_dependencies() {
+        use crate::isa::x86::X86Condition;
+        let seq = [
+            X86Instruction::CmpReg {
+                rn: X86Register::RAX,
+                rs: X86Register::RBX,
+            },
+            X86Instruction::Cmov {
+                rd: X86Register::RCX,
+                rs: X86Register::RDX,
+                cond: X86Condition::E,
+            },
+        ];
+        assert_eq!(sequence_cost(&seq, &CostMetric::Latency, 64), 2);
+    }
+
+    /// A register-to-register MOV is eliminated at rename, so it adds 0 to the
+    /// critical path: `mov rax, rbx; add rax, rcx` costs the same as the lone
+    /// `add` (1 cycle), not 2.
+    #[test]
+    fn move_elimination_does_not_extend_critical_path() {
+        let seq = [
             X86Instruction::MovReg {
                 rd: X86Register::RAX,
                 rs: X86Register::RBX,
             },
             X86Instruction::AddReg {
                 rd: X86Register::RAX,
-                rs: X86Register::RBX,
-            },
-            X86Instruction::CmpImm {
-                rn: X86Register::RAX,
-                imm: 0,
+                rs: X86Register::RCX,
             },
         ];
-        for i in cases {
-            assert_eq!(instruction_cost(&i, &CostMetric::Latency, 64), 1);
-        }
+        assert_eq!(sequence_cost(&seq, &CostMetric::Latency, 64), 1);
+    }
+
+    /// IMUL's 3-cycle latency shows up on the critical path: a single IMUL costs
+    /// 3, and chaining it after an ADD that produces its input costs 1 + 3 = 4.
+    #[test]
+    fn imul_latency_lengthens_critical_path() {
+        let single = [X86Instruction::ImulReg {
+            rd: X86Register::RAX,
+            rs: X86Register::RBX,
+        }];
+        assert_eq!(sequence_cost(&single, &CostMetric::Latency, 64), 3);
+
+        let chain = [
+            X86Instruction::AddReg {
+                rd: X86Register::RAX,
+                rs: X86Register::RBX,
+            },
+            // Reads rax produced by the ADD above -> 1 (add) + 3 (imul) = 4.
+            X86Instruction::ImulReg {
+                rd: X86Register::RAX,
+                rs: X86Register::RCX,
+            },
+        ];
+        assert_eq!(sequence_cost(&chain, &CostMetric::Latency, 64), 4);
     }
 
     #[test]

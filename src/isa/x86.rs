@@ -708,7 +708,12 @@ impl ISA for X86_32 {
 /// `for X86_32`. MOV / CMOV / Jcc do not write EFLAGS — CMOV and Jcc
 /// read them via `x86_reads_flags` but do not modify any flag bit.
 /// Every other variant in the current set writes EFLAGS.
-fn x86_modifies_flags(instr: &X86Instruction) -> bool {
+///
+/// Crate-visible so the cost model's critical-path latency
+/// (`crate::semantics::cost_x86::critical_path_latency`) can route flag
+/// def-use edges through the same authoritative match arm as the search and
+/// equivalence callers — adding a future flag-writer updates exactly one place.
+pub(crate) fn x86_modifies_flags(instr: &X86Instruction) -> bool {
     !matches!(
         instr,
         X86Instruction::MovReg { .. }
@@ -881,6 +886,17 @@ impl crate::isa::traits::CostModel<X86Instruction> for X86_64 {
     ) -> u64 {
         crate::semantics::cost_x86::instruction_cost(instruction, metric, 64)
     }
+
+    /// Override the trait's `.sum()` default so `Latency` uses the sequence's
+    /// critical path (`cost_x86::sequence_cost`) rather than a flat per-
+    /// instruction sum; `InstructionCount` / `CodeSize` remain sums (issue #622).
+    fn sequence_cost(
+        &self,
+        instructions: &[X86Instruction],
+        metric: &crate::semantics::cost::CostMetric,
+    ) -> u64 {
+        crate::semantics::cost_x86::sequence_cost(instructions, metric, 64)
+    }
 }
 
 impl crate::isa::traits::CostModel<X86Instruction> for X86_32 {
@@ -890,6 +906,15 @@ impl crate::isa::traits::CostModel<X86Instruction> for X86_32 {
         metric: &crate::semantics::cost::CostMetric,
     ) -> u64 {
         crate::semantics::cost_x86::instruction_cost(instruction, metric, 32)
+    }
+
+    /// See the `X86_64` impl: `Latency` is the critical path, others are sums.
+    fn sequence_cost(
+        &self,
+        instructions: &[X86Instruction],
+        metric: &crate::semantics::cost::CostMetric,
+    ) -> u64 {
+        crate::semantics::cost_x86::sequence_cost(instructions, metric, 32)
     }
 }
 
