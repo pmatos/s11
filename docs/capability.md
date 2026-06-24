@@ -97,12 +97,14 @@ with width-parameterised SMT equivalence.
 
 Rewritable straight-line mnemonic families:
 
-- `mov`, `add`, `sub`, `and`, `or`, `xor`, `cmp`
+- `mov`, `add`, `sub`, `and`, `or`, `xor`, `cmp`, `test`
 - Conditional moves: `cmov<cond>`
 
 The data-movement/arithmetic/logical/comparison families have register and
-immediate forms where the x86 IR models them. `cmov<cond>` has register
-operands and reads EFLAGS without modifying them.
+immediate forms where the x86 IR models them. `cmp` and `test` are
+flag-setting: each discards its result and writes only EFLAGS (`cmp` from a
+subtraction, `test` from a bitwise AND that clears CF/OF). `cmov<cond>` has
+register operands and reads EFLAGS without modifying them.
 
 The x86 IR does not yet carry operand width. To avoid rewriting partial-width
 operations as full-width operations, the binary optimization path currently

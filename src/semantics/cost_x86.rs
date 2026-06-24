@@ -54,13 +54,15 @@ fn instruction_code_size(instr: &X86Instruction, width: u32) -> u64 {
         | X86Instruction::AndReg { .. }
         | X86Instruction::OrReg { .. }
         | X86Instruction::XorReg { .. }
-        | X86Instruction::CmpReg { .. } => 2 + rex,
+        | X86Instruction::CmpReg { .. }
+        | X86Instruction::TestReg { .. } => 2 + rex,
         X86Instruction::AddImm { .. }
         | X86Instruction::SubImm { .. }
         | X86Instruction::AndImm { .. }
         | X86Instruction::OrImm { .. }
         | X86Instruction::XorImm { .. }
-        | X86Instruction::CmpImm { .. } => 6 + rex,
+        | X86Instruction::CmpImm { .. }
+        | X86Instruction::TestImm { .. } => 6 + rex,
         // CMOV is `0F 4x ModR/M` = 3 bytes plus REX.W on 64-bit.
         X86Instruction::Cmov { .. } => 3 + rex,
         // Short-form Jcc is `7x rel8` = 2 bytes (no REX). Long-form
@@ -139,6 +141,25 @@ mod tests {
         };
         assert_eq!(instruction_cost(&rr, &CostMetric::CodeSize, 32), 2);
         assert_eq!(instruction_cost(&ri, &CostMetric::CodeSize, 32), 6);
+    }
+
+    #[test]
+    fn test_code_size_and_latency_mirror_cmp() {
+        let reg = X86Instruction::TestReg {
+            rn: X86Register::RAX,
+            rs: X86Register::RBX,
+        };
+        let imm = X86Instruction::TestImm {
+            rn: X86Register::RAX,
+            imm: 5,
+        };
+        // Same sizes as CMP: reg-reg 2(+rex), reg-imm 6(+rex); latency 1.
+        assert_eq!(instruction_cost(&reg, &CostMetric::CodeSize, 64), 3);
+        assert_eq!(instruction_cost(&reg, &CostMetric::CodeSize, 32), 2);
+        assert_eq!(instruction_cost(&imm, &CostMetric::CodeSize, 64), 7);
+        assert_eq!(instruction_cost(&imm, &CostMetric::CodeSize, 32), 6);
+        assert_eq!(instruction_cost(&reg, &CostMetric::Latency, 64), 1);
+        assert_eq!(instruction_cost(&imm, &CostMetric::Latency, 64), 1);
     }
 
     #[test]

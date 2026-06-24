@@ -369,7 +369,7 @@ fn x86_ir_from_mnemonic_impl(
     // immediate parse error.
     if !matches!(
         mnemonic.as_str(),
-        "mov" | "movabs" | "add" | "sub" | "and" | "or" | "xor" | "cmp"
+        "mov" | "movabs" | "add" | "sub" | "and" | "or" | "xor" | "cmp" | "test"
     ) {
         return Ok(None);
     }
@@ -420,6 +420,10 @@ fn x86_ir_from_mnemonic_impl(
             |rn, rs| X86Instruction::CmpReg { rn, rs },
             |rn, imm| X86Instruction::CmpImm { rn, imm },
         ),
+        "test" => make(
+            |rn, rs| X86Instruction::TestReg { rn, rs },
+            |rn, imm| X86Instruction::TestImm { rn, imm },
+        ),
         _ => Ok(None),
     }
 }
@@ -430,8 +434,8 @@ fn x86_ir_from_mnemonic_impl(
 ///
 /// Recognised lines: empty, comments (`;`, `//`, `#`), labels
 /// (`name:`), directives (`.foo`), and instructions whose mnemonic is
-/// one of the nine supported families (mov, add, sub, and, or, xor,
-/// cmp plus the conditional cmovCC and jCC variants). Anything else is
+/// one of the supported families (mov, add, sub, and, or, xor, cmp,
+/// test plus the conditional cmovCC and jCC variants). Anything else is
 /// a parse error.
 pub fn parse_x86_assembly_string(
     content: &str,
@@ -637,6 +641,22 @@ mod tests {
                 },
             ),
             (
+                "test",
+                "rax, rbx",
+                X86Instruction::TestReg {
+                    rn: X86Register::RAX,
+                    rs: X86Register::RBX,
+                },
+            ),
+            (
+                "test",
+                "rax, 5",
+                X86Instruction::TestImm {
+                    rn: X86Register::RAX,
+                    imm: 5,
+                },
+            ),
+            (
                 "cmove",
                 "rax, rbx",
                 X86Instruction::Cmov {
@@ -741,6 +761,67 @@ mod tests {
         assert!(
             err.contains("not encodable in x86-32"),
             "unexpected error for r8d: {err}"
+        );
+    }
+
+    #[test]
+    fn test_mnemonic_parses_reg_and_imm_forms_and_round_trips_display() {
+        // `test rax, rbx` and `test rax, 5` parse to TestReg/TestImm, and the
+        // Display output round-trips back through the parser to the same IR.
+        let reg = x86_ir_from_mnemonic("test", "rax, rbx").unwrap().unwrap();
+        assert_eq!(
+            reg,
+            X86Instruction::TestReg {
+                rn: X86Register::RAX,
+                rs: X86Register::RBX,
+            }
+        );
+        assert_eq!(reg.to_string(), "test rax, rbx");
+
+        let imm = x86_ir_from_mnemonic("test", "rax, 5").unwrap().unwrap();
+        assert_eq!(
+            imm,
+            X86Instruction::TestImm {
+                rn: X86Register::RAX,
+                imm: 5,
+            }
+        );
+        assert_eq!(imm.to_string(), "test rax, 5");
+
+        // Display → parse round-trip for both forms.
+        for instr in [reg, imm] {
+            let text = instr.to_string();
+            let mut parts = text.splitn(2, char::is_whitespace);
+            let mnemonic = parts.next().unwrap();
+            let ops = parts.next().unwrap();
+            assert_eq!(
+                x86_ir_from_mnemonic(mnemonic, ops).unwrap().unwrap(),
+                instr,
+                "round-trip failed for {text}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_mnemonic_round_trips_through_mode_aware_binary_path() {
+        // The Capstone/binary path (mode-aware) must also accept `test`.
+        assert_eq!(
+            x86_ir_from_mnemonic_for_mode("test", "rax, rbx", X86ParseMode::Mode64)
+                .unwrap()
+                .unwrap(),
+            X86Instruction::TestReg {
+                rn: X86Register::RAX,
+                rs: X86Register::RBX,
+            }
+        );
+        assert_eq!(
+            x86_ir_from_mnemonic_for_mode("test", "eax, 5", X86ParseMode::Mode32)
+                .unwrap()
+                .unwrap(),
+            X86Instruction::TestImm {
+                rn: X86Register::RAX,
+                imm: 5,
+            }
         );
     }
 

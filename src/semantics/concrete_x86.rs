@@ -39,6 +39,8 @@ pub fn apply_instruction_concrete_x86(
         X86Instruction::XorImm { rd, imm } => apply_binop_imm(&mut state, *rd, *imm, Binop::Xor),
         X86Instruction::CmpReg { rn, rs } => apply_cmp_reg(&mut state, *rn, *rs),
         X86Instruction::CmpImm { rn, imm } => apply_cmp_imm(&mut state, *rn, *imm),
+        X86Instruction::TestReg { rn, rs } => apply_test_reg(&mut state, *rn, *rs),
+        X86Instruction::TestImm { rn, imm } => apply_test_imm(&mut state, *rn, *imm),
         X86Instruction::Cmov { rd, rs, cond } => {
             if state.get_flags().evaluate(*cond) {
                 let v = state.get_register(*rs);
@@ -70,6 +72,27 @@ fn apply_cmp_imm(state: &mut X86ConcreteMachineState, rn: crate::isa::x86::X86Re
     let rhs = imm as u64;
     let result = lhs.wrapping_sub(rhs);
     state.set_flags(Eflags::from_sub(lhs, rhs, result, state.width()));
+}
+
+// TEST is the non-destructive sibling of AND: it computes `rn & rhs`, sets
+// flags from the result via the logical path (CF=OF=0, SF/ZF/PF from result),
+// and writes no register — just as CMP discards a SUB result.
+fn apply_test_reg(
+    state: &mut X86ConcreteMachineState,
+    rn: crate::isa::x86::X86Register,
+    rs: crate::isa::x86::X86Register,
+) {
+    let lhs = state.get_register(rn).as_u64();
+    let rhs = state.get_register(rs).as_u64();
+    let result = lhs & rhs;
+    state.set_flags(Eflags::from_logical(result, state.width()));
+}
+
+fn apply_test_imm(state: &mut X86ConcreteMachineState, rn: crate::isa::x86::X86Register, imm: i64) {
+    let lhs = state.get_register(rn).as_u64();
+    let rhs = imm as u64;
+    let result = lhs & rhs;
+    state.set_flags(Eflags::from_logical(result, state.width()));
 }
 
 #[derive(Clone, Copy)]
@@ -194,6 +217,82 @@ mod tests {
         // Operand registers must be unchanged.
         assert_eq!(after.get_register(X86Register::RAX).as_u64(), 5);
         assert_eq!(after.get_register(X86Register::RBX).as_u64(), 5);
+    }
+
+    #[test]
+    fn testreg_zero_result_sets_zf_clears_cf_of_without_writing_register() {
+        // rax & rbx == 0 -> ZF set; TEST writes no register and always
+        // clears CF/OF (logical-flag semantics).
+        let mut state = X86ConcreteMachineState::new_zeroed(64);
+        state.set_register(X86Register::RAX, ConcreteValue::new(0xf0));
+        state.set_register(X86Register::RBX, ConcreteValue::new(0x0f));
+        let after = apply_instruction_concrete_x86(
+            state,
+            &X86Instruction::TestReg {
+                rn: X86Register::RAX,
+                rs: X86Register::RBX,
+            },
+        );
+        let flags = after.get_flags();
+        assert!(flags.zf, "0xf0 & 0x0f == 0 -> ZF set");
+        assert!(!flags.cf, "TEST always clears CF");
+        assert!(!flags.of, "TEST always clears OF");
+        assert!(!flags.sf);
+        // Operands are untouched.
+        assert_eq!(after.get_register(X86Register::RAX).as_u64(), 0xf0);
+        assert_eq!(after.get_register(X86Register::RBX).as_u64(), 0x0f);
+    }
+
+    #[test]
+    fn testreg_nonzero_result_clears_zf_keeps_cf_of_clear() {
+        let mut state = X86ConcreteMachineState::new_zeroed(64);
+        state.set_register(X86Register::RAX, ConcreteValue::new(0xff));
+        state.set_register(X86Register::RBX, ConcreteValue::new(0x0f));
+        let after = apply_instruction_concrete_x86(
+            state,
+            &X86Instruction::TestReg {
+                rn: X86Register::RAX,
+                rs: X86Register::RBX,
+            },
+        );
+        let flags = after.get_flags();
+        assert!(!flags.zf, "0xff & 0x0f == 0x0f != 0 -> ZF clear");
+        assert!(!flags.cf);
+        assert!(!flags.of);
+    }
+
+    #[test]
+    fn testimm_masks_and_sets_flags_without_writing_register() {
+        let mut state = X86ConcreteMachineState::new_zeroed(64);
+        state.set_register(X86Register::RAX, ConcreteValue::new(0x80));
+        // 0x80 & 0x80 = 0x80 (top bit of low byte set) -> nonzero.
+        let after = apply_instruction_concrete_x86(
+            state,
+            &X86Instruction::TestImm {
+                rn: X86Register::RAX,
+                imm: 0x80,
+            },
+        );
+        let flags = after.get_flags();
+        assert!(!flags.zf);
+        assert!(!flags.cf);
+        assert!(!flags.of);
+        // rn untouched.
+        assert_eq!(after.get_register(X86Register::RAX).as_u64(), 0x80);
+
+        // 0x80 & 0x7f == 0 -> ZF set.
+        let mut state2 = X86ConcreteMachineState::new_zeroed(64);
+        state2.set_register(X86Register::RAX, ConcreteValue::new(0x80));
+        let after2 = apply_instruction_concrete_x86(
+            state2,
+            &X86Instruction::TestImm {
+                rn: X86Register::RAX,
+                imm: 0x7f,
+            },
+        );
+        assert!(after2.get_flags().zf);
+        assert!(!after2.get_flags().cf);
+        assert!(!after2.get_flags().of);
     }
 
     #[test]
