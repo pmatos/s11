@@ -35,6 +35,19 @@ if command -v gcc >/dev/null && [ "$(gcc -dumpmachine | head -c 6)" = "x86_64" ]
         gcc -g -O0 -o "binaries/x86_64/${base_name}_debug" "$test_file"
         gcc -O2     -o "binaries/x86_64/${base_name}_opt"   "$test_file"
     done
+
+    # Hand-written register-only x86 assembly fixtures (tests/x86_asm/*.s).
+    # gcc compiles the tests/*.c sources to memory-operand-heavy code the
+    # x86 opt path does not model; these fixtures stay inside the supported
+    # register/immediate subset and encode a known deterministic shortening
+    # for the end-to-end opt integration tests. `-no-pie -nostdlib` gives a
+    # fixed-address ELF so window addresses are stable across rebuilds.
+    for asm_file in tests/x86_asm/*.s; do
+        [ -e "$asm_file" ] || continue
+        base_name=$(basename "$asm_file" .s)
+        echo "Assembling x86-64 fixture $base_name..."
+        gcc -no-pie -nostdlib -o "binaries/x86_64/${base_name}" "$asm_file"
+    done
 else
     echo "Skipping x86-64 (no x86_64 host gcc)."
 fi
