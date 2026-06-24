@@ -219,6 +219,24 @@ fn encode_64(ops: &mut dynasmrt::x64::Assembler, instr: &X86Instruction) -> Resu
             dynasm!(ops ; .arch x64 ; dec Rq(rd));
             Ok(())
         }
+        X86Instruction::Shl { rd, imm } => {
+            let rd = reg_index(*rd)?;
+            let count = shift_count_imm8(*imm)?;
+            dynasm!(ops ; .arch x64 ; shl Rq(rd), BYTE count);
+            Ok(())
+        }
+        X86Instruction::Shr { rd, imm } => {
+            let rd = reg_index(*rd)?;
+            let count = shift_count_imm8(*imm)?;
+            dynasm!(ops ; .arch x64 ; shr Rq(rd), BYTE count);
+            Ok(())
+        }
+        X86Instruction::Sar { rd, imm } => {
+            let rd = reg_index(*rd)?;
+            let count = shift_count_imm8(*imm)?;
+            dynasm!(ops ; .arch x64 ; sar Rq(rd), BYTE count);
+            Ok(())
+        }
         X86Instruction::Cmov { rd, rs, cond } => {
             let rd = reg_index(*rd)?;
             let rs = reg_index(*rs)?;
@@ -275,6 +293,16 @@ fn encode_64(ops: &mut dynasmrt::x64::Assembler, instr: &X86Instruction) -> Resu
 /// sign-extended 32-bit immediate.
 fn signed_imm_i32(imm: i64) -> Result<i32, String> {
     i32::try_from(imm).map_err(|_| format!("immediate {} does not fit in 32 bits", imm))
+}
+
+/// A shift count encodes as `imm8`. Accept `0..=255` and emit it as the raw
+/// byte (dynasm takes the shift count as an `i8`); reject anything that does
+/// not fit a single byte. `can_assemble` performs the same check up front, so
+/// this is a defensive backstop.
+fn shift_count_imm8(imm: i64) -> Result<i8, String> {
+    u8::try_from(imm)
+        .map(|byte| byte as i8)
+        .map_err(|_| format!("shift count {} does not fit in imm8", imm))
 }
 
 /// Like [`signed_imm_i32`] but also accepts canonical 32-bit bit patterns.
@@ -403,6 +431,24 @@ fn encode_32(ops: &mut dynasmrt::x86::Assembler, instr: &X86Instruction) -> Resu
         X86Instruction::Dec { rd } => {
             let rd = reg_index_32(*rd)?;
             dynasm!(ops ; .arch x86 ; dec Rd(rd));
+            Ok(())
+        }
+        X86Instruction::Shl { rd, imm } => {
+            let rd = reg_index_32(*rd)?;
+            let count = shift_count_imm8(*imm)?;
+            dynasm!(ops ; .arch x86 ; shl Rd(rd), BYTE count);
+            Ok(())
+        }
+        X86Instruction::Shr { rd, imm } => {
+            let rd = reg_index_32(*rd)?;
+            let count = shift_count_imm8(*imm)?;
+            dynasm!(ops ; .arch x86 ; shr Rd(rd), BYTE count);
+            Ok(())
+        }
+        X86Instruction::Sar { rd, imm } => {
+            let rd = reg_index_32(*rd)?;
+            let count = shift_count_imm8(*imm)?;
+            dynasm!(ops ; .arch x86 ; sar Rd(rd), BYTE count);
             Ok(())
         }
         X86Instruction::Cmov { rd, rs, cond } => {
@@ -812,6 +858,69 @@ mod tests {
             },
             "dec",
             &["ebx"],
+        );
+    }
+
+    #[test]
+    fn shift_variants_x86_64() {
+        check_x86_64(
+            X86Instruction::Shl {
+                rd: X86Register::RAX,
+                imm: 1,
+            },
+            "shl",
+            &["rax", "1"],
+        );
+        check_x86_64(
+            X86Instruction::Shr {
+                rd: X86Register::RBX,
+                imm: 3,
+            },
+            "shr",
+            &["rbx", "3"],
+        );
+        check_x86_64(
+            X86Instruction::Sar {
+                rd: X86Register::RCX,
+                imm: 7,
+            },
+            "sar",
+            &["rcx", "7"],
+        );
+    }
+
+    #[test]
+    fn shift_variants_x86_32() {
+        check_x86_32(
+            X86Instruction::Shl {
+                rd: X86Register::RAX,
+                imm: 2,
+            },
+            "shl",
+            &["eax", "2"],
+        );
+        check_x86_32(
+            X86Instruction::Sar {
+                rd: X86Register::RBX,
+                imm: 4,
+            },
+            "sar",
+            &["ebx", "4"],
+        );
+    }
+
+    // SAL and SHL assemble to identical bytes; Capstone disassembles the
+    // encoding as `shl`. The IR has no Sal variant (the parser folds `sal`
+    // into `Shl`), so we assert the `Shl` encoding round-trips as `shl`.
+    #[test]
+    fn shl_encoding_disassembles_as_shl_not_sal() {
+        check_x86_64(
+            X86Instruction::Shl {
+                rd: X86Register::RDX,
+                imm: 5,
+            },
+            "shl",
+            &["rdx", "5"],
         );
     }
 

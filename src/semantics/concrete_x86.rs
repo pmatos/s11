@@ -45,6 +45,9 @@ pub fn apply_instruction_concrete_x86(
         X86Instruction::Not { rd } => apply_not(&mut state, *rd),
         X86Instruction::Inc { rd } => apply_inc(&mut state, *rd),
         X86Instruction::Dec { rd } => apply_dec(&mut state, *rd),
+        X86Instruction::Shl { rd, imm } => apply_shift(&mut state, *rd, *imm, ShiftKind::Shl),
+        X86Instruction::Shr { rd, imm } => apply_shift(&mut state, *rd, *imm, ShiftKind::Shr),
+        X86Instruction::Sar { rd, imm } => apply_shift(&mut state, *rd, *imm, ShiftKind::Sar),
         X86Instruction::Cmov { rd, rs, cond } => {
             if state.get_flags().evaluate(*cond) {
                 let v = state.get_register(*rs);
@@ -141,6 +144,101 @@ fn apply_dec(state: &mut X86ConcreteMachineState, rd: crate::isa::x86::X86Regist
     state.set_register(rd, ConcreteValue::new(result));
     let mut flags = Eflags::from_sub(old, 1, result, state.width());
     flags.cf = prev_cf;
+    state.set_flags(flags);
+}
+
+#[derive(Clone, Copy)]
+enum ShiftKind {
+    Shl,
+    Shr,
+    Sar,
+}
+
+// Mask a value to the operand width (low `width` bits).
+fn mask_width(value: u64, width: u32) -> u64 {
+    match width {
+        64 => value,
+        32 => value & 0xffff_ffff,
+        16 => value & 0xffff,
+        8 => value & 0xff,
+        _ => unreachable!("unsupported width: {}", width),
+    }
+}
+
+// Top (sign) bit of a width-`width` value.
+fn msb(value: u64, width: u32) -> bool {
+    (mask_width(value, width) >> (width - 1)) & 1 == 1
+}
+
+// Immediate-count shift. The count is a concrete compile-time value, so we
+// branch on it directly rather than modelling a symbolic count.
+//
+// x86 masks the count to `width-1` (0x1f at width 32, 0x3f at width 64). A
+// masked count of 0 is the load-bearing case: the result and ALL flags are
+// left completely unchanged (a shift by 0 touches nothing). For a nonzero
+// count, SF/ZF/PF come from the result; CF is the last bit shifted out; OF is
+// architecturally defined only for count 1.
+//
+// OF for count > 1 is UNDEFINED on real hardware. We deliberately model it
+// with the SAME formula as count == 1 — a fixed, deterministic value. Since
+// both the target and candidate sequences go through this identical lowering,
+// equivalence checking stays internally consistent; downstream consumers must
+// not rely on OF after a count > 1 shift because the architecture leaves it
+// undefined.
+fn apply_shift(
+    state: &mut X86ConcreteMachineState,
+    rd: crate::isa::x86::X86Register,
+    imm: i64,
+    kind: ShiftKind,
+) {
+    let width = state.width();
+    let mask = u64::from(width - 1);
+    let eff = (imm as u64) & mask;
+    let old = mask_width(state.get_register(rd).as_u64(), width);
+
+    // Count masks to 0: leave rd and every flag untouched.
+    if eff == 0 {
+        return;
+    }
+
+    let result = match kind {
+        ShiftKind::Shl => old << eff,
+        ShiftKind::Shr => old >> eff,
+        // Arithmetic right shift: sign-extend within the operand width.
+        ShiftKind::Sar => {
+            let sign = msb(old, width);
+            let logical = old >> eff;
+            if sign {
+                // Set the top `eff` bits that the logical shift cleared.
+                let fill = mask_width(!0u64 << (width as u64 - eff), width);
+                logical | fill
+            } else {
+                logical
+            }
+        }
+    };
+    let result = mask_width(result, width);
+
+    // CF is the last bit shifted out of the source.
+    let cf = match kind {
+        // SHL: the bit at index `width - eff` of the original operand.
+        ShiftKind::Shl => (old >> (width as u64 - eff)) & 1 == 1,
+        // SHR / SAR: the bit at index `eff - 1` of the original operand.
+        ShiftKind::Shr | ShiftKind::Sar => (old >> (eff - 1)) & 1 == 1,
+    };
+
+    // OF: defined for count == 1 only; we reuse the count-1 formula for all
+    // nonzero counts (see the function comment).
+    let of = match kind {
+        ShiftKind::Shl => msb(result, width) ^ cf,
+        ShiftKind::Shr => msb(old, width),
+        ShiftKind::Sar => false,
+    };
+
+    state.set_register(rd, ConcreteValue::new(result));
+    let mut flags = Eflags::from_logical(result, width);
+    flags.cf = cf;
+    flags.of = of;
     state.set_flags(flags);
 }
 
@@ -501,6 +599,146 @@ mod tests {
                     "{instr:?} must preserve CF (incoming CF = {cf_in})"
                 );
             }
+        }
+    }
+
+    #[test]
+    fn shl_shifts_left_and_sets_zf_sf() {
+        // shl rax, 4 of 0x0F00_0000_0000_0000 -> 0xF000_0000_0000_0000:
+        // SF set (MSB), ZF clear.
+        let mut state = X86ConcreteMachineState::new_zeroed(64);
+        state.set_register(X86Register::RAX, ConcreteValue::new(0x0F00_0000_0000_0000));
+        let after = apply_instruction_concrete_x86(
+            state,
+            &X86Instruction::Shl {
+                rd: X86Register::RAX,
+                imm: 4,
+            },
+        );
+        assert_eq!(
+            after.get_register(X86Register::RAX).as_u64(),
+            0xF000_0000_0000_0000
+        );
+        let flags = after.get_flags();
+        assert!(flags.sf, "shl result MSB set -> SF");
+        assert!(!flags.zf);
+
+        // shl that shifts every bit out -> 0: ZF set.
+        let mut state = X86ConcreteMachineState::new_zeroed(64);
+        state.set_register(X86Register::RAX, ConcreteValue::new(1u64 << 60));
+        let after = apply_instruction_concrete_x86(
+            state,
+            &X86Instruction::Shl {
+                rd: X86Register::RAX,
+                imm: 8,
+            },
+        );
+        assert_eq!(after.get_register(X86Register::RAX).as_u64(), 0);
+        assert!(after.get_flags().zf, "all bits shifted out -> ZF set");
+    }
+
+    // Known-concrete CF case from the DoD: `shr rax, 1` of an odd value sets
+    // CF = 1 (the low bit shifted out).
+    #[test]
+    fn shr_odd_value_sets_carry_from_low_bit() {
+        let mut state = X86ConcreteMachineState::new_zeroed(64);
+        state.set_register(X86Register::RAX, ConcreteValue::new(0b1011));
+        let after = apply_instruction_concrete_x86(
+            state,
+            &X86Instruction::Shr {
+                rd: X86Register::RAX,
+                imm: 1,
+            },
+        );
+        assert_eq!(after.get_register(X86Register::RAX).as_u64(), 0b101);
+        assert!(
+            after.get_flags().cf,
+            "shr of an odd value shifts a 1 out -> CF set"
+        );
+
+        // Even value: low bit is 0, so CF clear.
+        let mut state = X86ConcreteMachineState::new_zeroed(64);
+        state.set_register(X86Register::RAX, ConcreteValue::new(0b1010));
+        let after = apply_instruction_concrete_x86(
+            state,
+            &X86Instruction::Shr {
+                rd: X86Register::RAX,
+                imm: 1,
+            },
+        );
+        assert_eq!(after.get_register(X86Register::RAX).as_u64(), 0b101);
+        assert!(!after.get_flags().cf, "shr of an even value -> CF clear");
+    }
+
+    #[test]
+    fn sar_preserves_sign_and_sets_carry() {
+        // sar of a negative value sign-extends; CF = original bit (eff-1).
+        let mut state = X86ConcreteMachineState::new_zeroed(64);
+        state.set_register(X86Register::RAX, ConcreteValue::new(0x8000_0000_0000_0001));
+        let after = apply_instruction_concrete_x86(
+            state,
+            &X86Instruction::Sar {
+                rd: X86Register::RAX,
+                imm: 1,
+            },
+        );
+        // 0x8000_0000_0000_0001 >>s 1 = 0xC000_0000_0000_0000.
+        assert_eq!(
+            after.get_register(X86Register::RAX).as_u64(),
+            0xC000_0000_0000_0000
+        );
+        let flags = after.get_flags();
+        assert!(flags.sf, "sar of a negative value keeps the sign -> SF");
+        assert!(flags.cf, "sar shifts the set low bit out -> CF set");
+    }
+
+    // The load-bearing eff == 0 case: a shift by 0 (after masking) leaves the
+    // register AND every flag untouched. We seed distinctive flag values and
+    // assert they survive unchanged for shl/shr/sar.
+    #[test]
+    fn shift_by_zero_preserves_register_and_all_flags() {
+        for instr in [
+            X86Instruction::Shl {
+                rd: X86Register::RAX,
+                imm: 0,
+            },
+            X86Instruction::Shr {
+                rd: X86Register::RAX,
+                imm: 0,
+            },
+            X86Instruction::Sar {
+                rd: X86Register::RAX,
+                imm: 0,
+            },
+            // A count of 64 masks to 0 at width 64 (mask = 0x3f), so it is also
+            // a no-op even though the raw count is nonzero.
+            X86Instruction::Shl {
+                rd: X86Register::RAX,
+                imm: 64,
+            },
+        ] {
+            let mut state = X86ConcreteMachineState::new_zeroed(64);
+            state.set_register(X86Register::RAX, ConcreteValue::new(0xDEAD_BEEF));
+            let seeded = Eflags {
+                cf: true,
+                pf: true,
+                af: true,
+                zf: true,
+                sf: true,
+                of: true,
+            };
+            state.set_flags(seeded);
+            let after = apply_instruction_concrete_x86(state, &instr);
+            assert_eq!(
+                after.get_register(X86Register::RAX).as_u64(),
+                0xDEAD_BEEF,
+                "{instr:?} (eff==0) must leave rd unchanged"
+            );
+            assert_eq!(
+                after.get_flags(),
+                seeded,
+                "{instr:?} (eff==0) must preserve ALL flags"
+            );
         }
     }
 
