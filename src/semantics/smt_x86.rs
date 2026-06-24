@@ -353,6 +353,24 @@ pub fn apply_instruction(
             let flags = compute_eflags_logical(&result, state.width());
             state.set_flags(flags);
         }
+        // NEG computes `rd = -rd` and sets EFLAGS as if from `0 - rd`. We
+        // reuse the SUB flag path with lhs = 0, rhs = old_rd so CF = (rd != 0)
+        // and OF/SF/ZF/PF match `sub` bit-for-bit.
+        X86Instruction::Neg { rd } => {
+            let old = state.get_register(*rd).clone();
+            let zero = BV::from_u64(0, state.width());
+            let result = old.bvneg();
+            let flags = compute_eflags_sub(&zero, &old, state.width());
+            state.set_register(*rd, result);
+            state.set_flags(flags);
+        }
+        // NOT computes `rd = !rd` (bitwise complement) and leaves EFLAGS
+        // UNCHANGED — exactly like MOV, which writes only its register and
+        // carries the incoming flag BVs forward untouched.
+        X86Instruction::Not { rd } => {
+            let result = state.get_register(*rd).bvnot();
+            state.set_register(*rd, result);
+        }
         X86Instruction::Cmov { rd, rs, cond } => {
             let pred = x86_condition_to_smt(*cond, state.get_flags());
             let rs_val = state.get_register(*rs).clone();
@@ -607,6 +625,104 @@ mod tests {
             solver.check(),
             SatResult::Unsat,
             "TEST rax,rax must agree with CMP rax,0 on ZF/SF and clear CF/OF"
+        );
+    }
+
+    // --- symbolic NEG / NOT ---
+
+    #[test]
+    fn neg_result_equals_zero_minus_rax_and_cf_tracks_nonzero() {
+        // The key NEG theorem: `neg rax` writes `0 - rax` and sets CF iff
+        // rax != 0 (equivalently rax >u 0, i.e. 0 <u rax). Prove both by
+        // unsat-of-negation over one shared symbolic rax.
+        let s0 = MachineStateX86::new_symbolic("s", 64);
+        let rax_init = s0.get_register(X86Register::RAX).clone();
+        let s1 = apply_instruction(
+            s0,
+            &X86Instruction::Neg {
+                rd: X86Register::RAX,
+            },
+        );
+        let rax_after = s1.get_register(X86Register::RAX).clone();
+        let cf = s1.get_flags().cf.clone();
+
+        let zero64 = BV::from_u64(0, 64);
+        let cf_one = BV::from_u64(1, 1);
+        let solver = Solver::new();
+        // result == 0 - rax, AND CF == (rax != 0).
+        let result_wrong = rax_after.eq(zero64.bvsub(&rax_init)).not();
+        let nonzero = rax_init.eq(&zero64).not();
+        let cf_wrong = cf.eq(&cf_one).iff(&nonzero).not();
+        solver.assert(z3::ast::Bool::or(&[&result_wrong, &cf_wrong]));
+        assert_eq!(
+            solver.check(),
+            SatResult::Unsat,
+            "NEG must compute 0 - rax and set CF iff rax != 0"
+        );
+    }
+
+    #[test]
+    fn not_result_matches_xor_with_minus_one() {
+        // `not rax` and `xor rax, -1` compute the same value (bitwise
+        // complement). Prove result-equivalence over one shared symbolic rax.
+        let after_not = apply_instruction(
+            MachineStateX86::new_symbolic("shared", 64),
+            &X86Instruction::Not {
+                rd: X86Register::RAX,
+            },
+        );
+        let after_xor = apply_instruction(
+            MachineStateX86::new_symbolic("shared", 64),
+            &X86Instruction::XorImm {
+                rd: X86Register::RAX,
+                imm: -1,
+            },
+        );
+        let solver = Solver::new();
+        solver.assert(
+            after_not
+                .get_register(X86Register::RAX)
+                .eq(after_xor.get_register(X86Register::RAX))
+                .not(),
+        );
+        assert_eq!(
+            solver.check(),
+            SatResult::Unsat,
+            "NOT rax must equal XOR rax,-1 on the result"
+        );
+    }
+
+    #[test]
+    fn not_leaves_all_flags_unchanged() {
+        // The load-bearing NOT subtlety: unlike XOR, NOT writes NO flags.
+        // Each tracked flag BV after NOT must be identical to the incoming
+        // one. (XOR, by contrast, would clear CF/OF and set SF/ZF/PF — which
+        // is exactly why the NOT≡XOR equivalence is result-only.)
+        let s0 = MachineStateX86::new_symbolic("s", 64);
+        let cf0 = s0.get_flags().cf.clone();
+        let pf0 = s0.get_flags().pf.clone();
+        let zf0 = s0.get_flags().zf.clone();
+        let sf0 = s0.get_flags().sf.clone();
+        let of0 = s0.get_flags().of.clone();
+        let s1 = apply_instruction(
+            s0,
+            &X86Instruction::Not {
+                rd: X86Register::RAX,
+            },
+        );
+        let f = s1.get_flags();
+        let solver = Solver::new();
+        solver.assert(z3::ast::Bool::or(&[
+            &f.cf.eq(&cf0).not(),
+            &f.pf.eq(&pf0).not(),
+            &f.zf.eq(&zf0).not(),
+            &f.sf.eq(&sf0).not(),
+            &f.of.eq(&of0).not(),
+        ]));
+        assert_eq!(
+            solver.check(),
+            SatResult::Unsat,
+            "NOT must leave every EFLAGS bit unchanged"
         );
     }
 
@@ -901,6 +1017,18 @@ mod tests {
         let instr = X86Instruction::TestReg {
             rn: X86Register::RAX,
             rs: X86Register::RBX,
+        };
+        for &(a, b) in PARITY_SAMPLES {
+            assert_x86_concrete_smt_parity(&instr, a, b);
+        }
+    }
+
+    #[test]
+    fn parity_neg() {
+        // NEG reads/writes only RAX and sets flags deterministically, so the
+        // generic register+flags parity harness applies (rhs is ignored).
+        let instr = X86Instruction::Neg {
+            rd: X86Register::RAX,
         };
         for &(a, b) in PARITY_SAMPLES {
             assert_x86_concrete_smt_parity(&instr, a, b);

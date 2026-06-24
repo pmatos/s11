@@ -199,6 +199,16 @@ fn encode_64(ops: &mut dynasmrt::x64::Assembler, instr: &X86Instruction) -> Resu
             dynasm!(ops ; .arch x64 ; test Rq(rn), imm);
             Ok(())
         }
+        X86Instruction::Neg { rd } => {
+            let rd = reg_index(*rd)?;
+            dynasm!(ops ; .arch x64 ; neg Rq(rd));
+            Ok(())
+        }
+        X86Instruction::Not { rd } => {
+            let rd = reg_index(*rd)?;
+            dynasm!(ops ; .arch x64 ; not Rq(rd));
+            Ok(())
+        }
         X86Instruction::Cmov { rd, rs, cond } => {
             let rd = reg_index(*rd)?;
             let rs = reg_index(*rs)?;
@@ -363,6 +373,16 @@ fn encode_32(ops: &mut dynasmrt::x86::Assembler, instr: &X86Instruction) -> Resu
             let rn = reg_index_32(*rn)?;
             let imm = imm32_bitpattern_i32(*imm)?;
             dynasm!(ops ; .arch x86 ; test Rd(rn), imm);
+            Ok(())
+        }
+        X86Instruction::Neg { rd } => {
+            let rd = reg_index_32(*rd)?;
+            dynasm!(ops ; .arch x86 ; neg Rd(rd));
+            Ok(())
+        }
+        X86Instruction::Not { rd } => {
+            let rd = reg_index_32(*rd)?;
+            dynasm!(ops ; .arch x86 ; not Rd(rd));
             Ok(())
         }
         X86Instruction::Cmov { rd, rs, cond } => {
@@ -700,6 +720,42 @@ mod tests {
             },
             "test",
             &["eax", "5"],
+        );
+    }
+
+    #[test]
+    fn neg_not_variants_x86_64() {
+        check_x86_64(
+            X86Instruction::Neg {
+                rd: X86Register::RAX,
+            },
+            "neg",
+            &["rax"],
+        );
+        check_x86_64(
+            X86Instruction::Not {
+                rd: X86Register::RBX,
+            },
+            "not",
+            &["rbx"],
+        );
+    }
+
+    #[test]
+    fn neg_not_variants_x86_32() {
+        check_x86_32(
+            X86Instruction::Neg {
+                rd: X86Register::RAX,
+            },
+            "neg",
+            &["eax"],
+        );
+        check_x86_32(
+            X86Instruction::Not {
+                rd: X86Register::RBX,
+            },
+            "not",
+            &["ebx"],
         );
     }
 

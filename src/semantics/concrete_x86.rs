@@ -41,6 +41,8 @@ pub fn apply_instruction_concrete_x86(
         X86Instruction::CmpImm { rn, imm } => apply_cmp_imm(&mut state, *rn, *imm),
         X86Instruction::TestReg { rn, rs } => apply_test_reg(&mut state, *rn, *rs),
         X86Instruction::TestImm { rn, imm } => apply_test_imm(&mut state, *rn, *imm),
+        X86Instruction::Neg { rd } => apply_neg(&mut state, *rd),
+        X86Instruction::Not { rd } => apply_not(&mut state, *rd),
         X86Instruction::Cmov { rd, rs, cond } => {
             if state.get_flags().evaluate(*cond) {
                 let v = state.get_register(*rs);
@@ -93,6 +95,24 @@ fn apply_test_imm(state: &mut X86ConcreteMachineState, rn: crate::isa::x86::X86R
     let rhs = imm as u64;
     let result = lhs & rhs;
     state.set_flags(Eflags::from_logical(result, state.width()));
+}
+
+// NEG computes `rd = -rd` (two's complement) and sets EFLAGS as if computing
+// `0 - rd`: CF = (rd != 0), with OF/SF/ZF/PF from the SUB result. We reuse the
+// SUB flag path with lhs = 0, rhs = old_rd so the carry/overflow semantics
+// match `sub` exactly.
+fn apply_neg(state: &mut X86ConcreteMachineState, rd: crate::isa::x86::X86Register) {
+    let old = state.get_register(rd).as_u64();
+    let result = 0u64.wrapping_sub(old);
+    state.set_register(rd, ConcreteValue::new(result));
+    state.set_flags(Eflags::from_sub(0, old, result, state.width()));
+}
+
+// NOT computes `rd = !rd` (bitwise complement). It affects NO flags — EFLAGS
+// is left exactly as it was, like MOV.
+fn apply_not(state: &mut X86ConcreteMachineState, rd: crate::isa::x86::X86Register) {
+    let old = state.get_register(rd).as_u64();
+    state.set_register(rd, ConcreteValue::new(!old));
 }
 
 #[derive(Clone, Copy)]
@@ -293,6 +313,75 @@ mod tests {
         assert!(after2.get_flags().zf);
         assert!(!after2.get_flags().cf);
         assert!(!after2.get_flags().of);
+    }
+
+    #[test]
+    fn neg_of_zero_yields_zero_with_zf_set_and_cf_clear() {
+        // NEG 0 -> 0; flags from `0 - 0`: ZF set, CF clear (rd == 0).
+        let state = X86ConcreteMachineState::new_zeroed(64);
+        let after = apply_instruction_concrete_x86(
+            state,
+            &X86Instruction::Neg {
+                rd: X86Register::RAX,
+            },
+        );
+        assert_eq!(after.get_register(X86Register::RAX).as_u64(), 0);
+        let flags = after.get_flags();
+        assert!(flags.zf, "neg 0 -> result 0 -> ZF set");
+        assert!(!flags.cf, "neg 0 -> CF clear (operand was zero)");
+        assert!(!flags.sf);
+        assert!(!flags.of);
+    }
+
+    #[test]
+    fn neg_of_nonzero_sets_cf_and_computes_twos_complement() {
+        // NEG 1 -> -1 (all ones); CF set because operand != 0.
+        let mut state = X86ConcreteMachineState::new_zeroed(64);
+        state.set_register(X86Register::RAX, ConcreteValue::new(1));
+        let after = apply_instruction_concrete_x86(
+            state,
+            &X86Instruction::Neg {
+                rd: X86Register::RAX,
+            },
+        );
+        assert_eq!(
+            after.get_register(X86Register::RAX).as_u64(),
+            0u64.wrapping_sub(1)
+        );
+        let flags = after.get_flags();
+        assert!(flags.cf, "neg of nonzero sets CF");
+        assert!(!flags.zf);
+        assert!(flags.sf, "result -1 has top bit set");
+    }
+
+    #[test]
+    fn not_flips_bits_and_leaves_flags_unchanged() {
+        // NOT flips every bit and must NOT touch EFLAGS. Pre-set a flag
+        // pattern, run NOT, and assert the flags are byte-for-byte identical.
+        let mut state = X86ConcreteMachineState::new_zeroed(64);
+        state.set_register(X86Register::RAX, ConcreteValue::new(0x0f0f));
+        // Establish a non-trivial incoming flag state via a CMP.
+        state.set_register(X86Register::RBX, ConcreteValue::new(5));
+        let state = apply_instruction_concrete_x86(
+            state,
+            &X86Instruction::CmpImm {
+                rn: X86Register::RBX,
+                imm: 9,
+            },
+        );
+        let flags_before = state.get_flags();
+        let after = apply_instruction_concrete_x86(
+            state,
+            &X86Instruction::Not {
+                rd: X86Register::RAX,
+            },
+        );
+        assert_eq!(after.get_register(X86Register::RAX).as_u64(), !0x0f0fu64);
+        assert_eq!(
+            after.get_flags(),
+            flags_before,
+            "NOT must leave EFLAGS unchanged"
+        );
     }
 
     #[test]
