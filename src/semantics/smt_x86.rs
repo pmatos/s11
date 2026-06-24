@@ -298,6 +298,80 @@ fn apply_shift_smt(
     state.set_flags(flags);
 }
 
+#[derive(Clone, Copy)]
+enum RotateKind {
+    Rol,
+    Ror,
+}
+
+/// Lower an immediate-count rotate symbolically. Mirrors the concrete
+/// interpreter (`semantics::concrete_x86::apply_rotate`) bit-for-bit. The count
+/// is a CONCRETE IR value, so we mask it in Rust and branch on the result.
+///
+/// The flag model is the load-bearing difference from the shifts: rotates touch
+/// ONLY CF (plus OF for count 1). SF/ZF/PF/AF are PRESERVED. We therefore start
+/// from the PRIOR flag BVs (carrying SF/ZF/PF/AF forward unchanged) and override
+/// only CF, plus OF when the masked count is 1.
+///
+/// * `eff == 0`: leave `rd` and ALL flags untouched (a rotate by 0 is a no-op).
+/// * `eff != 0`:
+///   - ROL: `result = bvrotl(rd, eff)`; CF = bit 0 of the result. OF (count 1
+///     only) = `MSB(result) XOR CF`.
+///   - ROR: `result = bvrotr(rd, eff)`; CF = the MSB (bit `width-1`) of the
+///     result. OF (count 1 only) = XOR of the result's two most-significant bits.
+///   - For count != 1 OF is UNDEFINED on hardware; we preserve the incoming OF.
+fn apply_rotate_smt(
+    state: &mut MachineStateX86,
+    rd: crate::isa::x86::X86Register,
+    imm: i64,
+    kind: RotateKind,
+) {
+    let width = state.width();
+    let mask = u64::from(width - 1);
+    let eff = (imm as u64) & mask;
+
+    // Count masks to 0: no register or flag change.
+    if eff == 0 {
+        return;
+    }
+
+    let old = state.get_register(rd).clone();
+    let amount = BV::from_u64(eff, width);
+    let result = match kind {
+        RotateKind::Rol => old.bvrotl(&amount),
+        RotateKind::Ror => old.bvrotr(&amount),
+    };
+
+    // CF is extracted from the result. ROL: bit 0; ROR: the MSB.
+    let cf = match kind {
+        RotateKind::Rol => result.extract(0, 0),
+        RotateKind::Ror => top_bit_bv(&result, width),
+    };
+
+    // Start from the PRIOR flags so SF/ZF/PF (and OF for count != 1) carry over
+    // unchanged; override CF, and OF only when the masked count is exactly 1.
+    let prior = state.get_flags();
+    let mut flags = EflagsBvs {
+        cf: cf.clone(),
+        pf: prior.pf.clone(),
+        zf: prior.zf.clone(),
+        sf: prior.sf.clone(),
+        of: prior.of.clone(),
+    };
+    if eff == 1 {
+        flags.of = match kind {
+            RotateKind::Rol => top_bit_bv(&result, width).bvxor(&cf),
+            // XOR of the result's two most-significant bits.
+            RotateKind::Ror => {
+                top_bit_bv(&result, width).bvxor(result.extract(width - 2, width - 2))
+            }
+        };
+    }
+
+    state.set_register(rd, result);
+    state.set_flags(flags);
+}
+
 /// Apply a single x86 instruction symbolically. Arithmetic / logic /
 /// CMP arms bind the five tracked flag BVs via `compute_eflags_*`;
 /// CMOV reads them via `x86_condition_to_smt`.
@@ -476,6 +550,11 @@ pub fn apply_instruction(
         X86Instruction::Shl { rd, imm } => apply_shift_smt(&mut state, *rd, *imm, ShiftKind::Shl),
         X86Instruction::Shr { rd, imm } => apply_shift_smt(&mut state, *rd, *imm, ShiftKind::Shr),
         X86Instruction::Sar { rd, imm } => apply_shift_smt(&mut state, *rd, *imm, ShiftKind::Sar),
+        // Immediate-count rotates. Same concrete-count handling as the shifts,
+        // but a partial flag update (only CF, plus OF for count 1) — see
+        // `apply_rotate_smt`.
+        X86Instruction::Rol { rd, imm } => apply_rotate_smt(&mut state, *rd, *imm, RotateKind::Rol),
+        X86Instruction::Ror { rd, imm } => apply_rotate_smt(&mut state, *rd, *imm, RotateKind::Ror),
         X86Instruction::Cmov { rd, rs, cond } => {
             let pred = x86_condition_to_smt(*cond, state.get_flags());
             let rs_val = state.get_register(*rs).clone();
@@ -1098,6 +1177,219 @@ mod tests {
             solver.check(),
             SatResult::Unsat,
             "shr rax, 1 must set CF to the original low bit"
+        );
+    }
+
+    // --- symbolic ROL / ROR ---
+
+    // The DoD ROL theorem: `rol rd, 1` produces the same RESULT as the
+    // shift-construction `(rd << 1) | (rd >>u (width-1))`. We prove the negation
+    // of the result equality is unsat over a shared symbolic input.
+    #[test]
+    fn rol_one_result_matches_shift_construction() {
+        let state = MachineStateX86::new_symbolic("s", 64);
+        let old = state.get_register(X86Register::RAX).clone();
+        // (rd << 1) | (rd >>u 63).
+        let constructed = old
+            .bvshl(BV::from_u64(1, 64))
+            .bvor(old.bvlshr(BV::from_u64(63, 64)));
+        let after = apply_instruction(
+            state,
+            &X86Instruction::Rol {
+                rd: X86Register::RAX,
+                imm: 1,
+            },
+        );
+        let solver = Solver::new();
+        solver.assert(after.get_register(X86Register::RAX).eq(&constructed).not());
+        assert_eq!(
+            solver.check(),
+            SatResult::Unsat,
+            "rol rax, 1 must equal (rax << 1) | (rax >>u 63)"
+        );
+    }
+
+    // The DoD ROR theorem: `ror rd, 1` equals `(rd >>u 1) | (rd << (width-1))`.
+    #[test]
+    fn ror_one_result_matches_shift_construction() {
+        let state = MachineStateX86::new_symbolic("s", 64);
+        let old = state.get_register(X86Register::RAX).clone();
+        // (rd >>u 1) | (rd << 63).
+        let constructed = old
+            .bvlshr(BV::from_u64(1, 64))
+            .bvor(old.bvshl(BV::from_u64(63, 64)));
+        let after = apply_instruction(
+            state,
+            &X86Instruction::Ror {
+                rd: X86Register::RAX,
+                imm: 1,
+            },
+        );
+        let solver = Solver::new();
+        solver.assert(after.get_register(X86Register::RAX).eq(&constructed).not());
+        assert_eq!(
+            solver.check(),
+            SatResult::Unsat,
+            "ror rax, 1 must equal (rax >>u 1) | (rax << 63)"
+        );
+    }
+
+    // The load-bearing rotate flag model: SF/ZF/PF are PRESERVED across a rotate
+    // (only CF, plus OF for count 1, changes). We seed the incoming SF/ZF/PF,
+    // rotate, and prove they survive bit-identically (negation unsat). We also
+    // prove CF equals the rotated-out bit for both ROL (result bit 0) and ROR
+    // (result MSB).
+    #[test]
+    fn rotate_preserves_sf_zf_pf_and_binds_cf() {
+        // ROL by 3: SF/ZF/PF unchanged; CF == result bit 0.
+        {
+            let state = MachineStateX86::new_symbolic("s", 64);
+            let old_flags = state.get_flags();
+            let (old_sf, old_zf, old_pf) = (
+                old_flags.sf.clone(),
+                old_flags.zf.clone(),
+                old_flags.pf.clone(),
+            );
+            let after = apply_instruction(
+                state,
+                &X86Instruction::Rol {
+                    rd: X86Register::RAX,
+                    imm: 3,
+                },
+            );
+            let f = after.get_flags();
+            let solver = Solver::new();
+            solver.assert(z3::ast::Bool::or(&[
+                &f.sf.eq(&old_sf).not(),
+                &f.zf.eq(&old_zf).not(),
+                &f.pf.eq(&old_pf).not(),
+            ]));
+            assert_eq!(
+                solver.check(),
+                SatResult::Unsat,
+                "ROL must preserve SF/ZF/PF"
+            );
+
+            // CF == bit 0 of the rotated result.
+            let cf_solver = Solver::new();
+            let result_bit0 = after.get_register(X86Register::RAX).extract(0, 0);
+            cf_solver.assert(f.cf.eq(&result_bit0).not());
+            assert_eq!(
+                cf_solver.check(),
+                SatResult::Unsat,
+                "ROL CF must equal the result's bit 0"
+            );
+        }
+        // ROR by 3: SF/ZF/PF unchanged; CF == result MSB.
+        {
+            let state = MachineStateX86::new_symbolic("s", 64);
+            let old_flags = state.get_flags();
+            let (old_sf, old_zf, old_pf) = (
+                old_flags.sf.clone(),
+                old_flags.zf.clone(),
+                old_flags.pf.clone(),
+            );
+            let after = apply_instruction(
+                state,
+                &X86Instruction::Ror {
+                    rd: X86Register::RAX,
+                    imm: 3,
+                },
+            );
+            let f = after.get_flags();
+            let solver = Solver::new();
+            solver.assert(z3::ast::Bool::or(&[
+                &f.sf.eq(&old_sf).not(),
+                &f.zf.eq(&old_zf).not(),
+                &f.pf.eq(&old_pf).not(),
+            ]));
+            assert_eq!(
+                solver.check(),
+                SatResult::Unsat,
+                "ROR must preserve SF/ZF/PF"
+            );
+
+            // CF == the rotated result's MSB (bit 63).
+            let cf_solver = Solver::new();
+            let result_msb = after.get_register(X86Register::RAX).extract(63, 63);
+            cf_solver.assert(f.cf.eq(&result_msb).not());
+            assert_eq!(
+                cf_solver.check(),
+                SatResult::Unsat,
+                "ROR CF must equal the result's MSB"
+            );
+        }
+    }
+
+    // The eff == 0 rotate case: a masked count of 0 leaves the register AND all
+    // five tracked flags bit-identical to the incoming state.
+    #[test]
+    fn rotate_by_zero_preserves_register_and_all_flags_smt() {
+        for instr in [
+            X86Instruction::Rol {
+                rd: X86Register::RAX,
+                imm: 0,
+            },
+            X86Instruction::Ror {
+                rd: X86Register::RAX,
+                imm: 0,
+            },
+            // 64 masks to 0 at width 64.
+            X86Instruction::Ror {
+                rd: X86Register::RAX,
+                imm: 64,
+            },
+        ] {
+            let before = MachineStateX86::new_symbolic("s", 64);
+            let old_reg = before.get_register(X86Register::RAX).clone();
+            let old_flags = before.get_flags();
+            let (old_cf, old_pf, old_zf, old_sf, old_of) = (
+                old_flags.cf.clone(),
+                old_flags.pf.clone(),
+                old_flags.zf.clone(),
+                old_flags.sf.clone(),
+                old_flags.of.clone(),
+            );
+
+            let after = apply_instruction(before, &instr);
+            let after_flags = after.get_flags();
+
+            let solver = Solver::new();
+            solver.assert(z3::ast::Bool::or(&[
+                &after.get_register(X86Register::RAX).eq(&old_reg).not(),
+                &after_flags.cf.eq(&old_cf).not(),
+                &after_flags.pf.eq(&old_pf).not(),
+                &after_flags.zf.eq(&old_zf).not(),
+                &after_flags.sf.eq(&old_sf).not(),
+                &after_flags.of.eq(&old_of).not(),
+            ]));
+            assert_eq!(
+                solver.check(),
+                SatResult::Unsat,
+                "{instr:?} (eff==0) must preserve rd and every flag"
+            );
+        }
+    }
+
+    // OF is preserved for a rotate count != 1 (architecturally undefined). After
+    // `rol rd, 3` the OF must equal the incoming OF.
+    #[test]
+    fn rotate_count_not_one_preserves_of() {
+        let before = MachineStateX86::new_symbolic("s", 64);
+        let old_of = before.get_flags().of.clone();
+        let after = apply_instruction(
+            before,
+            &X86Instruction::Rol {
+                rd: X86Register::RAX,
+                imm: 3,
+            },
+        );
+        let solver = Solver::new();
+        solver.assert(after.get_flags().of.eq(&old_of).not());
+        assert_eq!(
+            solver.check(),
+            SatResult::Unsat,
+            "rotate count != 1 must leave OF == the incoming OF"
         );
     }
 

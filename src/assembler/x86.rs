@@ -237,6 +237,18 @@ fn encode_64(ops: &mut dynasmrt::x64::Assembler, instr: &X86Instruction) -> Resu
             dynasm!(ops ; .arch x64 ; sar Rq(rd), BYTE count);
             Ok(())
         }
+        X86Instruction::Rol { rd, imm } => {
+            let rd = reg_index(*rd)?;
+            let count = shift_count_imm8(*imm)?;
+            dynasm!(ops ; .arch x64 ; rol Rq(rd), BYTE count);
+            Ok(())
+        }
+        X86Instruction::Ror { rd, imm } => {
+            let rd = reg_index(*rd)?;
+            let count = shift_count_imm8(*imm)?;
+            dynasm!(ops ; .arch x64 ; ror Rq(rd), BYTE count);
+            Ok(())
+        }
         X86Instruction::Cmov { rd, rs, cond } => {
             let rd = reg_index(*rd)?;
             let rs = reg_index(*rs)?;
@@ -449,6 +461,18 @@ fn encode_32(ops: &mut dynasmrt::x86::Assembler, instr: &X86Instruction) -> Resu
             let rd = reg_index_32(*rd)?;
             let count = shift_count_imm8(*imm)?;
             dynasm!(ops ; .arch x86 ; sar Rd(rd), BYTE count);
+            Ok(())
+        }
+        X86Instruction::Rol { rd, imm } => {
+            let rd = reg_index_32(*rd)?;
+            let count = shift_count_imm8(*imm)?;
+            dynasm!(ops ; .arch x86 ; rol Rd(rd), BYTE count);
+            Ok(())
+        }
+        X86Instruction::Ror { rd, imm } => {
+            let rd = reg_index_32(*rd)?;
+            let count = shift_count_imm8(*imm)?;
+            dynasm!(ops ; .arch x86 ; ror Rd(rd), BYTE count);
             Ok(())
         }
         X86Instruction::Cmov { rd, rs, cond } => {
@@ -906,6 +930,55 @@ mod tests {
             },
             "sar",
             &["ebx", "4"],
+        );
+    }
+
+    #[test]
+    fn rotate_variants_x86_64() {
+        check_x86_64(
+            X86Instruction::Rol {
+                rd: X86Register::RAX,
+                imm: 1,
+            },
+            "rol",
+            &["rax", "1"],
+        );
+        check_x86_64(
+            X86Instruction::Ror {
+                rd: X86Register::RBX,
+                imm: 5,
+            },
+            "ror",
+            &["rbx", "5"],
+        );
+        // Extended register round-trips too.
+        check_x86_64(
+            X86Instruction::Rol {
+                rd: X86Register::R9,
+                imm: 7,
+            },
+            "rol",
+            &["r9", "7"],
+        );
+    }
+
+    #[test]
+    fn rotate_variants_x86_32() {
+        check_x86_32(
+            X86Instruction::Rol {
+                rd: X86Register::RAX,
+                imm: 2,
+            },
+            "rol",
+            &["eax", "2"],
+        );
+        check_x86_32(
+            X86Instruction::Ror {
+                rd: X86Register::RDX,
+                imm: 4,
+            },
+            "ror",
+            &["edx", "4"],
         );
     }
 

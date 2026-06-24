@@ -48,6 +48,8 @@ pub fn apply_instruction_concrete_x86(
         X86Instruction::Shl { rd, imm } => apply_shift(&mut state, *rd, *imm, ShiftKind::Shl),
         X86Instruction::Shr { rd, imm } => apply_shift(&mut state, *rd, *imm, ShiftKind::Shr),
         X86Instruction::Sar { rd, imm } => apply_shift(&mut state, *rd, *imm, ShiftKind::Sar),
+        X86Instruction::Rol { rd, imm } => apply_rotate(&mut state, *rd, *imm, RotateKind::Rol),
+        X86Instruction::Ror { rd, imm } => apply_rotate(&mut state, *rd, *imm, RotateKind::Ror),
         X86Instruction::Cmov { rd, rs, cond } => {
             if state.get_flags().evaluate(*cond) {
                 let v = state.get_register(*rs);
@@ -239,6 +241,80 @@ fn apply_shift(
     let mut flags = Eflags::from_logical(result, width);
     flags.cf = cf;
     flags.of = of;
+    state.set_flags(flags);
+}
+
+#[derive(Clone, Copy)]
+enum RotateKind {
+    Rol,
+    Ror,
+}
+
+// Immediate-count rotate. Like the shifts the count is a concrete compile-time
+// value masked to `width-1` (`eff`). The CRUCIAL difference from the shifts is
+// the flag model: rotates touch ONLY CF (plus OF for count 1). SF/ZF/PF/AF are
+// PRESERVED — this is a PARTIAL flag update, so we read the prior flags and keep
+// SF/ZF/PF/AF, overriding only CF (and OF when count == 1).
+//
+// * `eff == 0`: the rotate is a complete no-op — leave `rd` and every flag
+//   untouched.
+// * `eff != 0`:
+//   - ROL: `result = rotate_left(rd, eff)`; CF = bit 0 of the result (the bit
+//     rotated from the MSB into the LSB). OF (count 1 only) = `MSB(result) XOR
+//     CF`.
+//   - ROR: `result = rotate_right(rd, eff)`; CF = the MSB (bit `width-1`) of the
+//     result. OF (count 1 only) = `MSB(result) XOR (bit width-2 of result)` (the
+//     XOR of the result's two most-significant bits).
+//   - For count != 1 OF is architecturally UNDEFINED, so we PRESERVE the
+//     incoming OF (deterministic and internally consistent: target and candidate
+//     share this lowering).
+fn apply_rotate(
+    state: &mut X86ConcreteMachineState,
+    rd: crate::isa::x86::X86Register,
+    imm: i64,
+    kind: RotateKind,
+) {
+    let width = state.width();
+    let mask = u64::from(width - 1);
+    let eff = (imm as u64) & mask;
+
+    // Count masks to 0: leave rd and every flag untouched.
+    if eff == 0 {
+        return;
+    }
+
+    let old = mask_width(state.get_register(rd).as_u64(), width);
+    let eff_u32 = eff as u32;
+
+    // `(old << eff) | (old >>u (width - eff))` for ROL (and the mirror for ROR),
+    // masked back to the operand width.
+    let result = match kind {
+        RotateKind::Rol => (old << eff_u32) | (old >> (width - eff_u32)),
+        RotateKind::Ror => (old >> eff_u32) | (old << (width - eff_u32)),
+    };
+    let result = mask_width(result, width);
+
+    let cf = match kind {
+        // ROL: CF = bit 0 of the result.
+        RotateKind::Rol => result & 1 == 1,
+        // ROR: CF = the MSB (bit width-1) of the result.
+        RotateKind::Ror => msb(result, width),
+    };
+
+    // Start from the PRIOR flags so SF/ZF/PF/AF are preserved, then override CF.
+    let mut flags = state.get_flags();
+    flags.cf = cf;
+    // OF is defined for count == 1 only. For any other count it is undefined, so
+    // we keep the prior OF (already carried over by cloning the flags above).
+    if eff == 1 {
+        flags.of = match kind {
+            RotateKind::Rol => msb(result, width) ^ cf,
+            // XOR of the result's two most-significant bits.
+            RotateKind::Ror => msb(result, width) ^ ((result >> (width - 2)) & 1 == 1),
+        };
+    }
+
+    state.set_register(rd, ConcreteValue::new(result));
     state.set_flags(flags);
 }
 
@@ -738,6 +814,192 @@ mod tests {
                 after.get_flags(),
                 seeded,
                 "{instr:?} (eff==0) must preserve ALL flags"
+            );
+        }
+    }
+
+    #[test]
+    fn rol_rotates_left_and_sets_carry_from_lsb() {
+        // rol rax, 1 of MSB-set value: 0x8000... -> 0x0000...0001. CF = bit 0
+        // of the result = 1.
+        let mut state = X86ConcreteMachineState::new_zeroed(64);
+        state.set_register(X86Register::RAX, ConcreteValue::new(0x8000_0000_0000_0000));
+        let after = apply_instruction_concrete_x86(
+            state,
+            &X86Instruction::Rol {
+                rd: X86Register::RAX,
+                imm: 1,
+            },
+        );
+        assert_eq!(after.get_register(X86Register::RAX).as_u64(), 1);
+        assert!(
+            after.get_flags().cf,
+            "rol moved the MSB into bit 0 -> CF set"
+        );
+        // OF (count 1) = MSB(result) XOR CF = 0 XOR 1 = 1.
+        assert!(after.get_flags().of, "rol count 1: OF = MSB(result) XOR CF");
+
+        // rol of a value whose MSB is 0: CF = 0.
+        let mut state = X86ConcreteMachineState::new_zeroed(64);
+        state.set_register(X86Register::RAX, ConcreteValue::new(0x1));
+        let after = apply_instruction_concrete_x86(
+            state,
+            &X86Instruction::Rol {
+                rd: X86Register::RAX,
+                imm: 1,
+            },
+        );
+        assert_eq!(after.get_register(X86Register::RAX).as_u64(), 0b10);
+        assert!(!after.get_flags().cf, "rol of bit 0 only -> CF clear");
+    }
+
+    #[test]
+    fn ror_rotates_right_and_sets_carry_from_msb() {
+        // ror rax, 1 of an odd value: bit 0 wraps to the MSB and becomes CF.
+        let mut state = X86ConcreteMachineState::new_zeroed(64);
+        state.set_register(X86Register::RAX, ConcreteValue::new(0x1));
+        let after = apply_instruction_concrete_x86(
+            state,
+            &X86Instruction::Ror {
+                rd: X86Register::RAX,
+                imm: 1,
+            },
+        );
+        assert_eq!(
+            after.get_register(X86Register::RAX).as_u64(),
+            0x8000_0000_0000_0000
+        );
+        assert!(
+            after.get_flags().cf,
+            "ror wrapped bit 0 into the MSB -> CF = result MSB = 1"
+        );
+
+        // ror of an even value: result MSB is 0, so CF clear.
+        let mut state = X86ConcreteMachineState::new_zeroed(64);
+        state.set_register(X86Register::RAX, ConcreteValue::new(0b10));
+        let after = apply_instruction_concrete_x86(
+            state,
+            &X86Instruction::Ror {
+                rd: X86Register::RAX,
+                imm: 1,
+            },
+        );
+        assert_eq!(after.get_register(X86Register::RAX).as_u64(), 0b1);
+        assert!(!after.get_flags().cf, "ror of an even value -> CF clear");
+    }
+
+    // The load-bearing rotate distinction: SF/ZF/PF/AF are PRESERVED across a
+    // rotate (only CF and, for count 1, OF change). Seed distinctive SF/ZF/PF/AF
+    // and assert they survive.
+    #[test]
+    fn rotate_preserves_sf_zf_pf_af() {
+        for instr in [
+            X86Instruction::Rol {
+                rd: X86Register::RAX,
+                imm: 3,
+            },
+            X86Instruction::Ror {
+                rd: X86Register::RAX,
+                imm: 3,
+            },
+        ] {
+            let mut state = X86ConcreteMachineState::new_zeroed(64);
+            // A nonzero, non-zero-result value so the "natural" SF/ZF/PF would
+            // differ from the seeded ones if the rotate (wrongly) recomputed
+            // them.
+            state.set_register(X86Register::RAX, ConcreteValue::new(0x1));
+            let seeded = Eflags {
+                cf: false,
+                pf: true,
+                af: true,
+                zf: true,
+                sf: true,
+                of: false,
+            };
+            state.set_flags(seeded);
+            let after = apply_instruction_concrete_x86(state, &instr);
+            let flags = after.get_flags();
+            assert_eq!(flags.sf, seeded.sf, "{instr:?} must preserve SF");
+            assert_eq!(flags.zf, seeded.zf, "{instr:?} must preserve ZF");
+            assert_eq!(flags.pf, seeded.pf, "{instr:?} must preserve PF");
+            assert_eq!(flags.af, seeded.af, "{instr:?} must preserve AF");
+            // count == 3 (!= 1): OF is undefined, so the model preserves it.
+            assert_eq!(
+                flags.of, seeded.of,
+                "{instr:?} count != 1 must preserve incoming OF"
+            );
+        }
+    }
+
+    // A masked count of 0 is a complete no-op: register AND every flag, including
+    // CF and OF, are left untouched.
+    #[test]
+    fn rotate_by_zero_preserves_register_and_all_flags() {
+        for instr in [
+            X86Instruction::Rol {
+                rd: X86Register::RAX,
+                imm: 0,
+            },
+            X86Instruction::Ror {
+                rd: X86Register::RAX,
+                imm: 0,
+            },
+            // A count of 64 masks to 0 at width 64 (mask = 0x3f), so it is also a
+            // no-op even though the raw count is nonzero.
+            X86Instruction::Rol {
+                rd: X86Register::RAX,
+                imm: 64,
+            },
+        ] {
+            let mut state = X86ConcreteMachineState::new_zeroed(64);
+            state.set_register(X86Register::RAX, ConcreteValue::new(0xDEAD_BEEF));
+            let seeded = Eflags {
+                cf: true,
+                pf: true,
+                af: true,
+                zf: true,
+                sf: true,
+                of: true,
+            };
+            state.set_flags(seeded);
+            let after = apply_instruction_concrete_x86(state, &instr);
+            assert_eq!(
+                after.get_register(X86Register::RAX).as_u64(),
+                0xDEAD_BEEF,
+                "{instr:?} (eff==0) must leave rd unchanged"
+            );
+            assert_eq!(
+                after.get_flags(),
+                seeded,
+                "{instr:?} (eff==0) must preserve ALL flags"
+            );
+        }
+    }
+
+    // Cross-check the rotate result against the shift-construction identity from
+    // the DoD: `rol rd, 1` == `(rd << 1) | (rd >>u (width-1))`.
+    #[test]
+    fn rol_by_one_matches_shift_construction() {
+        for value in [0x1u64, 0x8000_0000_0000_0000, 0xDEAD_BEEF, u64::MAX, 0x5555] {
+            let mut state = X86ConcreteMachineState::new_zeroed(64);
+            state.set_register(X86Register::RAX, ConcreteValue::new(value));
+            let after = apply_instruction_concrete_x86(
+                state,
+                &X86Instruction::Rol {
+                    rd: X86Register::RAX,
+                    imm: 1,
+                },
+            );
+            // The DoD cross-check is precisely that `rol rd, 1` equals this
+            // hand-written shift construction, so spell it out rather than
+            // collapsing it into `rotate_left` (which would make the test
+            // tautological).
+            #[allow(clippy::manual_rotate)]
+            let expected = (value << 1) | (value >> 63);
+            assert_eq!(
+                after.get_register(X86Register::RAX).as_u64(),
+                expected,
+                "rol {value:#x}, 1 must equal (v << 1) | (v >>u 63)"
             );
         }
     }

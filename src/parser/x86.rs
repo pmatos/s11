@@ -401,6 +401,8 @@ fn x86_ir_from_mnemonic_impl(
             | "sal"
             | "shr"
             | "sar"
+            | "rol"
+            | "ror"
     ) {
         return Ok(None);
     }
@@ -467,6 +469,16 @@ fn x86_ir_from_mnemonic_impl(
             })),
             X86Operand::Register(_) => Ok(None),
         },
+        // ROL/ROR take a register plus an immediate COUNT. Only the
+        // immediate-count form is modelled — the register (CL) count form is
+        // deferred and surfaces as `Ok(None)` (an unsupported shape).
+        "rol" | "ror" => match src_op {
+            X86Operand::Immediate(imm) => Ok(Some(match mnemonic.as_str() {
+                "rol" => X86Instruction::Rol { rd, imm },
+                _ => X86Instruction::Ror { rd, imm },
+            })),
+            X86Operand::Register(_) => Ok(None),
+        },
         _ => Ok(None),
     }
 }
@@ -479,8 +491,8 @@ fn x86_ir_from_mnemonic_impl(
 /// (`name:`), directives (`.foo`), and instructions whose mnemonic is
 /// one of the supported families (mov, add, sub, and, or, xor, cmp,
 /// test, the single-operand neg/not/inc/dec, the immediate-count shifts
-/// shl/sal/shr/sar, plus the conditional cmovCC and jCC variants). Anything
-/// else is a parse error.
+/// shl/sal/shr/sar, the immediate-count rotates rol/ror, plus the conditional
+/// cmovCC and jCC variants). Anything else is a parse error.
 pub fn parse_x86_assembly_string(
     content: &str,
     source_name: String,
@@ -1053,6 +1065,74 @@ mod tests {
                 .unwrap()
                 .unwrap(),
             X86Instruction::Sar {
+                rd: X86Register::RAX,
+                imm: 4
+            }
+        );
+    }
+
+    #[test]
+    fn rotate_parse_register_plus_count_and_round_trip_display() {
+        // rol / ror parse to the immediate-count variants and Display
+        // round-trips back to the same IR.
+        let rol = x86_ir_from_mnemonic("rol", "rax, 1").unwrap().unwrap();
+        assert_eq!(
+            rol,
+            X86Instruction::Rol {
+                rd: X86Register::RAX,
+                imm: 1
+            }
+        );
+        assert_eq!(rol.to_string(), "rol rax, 1");
+
+        let ror = x86_ir_from_mnemonic("ror", "rbx, 5").unwrap().unwrap();
+        assert_eq!(
+            ror,
+            X86Instruction::Ror {
+                rd: X86Register::RBX,
+                imm: 5
+            }
+        );
+        assert_eq!(ror.to_string(), "ror rbx, 5");
+
+        for instr in [rol, ror] {
+            let text = instr.to_string();
+            let (mnemonic, ops) = text.split_once(char::is_whitespace).unwrap();
+            assert_eq!(
+                x86_ir_from_mnemonic(mnemonic, ops).unwrap().unwrap(),
+                instr,
+                "round-trip failed for {text}"
+            );
+        }
+    }
+
+    #[test]
+    fn rotate_with_register_count_is_rejected() {
+        // The CL-register-count form is deferred: `rol rax, rcx` is an
+        // unsupported shape and surfaces as Ok(None), not a Rol.
+        assert!(x86_ir_from_mnemonic("rol", "rax, rcx").unwrap().is_none());
+        assert!(x86_ir_from_mnemonic("ror", "rax, rcx").unwrap().is_none());
+        // A single operand (no count) is also an unsupported shape.
+        assert!(x86_ir_from_mnemonic("rol", "rax").unwrap().is_none());
+        assert!(x86_ir_from_mnemonic("ror", "rbx").unwrap().is_none());
+    }
+
+    #[test]
+    fn rotate_round_trip_through_mode_aware_binary_path() {
+        assert_eq!(
+            x86_ir_from_mnemonic_for_mode("rol", "rax, 1", X86ParseMode::Mode64)
+                .unwrap()
+                .unwrap(),
+            X86Instruction::Rol {
+                rd: X86Register::RAX,
+                imm: 1
+            }
+        );
+        assert_eq!(
+            x86_ir_from_mnemonic_for_mode("ror", "eax, 4", X86ParseMode::Mode32)
+                .unwrap()
+                .unwrap(),
+            X86Instruction::Ror {
                 rd: X86Register::RAX,
                 imm: 4
             }
