@@ -489,15 +489,33 @@ enum OptimizedWindowBytes {
     LeaveInputUnchanged,
 }
 
-#[derive(Clone, Copy)]
+/// Registers proven live downstream of the window, carried per-arch.
+///
+/// `None` means "no downstream narrowing available" — the consumer falls back
+/// to the conservative default (every window-written register is live-out).
+/// This is the safe posture for any unanalyzable section (issue #621).
+#[derive(Clone, Default)]
+enum DownstreamLiveRegs {
+    #[default]
+    Unknown,
+    Aarch64(semantics::live_out::RegisterSet<Register>),
+    X86(semantics::live_out::RegisterSet<isa::x86::X86Register>),
+}
+
+#[derive(Clone)]
 struct OptimizationContext {
     downstream_flags_live: bool,
+    /// Registers the window writes that are proven live downstream. The
+    /// window's live-out set is narrowed to (written ∩ this) when available;
+    /// `Unknown` keeps every written register live (issue #621).
+    downstream_live_regs: DownstreamLiveRegs,
 }
 
 impl Default for OptimizationContext {
     fn default() -> Self {
         Self {
             downstream_flags_live: true,
+            downstream_live_regs: DownstreamLiveRegs::Unknown,
         }
     }
 }
@@ -523,6 +541,22 @@ trait ElfOptimizationBackend {
     ) -> Result<Vec<Self::Instruction>, String>;
 
     fn validate_window_ir(&self, ir: &[Self::Instruction]) -> Result<(), String>;
+
+    /// Build the per-window `OptimizationContext`, deriving the downstream
+    /// flags- and register-liveness from the bytes that follow the window in
+    /// the section. The default mirrors the shared flags-only derivation; the
+    /// AArch64 and x86 backends override it to also compute the downstream-live
+    /// register set over the window's written registers (issue #621).
+    fn optimization_context(
+        &self,
+        _ir: &[Self::Instruction],
+        patcher: &ElfPatcher,
+        section: &TextSection,
+        end_addr: u64,
+        cs: &Capstone,
+    ) -> OptimizationContext {
+        optimization_context_for_backend(self.arch(), patcher, section, end_addr, cs)
+    }
 
     /// Run the selected search. `capstone_instructions` preserves source
     /// operand spelling for backends whose IR collapses aliases; backends
@@ -576,6 +610,31 @@ impl ElfOptimizationBackend for AArch64OptimizationBackend {
         validate_basic_block(ir)
     }
 
+    fn optimization_context(
+        &self,
+        ir: &[Self::Instruction],
+        patcher: &ElfPatcher,
+        section: &TextSection,
+        end_addr: u64,
+        cs: &Capstone,
+    ) -> OptimizationContext {
+        // Candidates are the registers the window prefix writes — the same set
+        // that becomes the default (all-live) live-out contract. The
+        // terminator (held fixed) is not a candidate: its reads are pinned
+        // separately by `live_out_for_optimization_prefix`.
+        let (prefix, _terminator) = split_terminator(ir);
+        let candidates = validation::live_out::compute_written_registers(prefix);
+        let downstream_live_regs = DownstreamLiveRegs::Aarch64(
+            aarch64_downstream_regs_live_from_section(patcher, section, end_addr, cs, &candidates),
+        );
+        OptimizationContext {
+            downstream_flags_live: aarch64_downstream_flags_live_from_section(
+                patcher, section, end_addr, cs,
+            ),
+            downstream_live_regs,
+        }
+    }
+
     fn run_search(
         &self,
         ir: &[Self::Instruction],
@@ -583,7 +642,11 @@ impl ElfOptimizationBackend for AArch64OptimizationBackend {
         options: &OptimizationOptions,
         context: OptimizationContext,
     ) -> Result<Option<Vec<Self::Instruction>>, Box<dyn std::error::Error>> {
-        run_optimization(ir, options, context.downstream_flags_live)
+        let downstream_live = match &context.downstream_live_regs {
+            DownstreamLiveRegs::Aarch64(set) => Some(set.clone()),
+            _ => None,
+        };
+        run_optimization(ir, options, context.downstream_flags_live, downstream_live)
     }
 
     fn no_optimization_message(&self) -> &'static str {
@@ -704,6 +767,40 @@ impl ElfOptimizationBackend for X86OptimizationBackend {
         validate_x86_window_terminator_placement(ir)
     }
 
+    fn optimization_context(
+        &self,
+        ir: &[Self::Instruction],
+        patcher: &ElfPatcher,
+        section: &TextSection,
+        end_addr: u64,
+        cs: &Capstone,
+    ) -> OptimizationContext {
+        // Candidates: every register the window writes (the trailing Jcc, if
+        // any, has no destination and contributes nothing). This is the same
+        // set `x86_live_out_from_target` marks live by default.
+        let candidates = semantics::live_out::RegisterSet::from_registers(
+            ir.iter().filter_map(|i| i.destination()).collect(),
+        );
+        let downstream_live_regs = DownstreamLiveRegs::X86(x86_downstream_regs_live_from_section(
+            self.arch(),
+            patcher,
+            section,
+            end_addr,
+            cs,
+            &candidates,
+        ));
+        OptimizationContext {
+            downstream_flags_live: x86_downstream_flags_live_from_section(
+                self.arch(),
+                patcher,
+                section,
+                end_addr,
+                cs,
+            ),
+            downstream_live_regs,
+        }
+    }
+
     fn run_search(
         &self,
         ir: &[Self::Instruction],
@@ -712,18 +809,31 @@ impl ElfOptimizationBackend for X86OptimizationBackend {
         context: OptimizationContext,
     ) -> Result<Option<Vec<Self::Instruction>>, Box<dyn std::error::Error>> {
         let width = self.arch.width();
+        let downstream_live = match &context.downstream_live_regs {
+            DownstreamLiveRegs::X86(set) => Some(set.clone()),
+            _ => None,
+        };
         let optimized = match options.algorithm {
-            Algorithm::Enumerative => {
-                run_x86_enumerative(ir, width, options, context.downstream_flags_live)
-            }
-            Algorithm::Stochastic => {
-                run_x86_stochastic(ir, width, options, context.downstream_flags_live)
-            }
+            Algorithm::Enumerative => run_x86_enumerative(
+                ir,
+                width,
+                options,
+                context.downstream_flags_live,
+                downstream_live.as_ref(),
+            ),
+            Algorithm::Stochastic => run_x86_stochastic(
+                ir,
+                width,
+                options,
+                context.downstream_flags_live,
+                downstream_live.as_ref(),
+            ),
             Algorithm::Symbolic => run_x86_symbolic(
                 ir,
                 width,
                 options,
                 context.downstream_flags_live,
+                downstream_live.as_ref(),
                 x86_capstone_window_uses_only_full_width_register_operands(
                     capstone_instructions,
                     width,
@@ -936,7 +1046,7 @@ fn optimize_elf_binary_with_backend<B: ElfOptimizationBackend>(
     backend.validate_window_ir(&ir_instructions)?;
 
     let optimization_context =
-        optimization_context_for_backend(backend.arch(), patcher, &section, end_addr, &cs);
+        backend.optimization_context(&ir_instructions, patcher, &section, end_addr, &cs);
 
     // Run optimization based on selected algorithm
     let optimized_instructions = backend.run_search(
@@ -984,15 +1094,32 @@ fn optimize_elf_binary_with_backend<B: ElfOptimizationBackend>(
     Ok(())
 }
 
+/// Build the per-window AArch64 live-out contract.
+///
+/// Window-written registers are live-out **unless** the downstream scan proved
+/// them dead. `downstream_live` is `Some(set)` of the registers proven live
+/// downstream when an in-region suffix could be analyzed (issue #621); when it
+/// is `None` (unanalyzable section) every written register stays live — the
+/// pre-#621 default. Registers the fixed terminator reads are always pinned,
+/// independent of the downstream scan, since they are consumed before control
+/// transfers.
 fn live_out_for_optimization_prefix(
     prefix: &[Instruction],
     terminator: Option<&Instruction>,
     downstream_flags_live: bool,
+    downstream_live: Option<&semantics::live_out::RegisterSet<Register>>,
 ) -> LiveOut {
-    let mut live_registers: Vec<Register> = prefix
-        .iter()
-        .flat_map(|instr| instr.destinations())
-        .collect();
+    let mut live_registers: Vec<Register> = match downstream_live {
+        // Narrow to (written ∩ proven-live). The downstream set is already a
+        // subset of the window-written registers (it is computed from exactly
+        // that candidate set), so iterating it is sufficient.
+        Some(live) => live.iter().copied().collect(),
+        // No downstream analysis: keep every written register live.
+        None => prefix
+            .iter()
+            .flat_map(|instr| instr.destinations())
+            .collect(),
+    };
 
     if let Some(terminator) = terminator {
         live_registers.extend(terminator.source_registers());
@@ -1128,6 +1255,7 @@ fn run_optimization(
     target: &[Instruction],
     options: &OptimizationOptions,
     downstream_flags_live: bool,
+    downstream_live: Option<semantics::live_out::RegisterSet<Register>>,
 ) -> Result<Option<Vec<Instruction>>, Box<dyn std::error::Error>> {
     if target.is_empty() {
         return Ok(None);
@@ -1161,7 +1289,12 @@ fn run_optimization(
     // are live-out), plus any registers the fixed terminator reads after the
     // optimized prefix runs. NZCV liveness comes from the fixed terminator or
     // the known downstream fall-through context.
-    let live_out = live_out_for_optimization_prefix(prefix, terminator, downstream_flags_live);
+    let live_out = live_out_for_optimization_prefix(
+        prefix,
+        terminator,
+        downstream_flags_live,
+        downstream_live.as_ref(),
+    );
 
     // Reattach the terminator (if any) to a successfully optimized prefix.
     let reattach = |opt: Option<Vec<Instruction>>| -> Option<Vec<Instruction>> {
@@ -1744,6 +1877,141 @@ fn aarch64_downstream_flags_live_from_section(
     aarch64_downstream_flags_live_from_bytes(cs, &bytes, end_addr)
 }
 
+/// Compute the subset of `candidates` (registers the window writes) that are
+/// provably *live* downstream of an AArch64 window, given the fall-through
+/// bytes that follow it.
+///
+/// This is the register counterpart to `aarch64_downstream_flags_live_from_bytes`
+/// and walks the suffix the same way: disassemble one instruction at a time,
+/// convert it to IR, and stop at the first uncertainty.
+///
+/// **Soundness discipline (the #224 bug class).** A candidate register stays in
+/// the live set unless the scan can *prove* it dead. Concretely, a candidate R
+/// is dropped from live-out only when, walking forward from the window, the
+/// first instruction that mentions R fully overwrites R *before reading it*
+/// (`DownstreamRegLiveness::Dead`). Every other situation keeps R live:
+/// * R is read by a later instruction before any full overwrite (`Read`);
+/// * the scan hits a terminator (which on AArch64 includes `B`/`BR`/`BL`/`RET`,
+///   so the call/ret ABI is covered — any window-written register may be
+///   observable across the transfer, so all still-undecided candidates are
+///   pinned live);
+/// * an instruction is unsupported by the optimization IR or fails to
+///   disassemble (we cannot reason about its reads/writes);
+/// * control leaves the analyzable region (handled by the caller, which passes
+///   only in-region bytes and treats an empty / out-of-range window as "all
+///   live").
+///
+/// `Skip` (NOP) instructions neither read nor write and are stepped over.
+fn aarch64_downstream_regs_live_from_bytes(
+    cs: &Capstone,
+    bytes: &[u8],
+    start_addr: u64,
+    candidates: &semantics::live_out::RegisterSet<Register>,
+) -> semantics::live_out::RegisterSet<Register> {
+    use semantics::live_out::RegisterSet;
+
+    // Registers not yet proven dead. We start with everything the window wrote
+    // and remove a register only on a provable full overwrite.
+    let mut undecided: Vec<Register> = candidates.iter().copied().collect();
+    let mut live = RegisterSet::<Register>::empty();
+
+    if undecided.is_empty() {
+        return live;
+    }
+
+    // Pins every still-undecided candidate live and clears the worklist.
+    macro_rules! pin_all_remaining_live {
+        () => {{
+            for &reg in &undecided {
+                live.add(reg);
+            }
+            return live;
+        }};
+    }
+
+    if bytes.is_empty() {
+        pin_all_remaining_live!();
+    }
+
+    let mut remaining = bytes;
+    let mut address = start_addr;
+
+    while !remaining.is_empty() && !undecided.is_empty() {
+        let Ok(instructions) = cs.disasm_count(remaining, address, 1) else {
+            pin_all_remaining_live!();
+        };
+        let Some(instruction) = instructions.iter().next() else {
+            pin_all_remaining_live!();
+        };
+        let instruction_len = instruction.bytes().len();
+        if instruction_len == 0 || instruction_len > remaining.len() {
+            pin_all_remaining_live!();
+        }
+
+        let mnemonic = instruction.mnemonic().unwrap_or("");
+        let op_str = instruction.op_str().unwrap_or("");
+        match convert_capstone_op(mnemonic, op_str) {
+            ConvertOutcome::Instruction(instr) => {
+                if instr.is_terminator() {
+                    // Terminators (incl. B/BR/BL/RET) hand control out of the
+                    // window; any window-written register may be observed
+                    // downstream or across the call/ret ABI — pin all live.
+                    pin_all_remaining_live!();
+                }
+                undecided.retain(
+                    |&reg| match validation::live_out::aarch64_reg_downstream_liveness(
+                        reg,
+                        std::slice::from_ref(&instr),
+                    ) {
+                        validation::live_out::DownstreamRegLiveness::Read => {
+                            live.add(reg);
+                            false
+                        }
+                        validation::live_out::DownstreamRegLiveness::Dead => false,
+                        validation::live_out::DownstreamRegLiveness::Uncertain => true,
+                    },
+                );
+            }
+            ConvertOutcome::Skip => {}
+            ConvertOutcome::Unsupported(_) => pin_all_remaining_live!(),
+        }
+
+        remaining = &remaining[instruction_len..];
+        address += instruction_len as u64;
+    }
+
+    // Reached the end of the in-region suffix without resolving these
+    // candidates: control falls through to whatever lies past the analyzed
+    // bytes, so keep them live.
+    pin_all_remaining_live!();
+}
+
+/// Section wrapper for `aarch64_downstream_regs_live_from_bytes`. Returns all
+/// candidates live whenever the suffix is unavailable or the window already
+/// reaches the section end (the byte-scan default for an unanalyzable region).
+fn aarch64_downstream_regs_live_from_section(
+    patcher: &ElfPatcher,
+    section: &TextSection,
+    end_addr: u64,
+    cs: &Capstone,
+    candidates: &semantics::live_out::RegisterSet<Register>,
+) -> semantics::live_out::RegisterSet<Register> {
+    let section_end = section.virtual_addr + section.size;
+    if end_addr >= section_end {
+        return candidates.clone();
+    }
+
+    let suffix_window = AddressWindow {
+        start: end_addr,
+        end: section_end,
+    };
+    let Ok(bytes) = patcher.get_instructions_in_window(&suffix_window) else {
+        return candidates.clone();
+    };
+
+    aarch64_downstream_regs_live_from_bytes(cs, &bytes, end_addr, candidates)
+}
+
 fn x86_downstream_flags_live_from_bytes<I>(cs: &Capstone, bytes: &[u8], start_addr: u64) -> bool
 where
     I: isa::FlagsAnalysis<isa::x86::X86Instruction>,
@@ -1824,6 +2092,142 @@ fn x86_downstream_flags_live_from_section(
     }
 }
 
+/// Compute the subset of `candidates` (registers an x86 window writes) that are
+/// provably *live* downstream, given the fall-through bytes that follow.
+///
+/// Structurally identical to the AArch64 register scan, but the kill rule is
+/// intentionally weaker to stay sound under issue #75 (the x86 IR has no
+/// operand width). `x86_reg_downstream_liveness` therefore *never* reports a
+/// write as a full overwrite, so the only way a candidate leaves the live set
+/// is — there is no such way today. In practice every candidate stays live:
+/// either an instruction reads it (`Read`), or the scan reaches an
+/// uncertainty (unsupported instruction — which includes `call`/`ret`, since
+/// neither is modelled in the x86 IR and `x86_ir_from_mnemonic` returns
+/// `Ok(None)` for them — a terminator, a disasm failure, or the end of the
+/// in-region suffix), all of which pin the remaining candidates live. This is
+/// the vacuously-safe behaviour the issue calls for; when #75 lands and
+/// `x86_destination_fully_kills` learns real widths, the narrowing turns on
+/// without weakening the contract.
+///
+/// Unlike the flags scan, this needs no ISA-marker type parameter: register
+/// reads/kills are width-independent in the shared x86 IR, and the `cs`
+/// disassembler is already configured for the right mode by the caller.
+fn x86_downstream_regs_live_from_bytes(
+    cs: &Capstone,
+    bytes: &[u8],
+    start_addr: u64,
+    candidates: &semantics::live_out::RegisterSet<isa::x86::X86Register>,
+) -> semantics::live_out::RegisterSet<isa::x86::X86Register> {
+    use semantics::live_out::RegisterSet;
+
+    let mut undecided: Vec<isa::x86::X86Register> = candidates.iter().copied().collect();
+    let mut live = RegisterSet::<isa::x86::X86Register>::empty();
+
+    if undecided.is_empty() {
+        return live;
+    }
+
+    macro_rules! pin_all_remaining_live {
+        () => {{
+            for &reg in &undecided {
+                live.add(reg);
+            }
+            return live;
+        }};
+    }
+
+    if bytes.is_empty() {
+        pin_all_remaining_live!();
+    }
+
+    let mut remaining = bytes;
+    let mut address = start_addr;
+
+    while !remaining.is_empty() && !undecided.is_empty() {
+        let Ok(instructions) = cs.disasm_count(remaining, address, 1) else {
+            pin_all_remaining_live!();
+        };
+        let Some(instruction) = instructions.iter().next() else {
+            pin_all_remaining_live!();
+        };
+        let instruction_len = instruction.bytes().len();
+        if instruction_len == 0 || instruction_len > remaining.len() {
+            pin_all_remaining_live!();
+        }
+
+        let mnemonic = instruction.mnemonic().unwrap_or("");
+        let op_str = instruction.op_str().unwrap_or("");
+        match x86_ir_from_mnemonic(mnemonic, op_str) {
+            Ok(Some(instr)) => {
+                if instr.is_terminator() {
+                    pin_all_remaining_live!();
+                }
+                undecided.retain(|&reg| {
+                    match validation::live_out::x86_reg_downstream_liveness(
+                        reg,
+                        std::slice::from_ref(&instr),
+                    ) {
+                        validation::live_out::DownstreamRegLiveness::Read => {
+                            live.add(reg);
+                            false
+                        }
+                        validation::live_out::DownstreamRegLiveness::Dead => false,
+                        validation::live_out::DownstreamRegLiveness::Uncertain => true,
+                    }
+                });
+            }
+            Ok(None) if mnemonic.eq_ignore_ascii_case("nop") => {}
+            // Unsupported (incl. call/ret) or unparseable → cannot reason; pin live.
+            Ok(None) => pin_all_remaining_live!(),
+            Err(_) => pin_all_remaining_live!(),
+        }
+
+        remaining = &remaining[instruction_len..];
+        address += instruction_len as u64;
+    }
+
+    pin_all_remaining_live!();
+}
+
+/// Section wrapper for `x86_downstream_regs_live_from_bytes`. Returns all
+/// candidates live whenever the suffix is unavailable, the window reaches the
+/// section end, or the arch is not an x86 mode.
+fn x86_downstream_regs_live_from_section(
+    arch: DetectedArch,
+    patcher: &ElfPatcher,
+    section: &TextSection,
+    end_addr: u64,
+    cs: &Capstone,
+    candidates: &semantics::live_out::RegisterSet<isa::x86::X86Register>,
+) -> semantics::live_out::RegisterSet<isa::x86::X86Register> {
+    let section_end = section.virtual_addr + section.size;
+    if end_addr >= section_end {
+        return candidates.clone();
+    }
+
+    let suffix_window = AddressWindow {
+        start: end_addr,
+        end: section_end,
+    };
+    let Ok(bytes) = patcher.get_instructions_in_window(&suffix_window) else {
+        return candidates.clone();
+    };
+
+    match arch {
+        // Register liveness is width-independent; the mode-configured `cs`
+        // already drives the correct x86-32/x86-64 disassembly.
+        DetectedArch::X86_64 | DetectedArch::X86_32 => {
+            x86_downstream_regs_live_from_bytes(cs, &bytes, end_addr, candidates)
+        }
+        DetectedArch::Aarch64 => candidates.clone(),
+    }
+}
+
+/// Flags-only context derivation, used as the trait default and by callers
+/// that do not have the window IR available to derive register liveness. The
+/// register-liveness narrowing (#621) needs the window's written set, so it is
+/// computed in the per-backend `optimization_context` overrides; here
+/// `downstream_live_regs` stays `Unknown` (every written register live).
 fn optimization_context_for_backend(
     arch: DetectedArch,
     patcher: &ElfPatcher,
@@ -1836,6 +2240,7 @@ fn optimization_context_for_backend(
             downstream_flags_live: aarch64_downstream_flags_live_from_section(
                 patcher, section, end_addr, cs,
             ),
+            downstream_live_regs: DownstreamLiveRegs::Unknown,
         };
     }
 
@@ -1844,6 +2249,7 @@ fn optimization_context_for_backend(
             downstream_flags_live: x86_downstream_flags_live_from_section(
                 arch, patcher, section, end_addr, cs,
             ),
+            downstream_live_regs: DownstreamLiveRegs::Unknown,
         };
     }
 
@@ -2020,13 +2426,31 @@ fn x86_enumerative_immediates_from_target(target: &[isa::x86::X86Instruction]) -
     imms
 }
 
+/// Build the per-window x86 live-out contract.
+///
+/// EFLAGS liveness folds in the downstream flags scan (pre-existing). For
+/// registers (issue #621): when `downstream_live` is `Some(set)`, the
+/// window-written live-out set is narrowed to that proven-live subset;
+/// when `None` every written register stays live (the pre-#621 default).
+///
+/// Because the x86 register kill rule is intentionally inert under #75 (no
+/// operand width — see `validation::live_out::x86_reg_downstream_liveness`),
+/// the proven-live subset is, today, always the full window-written set. The
+/// narrowing wiring is in place so that #75 enables it with no further change.
 fn x86_live_out_for_optimization(
     target: &[isa::x86::X86Instruction],
     downstream_flags_live: bool,
+    downstream_live: Option<&semantics::live_out::RegisterSet<isa::x86::X86Register>>,
 ) -> semantics::live_out::X86LiveOut {
     let live_out = validation::live_out::x86_live_out_from_target(target);
     let flags_live = live_out.flags_live() || downstream_flags_live;
-    live_out.with_flags(flags_live)
+    let narrowed = match downstream_live {
+        Some(live) => {
+            semantics::live_out::RegisterSet::from_registers(live.iter().copied().collect())
+        }
+        None => live_out,
+    };
+    narrowed.with_flags(flags_live)
 }
 
 /// Build the search config for the x86 *enumerative* path. Like stochastic and
@@ -2050,11 +2474,12 @@ fn run_x86_enumerative(
     width: u32,
     options: &OptimizationOptions,
     downstream_flags_live: bool,
+    downstream_live: Option<&semantics::live_out::RegisterSet<isa::x86::X86Register>>,
 ) -> Option<Vec<isa::x86::X86Instruction>> {
     use search::SearchAlgorithm;
 
     let config = build_x86_enumerative_search_config(target, options);
-    let live_out = x86_live_out_for_optimization(target, downstream_flags_live);
+    let live_out = x86_live_out_for_optimization(target, downstream_flags_live, downstream_live);
 
     let (optimized, statistics) = if width == 32 {
         let mut search: EnumerativeSearch<isa::X86_32> = EnumerativeSearch::new();
@@ -2091,6 +2516,7 @@ fn run_x86_stochastic(
     width: u32,
     options: &OptimizationOptions,
     downstream_flags_live: bool,
+    downstream_live: Option<&semantics::live_out::RegisterSet<isa::x86::X86Register>>,
 ) -> Option<Vec<isa::x86::X86Instruction>> {
     use search::SearchAlgorithm;
     use search::stochastic::StochasticSearch;
@@ -2099,7 +2525,7 @@ fn run_x86_stochastic(
     if config.x86_available_registers.is_empty() {
         return None;
     }
-    let live_out = x86_live_out_for_optimization(target, downstream_flags_live);
+    let live_out = x86_live_out_for_optimization(target, downstream_flags_live, downstream_live);
 
     // Extract (optimized, statistics) in each width branch separately:
     // the two `SearchResultFor<X86_64>` / `SearchResultFor<X86_32>`
@@ -2137,13 +2563,14 @@ fn run_x86_symbolic(
     width: u32,
     options: &OptimizationOptions,
     downstream_flags_live: bool,
+    downstream_live: Option<&semantics::live_out::RegisterSet<isa::x86::X86Register>>,
     same_count_code_size_allowed: bool,
 ) -> Option<Vec<isa::x86::X86Instruction>> {
     use search::SearchAlgorithm;
     use search::symbolic::SymbolicSearch;
 
     let config = build_x86_symbolic_search_config(target, options, same_count_code_size_allowed);
-    let live_out = x86_live_out_for_optimization(target, downstream_flags_live);
+    let live_out = x86_live_out_for_optimization(target, downstream_flags_live, downstream_live);
 
     let (optimized, statistics) = if width == 32 {
         let mut search: SymbolicSearch<isa::X86_32> = SymbolicSearch::new();
@@ -3524,6 +3951,174 @@ mod cli_helper_tests {
         ));
     }
 
+    // ---- downstream register-liveness byte scans (#621) ----
+
+    fn x86_64_regset(regs: &[X86Register]) -> semantics::live_out::RegisterSet<X86Register> {
+        semantics::live_out::RegisterSet::from_registers(regs.to_vec())
+    }
+
+    fn aarch64_regset(regs: &[Register]) -> semantics::live_out::RegisterSet<Register> {
+        semantics::live_out::RegisterSet::from_registers(regs.to_vec())
+    }
+
+    #[test]
+    fn downstream_regs_live_scan_marks_dead_when_later_full_overwrite_precedes_any_read() {
+        // Window wrote RAX. Suffix `mov rax, rbx` fully overwrites rax before
+        // any read — RAX is dead/optimizable. (Driven via AArch64 because the
+        // x86 IR cannot prove a full overwrite under #75; see the x86 partial
+        // test below.)
+        let bytes = assemble_aarch64_test_bytes(&[Instruction::MovReg {
+            rd: Register::X0,
+            rn: Register::X1,
+        }]);
+        let cs = aarch64_test_capstone();
+        let live = aarch64_downstream_regs_live_from_bytes(
+            &cs,
+            &bytes,
+            0x1000,
+            &aarch64_regset(&[Register::X0]),
+        );
+        assert!(
+            !live.contains(Register::X0),
+            "x0 fully overwritten before any read must be dropped from live-out"
+        );
+    }
+
+    #[test]
+    fn downstream_regs_live_scan_marks_live_when_read_before_overwrite() {
+        // Window wrote RAX. Suffix `add x2, x0, #1` reads x0 before any
+        // redefinition — x0 must stay live.
+        let bytes = assemble_aarch64_test_bytes(&[Instruction::Add {
+            rd: Register::X2,
+            rn: Register::X0,
+            rm: Operand::Immediate(1),
+        }]);
+        let cs = aarch64_test_capstone();
+        let live = aarch64_downstream_regs_live_from_bytes(
+            &cs,
+            &bytes,
+            0x1000,
+            &aarch64_regset(&[Register::X0]),
+        );
+        assert!(
+            live.contains(Register::X0),
+            "x0 read before any overwrite must stay live"
+        );
+    }
+
+    #[test]
+    fn downstream_regs_live_scan_conservative_for_unknown_context() {
+        let cs = aarch64_test_capstone();
+        let candidates = aarch64_regset(&[Register::X0, Register::X1]);
+
+        // Empty suffix → both candidates live.
+        let empty = aarch64_downstream_regs_live_from_bytes(&cs, &[], 0x1000, &candidates);
+        assert!(empty.contains(Register::X0) && empty.contains(Register::X1));
+
+        // Undisassemblable byte → live.
+        let garbage = aarch64_downstream_regs_live_from_bytes(&cs, &[0xff], 0x1000, &candidates);
+        assert!(garbage.contains(Register::X0) && garbage.contains(Register::X1));
+
+        // LDR-literal decodes in Capstone but is unsupported by the IR → live.
+        let unsupported = aarch64_downstream_regs_live_from_bytes(
+            &cs,
+            &[0x00, 0x00, 0x00, 0x58],
+            0x1000,
+            &candidates,
+        );
+        assert!(unsupported.contains(Register::X0) && unsupported.contains(Register::X1));
+    }
+
+    #[test]
+    fn downstream_regs_live_scan_marks_live_across_call_ret() {
+        let cs = aarch64_test_capstone();
+        let candidates = aarch64_regset(&[Register::X0, Register::X1]);
+
+        // `bl #0` is a call terminator → every window register may be
+        // observable across the ABI; keep them all live.
+        let bl_bytes = assemble_aarch64_test_bytes(&[Instruction::Bl {
+            target: s11::ir::LabelId(0x1000),
+        }]);
+        let across_call =
+            aarch64_downstream_regs_live_from_bytes(&cs, &bl_bytes, 0x1000, &candidates);
+        assert!(across_call.contains(Register::X0) && across_call.contains(Register::X1));
+
+        // `ret` is a return terminator → same ABI-observable rule.
+        let ret_bytes = assemble_aarch64_test_bytes(&[Instruction::Ret { rn: Register::X30 }]);
+        let across_ret =
+            aarch64_downstream_regs_live_from_bytes(&cs, &ret_bytes, 0x1000, &candidates);
+        assert!(across_ret.contains(Register::X0) && across_ret.contains(Register::X1));
+    }
+
+    #[test]
+    fn x86_partial_write_does_not_kill() {
+        // Window wrote RAX. Suffix `mov rax, rbx` *looks* like a full
+        // overwrite, but the x86 IR carries no operand width (#75): it could be
+        // `mov eax/al, ...`, a partial write that leaves RAX's upper bits live.
+        // The scan must therefore NOT treat it as a kill — RAX stays live.
+        // This guard keeps the path sound when #75 lands and the kill rule is
+        // turned on for genuinely full-width forms.
+        let bytes = assemble_x86_64_test_bytes(&[X86Instruction::MovReg {
+            rd: X86Register::RAX,
+            rs: X86Register::RBX,
+        }]);
+        let cs = x86_64_test_capstone();
+        let live = x86_downstream_regs_live_from_bytes(
+            &cs,
+            &bytes,
+            0x1000,
+            &x86_64_regset(&[X86Register::RAX]),
+        );
+        assert!(
+            live.contains(X86Register::RAX),
+            "x86 write must not be trusted as a full overwrite (#75) — RAX stays live"
+        );
+    }
+
+    #[test]
+    fn x86_downstream_regs_live_scan_marks_live_when_read_before_overwrite() {
+        // `add rbx, rax` reads rax before any redefinition → rax stays live.
+        let bytes = assemble_x86_64_test_bytes(&[X86Instruction::AddReg {
+            rd: X86Register::RBX,
+            rs: X86Register::RAX,
+        }]);
+        let cs = x86_64_test_capstone();
+        let live = x86_downstream_regs_live_from_bytes(
+            &cs,
+            &bytes,
+            0x1000,
+            &x86_64_regset(&[X86Register::RAX]),
+        );
+        assert!(live.contains(X86Register::RAX));
+    }
+
+    #[test]
+    fn x86_downstream_regs_live_scan_conservative_across_call_ret_and_unknown() {
+        let cs = x86_64_test_capstone();
+        let candidates = x86_64_regset(&[X86Register::RAX]);
+
+        // Empty suffix → live.
+        assert!(
+            x86_downstream_regs_live_from_bytes(&cs, &[], 0x1000, &candidates)
+                .contains(X86Register::RAX)
+        );
+        // `ret` (0xc3) is not modelled in the x86 IR → unsupported → live.
+        assert!(
+            x86_downstream_regs_live_from_bytes(&cs, &[0xc3], 0x1000, &candidates)
+                .contains(X86Register::RAX)
+        );
+        // `call rel32` (e8 00 00 00 00) is likewise not modelled → live.
+        assert!(
+            x86_downstream_regs_live_from_bytes(
+                &cs,
+                &[0xe8, 0x00, 0x00, 0x00, 0x00],
+                0x1000,
+                &candidates
+            )
+            .contains(X86Register::RAX)
+        );
+    }
+
     #[test]
     fn convert_capstone_op_for_optimization_rejects_unsupported_instruction() {
         let err = convert_capstone_op_for_optimization("fadd", "v0.4s, v1.4s, v2.4s", 0x1234)
@@ -3779,7 +4374,7 @@ mod cli_helper_tests {
         opts.timeout = Some(Duration::from_secs(5));
         opts.solver_timeout = Duration::from_secs(5);
         opts.cost_metric = CostMetric::CodeSize;
-        assert!(run_x86_enumerative(&[], 64, &opts, false).is_none());
+        assert!(run_x86_enumerative(&[], 64, &opts, false, None).is_none());
         assert!(
             run_x86_enumerative(
                 &[X86Instruction::MovImm {
@@ -3789,6 +4384,7 @@ mod cli_helper_tests {
                 64,
                 &opts,
                 false,
+                None,
             )
             .is_none()
         );
@@ -3806,6 +4402,7 @@ mod cli_helper_tests {
             64,
             &opts,
             false,
+            None,
         )
         .expect("two identical writes can be shortened");
         assert_eq!(optimized.len(), 1);
@@ -3818,14 +4415,82 @@ mod cli_helper_tests {
             imm: 0,
         }];
 
-        assert!(!x86_live_out_for_optimization(&mov_only, false).flags_live());
-        assert!(x86_live_out_for_optimization(&mov_only, true).flags_live());
+        assert!(!x86_live_out_for_optimization(&mov_only, false, None).flags_live());
+        assert!(x86_live_out_for_optimization(&mov_only, true, None).flags_live());
 
         let flag_writer = [X86Instruction::XorReg {
             rd: X86Register::RAX,
             rs: X86Register::RAX,
         }];
-        assert!(x86_live_out_for_optimization(&flag_writer, false).flags_live());
+        assert!(x86_live_out_for_optimization(&flag_writer, false, None).flags_live());
+    }
+
+    #[test]
+    fn x86_live_out_for_optimization_narrows_to_downstream_live_regs() {
+        use semantics::live_out::RegisterSet;
+
+        // Window writes RAX and RBX.
+        let window = [
+            X86Instruction::MovImm {
+                rd: X86Register::RAX,
+                imm: 0,
+            },
+            X86Instruction::MovImm {
+                rd: X86Register::RBX,
+                imm: 0,
+            },
+        ];
+
+        // Default (no downstream analysis): both written registers stay live.
+        let default = x86_live_out_for_optimization(&window, false, None);
+        assert!(default.contains(X86Register::RAX));
+        assert!(default.contains(X86Register::RBX));
+
+        // Downstream scan proved only RBX live (RAX dead). The contract must
+        // drop RAX and pin RBX.
+        let downstream_live = RegisterSet::from_registers(vec![X86Register::RBX]);
+        let narrowed = x86_live_out_for_optimization(&window, false, Some(&downstream_live));
+        assert!(
+            !narrowed.contains(X86Register::RAX),
+            "a provably-dead window register must be dropped from live-out"
+        );
+        assert!(
+            narrowed.contains(X86Register::RBX),
+            "a downstream-read window register must stay pinned"
+        );
+    }
+
+    #[test]
+    fn live_out_for_optimization_prefix_narrows_to_downstream_live_regs() {
+        // Prefix writes x0 and x1.
+        let prefix = [
+            Instruction::MovImm {
+                rd: Register::X0,
+                imm: 0,
+            },
+            Instruction::MovImm {
+                rd: Register::X1,
+                imm: 0,
+            },
+        ];
+
+        // Default (no downstream analysis): both written registers stay live.
+        let default = live_out_for_optimization_prefix(&prefix, None, false, None);
+        assert!(default.contains(Register::X0));
+        assert!(default.contains(Register::X1));
+
+        // Downstream scan proved only x1 live (x0 dead): drop x0, pin x1.
+        let downstream_live = semantics::live_out::RegisterSet::from_registers(vec![Register::X1]);
+        let narrowed =
+            live_out_for_optimization_prefix(&prefix, None, false, Some(&downstream_live));
+        assert!(
+            !narrowed.contains(Register::X0),
+            "a provably-dead window register must be dropped from live-out"
+        );
+        assert!(
+            narrowed.contains(Register::X1),
+            "a downstream-live window register must stay pinned"
+        );
     }
 
     #[test]
@@ -3839,18 +4504,18 @@ mod cli_helper_tests {
             imm: 0,
         }];
 
-        let flags_dead = run_x86_symbolic(&target, 64, &opts, false, true)
+        let flags_dead = run_x86_symbolic(&target, 64, &opts, false, None, true)
             .expect("flags-dead one-instruction MOV can use an x86 code-size rewrite");
         assert_eq!(flags_dead.len(), 1);
         assert_ne!(flags_dead, target.to_vec());
 
         assert!(
-            run_x86_symbolic(&target, 64, &opts, false, false).is_none(),
+            run_x86_symbolic(&target, 64, &opts, false, None, false).is_none(),
             "the ELF frontend can disable same-count symbolic code-size rewrites when source operand widths are unsafe"
         );
 
         assert!(
-            run_x86_symbolic(&target, 64, &opts, true, true).is_none(),
+            run_x86_symbolic(&target, 64, &opts, true, None, true).is_none(),
             "a same-count code-size rewrite must preserve EFLAGS when the following code reads them"
         );
     }
@@ -3865,6 +4530,7 @@ mod cli_helper_tests {
         opts.cost_metric = CostMetric::CodeSize;
         let context = OptimizationContext {
             downstream_flags_live: false,
+            downstream_live_regs: DownstreamLiveRegs::Unknown,
         };
 
         // 66 b8 00 00 = mov ax, 0. The Capstone bridge now rejects
@@ -3917,6 +4583,7 @@ mod cli_helper_tests {
         opts.cost_metric = CostMetric::CodeSize;
         let context = OptimizationContext {
             downstream_flags_live: false,
+            downstream_live_regs: DownstreamLiveRegs::Unknown,
         };
 
         // 48 c7 c0 00 00 00 00 = mov rax, 0 (full-width source operand).
@@ -3948,6 +4615,7 @@ mod cli_helper_tests {
         opts.cost_metric = CostMetric::CodeSize;
         let context = OptimizationContext {
             downstream_flags_live: false,
+            downstream_live_regs: DownstreamLiveRegs::Unknown,
         };
 
         // 48 c7 c0 00 00 00 00 = mov rax, 0, written twice. The first write is
@@ -3981,6 +4649,7 @@ mod cli_helper_tests {
         let cs = backend.disassembler().unwrap();
         let context = OptimizationContext {
             downstream_flags_live: false,
+            downstream_live_regs: DownstreamLiveRegs::Unknown,
         };
 
         // 48 c7 c0 00 00 00 00 = mov rax, 0.
@@ -3992,7 +4661,7 @@ mod cli_helper_tests {
         for algorithm in [Algorithm::Hybrid, Algorithm::Llm] {
             let opts = options_for(algorithm);
             let err = backend
-                .run_search(&ir, &instructions, &opts, context)
+                .run_search(&ir, &instructions, &opts, context.clone())
                 .expect_err("hybrid/llm arms are AArch64-only and must be rejected");
             assert!(
                 err.to_string().contains("AArch64-only"),
@@ -4081,6 +4750,7 @@ mod cli_helper_tests {
             64,
             &opts,
             false,
+            None,
         )
         .expect("redundant prefix + Jcc must be optimizable");
         // Expect: [MovImm RBX, 1, Jcc E].
@@ -4131,7 +4801,7 @@ mod cli_helper_tests {
             "immediate pool must preserve the fixture immediate"
         );
 
-        let optimized = run_x86_enumerative(&target, 64, &opts, false)
+        let optimized = run_x86_enumerative(&target, 64, &opts, false, None)
             .expect("two identical RBX writes can be shortened");
         assert_eq!(optimized.len(), 1);
         match optimized[0] {
@@ -4170,6 +4840,7 @@ mod cli_helper_tests {
             64,
             &opts,
             false,
+            None,
         )
         .expect("two identical R10/-1 writes must collapse to one");
         assert_eq!(optimized.len(), 1);
@@ -4191,7 +4862,7 @@ mod cli_helper_tests {
         opts.seed = Some(7);
 
         let target = r10_zeroing_target();
-        let optimized = run_x86_stochastic(&target, 64, &opts, false)
+        let optimized = run_x86_stochastic(&target, 64, &opts, false, None)
             .expect("two identical R10 zeroing writes must collapse to one");
 
         assert_single_r10_rewrite(&optimized);
@@ -4210,7 +4881,7 @@ mod cli_helper_tests {
         opts.cost_metric = CostMetric::InstructionCount;
 
         let target = r10_zeroing_target();
-        let optimized = run_x86_symbolic(&target, 64, &opts, false, false)
+        let optimized = run_x86_symbolic(&target, 64, &opts, false, None, false)
             .expect("two identical R10 zeroing writes must collapse to one");
 
         assert_single_r10_rewrite(&optimized);
@@ -4659,10 +5330,10 @@ mod cli_helper_tests {
             Algorithm::Llm,
         ] {
             let options = options_for(algorithm);
-            let _ = run_optimization(&target, &options, true).unwrap();
+            let _ = run_optimization(&target, &options, true, None).unwrap();
         }
         assert!(
-            run_optimization(&[], &options_for(Algorithm::Enumerative), true)
+            run_optimization(&[], &options_for(Algorithm::Enumerative), true, None)
                 .unwrap()
                 .is_none()
         );
@@ -4684,7 +5355,7 @@ mod cli_helper_tests {
         options.timeout = Some(Duration::from_secs(10));
         options.solver_timeout = Duration::from_secs(10);
 
-        let flags_dead = run_optimization(&target, &options, false)
+        let flags_dead = run_optimization(&target, &options, false, None)
             .expect("symbolic search should run with flags dead")
             .expect("flags-dead window should drop redundant cmp");
         assert_eq!(flags_dead.len(), 1);
@@ -4798,7 +5469,8 @@ mod cli_helper_tests {
         ];
 
         for (terminator, source) in cases {
-            let live_out = live_out_for_optimization_prefix(&prefix, Some(&terminator), false);
+            let live_out =
+                live_out_for_optimization_prefix(&prefix, Some(&terminator), false, None);
             assert!(live_out.contains_register(Register::X1));
             assert!(
                 live_out.contains_register(source),
@@ -4816,10 +5488,10 @@ mod cli_helper_tests {
             imm: 1,
         }];
 
-        let flags_dead = live_out_for_optimization_prefix(&prefix, None, false);
+        let flags_dead = live_out_for_optimization_prefix(&prefix, None, false, None);
         assert!(!flags_dead.flags_live());
 
-        let flags_live = live_out_for_optimization_prefix(&prefix, None, true);
+        let flags_live = live_out_for_optimization_prefix(&prefix, None, true, None);
         assert!(flags_live.flags_live());
     }
 
@@ -4834,11 +5506,11 @@ mod cli_helper_tests {
             target: s11::ir::LabelId(0x1000),
             cond: s11::ir::Condition::EQ,
         };
-        let live_out = live_out_for_optimization_prefix(&prefix, Some(&b_cond), false);
+        let live_out = live_out_for_optimization_prefix(&prefix, Some(&b_cond), false, None);
         assert!(live_out.flags_live());
 
         let ret = Instruction::Ret { rn: Register::X30 };
-        let live_out = live_out_for_optimization_prefix(&prefix, Some(&ret), false);
+        let live_out = live_out_for_optimization_prefix(&prefix, Some(&ret), false, None);
         assert!(live_out.flags_live());
     }
 
@@ -4914,7 +5586,7 @@ mod cli_helper_tests {
         let (prefix, term) = split_terminator(&seq);
         assert_eq!(term, Some(&terminator), "split must recognize ret");
 
-        let live_out = live_out_for_optimization_prefix(prefix, term, true);
+        let live_out = live_out_for_optimization_prefix(prefix, term, true, None);
         let config = SearchConfig::default()
             .with_registers(vec![Register::X0, Register::X1])
             .with_immediates(vec![0, 1]);
@@ -4978,7 +5650,7 @@ mod cli_helper_tests {
         ];
 
         let (prefix, term) = split_terminator(&target);
-        let live_out = live_out_for_optimization_prefix(prefix, term, true);
+        let live_out = live_out_for_optimization_prefix(prefix, term, true, None);
         assert!(
             live_out.contains_register(Register::X0),
             "live_out_for_optimization_prefix must mark x0 live when the \

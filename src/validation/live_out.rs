@@ -253,6 +253,124 @@ pub fn flags_read_before_overwrite_after_window(instructions: &[Instruction]) ->
     reads_flags_before_writing(instructions)
 }
 
+/// Outcome of scanning a decoded suffix for the downstream liveness of one
+/// window-written register.
+///
+/// `Read` and `Dead` are *definitive*: the scan saw enough of the suffix to
+/// prove the register is observed (`Read`) or fully overwritten before any
+/// observation (`Dead`). `Uncertain` is the conservative fallback — the scan
+/// reached the end of the instructions it was handed without proving either,
+/// so the caller (which knows whether control then leaves the analyzable
+/// region) must decide. Callers that cannot prove the region is closed MUST
+/// treat `Uncertain` as live.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DownstreamRegLiveness {
+    /// A later instruction reads R before any full overwrite — R is live-out.
+    Read,
+    /// A later instruction fully overwrites R before any read — R is dead.
+    Dead,
+    /// The handed-in suffix ran out before proving Read or Dead.
+    Uncertain,
+}
+
+/// Scan an AArch64 suffix to classify the downstream liveness of `reg`.
+///
+/// Walks the decoded fall-through instructions in order:
+/// * if an instruction reads `reg` (via `source_registers()`) it is observed
+///   → [`DownstreamRegLiveness::Read`];
+/// * otherwise, if an instruction fully overwrites `reg` it is dead
+///   → [`DownstreamRegLiveness::Dead`];
+/// * reaching the end of the slice with neither yields
+///   [`DownstreamRegLiveness::Uncertain`].
+///
+/// **Read is checked before the overwrite within a single instruction.** This
+/// is the conservative ordering: a destructive instruction (e.g. `add x0, x0, x1`)
+/// both reads and writes `x0`, and the read happens-before the write, so the
+/// register is observed and must stay live.
+///
+/// **Kill rule (AArch64 GPRs):** any instruction whose `destinations()`
+/// contains `reg` is a clean, full-register kill. AArch64 has no sub-register
+/// aliasing trap for the X/W GPRs the optimization IR models — a W-form write
+/// zero-extends the full 64-bit register, so every modelled destination write
+/// fully redefines the architectural register. (Contrast the x86 helper, which
+/// must refuse to trust writes because that IR carries no operand width — see
+/// `x86_reg_downstream_liveness`.)
+///
+/// This helper does **not** itself decide terminators / unsupported
+/// instructions / region boundaries — the byte-level scan in `src/main.rs`
+/// handles those before a decoded instruction ever reaches here, mapping any
+/// such uncertainty to "live".
+pub fn aarch64_reg_downstream_liveness(
+    reg: Register,
+    suffix: &[Instruction],
+) -> DownstreamRegLiveness {
+    for instr in suffix {
+        if instr.source_registers().contains(&reg) {
+            return DownstreamRegLiveness::Read;
+        }
+        if aarch64_destination_fully_kills(instr, reg) {
+            return DownstreamRegLiveness::Dead;
+        }
+    }
+    DownstreamRegLiveness::Uncertain
+}
+
+/// True iff `instr` fully overwrites `reg` on AArch64.
+///
+/// AArch64 GPR writes (including W-form, which zero-extends into the 64-bit
+/// register) are clean full-register kills, so membership in `destinations()`
+/// is sufficient.
+fn aarch64_destination_fully_kills(instr: &Instruction, reg: Register) -> bool {
+    instr.destinations().contains(&reg)
+}
+
+/// Scan an x86 suffix to classify the downstream liveness of `reg`.
+///
+/// Same read-before-overwrite walk as the AArch64 helper, but with a
+/// deliberately weaker kill rule to stay sound under issue #75.
+///
+/// **#75 hazard / x86 kill rule:** the x86 IR does NOT model operand width.
+/// A `MovImm { rd: RAX, .. }` in this IR could, once #75 lands, actually be a
+/// 32-bit (`mov eax, imm`) or 8-bit (`mov al, imm`) write that leaves the
+/// upper bits of RAX intact — i.e. a *partial* write that does NOT kill the
+/// full register. Trusting `destination()` as a full kill would therefore be
+/// unsound (the #224 bug class). So this helper treats **no** x86 write as a
+/// proven full overwrite today: a downstream write to `reg` does not return
+/// `Dead`; it neither observes nor kills `reg` and the scan keeps walking. The
+/// only definitive answer it can produce is `Read`. Because of this, the x86
+/// path can never narrow a register to dead with the current IR — that is the
+/// intended, vacuously-safe behaviour. When #75 adds widths, replace the
+/// `false` in `x86_destination_fully_kills` with a real full-width check and
+/// the narrowing turns on automatically with no change to the soundness
+/// contract.
+pub fn x86_reg_downstream_liveness(
+    reg: crate::isa::x86::X86Register,
+    suffix: &[crate::isa::x86::X86Instruction],
+) -> DownstreamRegLiveness {
+    for instr in suffix {
+        if instr.source_registers().contains(&reg) {
+            return DownstreamRegLiveness::Read;
+        }
+        if x86_destination_fully_kills(instr, reg) {
+            return DownstreamRegLiveness::Dead;
+        }
+    }
+    DownstreamRegLiveness::Uncertain
+}
+
+/// True iff `instr` *provably* fully overwrites `reg` on x86.
+///
+/// Always `false` today: the x86 IR carries no operand width (#75), so no
+/// write can be proven to overwrite the whole architectural register. Kept as
+/// a named guard so the conservative posture is explicit and so #75 has one
+/// obvious place to turn on width-aware kills. See `x86_reg_downstream_liveness`.
+fn x86_destination_fully_kills(
+    _instr: &crate::isa::x86::X86Instruction,
+    _reg: crate::isa::x86::X86Register,
+) -> bool {
+    false
+}
+
 /// Compute the set of registers read before written by a sequence of instructions.
 ///
 /// Returns the set of registers the sequence reads before defining (writing).
@@ -979,5 +1097,134 @@ mod tests {
         let mask = x86_live_out_from_target(&target);
         assert!(mask.is_empty(), "CMP writes no destination register");
         assert!(mask.flags_live());
+    }
+
+    // ---- downstream register-liveness predicates (#621) ----
+
+    #[test]
+    fn aarch64_reg_downstream_liveness_dead_when_overwrite_precedes_read() {
+        // Suffix `mov x0, x1` fully overwrites x0 before any read of x0.
+        let suffix = vec![Instruction::MovReg {
+            rd: Register::X0,
+            rn: Register::X1,
+        }];
+        assert_eq!(
+            aarch64_reg_downstream_liveness(Register::X0, &suffix),
+            DownstreamRegLiveness::Dead
+        );
+    }
+
+    #[test]
+    fn aarch64_reg_downstream_liveness_live_when_read_before_overwrite() {
+        // `add x2, x0, #1` reads x0 before any redefinition.
+        let suffix = vec![
+            Instruction::Add {
+                rd: Register::X2,
+                rn: Register::X0,
+                rm: Operand::Immediate(1),
+            },
+            Instruction::MovReg {
+                rd: Register::X0,
+                rn: Register::X1,
+            },
+        ];
+        assert_eq!(
+            aarch64_reg_downstream_liveness(Register::X0, &suffix),
+            DownstreamRegLiveness::Read
+        );
+    }
+
+    #[test]
+    fn aarch64_reg_downstream_liveness_destructive_read_before_write() {
+        // `add x0, x0, #1` reads x0 before it overwrites x0 — must be Read.
+        let suffix = vec![Instruction::Add {
+            rd: Register::X0,
+            rn: Register::X0,
+            rm: Operand::Immediate(1),
+        }];
+        assert_eq!(
+            aarch64_reg_downstream_liveness(Register::X0, &suffix),
+            DownstreamRegLiveness::Read
+        );
+    }
+
+    #[test]
+    fn aarch64_reg_downstream_liveness_uncertain_when_unmentioned() {
+        // Suffix neither reads nor writes x0 — predicate is Uncertain and the
+        // byte-level caller must keep x0 live.
+        let suffix = vec![Instruction::MovReg {
+            rd: Register::X3,
+            rn: Register::X4,
+        }];
+        assert_eq!(
+            aarch64_reg_downstream_liveness(Register::X0, &suffix),
+            DownstreamRegLiveness::Uncertain
+        );
+        assert_eq!(
+            aarch64_reg_downstream_liveness(Register::X0, &[]),
+            DownstreamRegLiveness::Uncertain
+        );
+    }
+
+    #[test]
+    fn aarch64_reg_downstream_liveness_w_form_write_is_full_kill() {
+        // W-form write zero-extends into the 64-bit register → full kill.
+        let suffix = vec![Instruction::MovRegW {
+            rd: Register::X0,
+            rn: Register::X1,
+        }];
+        assert_eq!(
+            aarch64_reg_downstream_liveness(Register::X0, &suffix),
+            DownstreamRegLiveness::Dead
+        );
+    }
+
+    #[test]
+    fn x86_reg_downstream_liveness_live_when_read_before_overwrite() {
+        use crate::isa::x86::{X86Instruction, X86Register};
+        // `add rbx, rax` reads rax before any redefinition.
+        let suffix = vec![X86Instruction::AddReg {
+            rd: X86Register::RBX,
+            rs: X86Register::RAX,
+        }];
+        assert_eq!(
+            x86_reg_downstream_liveness(X86Register::RAX, &suffix),
+            DownstreamRegLiveness::Read
+        );
+    }
+
+    #[test]
+    fn x86_reg_downstream_liveness_write_is_never_a_full_kill_no_width() {
+        use crate::isa::x86::{X86Instruction, X86Register};
+        // `mov rax, rbx` looks like a full overwrite, but the IR carries no
+        // operand width (#75): it could be `mov eax/al, ...`. The predicate
+        // must NOT report Dead — it walks past the write as Uncertain so the
+        // caller keeps rax live.
+        let suffix = vec![X86Instruction::MovReg {
+            rd: X86Register::RAX,
+            rs: X86Register::RBX,
+        }];
+        assert_eq!(
+            x86_reg_downstream_liveness(X86Register::RAX, &suffix),
+            DownstreamRegLiveness::Uncertain,
+            "x86 write must not be trusted as a full overwrite (#75)"
+        );
+    }
+
+    #[test]
+    fn x86_reg_downstream_liveness_uncertain_when_unmentioned() {
+        use crate::isa::x86::{X86Instruction, X86Register};
+        let suffix = vec![X86Instruction::MovReg {
+            rd: X86Register::RCX,
+            rs: X86Register::RDX,
+        }];
+        assert_eq!(
+            x86_reg_downstream_liveness(X86Register::RAX, &suffix),
+            DownstreamRegLiveness::Uncertain
+        );
+        assert_eq!(
+            x86_reg_downstream_liveness(X86Register::RAX, &[]),
+            DownstreamRegLiveness::Uncertain
+        );
     }
 }
