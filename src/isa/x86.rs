@@ -367,6 +367,24 @@ pub enum X86Instruction {
     /// (`MSB(result) XOR bit width-2`). For count != 1 OF is UNDEFINED so the
     /// incoming OF is preserved. The CL-register-count form is not modelled.
     Ror { rd: X86Register, imm: i64 },
+    /// `imul rd, rs` — two-operand signed multiply: `rd = rd * rs` (low
+    /// `width` bits). Reads and writes `rd`, so `rd` is both source and
+    /// destination (destructive form). Only CF and OF are architecturally
+    /// defined: they are set iff the FULL signed product does not fit the
+    /// truncated `width`-bit destination; SF/ZF/PF/AF are Intel-UNDEFINED.
+    /// We model SF/ZF/PF deterministically from the truncated result (see
+    /// `concrete_x86::apply_imul`).
+    ImulReg { rd: X86Register, rs: X86Register },
+    /// `imul rd, rs, imm` — three-operand signed multiply: `rd = rs * imm`
+    /// (low `width` bits). The project's FIRST 3-operand x86 variant. `rd` is
+    /// purely WRITTEN (not read), so `source_registers()` is just `[rs]`. Same
+    /// flag model as `ImulReg`: CF/OF on signed overflow, SF/ZF/PF
+    /// Intel-undefined and modelled deterministically.
+    ImulRegImm {
+        rd: X86Register,
+        rs: X86Register,
+        imm: i64,
+    },
     /// `cmovCC rd, rs` — conditional move. Reads EFLAGS;
     /// when `cond` holds, writes `rd = rs`; otherwise `rd` is unchanged.
     /// Does not modify EFLAGS.
@@ -406,6 +424,8 @@ impl X86Instruction {
             | X86Instruction::Sar { rd, .. }
             | X86Instruction::Rol { rd, .. }
             | X86Instruction::Ror { rd, .. }
+            | X86Instruction::ImulReg { rd, .. }
+            | X86Instruction::ImulRegImm { rd, .. }
             | X86Instruction::Cmov { rd, .. } => Some(*rd),
             // CMP and TEST discard their result; only EFLAGS is written.
             X86Instruction::CmpReg { .. }
@@ -435,6 +455,7 @@ impl X86Instruction {
             X86Instruction::Sar { .. } => "sar",
             X86Instruction::Rol { .. } => "rol",
             X86Instruction::Ror { .. } => "ror",
+            X86Instruction::ImulReg { .. } | X86Instruction::ImulRegImm { .. } => "imul",
             X86Instruction::Cmov { cond, .. } => cond.cmov_mnemonic(),
             X86Instruction::Jcc { cond } => cond.jcc_mnemonic(),
         }
@@ -454,7 +475,11 @@ impl X86Instruction {
             | X86Instruction::SubReg { rd, rs }
             | X86Instruction::AndReg { rd, rs }
             | X86Instruction::OrReg { rd, rs }
+            // IMUL rd, rs is destructive (`rd = rd * rs`), so rd is read too.
+            | X86Instruction::ImulReg { rd, rs }
             | X86Instruction::XorReg { rd, rs } => vec![*rd, *rs],
+            // IMUL rd, rs, imm writes rd purely from `rs * imm`; rd is NOT read.
+            X86Instruction::ImulRegImm { rs, .. } => vec![*rs],
             X86Instruction::AddImm { rd, .. }
             | X86Instruction::SubImm { rd, .. }
             | X86Instruction::AndImm { rd, .. }
@@ -532,11 +557,13 @@ impl InstructionType for X86Instruction {
             X86Instruction::Sar { .. } => 22,
             X86Instruction::Rol { .. } => 23,
             X86Instruction::Ror { .. } => 24,
-            // Cmov MUST stay the last rewritable opcode (COUNT - 1 == 25):
+            X86Instruction::ImulReg { .. } => 25,
+            X86Instruction::ImulRegImm { .. } => 26,
+            // Cmov MUST stay the last rewritable opcode (COUNT - 1 == 27):
             // the CMOV distinct-register draw at both generation sites is
             // gated on `opcode == X86_REWRITABLE_OPCODE_COUNT - 1`.
-            X86Instruction::Cmov { .. } => 25,
-            X86Instruction::Jcc { .. } => 26,
+            X86Instruction::Cmov { .. } => 27,
+            X86Instruction::Jcc { .. } => 28,
         }
     }
 
@@ -570,7 +597,11 @@ impl fmt::Display for X86Instruction {
             | X86Instruction::SubReg { rd, rs }
             | X86Instruction::AndReg { rd, rs }
             | X86Instruction::OrReg { rd, rs }
+            // IMUL rd, rs renders like the other two-register forms.
+            | X86Instruction::ImulReg { rd, rs }
             | X86Instruction::XorReg { rd, rs } => write!(f, "{} {}, {}", mn, rd, rs),
+            // The 3-operand IMUL renders `imul rd, rs, imm`.
+            X86Instruction::ImulRegImm { rd, rs, imm } => write!(f, "{} {}, {}, {}", mn, rd, rs, imm),
             X86Instruction::MovImm { rd, imm }
             | X86Instruction::AddImm { rd, imm }
             | X86Instruction::SubImm { rd, imm }
@@ -875,6 +906,8 @@ impl crate::isa::traits::Assembler<X86Instruction> for X86_64 {
             | X86Instruction::OrImm { imm, .. }
             | X86Instruction::XorImm { imm, .. }
             | X86Instruction::CmpImm { imm, .. }
+            // The 3-operand IMUL immediate encodes as imm32 (`69 /r id`).
+            | X86Instruction::ImulRegImm { imm, .. }
             | X86Instruction::TestImm { imm, .. } => x86_signed_imm32_ok(*imm),
             // SHL / SHR / SAR / ROL / ROR encode their count as imm8: reject any
             // count that does not fit a single byte so the search never proposes
@@ -897,6 +930,8 @@ impl crate::isa::traits::Assembler<X86Instruction> for X86_64 {
             | X86Instruction::Not { .. }
             | X86Instruction::Inc { .. }
             | X86Instruction::Dec { .. }
+            // IMUL rd, rs is `0F AF /r` — always encodable.
+            | X86Instruction::ImulReg { .. }
             | X86Instruction::Cmov { .. }
             | X86Instruction::Jcc { .. } => true,
         }
@@ -921,7 +956,13 @@ impl crate::isa::traits::Assembler<X86Instruction> for X86_32 {
             | X86Instruction::SubReg { rd, rs }
             | X86Instruction::AndReg { rd, rs }
             | X86Instruction::OrReg { rd, rs }
+            // IMUL rd, rs: both registers must be low-8 in 32-bit mode.
+            | X86Instruction::ImulReg { rd, rs }
             | X86Instruction::XorReg { rd, rs } => reg_ok_32(*rd) && reg_ok_32(*rs),
+            // IMUL rd, rs, imm: low-8 registers plus an imm32 immediate.
+            X86Instruction::ImulRegImm { rd, rs, imm } => {
+                reg_ok_32(*rd) && reg_ok_32(*rs) && x86_signed_imm32_ok(*imm)
+            }
             X86Instruction::MovImm { rd, imm }
             | X86Instruction::AddImm { rd, imm }
             | X86Instruction::SubImm { rd, imm }
@@ -1149,6 +1190,8 @@ impl X86Mutator {
                 | X86Instruction::OrImm { imm, .. }
                 | X86Instruction::XorImm { imm, .. }
                 | X86Instruction::CmpImm { imm, .. }
+                // The 3-operand IMUL immediate draws from the imm32 pool too.
+                | X86Instruction::ImulRegImm { imm, .. }
                 | X86Instruction::TestImm { imm, .. } => *imm = self.pick_non_mov_immediate(rng),
                 // SHL / SHR / SAR / ROL / ROR carry an imm8 count; mutate it
                 // from the imm8-encodable pool even with no register pool.
@@ -1169,6 +1212,8 @@ impl X86Mutator {
                 | X86Instruction::Not { .. }
                 | X86Instruction::Inc { .. }
                 | X86Instruction::Dec { .. }
+                // IMUL rd, rs has no immediate, so it is a no-op with no pool.
+                | X86Instruction::ImulReg { .. }
                 | X86Instruction::Jcc { .. } => {}
                 X86Instruction::Cmov { cond, .. } => *cond = self.pick_condition(rng),
             }
@@ -1193,6 +1238,9 @@ impl X86Mutator {
             | X86Instruction::SubReg { rd, rs }
             | X86Instruction::AndReg { rd, rs }
             | X86Instruction::OrReg { rd, rs }
+            // IMUL rd, rs mutates either register slot, like the other reg-reg
+            // forms.
+            | X86Instruction::ImulReg { rd, rs }
             | X86Instruction::XorReg { rd, rs } => {
                 if rng.random_bool(0.5) {
                     *rd = self.pick_register(rng).expect("register pool is non-empty");
@@ -1200,6 +1248,12 @@ impl X86Mutator {
                     *rs = self.pick_register(rng).expect("register pool is non-empty");
                 }
             }
+            // IMUL rd, rs, imm mutates one of the three operand slots.
+            X86Instruction::ImulRegImm { rd, rs, imm } => match rng.random_range(0..3u32) {
+                0 => *rd = self.pick_register(rng).expect("register pool is non-empty"),
+                1 => *rs = self.pick_register(rng).expect("register pool is non-empty"),
+                _ => *imm = self.pick_non_mov_immediate(rng),
+            },
             X86Instruction::AddImm { rd, imm }
             | X86Instruction::SubImm { rd, imm }
             | X86Instruction::AndImm { rd, imm }
@@ -1385,6 +1439,11 @@ impl X86Mutator {
                     X86Instruction::Ror { rd, imm }
                 }
             }
+            // IMUL has a distinct (CF/OF-only-defined) flag model that no other
+            // family shares, so — like Cmov — it has no opcode-shape sibling to
+            // bridge to. Keep both IMUL forms unchanged here; operand mutation
+            // and whole-instruction replacement still explore them.
+            X86Instruction::ImulReg { .. } | X86Instruction::ImulRegImm { .. } => current,
             // Cmov has a unique shape (rd, rs, cond) with no opcode-shape
             // siblings; keep it unchanged in the opcode-bridge mutator.
             X86Instruction::Cmov { .. } => current,
@@ -1461,18 +1520,19 @@ pub struct X86InstructionGenerator;
 
 // One entry per rewritable opcode family: 6 reg-reg + 6 reg-imm + CMP + TEST
 // (each reg/imm) + NEG + NOT + INC + DEC + SHL + SHR + SAR + ROL + ROR +
-// CMOVcc. CMOVcc counts as a single family here even though `generate_all`
-// expands it across all 16 `X86Condition::ALL` variants per register pair.
+// IMUL (2-op) + IMUL (3-op) + CMOVcc. CMOVcc counts as a single family here
+// even though `generate_all` expands it across all 16 `X86Condition::ALL`
+// variants per register pair.
 //
-// CMOV MUST remain the LAST opcode (index COUNT - 1 == 25): both
+// CMOV MUST remain the LAST opcode (index COUNT - 1 == 27): both
 // `X86Mutator::random_instruction` and
 // `generate_random_rewritable_x86_instruction` gate the extra distinct-source
 // CMOV draw on `opcode == X86_REWRITABLE_OPCODE_COUNT - 1`. New flag-only
 // families (CMP, TEST), single-operand families (NEG, NOT, INC, DEC), the
-// immediate-count shift families (SHL, SHR, SAR), and the immediate-count
-// rotate families (ROL, ROR) are inserted before CMOV in
-// `build_x86_instruction_by_opcode` to preserve that invariant.
-const X86_REWRITABLE_OPCODE_COUNT: u8 = 26;
+// immediate-count shift families (SHL, SHR, SAR), the immediate-count
+// rotate families (ROL, ROR), and the two IMUL forms are inserted before CMOV
+// in `build_x86_instruction_by_opcode` to preserve that invariant.
+const X86_REWRITABLE_OPCODE_COUNT: u8 = 28;
 
 fn has_distinct_register_pair(registers: &[X86Register]) -> bool {
     let Some(first) = registers.first() else {
@@ -1535,9 +1595,14 @@ pub(crate) fn build_x86_instruction_by_opcode(
         // in lock-step on the shared `imm`.
         23 => X86Instruction::Rol { rd, imm },
         24 => X86Instruction::Ror { rd, imm },
-        // Cmov stays last (index 25 == X86_REWRITABLE_OPCODE_COUNT - 1) so the
+        // IMUL (2-op) consumes rd + rs; IMUL (3-op) consumes rd + rs + the
+        // shared `imm`. No extra RNG draw, so the two dispatch sites stay in
+        // lock-step on the shared operands.
+        25 => X86Instruction::ImulReg { rd, rs },
+        26 => X86Instruction::ImulRegImm { rd, rs, imm },
+        // Cmov stays last (index 27 == X86_REWRITABLE_OPCODE_COUNT - 1) so the
         // CMOV distinct-register draw at the two generation sites stays correct.
-        25 => X86Instruction::Cmov { rd, rs, cond },
+        27 => X86Instruction::Cmov { rd, rs, cond },
         _ => unreachable!("opcode out of range"),
     }
 }
@@ -1685,6 +1750,26 @@ impl InstructionGenerator<X86Instruction> for X86InstructionGenerator {
                 out.push(X86Instruction::Ror { rd, imm });
             }
         }
+        // IMUL (2-operand): `imul rd, rs` for every (register, register) pair,
+        // including rd == rs (self-multiply is meaningful, unlike self-CMOV).
+        for &rd in registers {
+            for &rs in registers {
+                out.push(X86Instruction::ImulReg { rd, rs });
+            }
+        }
+        // IMUL (3-operand): `imul rd, rs, imm` for every (rd, rs, imm) triple.
+        // The immediate encodes as imm32, so non-imm32 pool entries are skipped
+        // here rather than emitted and later rejected by `can_assemble`.
+        for &rd in registers {
+            for &rs in registers {
+                for &imm in immediates {
+                    if i32::try_from(imm).is_err() {
+                        continue;
+                    }
+                    out.push(X86Instruction::ImulRegImm { rd, rs, imm });
+                }
+            }
+        }
         // CMOVcc is rewritable and reads flags, so enumerate every
         // condition for each non-identical register pair. Jcc remains
         // excluded.
@@ -1786,6 +1871,13 @@ fn with_destination(instr: X86Instruction, new_rd: X86Register) -> X86Instructio
         // ROL / ROR likewise redirect the destination, carrying the count.
         X86Instruction::Rol { imm, .. } => X86Instruction::Rol { rd: new_rd, imm },
         X86Instruction::Ror { imm, .. } => X86Instruction::Ror { rd: new_rd, imm },
+        // IMUL redirects the destination, carrying the source (and imm).
+        X86Instruction::ImulReg { rs, .. } => X86Instruction::ImulReg { rd: new_rd, rs },
+        X86Instruction::ImulRegImm { rs, imm, .. } => X86Instruction::ImulRegImm {
+            rd: new_rd,
+            rs,
+            imm,
+        },
         X86Instruction::Cmov { rd, rs, cond } => X86Instruction::Cmov {
             rd: if new_rd == rs { rd } else { new_rd },
             rs,
@@ -1865,6 +1957,14 @@ fn with_sources(instr: X86Instruction, new_rs: X86Register, new_imm: i64) -> X86
                 imm
             },
         },
+        // IMUL (2-op) varies its source register; (3-op) varies both source
+        // register and immediate.
+        X86Instruction::ImulReg { rd, .. } => X86Instruction::ImulReg { rd, rs: new_rs },
+        X86Instruction::ImulRegImm { rd, .. } => X86Instruction::ImulRegImm {
+            rd,
+            rs: new_rs,
+            imm: new_imm,
+        },
         // Cmov's `rs` is mutated; `cond` and `rd` carry through unchanged.
         X86Instruction::Cmov { rd, rs, cond } => X86Instruction::Cmov {
             rd,
@@ -1922,20 +2022,28 @@ mod tests {
             .iter()
             .filter(|&&imm| u8::try_from(imm).is_ok())
             .count();
+        // The 3-operand IMUL only enumerates over imm32-encodable immediates.
+        let imul_m = imms
+            .iter()
+            .filter(|&&imm| i32::try_from(imm).is_ok())
+            .count();
         // 8 reg-reg families + 8 reg-imm families + 4 single-operand families
         // (NEG, NOT, INC, DEC) + 3 shift families (SHL, SHR, SAR over imm8
-        // counts) + 2 rotate families (ROL, ROR over imm8 counts) + CMOVcc over
-        // distinct pairs.
+        // counts) + 2 rotate families (ROL, ROR over imm8 counts) + IMUL 2-op
+        // (every register pair) + IMUL 3-op (every (rd, rs, imm32) triple) +
+        // CMOVcc over distinct pairs.
         let expected_len = 8 * n * n
             + 8 * n * m
             + 4 * n
             + 3 * n * shift_m
             + 2 * n * shift_m
+            + n * n
+            + n * n * imul_m
             + n * (n - 1) * X86Condition::ALL.len();
         assert_eq!(
             all.len(),
             expected_len,
-            "generate_all should only prune CMOV self-pairs and non-imm8 shift/rotate counts from the full pool"
+            "generate_all should only prune CMOV self-pairs and non-imm8 shift/rotate / non-imm32 imul counts from the full pool"
         );
 
         // For each opcode_id, at least one variant must appear.
@@ -2110,7 +2218,9 @@ mod tests {
                 | X86Instruction::Shr { imm, .. }
                 | X86Instruction::Sar { imm, .. }
                 | X86Instruction::Rol { imm, .. }
-                | X86Instruction::Ror { imm, .. } => {
+                | X86Instruction::Ror { imm, .. }
+                // The 3-operand IMUL draws its immediate from the shared pool.
+                | X86Instruction::ImulRegImm { imm, .. } => {
                     assert!(imms.contains(&imm), "immediate {} outside pool", imm);
                 }
                 X86Instruction::MovReg { .. }
@@ -2125,6 +2235,7 @@ mod tests {
                 | X86Instruction::Not { .. }
                 | X86Instruction::Inc { .. }
                 | X86Instruction::Dec { .. }
+                | X86Instruction::ImulReg { .. }
                 | X86Instruction::Cmov { .. }
                 | X86Instruction::Jcc { .. } => {}
             }
@@ -3227,7 +3338,10 @@ mod tests {
                 | X86Instruction::Shr { imm, .. }
                 | X86Instruction::Sar { imm, .. }
                 | X86Instruction::Rol { imm, .. }
-                | X86Instruction::Ror { imm, .. } => {
+                | X86Instruction::Ror { imm, .. }
+                // The 3-operand IMUL draws its immediate from the same shared
+                // slot, so the empty pool yields 0 here too.
+                | X86Instruction::ImulRegImm { imm, .. } => {
                     saw_immediate_form = true;
                     assert_eq!(imm, 0);
                 }
@@ -3243,6 +3357,7 @@ mod tests {
                 | X86Instruction::Not { .. }
                 | X86Instruction::Inc { .. }
                 | X86Instruction::Dec { .. }
+                | X86Instruction::ImulReg { .. }
                 | X86Instruction::Cmov { .. }
                 | X86Instruction::Jcc { .. } => {}
             }
@@ -3325,8 +3440,10 @@ mod tests {
             (22, X86Instruction::Sar { rd, imm }),
             (23, X86Instruction::Rol { rd, imm }),
             (24, X86Instruction::Ror { rd, imm }),
-            // Cmov stays last at COUNT - 1 == 25.
-            (25, X86Instruction::Cmov { rd, rs, cond }),
+            (25, X86Instruction::ImulReg { rd, rs }),
+            (26, X86Instruction::ImulRegImm { rd, rs, imm }),
+            // Cmov stays last at COUNT - 1 == 27.
+            (27, X86Instruction::Cmov { rd, rs, cond }),
         ];
 
         for (opcode, want) in expected {
@@ -3365,7 +3482,9 @@ mod tests {
             (22, "sar"),
             (23, "rol"),
             (24, "ror"),
-            (25, "cmove"),
+            (25, "imul"),
+            (26, "imul"),
+            (27, "cmove"),
         ];
         for (opcode, mnem) in mnemonics {
             assert_eq!(
@@ -3814,7 +3933,10 @@ mod tests {
                     | X86Instruction::Shr { .. }
                     | X86Instruction::Sar { .. }
                     | X86Instruction::Rol { .. }
-                    | X86Instruction::Ror { .. } => {
+                    | X86Instruction::Ror { .. }
+                    // The 3-operand IMUL immediate is imm32; same encodability
+                    // invariant.
+                    | X86Instruction::ImulRegImm { .. } => {
                         saw_non_mov_immediate = true;
                         assert!(
                             <X86_64 as Assembler<X86Instruction>>::can_assemble(&X86_64, instr),
@@ -3833,6 +3955,7 @@ mod tests {
                     | X86Instruction::Not { .. }
                     | X86Instruction::Inc { .. }
                     | X86Instruction::Dec { .. }
+                    | X86Instruction::ImulReg { .. }
                     | X86Instruction::Cmov { .. }
                     | X86Instruction::Jcc { .. } => {}
                 }

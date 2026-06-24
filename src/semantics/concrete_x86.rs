@@ -50,6 +50,16 @@ pub fn apply_instruction_concrete_x86(
         X86Instruction::Sar { rd, imm } => apply_shift(&mut state, *rd, *imm, ShiftKind::Sar),
         X86Instruction::Rol { rd, imm } => apply_rotate(&mut state, *rd, *imm, RotateKind::Rol),
         X86Instruction::Ror { rd, imm } => apply_rotate(&mut state, *rd, *imm, RotateKind::Ror),
+        X86Instruction::ImulReg { rd, rs } => {
+            let lhs = state.get_register(*rd).as_u64();
+            let rhs = state.get_register(*rs).as_u64();
+            apply_imul(&mut state, *rd, lhs, rhs);
+        }
+        X86Instruction::ImulRegImm { rd, rs, imm } => {
+            let lhs = state.get_register(*rs).as_u64();
+            let rhs = *imm as u64;
+            apply_imul(&mut state, *rd, lhs, rhs);
+        }
         X86Instruction::Cmov { rd, rs, cond } => {
             if state.get_flags().evaluate(*cond) {
                 let v = state.get_register(*rs);
@@ -146,6 +156,55 @@ fn apply_dec(state: &mut X86ConcreteMachineState, rd: crate::isa::x86::X86Regist
     state.set_register(rd, ConcreteValue::new(result));
     let mut flags = Eflags::from_sub(old, 1, result, state.width());
     flags.cf = prev_cf;
+    state.set_flags(flags);
+}
+
+// Sign-extend the low `width` bits of `value` to a full i128 (so a width-`width`
+// signed multiply cannot overflow the i128 product).
+fn sign_extend_to_i128(value: u64, width: u32) -> i128 {
+    let masked = mask_width(value, width);
+    // Shift the sign bit up to bit 127, then arithmetic-shift back down.
+    let shift = 128 - width;
+    ((masked as i128) << shift) >> shift
+}
+
+// IMUL (signed multiply) — shared by both the 2-operand (`rd = rd * rs`) and
+// 3-operand (`rd = rs * imm`) forms. `lhs`/`rhs` are the raw register/immediate
+// bit patterns; this function sign-extends each from the operand width, takes
+// the FULL signed product, and writes the low `width` bits to `rd`.
+//
+// FLAG MODEL (Intel SDM): for IMUL only CF and OF are architecturally defined;
+// SF/ZF/PF/AF are UNDEFINED. CF = OF = 1 iff the full signed product does NOT
+// fit the truncated `width`-bit destination (i.e. signed overflow), else 0.
+//
+// SF/ZF/PF are Intel-undefined. We model them DETERMINISTICALLY from the
+// truncated result (the `from_logical` SF/ZF/PF path: SF = MSB, ZF = result==0,
+// PF = parity of the low byte) and AF per the existing convention (false). This
+// is documented as deterministic-undefined: because the target and candidate
+// sequences share this exact lowering (concrete here, SMT in `smt_x86`),
+// equivalence checking stays internally consistent and conservative — it never
+// accepts a rewrite that changes a flag a legitimate program could rely on,
+// since legitimate programs do not read IMUL's undefined flags.
+fn apply_imul(
+    state: &mut X86ConcreteMachineState,
+    rd: crate::isa::x86::X86Register,
+    lhs: u64,
+    rhs: u64,
+) {
+    let width = state.width();
+    let full = sign_extend_to_i128(lhs, width) * sign_extend_to_i128(rhs, width);
+    let result = mask_width(full as u64, width);
+
+    // CF = OF = signed overflow: the full product does not equal the
+    // sign-extension of the truncated result.
+    let overflow = full != sign_extend_to_i128(result, width);
+
+    state.set_register(rd, ConcreteValue::new(result));
+    // SF/ZF/PF from the truncated result (Intel-undefined; modelled
+    // deterministically — see the function comment). CF/OF then overridden.
+    let mut flags = Eflags::from_logical(result, width);
+    flags.cf = overflow;
+    flags.of = overflow;
     state.set_flags(flags);
 }
 
@@ -1002,6 +1061,155 @@ mod tests {
                 "rol {value:#x}, 1 must equal (v << 1) | (v >>u 63)"
             );
         }
+    }
+
+    #[test]
+    fn imul_reg_multiplies_and_clears_cf_of_when_product_fits() {
+        // imul rax, rbx with small operands: 6 * 7 = 42 fits the 64-bit
+        // destination, so CF = OF = 0.
+        let mut state = X86ConcreteMachineState::new_zeroed(64);
+        state.set_register(X86Register::RAX, ConcreteValue::new(6));
+        state.set_register(X86Register::RBX, ConcreteValue::new(7));
+        let after = apply_instruction_concrete_x86(
+            state,
+            &X86Instruction::ImulReg {
+                rd: X86Register::RAX,
+                rs: X86Register::RBX,
+            },
+        );
+        assert_eq!(after.get_register(X86Register::RAX).as_u64(), 42);
+        let flags = after.get_flags();
+        assert!(!flags.cf, "product fits -> CF clear");
+        assert!(!flags.of, "product fits -> OF clear");
+        // SF/ZF modelled deterministically from the truncated result.
+        assert!(!flags.zf);
+        assert!(!flags.sf);
+    }
+
+    #[test]
+    fn imul_reg_signed_negative_product() {
+        // imul of (-3) * 4 = -12: the truncated 64-bit result is -12 and the
+        // full product still fits, so CF = OF = 0 and SF (modelled) is set.
+        let mut state = X86ConcreteMachineState::new_zeroed(64);
+        state.set_register(X86Register::RAX, ConcreteValue::new((-3i64) as u64));
+        state.set_register(X86Register::RBX, ConcreteValue::new(4));
+        let after = apply_instruction_concrete_x86(
+            state,
+            &X86Instruction::ImulReg {
+                rd: X86Register::RAX,
+                rs: X86Register::RBX,
+            },
+        );
+        assert_eq!(
+            after.get_register(X86Register::RAX).as_u64(),
+            (-12i64) as u64
+        );
+        let flags = after.get_flags();
+        assert!(!flags.cf, "(-3)*4 fits -> CF clear");
+        assert!(!flags.of);
+        assert!(flags.sf, "negative result -> SF set (deterministic model)");
+    }
+
+    #[test]
+    fn imul_reg_overflow_sets_cf_and_of() {
+        // imul rax, rbx where the full signed product overflows 64 bits:
+        // (1<<40) * (1<<40) = 1<<80, which does NOT fit -> CF = OF = 1.
+        let mut state = X86ConcreteMachineState::new_zeroed(64);
+        state.set_register(X86Register::RAX, ConcreteValue::new(1u64 << 40));
+        state.set_register(X86Register::RBX, ConcreteValue::new(1u64 << 40));
+        let after = apply_instruction_concrete_x86(
+            state,
+            &X86Instruction::ImulReg {
+                rd: X86Register::RAX,
+                rs: X86Register::RBX,
+            },
+        );
+        // Low 64 bits of 1<<80 are 0.
+        assert_eq!(after.get_register(X86Register::RAX).as_u64(), 0);
+        let flags = after.get_flags();
+        assert!(flags.cf, "product overflows -> CF set");
+        assert!(flags.of, "product overflows -> OF set");
+    }
+
+    #[test]
+    fn imul_reg_imm_writes_rs_times_imm() {
+        // imul rax, rbx, 4: rax = rbx * 4 (rax is purely written, NOT read).
+        let mut state = X86ConcreteMachineState::new_zeroed(64);
+        state.set_register(X86Register::RAX, ConcreteValue::new(0xdead));
+        state.set_register(X86Register::RBX, ConcreteValue::new(5));
+        let after = apply_instruction_concrete_x86(
+            state,
+            &X86Instruction::ImulRegImm {
+                rd: X86Register::RAX,
+                rs: X86Register::RBX,
+                imm: 4,
+            },
+        );
+        assert_eq!(after.get_register(X86Register::RAX).as_u64(), 20);
+        let flags = after.get_flags();
+        assert!(!flags.cf);
+        assert!(!flags.of);
+    }
+
+    // The DoD result identity, concrete form: `imul rd, rs, 4` produces the
+    // same truncated value as `rs << 2` (multiply by a power of two).
+    #[test]
+    fn imul_reg_imm_by_power_of_two_matches_shift_construction() {
+        for value in [0u64, 1, 5, 0xdead_beef, u64::MAX, 1u64 << 62] {
+            let mut state = X86ConcreteMachineState::new_zeroed(64);
+            state.set_register(X86Register::RBX, ConcreteValue::new(value));
+            let after = apply_instruction_concrete_x86(
+                state,
+                &X86Instruction::ImulRegImm {
+                    rd: X86Register::RAX,
+                    rs: X86Register::RBX,
+                    imm: 4,
+                },
+            );
+            assert_eq!(
+                after.get_register(X86Register::RAX).as_u64(),
+                value.wrapping_shl(2),
+                "imul {value:#x}, 4 must equal value << 2 (truncated)"
+            );
+        }
+    }
+
+    // The 32-bit overflow boundary differs from 64-bit: 0x10000 * 0x10000 =
+    // 0x1_0000_0000 overflows a 32-bit destination (CF=OF=1) but fits a 64-bit
+    // one. Pin both widths to guard width-awareness.
+    #[test]
+    fn imul_overflow_is_width_aware() {
+        // width 32: 0x10000 * 0x10000 overflows.
+        let mut s32 = X86ConcreteMachineState::new_zeroed(32);
+        s32.set_register(X86Register::RAX, ConcreteValue::new(0x10000));
+        s32.set_register(X86Register::RBX, ConcreteValue::new(0x10000));
+        let after32 = apply_instruction_concrete_x86(
+            s32,
+            &X86Instruction::ImulReg {
+                rd: X86Register::RAX,
+                rs: X86Register::RBX,
+            },
+        );
+        assert!(after32.get_flags().cf, "32-bit product overflows -> CF set");
+        assert!(after32.get_flags().of);
+
+        // width 64: the same operands fit.
+        let mut s64 = X86ConcreteMachineState::new_zeroed(64);
+        s64.set_register(X86Register::RAX, ConcreteValue::new(0x10000));
+        s64.set_register(X86Register::RBX, ConcreteValue::new(0x10000));
+        let after64 = apply_instruction_concrete_x86(
+            s64,
+            &X86Instruction::ImulReg {
+                rd: X86Register::RAX,
+                rs: X86Register::RBX,
+            },
+        );
+        assert_eq!(
+            after64.get_register(X86Register::RAX).as_u64(),
+            0x1_0000_0000
+        );
+        assert!(!after64.get_flags().cf, "64-bit product fits -> CF clear");
+        assert!(!after64.get_flags().of);
     }
 
     #[test]

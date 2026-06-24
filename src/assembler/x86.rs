@@ -249,6 +249,19 @@ fn encode_64(ops: &mut dynasmrt::x64::Assembler, instr: &X86Instruction) -> Resu
             dynasm!(ops ; .arch x64 ; ror Rq(rd), BYTE count);
             Ok(())
         }
+        X86Instruction::ImulReg { rd, rs } => {
+            let rd = reg_index(*rd)?;
+            let rs = reg_index(*rs)?;
+            dynasm!(ops ; .arch x64 ; imul Rq(rd), Rq(rs));
+            Ok(())
+        }
+        X86Instruction::ImulRegImm { rd, rs, imm } => {
+            let rd = reg_index(*rd)?;
+            let rs = reg_index(*rs)?;
+            let imm = signed_imm_i32(*imm)?;
+            dynasm!(ops ; .arch x64 ; imul Rq(rd), Rq(rs), imm);
+            Ok(())
+        }
         X86Instruction::Cmov { rd, rs, cond } => {
             let rd = reg_index(*rd)?;
             let rs = reg_index(*rs)?;
@@ -473,6 +486,19 @@ fn encode_32(ops: &mut dynasmrt::x86::Assembler, instr: &X86Instruction) -> Resu
             let rd = reg_index_32(*rd)?;
             let count = shift_count_imm8(*imm)?;
             dynasm!(ops ; .arch x86 ; ror Rd(rd), BYTE count);
+            Ok(())
+        }
+        X86Instruction::ImulReg { rd, rs } => {
+            let rd = reg_index_32(*rd)?;
+            let rs = reg_index_32(*rs)?;
+            dynasm!(ops ; .arch x86 ; imul Rd(rd), Rd(rs));
+            Ok(())
+        }
+        X86Instruction::ImulRegImm { rd, rs, imm } => {
+            let rd = reg_index_32(*rd)?;
+            let rs = reg_index_32(*rs)?;
+            let imm = signed_imm_i32(*imm)?;
+            dynasm!(ops ; .arch x86 ; imul Rd(rd), Rd(rs), imm);
             Ok(())
         }
         X86Instruction::Cmov { rd, rs, cond } => {
@@ -979,6 +1005,59 @@ mod tests {
             },
             "ror",
             &["edx", "4"],
+        );
+    }
+
+    #[test]
+    fn imul_variants_x86_64() {
+        // Two-operand `imul rd, rs` (0F AF /r).
+        check_x86_64(
+            X86Instruction::ImulReg {
+                rd: X86Register::RAX,
+                rs: X86Register::RBX,
+            },
+            "imul",
+            &["rax", "rbx"],
+        );
+        // Three-operand `imul rd, rs, imm` (69 /r id).
+        check_x86_64(
+            X86Instruction::ImulRegImm {
+                rd: X86Register::RCX,
+                rs: X86Register::RDX,
+                imm: 4,
+            },
+            "imul",
+            &["rcx", "rdx", "4"],
+        );
+        // Extended register source round-trips too.
+        check_x86_64(
+            X86Instruction::ImulReg {
+                rd: X86Register::R9,
+                rs: X86Register::RAX,
+            },
+            "imul",
+            &["r9", "rax"],
+        );
+    }
+
+    #[test]
+    fn imul_variants_x86_32() {
+        check_x86_32(
+            X86Instruction::ImulReg {
+                rd: X86Register::RAX,
+                rs: X86Register::RBX,
+            },
+            "imul",
+            &["eax", "ebx"],
+        );
+        check_x86_32(
+            X86Instruction::ImulRegImm {
+                rd: X86Register::RCX,
+                rs: X86Register::RDX,
+                imm: 7,
+            },
+            "imul",
+            &["ecx", "edx", "7"],
         );
     }
 
