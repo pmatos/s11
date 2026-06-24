@@ -313,6 +313,13 @@ pub enum X86Instruction {
     /// `test rn, imm` — `rn & imm` discarding the result; clears CF/OF, sets
     /// SF/ZF/PF (AF undefined).
     TestImm { rn: X86Register, imm: i64 },
+    /// `neg rd` — `rd = -rd` (two's complement). Single-operand; reads and
+    /// writes `rd`. Sets EFLAGS as if computing `0 - rd`: CF = (rd != 0),
+    /// OF/SF/ZF/PF per the SUB result. Flag-writing like `sub`.
+    Neg { rd: X86Register },
+    /// `not rd` — `rd = !rd` (bitwise complement). Single-operand; reads and
+    /// writes `rd`. Affects NO flags — EFLAGS is left unchanged, like `mov`.
+    Not { rd: X86Register },
     /// `cmovCC rd, rs` — conditional move. Reads EFLAGS;
     /// when `cond` holds, writes `rd = rs`; otherwise `rd` is unchanged.
     /// Does not modify EFLAGS.
@@ -343,6 +350,8 @@ impl X86Instruction {
             | X86Instruction::OrImm { rd, .. }
             | X86Instruction::XorReg { rd, .. }
             | X86Instruction::XorImm { rd, .. }
+            | X86Instruction::Neg { rd }
+            | X86Instruction::Not { rd }
             | X86Instruction::Cmov { rd, .. } => Some(*rd),
             // CMP and TEST discard their result; only EFLAGS is written.
             X86Instruction::CmpReg { .. }
@@ -363,6 +372,8 @@ impl X86Instruction {
             X86Instruction::XorReg { .. } | X86Instruction::XorImm { .. } => "xor",
             X86Instruction::CmpReg { .. } | X86Instruction::CmpImm { .. } => "cmp",
             X86Instruction::TestReg { .. } | X86Instruction::TestImm { .. } => "test",
+            X86Instruction::Neg { .. } => "neg",
+            X86Instruction::Not { .. } => "not",
             X86Instruction::Cmov { cond, .. } => cond.cmov_mnemonic(),
             X86Instruction::Jcc { cond } => cond.jcc_mnemonic(),
         }
@@ -394,6 +405,8 @@ impl X86Instruction {
             // writes no register — mirrors CMP.
             X86Instruction::TestReg { rn, rs } => vec![*rn, *rs],
             X86Instruction::TestImm { rn, .. } => vec![*rn],
+            // NEG / NOT are single-operand: each reads its own destination.
+            X86Instruction::Neg { rd } | X86Instruction::Not { rd } => vec![*rd],
             // Cmov reads both rd (kept on false branch) and rs.
             X86Instruction::Cmov { rd, rs, .. } => vec![*rd, *rs],
             X86Instruction::Jcc { .. } => vec![],
@@ -438,11 +451,13 @@ impl InstructionType for X86Instruction {
             X86Instruction::CmpImm { .. } => 13,
             X86Instruction::TestReg { .. } => 14,
             X86Instruction::TestImm { .. } => 15,
-            // Cmov MUST stay the last rewritable opcode (COUNT - 1 == 16):
+            X86Instruction::Neg { .. } => 16,
+            X86Instruction::Not { .. } => 17,
+            // Cmov MUST stay the last rewritable opcode (COUNT - 1 == 18):
             // the CMOV distinct-register draw at both generation sites is
             // gated on `opcode == X86_REWRITABLE_OPCODE_COUNT - 1`.
-            X86Instruction::Cmov { .. } => 16,
-            X86Instruction::Jcc { .. } => 17,
+            X86Instruction::Cmov { .. } => 18,
+            X86Instruction::Jcc { .. } => 19,
         }
     }
 
@@ -451,14 +466,16 @@ impl InstructionType for X86Instruction {
     }
 
     fn has_side_effects(&self) -> bool {
-        // MOV / CMOV / Jcc do not write EFLAGS (CMOV and Jcc read them,
-        // but reading is not a side effect on observable state). Every
-        // other variant sets or clobbers flag bits, which is observable
-        // state beyond the destination register.
+        // MOV / NOT / CMOV / Jcc do not write EFLAGS (CMOV and Jcc read
+        // them, but reading is not a side effect on observable state; NOT
+        // is bitwise complement and leaves EFLAGS untouched, exactly like
+        // MOV). Every other variant — including NEG — sets or clobbers flag
+        // bits, which is observable state beyond the destination register.
         !matches!(
             self,
             X86Instruction::MovReg { .. }
                 | X86Instruction::MovImm { .. }
+                | X86Instruction::Not { .. }
                 | X86Instruction::Cmov { .. }
                 | X86Instruction::Jcc { .. }
         )
@@ -487,6 +504,8 @@ impl fmt::Display for X86Instruction {
             X86Instruction::CmpImm { rn, imm } | X86Instruction::TestImm { rn, imm } => {
                 write!(f, "{} {}, {}", mn, rn, imm)
             }
+            // Single-operand: render just the destination register.
+            X86Instruction::Neg { rd } | X86Instruction::Not { rd } => write!(f, "{} {}", mn, rd),
             X86Instruction::Cmov { rd, rs, .. } => write!(f, "{} {}, {}", mn, rd, rs),
             // Target is opaque to the IR; render with a placeholder.
             X86Instruction::Jcc { .. } => write!(f, "{} <target>", mn),
@@ -575,6 +594,7 @@ fn x86_modifies_flags(instr: &X86Instruction) -> bool {
         instr,
         X86Instruction::MovReg { .. }
             | X86Instruction::MovImm { .. }
+            | X86Instruction::Not { .. }
             | X86Instruction::Cmov { .. }
             | X86Instruction::Jcc { .. }
     )
@@ -769,6 +789,8 @@ impl crate::isa::traits::Assembler<X86Instruction> for X86_64 {
             | X86Instruction::XorReg { .. }
             | X86Instruction::CmpReg { .. }
             | X86Instruction::TestReg { .. }
+            | X86Instruction::Neg { .. }
+            | X86Instruction::Not { .. }
             | X86Instruction::Cmov { .. }
             | X86Instruction::Jcc { .. } => true,
         }
@@ -806,6 +828,7 @@ impl crate::isa::traits::Assembler<X86Instruction> for X86_32 {
             X86Instruction::CmpImm { rn, imm } | X86Instruction::TestImm { rn, imm } => {
                 reg_ok_32(*rn) && x86_imm32_bitpattern_ok(*imm)
             }
+            X86Instruction::Neg { rd } | X86Instruction::Not { rd } => reg_ok_32(*rd),
             X86Instruction::Cmov { rd, rs, .. } => reg_ok_32(*rd) && reg_ok_32(*rs),
             X86Instruction::Jcc { .. } => true,
         }
@@ -990,6 +1013,8 @@ impl X86Mutator {
                 | X86Instruction::XorReg { .. }
                 | X86Instruction::CmpReg { .. }
                 | X86Instruction::TestReg { .. }
+                | X86Instruction::Neg { .. }
+                | X86Instruction::Not { .. }
                 | X86Instruction::Jcc { .. } => {}
                 X86Instruction::Cmov { cond, .. } => *cond = self.pick_condition(rng),
             }
@@ -1045,6 +1070,10 @@ impl X86Mutator {
                 } else {
                     *imm = self.pick_non_mov_immediate(rng);
                 }
+            }
+            // NEG / NOT have a single register operand; mutate it.
+            X86Instruction::Neg { rd } | X86Instruction::Not { rd } => {
+                *rd = self.pick_register(rng).expect("register pool is non-empty");
             }
             X86Instruction::Cmov { rd, rs, cond } => {
                 // Treat the condition code as a mutable operand alongside
@@ -1143,6 +1172,11 @@ impl X86Mutator {
                 Some(rs) => X86Instruction::TestReg { rn, rs },
                 None => current,
             },
+            // NEG and NOT share the single-operand (rd-only) shape, so the
+            // opcode-bridge mutation flips between them — always a real
+            // change, like CMP ↔ TEST.
+            X86Instruction::Neg { rd } => X86Instruction::Not { rd },
+            X86Instruction::Not { rd } => X86Instruction::Neg { rd },
             // Cmov has a unique shape (rd, rs, cond) with no opcode-shape
             // siblings; keep it unchanged in the opcode-bridge mutator.
             X86Instruction::Cmov { .. } => current,
@@ -1217,17 +1251,17 @@ impl crate::isa::traits::ISAMutator<X86Instruction> for X86Mutator {
 #[derive(Clone, Copy, Debug, Default)]
 pub struct X86InstructionGenerator;
 
-// One entry per rewritable opcode family: 8 reg-reg + 8 reg-imm + CMOVcc.
-// CMOVcc counts as a single family here even though `generate_all` expands
-// it across all 16 `X86Condition::ALL` variants per register pair.
+// One entry per rewritable opcode family: 8 reg-reg + 8 reg-imm + NEG + NOT
+// + CMOVcc. CMOVcc counts as a single family here even though `generate_all`
+// expands it across all 16 `X86Condition::ALL` variants per register pair.
 //
-// CMOV MUST remain the LAST opcode (index COUNT - 1 == 16): both
+// CMOV MUST remain the LAST opcode (index COUNT - 1 == 18): both
 // `X86Mutator::random_instruction` and
 // `generate_random_rewritable_x86_instruction` gate the extra distinct-source
 // CMOV draw on `opcode == X86_REWRITABLE_OPCODE_COUNT - 1`. New flag-only
-// families (CMP, TEST) are inserted before CMOV in
-// `build_x86_instruction_by_opcode` to preserve that invariant.
-const X86_REWRITABLE_OPCODE_COUNT: u8 = 17;
+// families (CMP, TEST) and single-operand families (NEG, NOT) are inserted
+// before CMOV in `build_x86_instruction_by_opcode` to preserve that invariant.
+const X86_REWRITABLE_OPCODE_COUNT: u8 = 19;
 
 fn has_distinct_register_pair(registers: &[X86Register]) -> bool {
     let Some(first) = registers.first() else {
@@ -1242,7 +1276,7 @@ fn has_distinct_register_pair(registers: &[X86Register]) -> bool {
 /// `X86Mutator::random_instruction` and
 /// `generate_random_rewritable_x86_instruction` both delegate here so the two
 /// dispatch tables cannot drift (see issue #348). Operand drawing and RNG draw
-/// order stay at the call sites; the CMOV slot (opcode 16, the last index)
+/// order stay at the call sites; the CMOV slot (opcode 18, the last index)
 /// consumes the `rs` the caller resolved via `pick_register_except` so
 /// `rs != rd`.
 ///
@@ -1272,9 +1306,13 @@ pub(crate) fn build_x86_instruction_by_opcode(
         13 => X86Instruction::CmpImm { rn: rd, imm },
         14 => X86Instruction::TestReg { rn: rd, rs },
         15 => X86Instruction::TestImm { rn: rd, imm },
-        // Cmov stays last (index 16 == X86_REWRITABLE_OPCODE_COUNT - 1) so the
+        // NEG / NOT are single-operand: they consume only `rd` (rs/imm/cond
+        // are ignored).
+        16 => X86Instruction::Neg { rd },
+        17 => X86Instruction::Not { rd },
+        // Cmov stays last (index 18 == X86_REWRITABLE_OPCODE_COUNT - 1) so the
         // CMOV distinct-register draw at the two generation sites stays correct.
-        16 => X86Instruction::Cmov { rd, rs, cond },
+        18 => X86Instruction::Cmov { rd, rs, cond },
         _ => unreachable!("opcode out of range"),
     }
 }
@@ -1390,6 +1428,11 @@ impl InstructionGenerator<X86Instruction> for X86InstructionGenerator {
                 out.push(X86Instruction::TestImm { rn: rd, imm });
             }
         }
+        // Single-operand variants (NEG, NOT): one per register.
+        for &rd in registers {
+            out.push(X86Instruction::Neg { rd });
+            out.push(X86Instruction::Not { rd });
+        }
         // CMOVcc is rewritable and reads flags, so enumerate every
         // condition for each non-identical register pair. Jcc remains
         // excluded.
@@ -1479,6 +1522,9 @@ fn with_destination(instr: X86Instruction, new_rd: X86Register) -> X86Instructio
         X86Instruction::CmpImm { imm, .. } => X86Instruction::CmpImm { rn: new_rd, imm },
         X86Instruction::TestReg { rs, .. } => X86Instruction::TestReg { rn: new_rd, rs },
         X86Instruction::TestImm { imm, .. } => X86Instruction::TestImm { rn: new_rd, imm },
+        // NEG / NOT have only a destination register; redirect it.
+        X86Instruction::Neg { .. } => X86Instruction::Neg { rd: new_rd },
+        X86Instruction::Not { .. } => X86Instruction::Not { rd: new_rd },
         X86Instruction::Cmov { rd, rs, cond } => X86Instruction::Cmov {
             rd: if new_rd == rs { rd } else { new_rd },
             rs,
@@ -1507,6 +1553,9 @@ fn with_sources(instr: X86Instruction, new_rs: X86Register, new_imm: i64) -> X86
         X86Instruction::CmpImm { rn, .. } => X86Instruction::CmpImm { rn, imm: new_imm },
         X86Instruction::TestReg { rn, .. } => X86Instruction::TestReg { rn, rs: new_rs },
         X86Instruction::TestImm { rn, .. } => X86Instruction::TestImm { rn, imm: new_imm },
+        // NEG / NOT have no source operand to vary; carry through unchanged.
+        X86Instruction::Neg { rd } => X86Instruction::Neg { rd },
+        X86Instruction::Not { rd } => X86Instruction::Not { rd },
         // Cmov's `rs` is mutated; `cond` and `rd` carry through unchanged.
         X86Instruction::Cmov { rd, rs, cond } => X86Instruction::Cmov {
             rd,
@@ -1559,8 +1608,9 @@ mod tests {
 
         let n = regs.len();
         let m = imms.len();
-        // 8 reg-reg families + 8 reg-imm families + CMOVcc over distinct pairs.
-        let expected_len = 8 * n * n + 8 * n * m + n * (n - 1) * X86Condition::ALL.len();
+        // 8 reg-reg families + 8 reg-imm families + 2 single-operand families
+        // (NEG, NOT) + CMOVcc over distinct pairs.
+        let expected_len = 8 * n * n + 8 * n * m + 2 * n + n * (n - 1) * X86Condition::ALL.len();
         assert_eq!(
             all.len(),
             expected_len,
@@ -1742,6 +1792,8 @@ mod tests {
                 | X86Instruction::XorReg { .. }
                 | X86Instruction::CmpReg { .. }
                 | X86Instruction::TestReg { .. }
+                | X86Instruction::Neg { .. }
+                | X86Instruction::Not { .. }
                 | X86Instruction::Cmov { .. }
                 | X86Instruction::Jcc { .. } => {}
             }
@@ -2061,6 +2113,8 @@ mod tests {
             X86Instruction::CmpImm { rn: rd, imm: 0 },
             X86Instruction::TestReg { rn: rd, rs },
             X86Instruction::TestImm { rn: rd, imm: 0 },
+            X86Instruction::Neg { rd },
+            X86Instruction::Not { rd },
             X86Instruction::Cmov {
                 rd,
                 rs,
@@ -2068,8 +2122,8 @@ mod tests {
             },
         ];
 
-        // Rewritable non-terminator variants: 16 data forms + CMOVcc.
-        assert_eq!(variants.len(), 17);
+        // Rewritable non-terminator variants: 16 data forms + NEG + NOT + CMOVcc.
+        assert_eq!(variants.len(), 19);
         let ids: Vec<u8> = variants
             .iter()
             .map(<X86Instruction as InstructionType>::opcode_id)
@@ -2092,12 +2146,13 @@ mod tests {
             );
         }
 
-        // EFLAGS side-effects: MOV and CMOV do not mutate EFLAGS.
+        // EFLAGS side-effects: MOV, NOT, and CMOV do not mutate EFLAGS.
         for v in variants.iter() {
             let leaves_flags = matches!(
                 v,
                 X86Instruction::MovReg { .. }
                     | X86Instruction::MovImm { .. }
+                    | X86Instruction::Not { .. }
                     | X86Instruction::Cmov { .. }
             );
             assert_eq!(
@@ -2130,6 +2185,8 @@ mod tests {
             (X86Instruction::CmpImm { rn: rd, imm: 7 }, "cmp rax, 7"),
             (X86Instruction::TestReg { rn: rd, rs }, "test rax, rbx"),
             (X86Instruction::TestImm { rn: rd, imm: 5 }, "test rax, 5"),
+            (X86Instruction::Neg { rd }, "neg rax"),
+            (X86Instruction::Not { rd }, "not rax"),
         ];
         for (instr, expected) in cases {
             assert_eq!(format!("{}", instr), *expected);
@@ -2157,6 +2214,8 @@ mod tests {
             (X86Instruction::CmpImm { rn: rd, imm: 0 }, "cmp"),
             (X86Instruction::TestReg { rn: rd, rs }, "test"),
             (X86Instruction::TestImm { rn: rd, imm: 0 }, "test"),
+            (X86Instruction::Neg { rd }, "neg"),
+            (X86Instruction::Not { rd }, "not"),
         ];
         for (instr, expected) in cases {
             assert_eq!(instr.mnemonic(), *expected);
@@ -2263,6 +2322,9 @@ mod tests {
             X86Instruction::TestImm { rn: rd, imm: 0 }.source_registers(),
             vec![rd]
         );
+        // NEG / NOT are single-operand: each reads its own destination.
+        assert_eq!(X86Instruction::Neg { rd }.source_registers(), vec![rd]);
+        assert_eq!(X86Instruction::Not { rd }.source_registers(), vec![rd]);
     }
 
     #[test]
@@ -2288,6 +2350,9 @@ mod tests {
             (X86Instruction::CmpImm { rn: rd, imm: 0 }, None),
             (X86Instruction::TestReg { rn: rd, rs }, None),
             (X86Instruction::TestImm { rn: rd, imm: 0 }, None),
+            // NEG and NOT write rd.
+            (X86Instruction::Neg { rd }, Some(rd)),
+            (X86Instruction::Not { rd }, Some(rd)),
         ];
         for (instr, want) in cases {
             assert_eq!(
@@ -2836,6 +2901,8 @@ mod tests {
                 | X86Instruction::XorReg { .. }
                 | X86Instruction::CmpReg { .. }
                 | X86Instruction::TestReg { .. }
+                | X86Instruction::Neg { .. }
+                | X86Instruction::Not { .. }
                 | X86Instruction::Cmov { .. }
                 | X86Instruction::Jcc { .. } => {}
             }
@@ -2909,8 +2976,10 @@ mod tests {
             (13, X86Instruction::CmpImm { rn: rd, imm }),
             (14, X86Instruction::TestReg { rn: rd, rs }),
             (15, X86Instruction::TestImm { rn: rd, imm }),
-            // Cmov stays last at COUNT - 1 == 16.
-            (16, X86Instruction::Cmov { rd, rs, cond }),
+            (16, X86Instruction::Neg { rd }),
+            (17, X86Instruction::Not { rd }),
+            // Cmov stays last at COUNT - 1 == 18.
+            (18, X86Instruction::Cmov { rd, rs, cond }),
         ];
 
         for (opcode, want) in expected {
@@ -2940,7 +3009,9 @@ mod tests {
             (13, "cmp"),
             (14, "test"),
             (15, "test"),
-            (16, "cmove"),
+            (16, "neg"),
+            (17, "not"),
+            (18, "cmove"),
         ];
         for (opcode, mnem) in mnemonics {
             assert_eq!(
@@ -3396,6 +3467,8 @@ mod tests {
                     | X86Instruction::XorReg { .. }
                     | X86Instruction::CmpReg { .. }
                     | X86Instruction::TestReg { .. }
+                    | X86Instruction::Neg { .. }
+                    | X86Instruction::Not { .. }
                     | X86Instruction::Cmov { .. }
                     | X86Instruction::Jcc { .. } => {}
                 }

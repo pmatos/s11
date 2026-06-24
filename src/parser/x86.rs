@@ -363,6 +363,23 @@ fn x86_ir_from_mnemonic_impl(
         return Ok(Some(X86Instruction::Jcc { cond }));
     }
 
+    // NEG / NOT are the only SINGLE-operand families. They expect exactly
+    // one register operand: a comma in the operand string (e.g. the
+    // two-operand `neg rax, rbx`) is rejected as an unsupported shape via
+    // `Ok(None)`, the same way an unknown mnemonic is. Handled here, ahead
+    // of the two-operand families below which hard-require `parts.len() == 2`.
+    if matches!(mnemonic.as_str(), "neg" | "not") {
+        let parts: Vec<&str> = op_str.split(',').map(|s| s.trim()).collect();
+        if parts.len() != 1 {
+            return Ok(None);
+        }
+        let rd = parse_x86_register_with_mode(parts[0], mode)?;
+        return Ok(Some(match mnemonic.as_str() {
+            "neg" => X86Instruction::Neg { rd },
+            _ => X86Instruction::Not { rd },
+        }));
+    }
+
     // Reject unsupported mnemonics before attempting operand parsing so
     // shapes outside the minimal core (e.g. LEA `rax, [rbx+1]`) surface
     // as "unsupported mnemonic" rather than a confusing downstream
@@ -435,8 +452,8 @@ fn x86_ir_from_mnemonic_impl(
 /// Recognised lines: empty, comments (`;`, `//`, `#`), labels
 /// (`name:`), directives (`.foo`), and instructions whose mnemonic is
 /// one of the supported families (mov, add, sub, and, or, xor, cmp,
-/// test plus the conditional cmovCC and jCC variants). Anything else is
-/// a parse error.
+/// test, the single-operand neg/not, plus the conditional cmovCC and
+/// jCC variants). Anything else is a parse error.
 pub fn parse_x86_assembly_string(
     content: &str,
     source_name: String,
@@ -821,6 +838,67 @@ mod tests {
             X86Instruction::TestImm {
                 rn: X86Register::RAX,
                 imm: 5,
+            }
+        );
+    }
+
+    #[test]
+    fn neg_not_parse_single_operand_and_round_trip_display() {
+        // `neg rax` / `not rax` parse to the single-operand variants and
+        // their Display output round-trips back to the same IR.
+        let neg = x86_ir_from_mnemonic("neg", "rax").unwrap().unwrap();
+        assert_eq!(
+            neg,
+            X86Instruction::Neg {
+                rd: X86Register::RAX
+            }
+        );
+        assert_eq!(neg.to_string(), "neg rax");
+
+        let not = x86_ir_from_mnemonic("not", "rax").unwrap().unwrap();
+        assert_eq!(
+            not,
+            X86Instruction::Not {
+                rd: X86Register::RAX
+            }
+        );
+        assert_eq!(not.to_string(), "not rax");
+
+        for instr in [neg, not] {
+            let text = instr.to_string();
+            let (mnemonic, ops) = text.split_once(char::is_whitespace).unwrap();
+            assert_eq!(
+                x86_ir_from_mnemonic(mnemonic, ops).unwrap().unwrap(),
+                instr,
+                "round-trip failed for {text}"
+            );
+        }
+    }
+
+    #[test]
+    fn neg_with_two_operands_is_rejected() {
+        // The single-operand families must reject a second operand: `neg rax,
+        // rbx` is an unsupported shape and surfaces as Ok(None), not a Neg.
+        assert!(x86_ir_from_mnemonic("neg", "rax, rbx").unwrap().is_none());
+        assert!(x86_ir_from_mnemonic("not", "rax, rbx").unwrap().is_none());
+    }
+
+    #[test]
+    fn neg_not_round_trip_through_mode_aware_binary_path() {
+        assert_eq!(
+            x86_ir_from_mnemonic_for_mode("neg", "rax", X86ParseMode::Mode64)
+                .unwrap()
+                .unwrap(),
+            X86Instruction::Neg {
+                rd: X86Register::RAX
+            }
+        );
+        assert_eq!(
+            x86_ir_from_mnemonic_for_mode("not", "eax", X86ParseMode::Mode32)
+                .unwrap()
+                .unwrap(),
+            X86Instruction::Not {
+                rd: X86Register::RAX
             }
         );
     }
