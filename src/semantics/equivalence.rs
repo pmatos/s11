@@ -968,6 +968,39 @@ where
     solver
 }
 
+/// Build the x86 fast-path input-register mask: the union of the live-out
+/// registers and every source register read by either sequence, sorted by
+/// register index for deterministic input ordering.
+///
+/// Mirrors `fast_path_input_registers` on the AArch64 path. Registers outside
+/// this set never affect the compared live-out state (a sequence's output
+/// depends only on the registers it reads), so they can stay at the
+/// `new_zeroed` default; conversely every register a sequence reads must be
+/// driven for the edge-case pass to expose value-dependent divergence.
+fn fast_path_input_registers_x86<I>(
+    config: &EquivalenceConfigFor<I>,
+    seq1: &[crate::isa::x86::X86Instruction],
+    seq2: &[crate::isa::x86::X86Instruction],
+) -> Vec<crate::isa::x86::X86Register>
+where
+    I: ISA<Instruction = crate::isa::x86::X86Instruction, Register = crate::isa::x86::X86Register>,
+{
+    use crate::isa::x86::X86Register;
+    use std::collections::HashSet;
+    let mut regs: HashSet<X86Register> = HashSet::new();
+    for r in config.live_out.iter() {
+        regs.insert(*r);
+    }
+    for instr in seq1.iter().chain(seq2.iter()) {
+        for src in instr.source_registers() {
+            regs.insert(src);
+        }
+    }
+    let mut v: Vec<_> = regs.into_iter().collect();
+    v.sort_by_key(|r| r.index().unwrap_or(u8::MAX));
+    v
+}
+
 fn run_fast_path_x86<I>(
     seq1: &[crate::isa::x86::X86Instruction],
     seq2: &[crate::isa::x86::X86Instruction],
@@ -997,13 +1030,33 @@ where
     });
     let flags_must_match = flags_only_present || config.live_out.flags_live();
 
-    // Deterministic seed sequence: the first four are hand-picked
-    // boundary cases (zero, one, an asymmetric bit pattern, all-ones);
-    // beyond that we mix the iteration index with a golden-ratio
-    // multiplier to scatter through the u64 space without pulling in a
-    // PRNG. The total number of seeds is `config.random_test_count`
-    // (matching the AArch64 path's contract that the field actually
-    // drives the fast-path coverage).
+    // Shared per-input refutation check: run both sequences from `state` and
+    // report whether they disagree on any live-out register (or on EFLAGS when
+    // `flags_must_match`). Used by both the random pass and the edge-case pass
+    // so the two never drift apart in what "divergence" means.
+    let refuted = |state: &X86ConcreteMachineState| -> bool {
+        let mut s1 = state.clone();
+        for instr in seq1 {
+            s1 = apply_instruction_concrete_x86(s1, instr);
+        }
+        let mut s2 = state.clone();
+        for instr in seq2 {
+            s2 = apply_instruction_concrete_x86(s2, instr);
+        }
+        for reg in config.live_out.iter() {
+            if s1.get_register(*reg) != s2.get_register(*reg) {
+                return true;
+            }
+        }
+        flags_must_match && s1.get_flags() != s2.get_flags()
+    };
+
+    // Random pass. Deterministic seed sequence: the first four are hand-picked
+    // boundary cases (zero, one, an asymmetric bit pattern, all-ones); beyond
+    // that we mix the iteration index with a golden-ratio multiplier to scatter
+    // through the u64 space without pulling in a PRNG. The total number of seeds
+    // is `config.random_test_count` (matching the AArch64 path's contract that
+    // the field actually drives the fast-path coverage).
     let base_seeds: &[u64] = &[0, 1, 0xdead_beef, u64::MAX];
     for n in 0..config.random_test_count {
         let seed = if n < base_seeds.len() {
@@ -1032,25 +1085,35 @@ where
         flags.sf = (seed & 8) != 0;
         flags.of = (seed & 16) != 0;
         state.set_flags(flags);
-        let mut s1 = state.clone();
-        for instr in seq1 {
-            s1 = apply_instruction_concrete_x86(s1, instr);
-        }
-        let mut s2 = state.clone();
-        for instr in seq2 {
-            s2 = apply_instruction_concrete_x86(s2, instr);
-        }
-        for reg in config.live_out.iter() {
-            if s1.get_register(*reg) != s2.get_register(*reg) {
-                // We don't have an X86-typed counterexample state in the
-                // EquivalenceResult yet; report a generic NotEquivalent.
-                return Some(EquivalenceResult::NotEquivalent);
-            }
-        }
-        if flags_must_match && s1.get_flags() != s2.get_flags() {
+        // We don't have an X86-typed counterexample state in the
+        // EquivalenceResult yet; report a generic NotEquivalent.
+        if refuted(&state) {
             return Some(EquivalenceResult::NotEquivalent);
         }
     }
+
+    // Edge-case pass. The random pass seeds register `i` with `seed + i`, so no
+    // two registers are ever equal and the extreme bit patterns (i64::MIN,
+    // 0x5555.../0xAAAA..., independent register combinations) are never hit —
+    // exactly the inputs value-dependent divergences hide behind. Route through
+    // the shared `validation::random` x86 edge-case generator (already used by
+    // the search backends) so x86 reaches the same edge coverage the AArch64
+    // fast path has always run. Purely additive: it can only surface more
+    // refutations, never approve a pair the random pass already refuted.
+    //
+    // `random_test_count == 0` is the caller's explicit "skip the concrete fast
+    // path and defer to SMT" signal (used to isolate the symbolic path in
+    // tests); honour it here too so the edge-case pass never fires when the
+    // random pass was suppressed.
+    if config.random_test_count > 0 {
+        let input_regs = fast_path_input_registers_x86(config, seq1, seq2);
+        for state in crate::validation::random::generate_edge_case_inputs_x86(&input_regs, width) {
+            if refuted(&state) {
+                return Some(EquivalenceResult::NotEquivalent);
+            }
+        }
+    }
+
     if config.fast_only {
         return Some(EquivalenceResult::Equivalent);
     }
@@ -1279,7 +1342,99 @@ mod tests {
         assert!(metrics.smt_formula_bytes.is_none());
     }
 
-    fn assert_x86_register_output_smt_only_refutation<I>()
+    fn assert_x86_fast_path_refutes_edge_case_only_divergence<I>()
+    where
+        I: EquivalenceBackend<Instruction = X86Instruction, Register = X86Register>,
+    {
+        // `sub rax, rcx` computes RAX = RAX - RCX. The fast path's random pass
+        // seeds register i with `seed + i` for every seed, so RAX = seed and
+        // RCX = seed + 1 on every concrete trial and RAX - RCX == -1 for all
+        // seeds — indistinguishable from `mov rax, -1`. But the two sequences
+        // are NOT equivalent (RAX - RCX != -1 in general); the random pass can
+        // never expose that because it never sets two registers equal. Only the
+        // edge-case pass, which drives both registers to the same extreme value
+        // (e.g. 0), refutes them. Under --fast-only the fast path is
+        // authoritative, so without the edge-case pass s11 would wrongly accept
+        // this non-equivalent rewrite as an optimization.
+        let seq_sub = vec![X86Instruction::SubReg {
+            rd: X86Register::RAX,
+            rs: X86Register::RCX,
+        }];
+        let seq_mov = vec![X86Instruction::MovImm {
+            rd: X86Register::RAX,
+            imm: -1,
+        }];
+        let cfg = EquivalenceConfigFor::<I>::fast_only()
+            .live_out(X86LiveOut::from_registers(vec![X86Register::RAX]));
+        let (result, metrics) = check_equivalence_for_metrics::<I>(&seq_sub, &seq_mov, &cfg);
+        assert_eq!(result, EquivalenceResult::NotEquivalent);
+        assert!(!metrics.smt_called);
+    }
+
+    #[test]
+    fn x86_fast_path_refutes_edge_case_only_divergence() {
+        assert_x86_fast_path_refutes_edge_case_only_divergence::<crate::isa::X86_64>();
+        assert_x86_fast_path_refutes_edge_case_only_divergence::<crate::isa::X86_32>();
+    }
+
+    #[test]
+    fn x86_fast_path_edge_case_pass_keeps_genuine_equivalence() {
+        // Commutativity of addition: `mov rax, rcx; add rax, rdx` and
+        // `mov rax, rdx; add rax, rcx` compute RAX = RCX + RDX for EVERY input,
+        // including the extreme values the edge-case pass drives. The added
+        // edge-case pass must not manufacture a false refutation for a pair
+        // that is genuinely equivalent on register-dependent output.
+        let seq1 = vec![
+            X86Instruction::MovReg {
+                rd: X86Register::RAX,
+                rs: X86Register::RCX,
+            },
+            X86Instruction::AddReg {
+                rd: X86Register::RAX,
+                rs: X86Register::RDX,
+            },
+        ];
+        let seq2 = vec![
+            X86Instruction::MovReg {
+                rd: X86Register::RAX,
+                rs: X86Register::RDX,
+            },
+            X86Instruction::AddReg {
+                rd: X86Register::RAX,
+                rs: X86Register::RCX,
+            },
+        ];
+        let cfg = EquivalenceConfigFor::<crate::isa::X86_64>::fast_only()
+            .live_out(X86LiveOut::from_registers(vec![X86Register::RAX]));
+        let (result, metrics) =
+            check_equivalence_for_metrics::<crate::isa::X86_64>(&seq1, &seq2, &cfg);
+        assert_eq!(result, EquivalenceResult::Equivalent);
+        assert!(!metrics.smt_called);
+    }
+
+    #[test]
+    fn fast_path_input_registers_x86_unions_live_out_and_source_registers() {
+        // Live-out {RDX}, seq1 reads {RAX, RCX}, seq2 writes RBX from an
+        // immediate (no source). The mask is the union of live-out and every
+        // source register — sorted by index — and excludes write-only RBX.
+        let seq1 = vec![X86Instruction::AddReg {
+            rd: X86Register::RAX,
+            rs: X86Register::RCX,
+        }];
+        let seq2 = vec![X86Instruction::MovImm {
+            rd: X86Register::RBX,
+            imm: 1,
+        }];
+        let cfg = EquivalenceConfigFor::<crate::isa::X86_64>::default()
+            .live_out(X86LiveOut::from_registers(vec![X86Register::RDX]));
+        let regs = fast_path_input_registers_x86::<crate::isa::X86_64>(&cfg, &seq1, &seq2);
+        assert_eq!(
+            regs,
+            vec![X86Register::RAX, X86Register::RCX, X86Register::RDX]
+        );
+    }
+
+    fn assert_x86_register_output_edge_case_refutation<I>()
     where
         I: EquivalenceBackend<Instruction = X86Instruction, Register = X86Register>,
     {
@@ -1299,29 +1454,34 @@ mod tests {
         ];
         let live_out = X86LiveOut::from_registers(vec![X86Register::RAX]);
 
+        // The random pass seeds register i with `seed + i` for every seed
+        // (RAX=0, RCX=1, RDX=2), so target RAX = seed + (seed+1) = 2*seed+1 and
+        // candidate RAX = (seed + (seed+2)) - 1 = 2*seed+1 on every random
+        // trial — the random pass cannot tell them apart. They are NOT
+        // equivalent (they agree only while RCX + 1 == RDX); the edge-case pass
+        // drives the registers to independent extreme values and refutes the
+        // pair in the fast path, without ever consulting SMT.
         let fast_cfg = EquivalenceConfigFor::<I>::fast_only().live_out(live_out.clone());
         let (fast_result, fast_metrics) =
             check_equivalence_for_metrics::<I>(&target, &candidate, &fast_cfg);
-        // The fast path seeds register i with `seed + i` for every seed
-        // (RAX=0, RCX=1, RDX=2), so target RAX = seed + (seed+1) = 2*seed+1 and
-        // candidate RAX = (seed + (seed+2)) - 1 = 2*seed+1 on every concrete
-        // trial. The pair is equal by construction here; only SMT can refute it.
-        assert_eq!(fast_result, EquivalenceResult::Equivalent);
+        assert_eq!(fast_result, EquivalenceResult::NotEquivalent);
         assert!(!fast_metrics.smt_called);
 
+        // The same edge-case refutation resolves the default (SMT-backed)
+        // config before Z3 is consulted.
         let cfg = EquivalenceConfigFor::<I>::default().live_out(live_out);
         let (result, metrics) = check_equivalence_for_metrics::<I>(&target, &candidate, &cfg);
         assert_eq!(result, EquivalenceResult::NotEquivalent);
-        assert!(metrics.smt_called);
+        assert!(!metrics.smt_called);
     }
 
     #[test]
-    fn x86_register_output_smt_only_refutation() {
-        assert_x86_register_output_smt_only_refutation::<crate::isa::X86_64>();
-        assert_x86_register_output_smt_only_refutation::<crate::isa::X86_32>();
+    fn x86_register_output_edge_case_refutation() {
+        assert_x86_register_output_edge_case_refutation::<crate::isa::X86_64>();
+        assert_x86_register_output_edge_case_refutation::<crate::isa::X86_32>();
     }
 
-    fn assert_x86_eflags_smt_only_refutation<I>()
+    fn assert_x86_eflags_edge_case_refutation<I>()
     where
         I: EquivalenceBackend<Instruction = X86Instruction, Register = X86Register>,
     {
@@ -1335,26 +1495,28 @@ mod tests {
         }];
         let live_out = X86LiveOut::empty().with_flags(true);
 
+        // The random pass seeds register i with `seed + i` for every seed
+        // (RCX=1, RDX=2, RSI=6, RDI=7), so both compares evaluate `cmp x, x+1`
+        // and produce identical flags on every random trial — the random pass
+        // cannot tell them apart. The pair is NOT flag-equivalent in general;
+        // the edge-case pass drives the compared registers independently and
+        // refutes the pair in the fast path, without ever consulting SMT.
         let fast_cfg = EquivalenceConfigFor::<I>::fast_only().live_out(live_out.clone());
         let (fast_result, fast_metrics) =
             check_equivalence_for_metrics::<I>(&target, &candidate, &fast_cfg);
-        // The fast path seeds register i with `seed + i` for every seed
-        // (RCX=1, RDX=2, RSI=6, RDI=7), so both compares compute -1 (RCX-RDX
-        // and RSI-RDI) and produce identical flags on every concrete trial.
-        // The pair is flag-equivalent by construction here; only SMT refutes it.
-        assert_eq!(fast_result, EquivalenceResult::Equivalent);
+        assert_eq!(fast_result, EquivalenceResult::NotEquivalent);
         assert!(!fast_metrics.smt_called);
 
         let cfg = EquivalenceConfigFor::<I>::default().live_out(live_out);
         let (result, metrics) = check_equivalence_for_metrics::<I>(&target, &candidate, &cfg);
         assert_eq!(result, EquivalenceResult::NotEquivalent);
-        assert!(metrics.smt_called);
+        assert!(!metrics.smt_called);
     }
 
     #[test]
-    fn x86_eflags_smt_only_refutation() {
-        assert_x86_eflags_smt_only_refutation::<crate::isa::X86_64>();
-        assert_x86_eflags_smt_only_refutation::<crate::isa::X86_32>();
+    fn x86_eflags_edge_case_refutation() {
+        assert_x86_eflags_edge_case_refutation::<crate::isa::X86_64>();
+        assert_x86_eflags_edge_case_refutation::<crate::isa::X86_32>();
     }
 
     #[test]
