@@ -286,6 +286,22 @@ pub enum Operand {
 }
 
 impl Operand {
+    /// The register this operand reads, if any: the inner register for the
+    /// `Register`, `ShiftedRegister`, and `ExtendedRegister` forms, and `None`
+    /// for an `Immediate`. This is the single home for "which register does an
+    /// rm/shift operand contribute as a source" — read-set computations such as
+    /// `Instruction::source_registers` route through it so a shifted or extended
+    /// operand never silently drops its inner register from liveness tracking.
+    #[must_use]
+    pub fn source_register(&self) -> Option<Register> {
+        match self {
+            Operand::Register(reg)
+            | Operand::ShiftedRegister { reg, .. }
+            | Operand::ExtendedRegister { reg, .. } => Some(*reg),
+            Operand::Immediate(_) => None,
+        }
+    }
+
     pub fn display_with_width(&self, width: RegisterWidth) -> String {
         match self {
             Operand::Register(reg) => width.register_name(*reg).to_string(),
