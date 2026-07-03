@@ -1206,24 +1206,14 @@ impl Instruction {
             | Instruction::Orr { rn, rm, .. }
             | Instruction::Eor { rn, rm, .. } => {
                 let mut regs = vec![*rn];
-                match rm {
-                    Operand::Register(r) => regs.push(*r),
-                    Operand::ShiftedRegister { reg, .. } => regs.push(*reg),
-                    Operand::ExtendedRegister { reg, .. } => regs.push(*reg),
-                    Operand::Immediate(_) => {}
-                }
+                regs.extend(rm.source_register());
                 regs
             }
             Instruction::Lsl { rn, shift, .. }
             | Instruction::Lsr { rn, shift, .. }
             | Instruction::Asr { rn, shift, .. } => {
                 let mut regs = vec![*rn];
-                match shift {
-                    Operand::Register(r) => regs.push(*r),
-                    Operand::ShiftedRegister { reg, .. } => regs.push(*reg),
-                    Operand::ExtendedRegister { reg, .. } => regs.push(*reg),
-                    Operand::Immediate(_) => {}
-                }
+                regs.extend(shift.source_register());
                 regs
             }
             Instruction::Mul { rn, rm, .. }
@@ -1241,12 +1231,7 @@ impl Instruction {
             | Instruction::Cmn { rn, rm }
             | Instruction::Tst { rn, rm, .. } => {
                 let mut regs = vec![*rn];
-                match rm {
-                    Operand::Register(r) => regs.push(*r),
-                    Operand::ShiftedRegister { reg, .. } => regs.push(*reg),
-                    Operand::ExtendedRegister { reg, .. } => regs.push(*reg),
-                    Operand::Immediate(_) => {}
-                }
+                regs.extend(rm.source_register());
                 regs
             }
             // CCMP / CCMN read rn and rm (if register). They also read NZCV
@@ -1254,9 +1239,7 @@ impl Instruction {
             // separately via `reads_flags` and `modifies_flags`.
             Instruction::Ccmp { rn, rm, .. } | Instruction::Ccmn { rn, rm, .. } => {
                 let mut regs = vec![*rn];
-                if let Operand::Register(r) = rm {
-                    regs.push(*r);
-                }
+                regs.extend(rm.source_register());
                 regs
             }
             // Conditional select instructions read rn and rm
@@ -1281,9 +1264,7 @@ impl Instruction {
             | Instruction::Subs { rn, rm, .. }
             | Instruction::Ands { rn, rm, .. } => {
                 let mut regs = vec![*rn];
-                if let Operand::Register(r) = rm {
-                    regs.push(*r);
-                }
+                regs.extend(rm.source_register());
                 regs
             }
             // ADC/ADCS/SBC/SBCS read rn and rm (both plain registers).
@@ -1298,12 +1279,7 @@ impl Instruction {
             // ROR reads rn and shift (if register)
             Instruction::Ror { rn, shift, .. } => {
                 let mut regs = vec![*rn];
-                match shift {
-                    Operand::Register(r) => regs.push(*r),
-                    Operand::ShiftedRegister { reg, .. } => regs.push(*reg),
-                    Operand::ExtendedRegister { reg, .. } => regs.push(*reg),
-                    Operand::Immediate(_) => {}
-                }
+                regs.extend(shift.source_register());
                 regs
             }
             // Single-source bit-manipulation: rn is the only source.
@@ -2989,6 +2965,106 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn test_source_registers_flag_setting_and_inverted_logical_shifted_register() {
+        use crate::ir::ExtendKind;
+        // Flag-setting arith/logical (ADDS/SUBS/ANDS) and inverted-logical
+        // (BIC/BICS/ORN/EON) must extract the inner register from a
+        // ShiftedRegister / ExtendedRegister rm, exactly like ADD/SUB/AND.
+        // ADDS/SUBS/ANDS are parser-reachable with these operands
+        // (`adds x0, x1, x2, lsl #3`), so dropping the inner register silently
+        // corrupts live-out tracking; the rest are covered for the same
+        // conservative reason as the shift-slot defensive test above.
+        let shifted = Operand::ShiftedRegister {
+            reg: Register::X5,
+            kind: ShiftKind::Lsl,
+            amount: 3,
+        };
+        let extended = Operand::ExtendedRegister {
+            reg: Register::X5,
+            kind: ExtendKind::Uxtb,
+            shift: 0,
+        };
+        for rm in [shifted, extended] {
+            for instr in [
+                Instruction::Adds {
+                    rd: Register::X0,
+                    rn: Register::X1,
+                    rm,
+                },
+                Instruction::Subs {
+                    rd: Register::X0,
+                    rn: Register::X1,
+                    rm,
+                },
+                Instruction::Ands {
+                    rd: Register::X0,
+                    rn: Register::X1,
+                    rm,
+                    width: crate::ir::RegisterWidth::X64,
+                },
+                Instruction::Bic {
+                    rd: Register::X0,
+                    rn: Register::X1,
+                    rm,
+                },
+                Instruction::Bics {
+                    rd: Register::X0,
+                    rn: Register::X1,
+                    rm,
+                },
+                Instruction::Orn {
+                    rd: Register::X0,
+                    rn: Register::X1,
+                    rm,
+                },
+                Instruction::Eon {
+                    rd: Register::X0,
+                    rn: Register::X1,
+                    rm,
+                },
+            ] {
+                assert_eq!(
+                    instr.source_registers(),
+                    vec![Register::X1, Register::X5],
+                    "instr {} must report X1 and the inner rm register X5 as sources",
+                    instr
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_operand_source_register() {
+        use crate::ir::ExtendKind;
+        // The Operand accessor is the single home for "which register does this
+        // operand read": inner register for register/shifted/extended forms,
+        // None for an immediate.
+        assert_eq!(
+            Operand::Register(Register::X7).source_register(),
+            Some(Register::X7)
+        );
+        assert_eq!(
+            Operand::ShiftedRegister {
+                reg: Register::X7,
+                kind: ShiftKind::Lsr,
+                amount: 5,
+            }
+            .source_register(),
+            Some(Register::X7)
+        );
+        assert_eq!(
+            Operand::ExtendedRegister {
+                reg: Register::X7,
+                kind: ExtendKind::Sxtw,
+                shift: 2,
+            }
+            .source_register(),
+            Some(Register::X7)
+        );
+        assert_eq!(Operand::Immediate(42).source_register(), None);
     }
 
     #[test]
