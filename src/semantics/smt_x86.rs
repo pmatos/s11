@@ -658,6 +658,37 @@ pub fn flags_not_equal_x86(a: &MachineStateX86, b: &MachineStateX86) -> z3::ast:
     ])
 }
 
+/// Bool predicate asserting that two symbolic x86 states diverge on the given
+/// live-out contract: any live-out register whose value differs, or — when
+/// `live_out.flags_live()` is set — any of the five tracked EFLAGS bits
+/// differing, refutes equivalence.
+///
+/// This is the x86 twin of `smt::states_not_equal_for_live_out`. It keeps the
+/// "how do two states differ on a contract" decision behind the `smt_x86`
+/// interface so the equivalence backend does not have to poke `MachineStateX86`
+/// register-by-register. Unlike the AArch64 twin there is no `memory_live`
+/// disjunct — the x86 IR carries no memory model (see ADR-0007).
+pub fn states_not_equal_for_live_out_x86(
+    state1: &MachineStateX86,
+    state2: &MachineStateX86,
+    live_out: &crate::semantics::live_out::RegisterSet<X86Register>,
+) -> z3::ast::Bool {
+    let mut disjuncts: Vec<z3::ast::Bool> = Vec::new();
+    for reg in live_out.iter() {
+        let v1 = state1.get_register(*reg);
+        let v2 = state2.get_register(*reg);
+        disjuncts.push(v1.eq(v2).not());
+    }
+    if live_out.flags_live() {
+        disjuncts.push(flags_not_equal_x86(state1, state2));
+    }
+    if disjuncts.is_empty() {
+        z3::ast::Bool::from_bool(false)
+    } else {
+        z3::ast::Bool::or(&disjuncts.iter().collect::<Vec<_>>())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2111,6 +2142,123 @@ mod tests {
             solver.check(),
             SatResult::Unsat,
             "CMOV must not write any flag"
+        );
+    }
+
+    // --- states_not_equal_for_live_out_x86: the live-out state comparator ---
+    //
+    // These pin the x86 twin of `smt::states_not_equal_for_live_out`: it must
+    // fold exactly the live-out register slice, and the five EFLAGS bits only
+    // when the contract declares flags live. x86 has no memory model, so there
+    // is no memory disjunct to exercise.
+
+    fn mov_imm(rd: X86Register, imm: i64) -> X86Instruction {
+        X86Instruction::MovImm { rd, imm }
+    }
+
+    #[test]
+    fn states_not_equal_x86_detects_live_out_register_divergence() {
+        // Two sequences leaving RAX at different constants must be refutable on
+        // a contract that includes RAX.
+        let s1 = apply_sequence(
+            MachineStateX86::new_symbolic("init", 64),
+            &[mov_imm(X86Register::RAX, 5)],
+        );
+        let s2 = apply_sequence(
+            MachineStateX86::new_symbolic("init", 64),
+            &[mov_imm(X86Register::RAX, 7)],
+        );
+        let live_out =
+            crate::semantics::live_out::RegisterSet::from_registers(vec![X86Register::RAX]);
+        let solver = Solver::new();
+        let diff = states_not_equal_for_live_out_x86(&s1, &s2, &live_out);
+        solver.assert(&diff);
+        assert_eq!(
+            solver.check(),
+            SatResult::Sat,
+            "diverging live-out register must be satisfiably not-equal"
+        );
+    }
+
+    #[test]
+    fn states_not_equal_x86_agrees_when_live_out_register_matches() {
+        let s1 = apply_sequence(
+            MachineStateX86::new_symbolic("init", 64),
+            &[mov_imm(X86Register::RAX, 5)],
+        );
+        let s2 = apply_sequence(
+            MachineStateX86::new_symbolic("init", 64),
+            &[mov_imm(X86Register::RAX, 5)],
+        );
+        let live_out =
+            crate::semantics::live_out::RegisterSet::from_registers(vec![X86Register::RAX]);
+        let solver = Solver::new();
+        let diff = states_not_equal_for_live_out_x86(&s1, &s2, &live_out);
+        solver.assert(&diff);
+        assert_eq!(
+            solver.check(),
+            SatResult::Unsat,
+            "agreeing live-out register must be provably equal"
+        );
+    }
+
+    #[test]
+    fn states_not_equal_x86_ignores_registers_outside_the_contract() {
+        // RBX differs between the two states but is NOT in the contract; RAX
+        // agrees. Only the live-out slice may be compared.
+        let s1 = apply_sequence(
+            MachineStateX86::new_symbolic("init", 64),
+            &[mov_imm(X86Register::RAX, 5), mov_imm(X86Register::RBX, 1)],
+        );
+        let s2 = apply_sequence(
+            MachineStateX86::new_symbolic("init", 64),
+            &[mov_imm(X86Register::RAX, 5), mov_imm(X86Register::RBX, 2)],
+        );
+        let live_out =
+            crate::semantics::live_out::RegisterSet::from_registers(vec![X86Register::RAX]);
+        let solver = Solver::new();
+        let diff = states_not_equal_for_live_out_x86(&s1, &s2, &live_out);
+        solver.assert(&diff);
+        assert_eq!(
+            solver.check(),
+            SatResult::Unsat,
+            "a register outside the live-out contract must not refute equivalence"
+        );
+    }
+
+    #[test]
+    fn states_not_equal_x86_gates_flags_on_flags_live() {
+        // seq1 writes EFLAGS (add), seq2 leaves them at symbolic init.
+        let s1 = apply_sequence(
+            MachineStateX86::new_symbolic("init", 64),
+            &[X86Instruction::AddReg {
+                rd: X86Register::RAX,
+                rs: X86Register::RBX,
+            }],
+        );
+        let s2 = apply_sequence(MachineStateX86::new_symbolic("init", 64), &[]);
+
+        // Flags dead, no live-out registers: nothing can refute equivalence.
+        let flags_dead = crate::semantics::live_out::RegisterSet::<X86Register>::empty();
+        let solver = Solver::new();
+        let diff_dead = states_not_equal_for_live_out_x86(&s1, &s2, &flags_dead);
+        solver.assert(&diff_dead);
+        assert_eq!(
+            solver.check(),
+            SatResult::Unsat,
+            "an empty flags-dead contract has nothing to refute"
+        );
+
+        // Flags live: the divergent flag effects must be exposed.
+        let flags_live =
+            crate::semantics::live_out::RegisterSet::<X86Register>::empty().with_flags(true);
+        let solver2 = Solver::new();
+        let diff_live = states_not_equal_for_live_out_x86(&s1, &s2, &flags_live);
+        solver2.assert(&diff_live);
+        assert_eq!(
+            solver2.check(),
+            SatResult::Sat,
+            "flags-live contract must fold in the diverging EFLAGS"
         );
     }
 }

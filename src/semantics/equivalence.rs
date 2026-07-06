@@ -946,24 +946,15 @@ where
     let final1 = crate::semantics::smt_x86::apply_sequence(initial.clone(), seq1);
     let final2 = crate::semantics::smt_x86::apply_sequence(initial, seq2);
 
-    let mut disjuncts: Vec<z3::ast::Bool> = Vec::new();
-    for reg in config.live_out.iter() {
-        let v1 = final1.get_register(*reg);
-        let v2 = final2.get_register(*reg);
-        disjuncts.push(v1.eq(v2).not());
-    }
-    // When flags are live (caller-declared or forced by a peeled Jcc),
-    // any of the five tracked EFLAGS bits diverging refutes equivalence.
-    if config.live_out.flags_live() {
-        disjuncts.push(crate::semantics::smt_x86::flags_not_equal_x86(
-            &final1, &final2,
-        ));
-    }
-    let any_diff = if disjuncts.is_empty() {
-        z3::ast::Bool::from_bool(false)
-    } else {
-        z3::ast::Bool::or(&disjuncts.iter().collect::<Vec<_>>())
-    };
+    // Delegate the "states differ on the live-out contract" decision (live-out
+    // registers, plus the five EFLAGS bits when flags are live — caller-declared
+    // or forced by a peeled Jcc) to `smt_x86`, mirroring how the AArch64 path
+    // uses `smt::states_not_equal_for_live_out`.
+    let any_diff = crate::semantics::smt_x86::states_not_equal_for_live_out_x86(
+        &final1,
+        &final2,
+        &config.live_out,
+    );
     solver.assert(&any_diff);
     solver
 }
