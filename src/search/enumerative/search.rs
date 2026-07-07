@@ -266,34 +266,25 @@ where
     };
     let (verdict, metrics) =
         <I as EnumerativeBackend<I>>::check_equivalence(target, candidate, live_out, smt_timeout);
-    let solver_nanos: u64 = metrics
-        .smt_elapsed
-        .as_nanos()
-        .try_into()
-        .unwrap_or(u64::MAX);
+    // The parallel path applies the same canonical policy as the symbolic path
+    // (see `SearchStatistics::verification_tally` for what each counter means:
+    // `reached_solver` marks both an SMT query and a fast pass, including
+    // candidates later disproved by Z3) to its atomic counters.
+    let tally = SearchStatistics::verification_tally(&metrics, &verdict);
+    let solver_nanos: u64 = tally.smt_elapsed.as_nanos().try_into().unwrap_or(u64::MAX);
     shared
         .smt_elapsed_nanos
         .fetch_add(solver_nanos, Ordering::Relaxed);
-    // Count only candidates that actually reached `solver.check()`. The same
-    // metric also marks candidates that passed fast concrete validation,
-    // including ones later disproved by SMT. `smt_called` is the right guard
-    // because every early return that never reaches the solver leaves it
-    // false: the pre-SMT guard (`flag_writers_diverge && flags_live`) returns
-    // `NotEquivalent` and the fast-path returns `NotEquivalentFast`, neither of
-    // which should count as a fast pass (PR #269 review).
-    if metrics.smt_called {
+    if tally.reached_solver {
         shared.smt_queries.fetch_add(1, Ordering::Relaxed);
         shared
             .candidates_passed_fast
             .fetch_add(1, Ordering::Relaxed);
     }
-    match verdict {
-        EquivalenceResult::Equivalent => {
-            shared.smt_equivalent.fetch_add(1, Ordering::Relaxed);
-            true
-        }
-        _ => false,
+    if tally.proved_equivalent {
+        shared.smt_equivalent.fetch_add(1, Ordering::Relaxed);
     }
+    tally.proved_equivalent
 }
 
 struct CachedThreadPool {

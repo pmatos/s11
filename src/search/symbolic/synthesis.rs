@@ -15,7 +15,6 @@ use crate::search::config::{SearchConfig, SearchMode};
 use crate::search::result::{SearchResultFor, SearchStatistics};
 use crate::search::symbolic::backend::SymbolicBackend;
 use crate::search::{Algorithm, SearchAlgorithm};
-use crate::semantics::EquivalenceResult;
 use std::marker::PhantomData;
 use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
@@ -337,20 +336,7 @@ where
         let (verdict, metrics) = <I as SymbolicBackend<I>>::check_equivalence(
             target, candidate, live_out, width, timeout,
         );
-        self.statistics.smt_elapsed += metrics.smt_elapsed;
-        // `smt_called` means the candidate survived the fast concrete
-        // pre-filter and reached Z3, regardless of the solver verdict.
-        if metrics.smt_called {
-            self.statistics.smt_queries += 1;
-            self.statistics.candidates_passed_fast += 1;
-        }
-        match verdict {
-            EquivalenceResult::Equivalent => {
-                self.statistics.smt_equivalent += 1;
-                true
-            }
-            _ => false,
-        }
+        self.statistics.record_verification(&metrics, &verdict)
     }
 
     /// Binary search on cost bound (not fully implemented yet)
@@ -435,10 +421,10 @@ mod tests {
     use crate::ir::{Instruction, Operand, Register};
     use crate::isa::{AArch64, ISA, ISAMutator, InstructionType, OperandType, RegisterType, U64};
     use crate::search::config::SymbolicConfig;
-    use crate::semantics::EquivalenceMetrics;
     use crate::semantics::cost::CostMetric;
     use crate::semantics::live_out::LiveOut;
     use crate::semantics::state::ConcreteMachineState;
+    use crate::semantics::{EquivalenceMetrics, EquivalenceResult};
     use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
     use std::sync::{Arc, Mutex};
     use std::time::Duration;
