@@ -5,6 +5,7 @@
 use crate::ir::Instruction;
 use crate::isa::ISA;
 use crate::search::config::Algorithm;
+use crate::semantics::{EquivalenceMetrics, EquivalenceResult};
 use std::time::Duration;
 
 /// Result of a search operation
@@ -118,6 +119,31 @@ impl From<SearchResultFor<crate::isa::AArch64>> for SearchResult {
     }
 }
 
+/// The counter deltas produced by folding one candidate verification into a
+/// [`SearchStatistics`].
+///
+/// This separates the *policy* — what a verification outcome means for the
+/// counters — from the *sink* it is applied to. The symbolic search path folds
+/// the tally into plain `&mut SearchStatistics` fields; the parallel enumerative
+/// path applies the same tally to its atomic counters. Both share one definition
+/// via [`SearchStatistics::verification_tally`], so the two paths cannot drift.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct VerificationTally {
+    /// Wall-clock time this verification spent inside `solver.check()`. Folds
+    /// into `smt_elapsed`. `Duration::ZERO` when the solver was not invoked.
+    pub smt_elapsed: Duration,
+    /// Whether the verification reached Z3 (`EquivalenceMetrics::smt_called`).
+    ///
+    /// When true the candidate counts as *both* an SMT query and a fast-
+    /// validation pass, even if Z3 later disproved it: reaching the solver means
+    /// it cleared the concrete pre-filter. Fast-path refutations and the pre-SMT
+    /// flag-writer guard leave `smt_called` false, so neither is counted here.
+    pub reached_solver: bool,
+    /// Whether Z3 proved the candidate equivalent to the target. Folds into
+    /// `smt_equivalent`.
+    pub proved_equivalent: bool,
+}
+
 /// Statistics from a search operation
 #[derive(Debug, Clone, Default)]
 pub struct SearchStatistics {
@@ -160,6 +186,47 @@ impl SearchStatistics {
             algorithm,
             ..Default::default()
         }
+    }
+
+    /// The canonical policy mapping one equivalence verification to its counter
+    /// deltas.
+    ///
+    /// This is the single source of truth for how a `(metrics, verdict)` pair
+    /// updates the SMT counters, shared by both the symbolic and the parallel
+    /// enumerative verification paths. See [`VerificationTally`] for what each
+    /// field counts.
+    pub fn verification_tally(
+        metrics: &EquivalenceMetrics,
+        verdict: &EquivalenceResult,
+    ) -> VerificationTally {
+        VerificationTally {
+            smt_elapsed: metrics.smt_elapsed,
+            reached_solver: metrics.smt_called,
+            proved_equivalent: matches!(verdict, EquivalenceResult::Equivalent),
+        }
+    }
+
+    /// Fold one equivalence verification into the (single-threaded) SMT
+    /// counters, returning whether the candidate proved equivalent.
+    ///
+    /// Used by the symbolic search path. The parallel enumerative path applies
+    /// the same [`Self::verification_tally`] to its atomic counters instead of
+    /// calling this method, so both paths agree on what each counter means.
+    pub fn record_verification(
+        &mut self,
+        metrics: &EquivalenceMetrics,
+        verdict: &EquivalenceResult,
+    ) -> bool {
+        let tally = Self::verification_tally(metrics, verdict);
+        self.smt_elapsed += tally.smt_elapsed;
+        if tally.reached_solver {
+            self.smt_queries += 1;
+            self.candidates_passed_fast += 1;
+        }
+        if tally.proved_equivalent {
+            self.smt_equivalent += 1;
+        }
+        tally.proved_equivalent
     }
 
     /// Record the start of timing
@@ -425,5 +492,104 @@ mod tests {
         assert!(with_opt_text.contains("Optimization found!"));
         assert!(with_opt_text.contains("Optimized sequence"));
         assert!(with_opt_text.contains("Savings: 1 instructions"));
+    }
+
+    // --- Verification accounting seam (verification_tally / record_verification) ---
+    //
+    // These pin the canonical policy for folding one candidate verification into
+    // the SMT counters, shared by the symbolic and enumerative search paths.
+    use crate::semantics::{EquivalenceMetrics, EquivalenceResult};
+
+    fn reached_solver(elapsed_ms: u64) -> EquivalenceMetrics {
+        EquivalenceMetrics {
+            smt_called: true,
+            smt_elapsed: Duration::from_millis(elapsed_ms),
+            ..Default::default()
+        }
+    }
+
+    fn refuted_before_solver() -> EquivalenceMetrics {
+        EquivalenceMetrics {
+            smt_called: false,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn record_verification_counts_solver_reaching_equivalent_candidate() {
+        // A candidate that reached Z3 and was proven equivalent counts as one SMT
+        // query, one fast-validation pass (it cleared the concrete pre-filter to
+        // reach Z3), and one proven equivalence; its solver time is accumulated.
+        let mut stats = SearchStatistics::default();
+        let proved = stats.record_verification(&reached_solver(7), &EquivalenceResult::Equivalent);
+        assert!(proved);
+        assert_eq!(stats.smt_queries, 1);
+        assert_eq!(stats.candidates_passed_fast, 1);
+        assert_eq!(stats.smt_equivalent, 1);
+        assert_eq!(stats.smt_elapsed, Duration::from_millis(7));
+    }
+
+    #[test]
+    fn record_verification_counts_solver_reaching_but_disproved_candidate() {
+        // Reaching Z3 but being disproved still counts as a fast pass + an SMT
+        // query (the documented meaning of candidates_passed_fast), but NOT an
+        // equivalence.
+        let mut stats = SearchStatistics::default();
+        let proved =
+            stats.record_verification(&reached_solver(3), &EquivalenceResult::NotEquivalent);
+        assert!(!proved);
+        assert_eq!(stats.smt_queries, 1);
+        assert_eq!(stats.candidates_passed_fast, 1);
+        assert_eq!(stats.smt_equivalent, 0);
+        assert_eq!(stats.smt_elapsed, Duration::from_millis(3));
+    }
+
+    #[test]
+    fn record_verification_ignores_candidates_that_never_reached_the_solver() {
+        // A fast-path refutation (smt_called == false) is neither an SMT query
+        // nor a fast pass; only the (zero) solver time is folded in.
+        let mut stats = SearchStatistics::default();
+        let proved = stats.record_verification(
+            &refuted_before_solver(),
+            &EquivalenceResult::Unknown("timeout".into()),
+        );
+        assert!(!proved);
+        assert_eq!(stats.smt_queries, 0);
+        assert_eq!(stats.candidates_passed_fast, 0);
+        assert_eq!(stats.smt_equivalent, 0);
+        assert_eq!(stats.smt_elapsed, Duration::ZERO);
+    }
+
+    #[test]
+    fn record_verification_accumulates_across_calls() {
+        let mut stats = SearchStatistics::default();
+        stats.record_verification(&reached_solver(2), &EquivalenceResult::Equivalent);
+        stats.record_verification(&refuted_before_solver(), &EquivalenceResult::NotEquivalent);
+        stats.record_verification(&reached_solver(2), &EquivalenceResult::NotEquivalent);
+        assert_eq!(stats.smt_queries, 2);
+        assert_eq!(stats.candidates_passed_fast, 2);
+        assert_eq!(stats.smt_equivalent, 1);
+        assert_eq!(stats.smt_elapsed, Duration::from_millis(4));
+    }
+
+    #[test]
+    fn verification_tally_exposes_the_three_counter_decisions() {
+        // The enumerative (parallel) path applies the same tally to its atomic
+        // counters, so the tally must expose exactly the decisions they need.
+        let tally = SearchStatistics::verification_tally(
+            &reached_solver(5),
+            &EquivalenceResult::Equivalent,
+        );
+        assert_eq!(tally.smt_elapsed, Duration::from_millis(5));
+        assert!(tally.reached_solver);
+        assert!(tally.proved_equivalent);
+
+        let refuted = SearchStatistics::verification_tally(
+            &refuted_before_solver(),
+            &EquivalenceResult::NotEquivalent,
+        );
+        assert_eq!(refuted.smt_elapsed, Duration::ZERO);
+        assert!(!refuted.reached_solver);
+        assert!(!refuted.proved_equivalent);
     }
 }
