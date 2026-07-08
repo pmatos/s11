@@ -248,34 +248,35 @@ where
                     width,
                     smt_timeout,
                 );
-                self.statistics.smt_elapsed += metrics.smt_elapsed;
-                if metrics.smt_called {
-                    self.statistics.smt_queries += 1;
-                }
-                match verdict {
-                    EquivalenceResult::Equivalent => {
-                        self.statistics.smt_equivalent += 1;
-                        self.statistics.improvements_found += 1;
+                // Fold the SMT counters through the canonical accounting seam so
+                // this path cannot drift from the symbolic/enumerative ones.
+                // `candidates_passed_fast` is counted separately above (at the
+                // concrete-test stage), which is why we apply the tally directly
+                // rather than calling `record_verification`.
+                let tally = SearchStatistics::verification_tally(&metrics, &verdict);
+                tally.fold_into(&mut self.statistics);
+                if tally.proved_equivalent {
+                    self.statistics.improvements_found += 1;
 
-                        best_equivalent = Some(proposal.clone());
-                        best_cost = proposal_cost;
-                        self.statistics.best_cost_found = best_cost;
+                    best_equivalent = Some(proposal.clone());
+                    best_cost = proposal_cost;
+                    self.statistics.best_cost_found = best_cost;
 
-                        if config.verbose {
-                            println!(
-                                "Found improvement at iteration {}: cost {} -> {}",
-                                iteration, original_cost, best_cost
-                            );
-                        }
+                    if config.verbose {
+                        println!(
+                            "Found improvement at iteration {}: cost {} -> {}",
+                            iteration, original_cost, best_cost
+                        );
                     }
-                    EquivalenceResult::NotEquivalent | EquivalenceResult::NotEquivalentFast(_) => {
-                        smt_refuted = true;
-                    }
-                    // SMT timeout / inconclusive: we cannot prove the proposal
-                    // incorrect, so leave the Metropolis decision below intact
-                    // rather than vetoing exploration.
-                    EquivalenceResult::Unknown(_) => {}
+                } else if matches!(
+                    verdict,
+                    EquivalenceResult::NotEquivalent | EquivalenceResult::NotEquivalentFast(_)
+                ) {
+                    smt_refuted = true;
                 }
+                // SMT timeout / inconclusive (`Unknown`): we cannot prove the
+                // proposal incorrect, so leave the Metropolis decision below
+                // intact rather than vetoing exploration.
             } else {
                 self.statistics.candidates_pruned_by_cost += 1;
             }
@@ -669,6 +670,31 @@ mod tests {
             run_timeout_probe_search_with(config, TIMEOUT_PROBE_EQUIVALENT, true);
         assert_eq!(statistics.smt_queries, 1);
         recorded_timeout
+    }
+
+    #[test]
+    fn stochastic_search_accounts_solver_proven_improvement_through_the_seam() {
+        // The equivalent branch folds its SMT counters through the shared
+        // `VerificationTally` seam: a solver-reaching, proven-equivalent cheaper
+        // proposal counts as one SMT query, one proven equivalence, and one
+        // recorded improvement — the counterpart to the refuted case below.
+        let _guard = set_timeout_probe_result(TIMEOUT_PROBE_EQUIVALENT, true);
+
+        let mut search: StochasticSearch<TimeoutProbeIsa> = StochasticSearch::new();
+        let config = SearchConfig::default().with_stochastic(
+            StochasticConfig::default()
+                .with_iterations(1)
+                .with_test_count(0)
+                .with_seed(1),
+        );
+        let target = [TimeoutProbeInstruction(1), TimeoutProbeInstruction(2)];
+
+        let result = search.search(&target, &(), &config);
+
+        assert_eq!(result.statistics.smt_queries, 1);
+        assert_eq!(result.statistics.smt_equivalent, 1);
+        assert_eq!(result.statistics.improvements_found, 1);
+        assert!(result.found_optimization);
     }
 
     #[test]
