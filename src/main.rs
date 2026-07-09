@@ -20,6 +20,7 @@ use s11::search::parallel::{ParallelConfig, run_parallel_search};
 use s11::search::{EnumerativeSearch, SearchAlgorithm, StochasticSearch, SymbolicSearch};
 use s11::semantics::LiveOut;
 use s11::semantics::cost::CostMetric;
+use s11::validation::downstream::{ScanStep, scan_flags_live, scan_regs_live};
 #[allow(unused_imports)]
 use s11::{assembler, elf_patcher, ir, isa, parser, search, semantics, validation};
 
@@ -1860,49 +1861,53 @@ fn convert_to_ir(instructions: &capstone::Instructions) -> Result<Vec<Instructio
     Ok(ir_instructions)
 }
 
+/// Resolve the in-section fall-through suffix after an optimization window
+/// ending at `end_addr`. `None` means there is no analyzable suffix — the
+/// window already reaches the section end, or the bytes are unavailable — in
+/// which case downstream liveness is unknown and the caller keeps every
+/// candidate live (the conservative default). The four `*_from_section`
+/// wrappers below all funnel through here rather than repeating the suffix math.
+fn fall_through_suffix(
+    patcher: &ElfPatcher,
+    section: &TextSection,
+    end_addr: u64,
+) -> Option<Vec<u8>> {
+    let section_end = section.virtual_addr + section.size;
+    if end_addr >= section_end {
+        return None;
+    }
+    let suffix_window = AddressWindow {
+        start: end_addr,
+        end: section_end,
+    };
+    patcher.get_instructions_in_window(&suffix_window).ok()
+}
+
+/// Decode one AArch64 Capstone `(mnemonic, op_str)` pair into a downstream scan
+/// step, reusing the shared Capstone→IR bridge so the fall-through scan honors
+/// exactly the same supported-mnemonic set as the optimizer.
+fn aarch64_scan_step(mnemonic: &str, op_str: &str) -> ScanStep<Instruction> {
+    match convert_capstone_op(mnemonic, op_str) {
+        ConvertOutcome::Instruction(instr) => ScanStep::Decoded(instr),
+        ConvertOutcome::Skip => ScanStep::Skipped,
+        ConvertOutcome::Unsupported(_) => ScanStep::Opaque,
+    }
+}
+
 fn aarch64_downstream_flags_live_from_bytes(cs: &Capstone, bytes: &[u8], start_addr: u64) -> bool {
-    if bytes.is_empty() {
-        return true;
-    }
-
-    let mut remaining = bytes;
-    let mut address = start_addr;
-
-    while !remaining.is_empty() {
-        let Ok(instructions) = cs.disasm_count(remaining, address, 1) else {
-            return true;
-        };
-        let Some(instruction) = instructions.iter().next() else {
-            return true;
-        };
-        let instruction_len = instruction.bytes().len();
-        if instruction_len == 0 || instruction_len > remaining.len() {
-            return true;
-        }
-
-        let mnemonic = instruction.mnemonic().unwrap_or("");
-        let op_str = instruction.op_str().unwrap_or("");
-        match convert_capstone_op(mnemonic, op_str) {
-            ConvertOutcome::Instruction(instr) => {
-                if validation::live_out::flags_read_before_overwrite_after_window(&[instr]) {
-                    return true;
-                }
-                if instr.modifies_flags() {
-                    return false;
-                }
-                if instr.is_terminator() {
-                    return true;
-                }
-            }
-            ConvertOutcome::Skip => {}
-            ConvertOutcome::Unsupported(_) => return true,
-        }
-
-        remaining = &remaining[instruction_len..];
-        address += instruction_len as u64;
-    }
-
-    false
+    scan_flags_live(
+        cs,
+        bytes,
+        start_addr,
+        aarch64_scan_step,
+        |instr: &Instruction| {
+            validation::live_out::flags_read_before_overwrite_after_window(std::slice::from_ref(
+                instr,
+            ))
+        },
+        |instr: &Instruction| instr.modifies_flags(),
+        |instr: &Instruction| instr.is_terminator(),
+    )
 }
 
 fn aarch64_downstream_flags_live_from_section(
@@ -1911,20 +1916,10 @@ fn aarch64_downstream_flags_live_from_section(
     end_addr: u64,
     cs: &Capstone,
 ) -> bool {
-    let section_end = section.virtual_addr + section.size;
-    if end_addr >= section_end {
-        return true;
+    match fall_through_suffix(patcher, section, end_addr) {
+        Some(bytes) => aarch64_downstream_flags_live_from_bytes(cs, &bytes, end_addr),
+        None => true,
     }
-
-    let suffix_window = AddressWindow {
-        start: end_addr,
-        end: section_end,
-    };
-    let Ok(bytes) = patcher.get_instructions_in_window(&suffix_window) else {
-        return true;
-    };
-
-    aarch64_downstream_flags_live_from_bytes(cs, &bytes, end_addr)
 }
 
 /// Compute the subset of `candidates` (registers the window writes) that are
@@ -1958,82 +1953,17 @@ fn aarch64_downstream_regs_live_from_bytes(
     start_addr: u64,
     candidates: &semantics::live_out::RegisterSet<Register>,
 ) -> semantics::live_out::RegisterSet<Register> {
-    use semantics::live_out::RegisterSet;
-
-    // Registers not yet proven dead. We start with everything the window wrote
-    // and remove a register only on a provable full overwrite.
-    let mut undecided: Vec<Register> = candidates.iter().copied().collect();
-    let mut live = RegisterSet::<Register>::empty();
-
-    if undecided.is_empty() {
-        return live;
-    }
-
-    // Pins every still-undecided candidate live and clears the worklist.
-    macro_rules! pin_all_remaining_live {
-        () => {{
-            for &reg in &undecided {
-                live.add(reg);
-            }
-            return live;
-        }};
-    }
-
-    if bytes.is_empty() {
-        pin_all_remaining_live!();
-    }
-
-    let mut remaining = bytes;
-    let mut address = start_addr;
-
-    while !remaining.is_empty() && !undecided.is_empty() {
-        let Ok(instructions) = cs.disasm_count(remaining, address, 1) else {
-            pin_all_remaining_live!();
-        };
-        let Some(instruction) = instructions.iter().next() else {
-            pin_all_remaining_live!();
-        };
-        let instruction_len = instruction.bytes().len();
-        if instruction_len == 0 || instruction_len > remaining.len() {
-            pin_all_remaining_live!();
-        }
-
-        let mnemonic = instruction.mnemonic().unwrap_or("");
-        let op_str = instruction.op_str().unwrap_or("");
-        match convert_capstone_op(mnemonic, op_str) {
-            ConvertOutcome::Instruction(instr) => {
-                if instr.is_terminator() {
-                    // Terminators (incl. B/BR/BL/RET) hand control out of the
-                    // window; any window-written register may be observed
-                    // downstream or across the call/ret ABI — pin all live.
-                    pin_all_remaining_live!();
-                }
-                undecided.retain(
-                    |&reg| match validation::live_out::aarch64_reg_downstream_liveness(
-                        reg,
-                        std::slice::from_ref(&instr),
-                    ) {
-                        validation::live_out::DownstreamRegLiveness::Read => {
-                            live.add(reg);
-                            false
-                        }
-                        validation::live_out::DownstreamRegLiveness::Dead => false,
-                        validation::live_out::DownstreamRegLiveness::Uncertain => true,
-                    },
-                );
-            }
-            ConvertOutcome::Skip => {}
-            ConvertOutcome::Unsupported(_) => pin_all_remaining_live!(),
-        }
-
-        remaining = &remaining[instruction_len..];
-        address += instruction_len as u64;
-    }
-
-    // Reached the end of the in-region suffix without resolving these
-    // candidates: control falls through to whatever lies past the analyzed
-    // bytes, so keep them live.
-    pin_all_remaining_live!();
+    scan_regs_live(
+        cs,
+        bytes,
+        start_addr,
+        candidates,
+        aarch64_scan_step,
+        |instr: &Instruction| instr.is_terminator(),
+        |reg: Register, instr: &Instruction| {
+            validation::live_out::aarch64_reg_downstream_liveness(reg, std::slice::from_ref(instr))
+        },
+    )
 }
 
 /// Section wrapper for `aarch64_downstream_regs_live_from_bytes`. Returns all
@@ -2046,69 +1976,42 @@ fn aarch64_downstream_regs_live_from_section(
     cs: &Capstone,
     candidates: &semantics::live_out::RegisterSet<Register>,
 ) -> semantics::live_out::RegisterSet<Register> {
-    let section_end = section.virtual_addr + section.size;
-    if end_addr >= section_end {
-        return candidates.clone();
+    match fall_through_suffix(patcher, section, end_addr) {
+        Some(bytes) => aarch64_downstream_regs_live_from_bytes(cs, &bytes, end_addr, candidates),
+        None => candidates.clone(),
     }
+}
 
-    let suffix_window = AddressWindow {
-        start: end_addr,
-        end: section_end,
-    };
-    let Ok(bytes) = patcher.get_instructions_in_window(&suffix_window) else {
-        return candidates.clone();
-    };
-
-    aarch64_downstream_regs_live_from_bytes(cs, &bytes, end_addr, candidates)
+/// Decode one x86 Capstone `(mnemonic, op_str)` pair into a downstream scan
+/// step. `nop` carries no observable state and is stepped over; anything the
+/// shared x86 IR does not model (including `call`/`ret`) is opaque and pins the
+/// remaining state live.
+fn x86_scan_step(mnemonic: &str, op_str: &str) -> ScanStep<isa::x86::X86Instruction> {
+    match x86_ir_from_mnemonic(mnemonic, op_str) {
+        Ok(Some(instr)) => ScanStep::Decoded(instr),
+        Ok(None) if mnemonic.eq_ignore_ascii_case("nop") => ScanStep::Skipped,
+        Ok(None) => ScanStep::Opaque,
+        Err(_) => ScanStep::Opaque,
+    }
 }
 
 fn x86_downstream_flags_live_from_bytes<I>(cs: &Capstone, bytes: &[u8], start_addr: u64) -> bool
 where
     I: isa::FlagsAnalysis<isa::x86::X86Instruction>,
 {
-    if bytes.is_empty() {
-        return true;
-    }
-
-    let mut remaining = bytes;
-    let mut address = start_addr;
-
-    while !remaining.is_empty() {
-        let Ok(instructions) = cs.disasm_count(remaining, address, 1) else {
-            return true;
-        };
-        let Some(instruction) = instructions.iter().next() else {
-            return true;
-        };
-        let instruction_len = instruction.bytes().len();
-        if instruction_len == 0 || instruction_len > remaining.len() {
-            return true;
-        }
-
-        let mnemonic = instruction.mnemonic().unwrap_or("");
-        let op_str = instruction.op_str().unwrap_or("");
-        match x86_ir_from_mnemonic(mnemonic, op_str) {
-            Ok(Some(instr)) => {
-                if <I as isa::FlagsAnalysis<isa::x86::X86Instruction>>::reads_flags(&instr) {
-                    return true;
-                }
-                if <I as isa::FlagsAnalysis<isa::x86::X86Instruction>>::modifies_flags(&instr) {
-                    return false;
-                }
-                if instr.is_terminator() {
-                    return true;
-                }
-            }
-            Ok(None) if mnemonic.eq_ignore_ascii_case("nop") => {}
-            Ok(None) => return true,
-            Err(_) => return true,
-        }
-
-        remaining = &remaining[instruction_len..];
-        address += instruction_len as u64;
-    }
-
-    false
+    scan_flags_live(
+        cs,
+        bytes,
+        start_addr,
+        x86_scan_step,
+        |instr: &isa::x86::X86Instruction| {
+            <I as isa::FlagsAnalysis<isa::x86::X86Instruction>>::reads_flags(instr)
+        },
+        |instr: &isa::x86::X86Instruction| {
+            <I as isa::FlagsAnalysis<isa::x86::X86Instruction>>::modifies_flags(instr)
+        },
+        |instr: &isa::x86::X86Instruction| instr.is_terminator(),
+    )
 }
 
 fn x86_downstream_flags_live_from_section(
@@ -2118,16 +2021,7 @@ fn x86_downstream_flags_live_from_section(
     end_addr: u64,
     cs: &Capstone,
 ) -> bool {
-    let section_end = section.virtual_addr + section.size;
-    if end_addr >= section_end {
-        return true;
-    }
-
-    let suffix_window = AddressWindow {
-        start: end_addr,
-        end: section_end,
-    };
-    let Ok(bytes) = patcher.get_instructions_in_window(&suffix_window) else {
+    let Some(bytes) = fall_through_suffix(patcher, section, end_addr) else {
         return true;
     };
 
@@ -2168,75 +2062,17 @@ fn x86_downstream_regs_live_from_bytes(
     start_addr: u64,
     candidates: &semantics::live_out::RegisterSet<isa::x86::X86Register>,
 ) -> semantics::live_out::RegisterSet<isa::x86::X86Register> {
-    use semantics::live_out::RegisterSet;
-
-    let mut undecided: Vec<isa::x86::X86Register> = candidates.iter().copied().collect();
-    let mut live = RegisterSet::<isa::x86::X86Register>::empty();
-
-    if undecided.is_empty() {
-        return live;
-    }
-
-    macro_rules! pin_all_remaining_live {
-        () => {{
-            for &reg in &undecided {
-                live.add(reg);
-            }
-            return live;
-        }};
-    }
-
-    if bytes.is_empty() {
-        pin_all_remaining_live!();
-    }
-
-    let mut remaining = bytes;
-    let mut address = start_addr;
-
-    while !remaining.is_empty() && !undecided.is_empty() {
-        let Ok(instructions) = cs.disasm_count(remaining, address, 1) else {
-            pin_all_remaining_live!();
-        };
-        let Some(instruction) = instructions.iter().next() else {
-            pin_all_remaining_live!();
-        };
-        let instruction_len = instruction.bytes().len();
-        if instruction_len == 0 || instruction_len > remaining.len() {
-            pin_all_remaining_live!();
-        }
-
-        let mnemonic = instruction.mnemonic().unwrap_or("");
-        let op_str = instruction.op_str().unwrap_or("");
-        match x86_ir_from_mnemonic(mnemonic, op_str) {
-            Ok(Some(instr)) => {
-                if instr.is_terminator() {
-                    pin_all_remaining_live!();
-                }
-                undecided.retain(|&reg| {
-                    match validation::live_out::x86_reg_downstream_liveness(
-                        reg,
-                        std::slice::from_ref(&instr),
-                    ) {
-                        validation::live_out::DownstreamRegLiveness::Read => {
-                            live.add(reg);
-                            false
-                        }
-                        validation::live_out::DownstreamRegLiveness::Dead => false,
-                        validation::live_out::DownstreamRegLiveness::Uncertain => true,
-                    }
-                });
-            }
-            Ok(None) if mnemonic.eq_ignore_ascii_case("nop") => {}
-            // Unsupported (incl. call/ret) or unparseable → cannot reason; pin live.
-            Ok(None) => pin_all_remaining_live!(),
-            Err(_) => pin_all_remaining_live!(),
-        }
-
-        remaining = &remaining[instruction_len..];
-        address += instruction_len as u64;
-    }
-
-    pin_all_remaining_live!();
+    scan_regs_live(
+        cs,
+        bytes,
+        start_addr,
+        candidates,
+        x86_scan_step,
+        |instr: &isa::x86::X86Instruction| instr.is_terminator(),
+        |reg: isa::x86::X86Register, instr: &isa::x86::X86Instruction| {
+            validation::live_out::x86_reg_downstream_liveness(reg, std::slice::from_ref(instr))
+        },
+    )
 }
 
 /// Section wrapper for `x86_downstream_regs_live_from_bytes`. Returns all
@@ -2250,16 +2086,7 @@ fn x86_downstream_regs_live_from_section(
     cs: &Capstone,
     candidates: &semantics::live_out::RegisterSet<isa::x86::X86Register>,
 ) -> semantics::live_out::RegisterSet<isa::x86::X86Register> {
-    let section_end = section.virtual_addr + section.size;
-    if end_addr >= section_end {
-        return candidates.clone();
-    }
-
-    let suffix_window = AddressWindow {
-        start: end_addr,
-        end: section_end,
-    };
-    let Ok(bytes) = patcher.get_instructions_in_window(&suffix_window) else {
+    let Some(bytes) = fall_through_suffix(patcher, section, end_addr) else {
         return candidates.clone();
     };
 

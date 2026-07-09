@@ -1,5 +1,6 @@
 //! Validation utilities for fast equivalence checking
 
+pub mod downstream;
 pub mod live_out;
 pub mod random;
 
