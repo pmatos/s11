@@ -123,10 +123,11 @@ impl From<SearchResultFor<crate::isa::AArch64>> for SearchResult {
 /// [`SearchStatistics`].
 ///
 /// This separates the *policy* — what a verification outcome means for the
-/// counters — from the *sink* it is applied to. The symbolic search path folds
-/// the tally into plain `&mut SearchStatistics` fields; the parallel enumerative
-/// path applies the same tally to its atomic counters. Both share one definition
-/// via [`SearchStatistics::verification_tally`], so the two paths cannot drift.
+/// counters — from the *sink* it is applied to. The symbolic and stochastic
+/// (MCMC) search paths fold the tally into plain `&mut SearchStatistics` fields
+/// via [`VerificationTally::fold_into`]; the parallel enumerative path applies
+/// the same tally to its atomic counters. All three share one definition via
+/// [`SearchStatistics::verification_tally`], so the paths cannot drift.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct VerificationTally {
     /// Wall-clock time this verification spent inside `solver.check()`. Folds
@@ -142,6 +143,34 @@ pub struct VerificationTally {
     /// Whether Z3 proved the candidate equivalent to the target. Folds into
     /// `smt_equivalent`.
     pub proved_equivalent: bool,
+}
+
+impl VerificationTally {
+    /// Fold this tally's SMT-counter deltas into a single-threaded
+    /// [`SearchStatistics`] sink: `smt_elapsed`, `smt_queries` (when the solver
+    /// was reached), and `smt_equivalent` (when equivalence was proven).
+    ///
+    /// This is the shared fold behind every plain-`&mut SearchStatistics`
+    /// verification path — the symbolic search ([`SearchStatistics::record_verification`])
+    /// and the stochastic (MCMC) search both call it, so the SMT accounting
+    /// cannot drift between them. The parallel enumerative path applies the same
+    /// [`SearchStatistics::verification_tally`] to *atomic* counters instead, the
+    /// one genuinely different sink.
+    ///
+    /// It deliberately does **not** touch `candidates_passed_fast`: what counts
+    /// as a fast-validation pass is a per-path policy. The symbolic path ties it
+    /// to `reached_solver` (a candidate that cleared the concrete pre-filter to
+    /// reach Z3); the stochastic path counts it earlier, at the concrete-test
+    /// stage before the cost gate. Each path owns that increment.
+    pub fn fold_into(&self, stats: &mut SearchStatistics) {
+        stats.smt_elapsed += self.smt_elapsed;
+        if self.reached_solver {
+            stats.smt_queries += 1;
+        }
+        if self.proved_equivalent {
+            stats.smt_equivalent += 1;
+        }
+    }
 }
 
 /// Statistics from a search operation
@@ -209,23 +238,24 @@ impl SearchStatistics {
     /// Fold one equivalence verification into the (single-threaded) SMT
     /// counters, returning whether the candidate proved equivalent.
     ///
-    /// Used by the symbolic search path. The parallel enumerative path applies
-    /// the same [`Self::verification_tally`] to its atomic counters instead of
-    /// calling this method, so both paths agree on what each counter means.
+    /// Used by the symbolic search path. The stochastic (MCMC) path shares the
+    /// SMT fold via [`VerificationTally::fold_into`] but owns its own
+    /// `candidates_passed_fast` policy, so it applies the tally directly rather
+    /// than calling this method. The parallel enumerative path applies the same
+    /// [`Self::verification_tally`] to its atomic counters instead. All three
+    /// agree on what each counter means because they share one tally.
     pub fn record_verification(
         &mut self,
         metrics: &EquivalenceMetrics,
         verdict: &EquivalenceResult,
     ) -> bool {
         let tally = Self::verification_tally(metrics, verdict);
-        self.smt_elapsed += tally.smt_elapsed;
         if tally.reached_solver {
-            self.smt_queries += 1;
+            // Symbolic-path policy: reaching Z3 means the candidate cleared the
+            // concrete pre-filter, so it also counts as one fast-validation pass.
             self.candidates_passed_fast += 1;
         }
-        if tally.proved_equivalent {
-            self.smt_equivalent += 1;
-        }
+        tally.fold_into(self);
         tally.proved_equivalent
     }
 
@@ -570,6 +600,50 @@ mod tests {
         assert_eq!(stats.candidates_passed_fast, 2);
         assert_eq!(stats.smt_equivalent, 1);
         assert_eq!(stats.smt_elapsed, Duration::from_millis(4));
+    }
+
+    #[test]
+    fn fold_into_counts_solver_reaching_equivalent_candidate() {
+        // Folding a solver-reaching, proven-equivalent tally into a plain sink
+        // adds its solver time, one SMT query, and one proven equivalence.
+        let tally = SearchStatistics::verification_tally(
+            &reached_solver(7),
+            &EquivalenceResult::Equivalent,
+        );
+        let mut stats = SearchStatistics::default();
+        tally.fold_into(&mut stats);
+        assert_eq!(stats.smt_queries, 1);
+        assert_eq!(stats.smt_equivalent, 1);
+        assert_eq!(stats.smt_elapsed, Duration::from_millis(7));
+    }
+
+    #[test]
+    fn fold_into_leaves_candidates_passed_fast_untouched() {
+        // The fast-pass increment is a per-path policy, not part of the shared
+        // SMT fold: fold_into must never move candidates_passed_fast, even for a
+        // solver-reaching candidate. (The symbolic path adds it separately; the
+        // stochastic path counts it at the concrete-test stage.)
+        let tally = SearchStatistics::verification_tally(
+            &reached_solver(4),
+            &EquivalenceResult::Equivalent,
+        );
+        let mut stats = SearchStatistics::default();
+        tally.fold_into(&mut stats);
+        assert_eq!(stats.candidates_passed_fast, 0);
+    }
+
+    #[test]
+    fn fold_into_ignores_candidates_that_never_reached_the_solver() {
+        // A pre-solver refutation folds in only its (zero) solver time.
+        let tally = SearchStatistics::verification_tally(
+            &refuted_before_solver(),
+            &EquivalenceResult::NotEquivalent,
+        );
+        let mut stats = SearchStatistics::default();
+        tally.fold_into(&mut stats);
+        assert_eq!(stats.smt_queries, 0);
+        assert_eq!(stats.smt_equivalent, 0);
+        assert_eq!(stats.smt_elapsed, Duration::ZERO);
     }
 
     #[test]
