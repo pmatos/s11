@@ -38,7 +38,7 @@ struct Args {
 }
 
 /// CLI algorithm selection
-#[derive(Clone, Copy, Debug, ValueEnum)]
+#[derive(Clone, Copy, Debug, ValueEnum, PartialEq, Eq)]
 enum CliAlgorithm {
     /// Enumerative search (exhaustive)
     Enumerative,
@@ -345,6 +345,92 @@ enum Commands {
 /// Prefix shared by every "architecture mismatch" diagnostic so the disasm
 /// caller can recognise the error without coupling to the full message text.
 const ARCH_MISMATCH_PREFIX: &str = "Architecture mismatch:";
+
+/// Why an `s11 opt` invocation cannot proceed once the ELF's architecture is
+/// known. Each variant is one pre-dispatch policy rule the CLI enforces, and
+/// its `Display` is the exact diagnostic printed to stderr before exiting.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum OptTargetError {
+    /// `--arch requested` was given but the ELF's e_machine decodes to
+    /// `detected`. Reported with CLI value names so it matches what the user
+    /// typed for `--arch`.
+    ArchMismatch {
+        requested: CliArch,
+        detected: CliArch,
+    },
+    /// The resolved architecture is RISC-V, which has no supported opt path
+    /// yet (ADR-0005 — machine-code emission is not implemented).
+    RiscvUnsupported,
+    /// The resolved architecture is x86 but the algorithm is AArch64-only
+    /// (ADR-0004 decision 3 — hybrid and LLM remain AArch64-only).
+    AlgorithmNotForArch {
+        arch: CliArch,
+        algorithm: CliAlgorithm,
+    },
+}
+
+impl std::fmt::Display for OptTargetError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            OptTargetError::ArchMismatch {
+                requested,
+                detected,
+            } => write!(
+                f,
+                "{ARCH_MISMATCH_PREFIX} --arch {requested} but ELF reports {detected}"
+            ),
+            OptTargetError::RiscvUnsupported => f.write_str(
+                "RISC-V optimization is not yet supported (ISA traits available but not integrated)",
+            ),
+            OptTargetError::AlgorithmNotForArch { .. } => f.write_str(
+                "x86 supports --algorithm enumerative / stochastic / symbolic in this release; \
+                 hybrid and llm remain AArch64-only.",
+            ),
+        }
+    }
+}
+
+impl std::error::Error for OptTargetError {}
+
+/// Resolve which architecture `s11 opt` should optimize for, enforcing every
+/// pre-dispatch policy rule in one testable place.
+///
+/// `detected` is the architecture decoded from the ELF e_machine (always read
+/// first so a stale or wrong `--arch` cannot route bytes through the wrong
+/// pipeline); `requested` is the optional `--arch` override; `algorithm` is
+/// the chosen search algorithm. The rules are applied in the same order the
+/// CLI has always used: reject an `--arch` that disagrees with the ELF, then
+/// reject RISC-V, then reject x86 paired with an AArch64-only algorithm.
+fn resolve_opt_target(
+    requested: Option<CliArch>,
+    detected: CliArch,
+    algorithm: CliAlgorithm,
+) -> Result<SupportedArch, OptTargetError> {
+    let arch = match requested {
+        Some(a) if a != detected => {
+            return Err(OptTargetError::ArchMismatch {
+                requested: a,
+                detected,
+            });
+        }
+        Some(a) => a,
+        None => detected,
+    };
+
+    let supported = match arch {
+        CliArch::Aarch64 => SupportedArch::Aarch64,
+        CliArch::X86_64 => SupportedArch::X86_64,
+        CliArch::X86_32 => SupportedArch::X86_32,
+        CliArch::Riscv32 | CliArch::Riscv64 => return Err(OptTargetError::RiscvUnsupported),
+    };
+
+    let is_x86 = matches!(supported, SupportedArch::X86_64 | SupportedArch::X86_32);
+    if is_x86 && matches!(algorithm, CliAlgorithm::Hybrid | CliAlgorithm::Llm) {
+        return Err(OptTargetError::AlgorithmNotForArch { arch, algorithm });
+    }
+
+    Ok(supported)
+}
 
 fn analyze_elf_binary(
     path: &Path,
@@ -2800,34 +2886,11 @@ fn main() {
                 std::process::exit(1);
             });
             let detected_arch: CliArch = patcher.arch().into();
-            let cli_arch = match arch {
-                Some(a) if a == detected_arch => a,
-                Some(a) => {
-                    eprintln!("{ARCH_MISMATCH_PREFIX} --arch {a} but ELF reports {detected_arch}");
-                    std::process::exit(1);
-                }
-                None => detected_arch,
-            };
-            match cli_arch {
-                CliArch::Aarch64 | CliArch::X86_64 | CliArch::X86_32 => {}
-                CliArch::Riscv32 | CliArch::Riscv64 => {
-                    eprintln!(
-                        "RISC-V optimization is not yet supported (ISA traits available but not integrated)"
-                    );
-                    std::process::exit(1);
-                }
-            }
-            let is_x86 = matches!(cli_arch, CliArch::X86_64 | CliArch::X86_32);
-            // Issue #73: x86 now supports enumerative + stochastic +
-            // symbolic. Hybrid and LLM remain AArch64-only (the parallel
-            // coordinator is still AArch64-typed per #77 stage 2 step 12
-            // deferral; the LLM path is AArch64-only by design per
-            // ADR-0004 decision 3).
-            if is_x86 && matches!(algorithm, CliAlgorithm::Hybrid | CliAlgorithm::Llm) {
-                eprintln!(
-                    "x86 supports --algorithm enumerative / stochastic / symbolic in this release; \
-                     hybrid and llm remain AArch64-only."
-                );
+            // Every pre-dispatch policy rule (arch cross-check, RISC-V refusal,
+            // x86-only-algorithm refusal) lives behind resolve_opt_target so it
+            // is exercised by table tests rather than only through this CLI arm.
+            if let Err(e) = resolve_opt_target(arch, detected_arch, algorithm) {
+                eprintln!("{e}");
                 std::process::exit(1);
             }
             // Optimization mode
@@ -3077,6 +3140,165 @@ mod cli_helper_tests {
         assert_eq!(CliArch::Riscv64.to_string(), "riscv64");
         assert_eq!(CliArch::X86_64.to_string(), "x86-64");
         assert_eq!(CliArch::X86_32.to_string(), "x86-32");
+    }
+
+    #[test]
+    fn resolve_opt_target_defaults_to_detected_arch_when_arch_unset() {
+        // No --arch: every supported detected architecture resolves to itself.
+        assert_eq!(
+            resolve_opt_target(None, CliArch::Aarch64, CliAlgorithm::Enumerative),
+            Ok(SupportedArch::Aarch64)
+        );
+        assert_eq!(
+            resolve_opt_target(None, CliArch::X86_64, CliAlgorithm::Stochastic),
+            Ok(SupportedArch::X86_64)
+        );
+        assert_eq!(
+            resolve_opt_target(None, CliArch::X86_32, CliAlgorithm::Symbolic),
+            Ok(SupportedArch::X86_32)
+        );
+    }
+
+    #[test]
+    fn resolve_opt_target_accepts_matching_arch_override() {
+        // --arch that agrees with the detected e_machine is accepted.
+        assert_eq!(
+            resolve_opt_target(
+                Some(CliArch::Aarch64),
+                CliArch::Aarch64,
+                CliAlgorithm::Hybrid
+            ),
+            Ok(SupportedArch::Aarch64)
+        );
+        assert_eq!(
+            resolve_opt_target(
+                Some(CliArch::X86_64),
+                CliArch::X86_64,
+                CliAlgorithm::Enumerative
+            ),
+            Ok(SupportedArch::X86_64)
+        );
+    }
+
+    #[test]
+    fn resolve_opt_target_rejects_arch_mismatch() {
+        // --arch that contradicts the detected e_machine is rejected before
+        // any bytes reach an optimization pipeline.
+        assert_eq!(
+            resolve_opt_target(
+                Some(CliArch::Aarch64),
+                CliArch::X86_64,
+                CliAlgorithm::Enumerative
+            ),
+            Err(OptTargetError::ArchMismatch {
+                requested: CliArch::Aarch64,
+                detected: CliArch::X86_64,
+            })
+        );
+    }
+
+    #[test]
+    fn resolve_opt_target_mismatch_message_uses_cli_names() {
+        // The diagnostic must match what users typed for --arch (CLI value
+        // names via CliArch Display), not Rust variant names — the exact
+        // contract tests/integration/opt_test.rs pins end-to-end.
+        let err = resolve_opt_target(
+            Some(CliArch::Aarch64),
+            CliArch::X86_64,
+            CliAlgorithm::Enumerative,
+        )
+        .expect_err("mismatched --arch should be rejected");
+        let message = err.to_string();
+        assert_eq!(
+            message,
+            "Architecture mismatch: --arch aarch64 but ELF reports x86-64"
+        );
+        assert!(
+            !message.contains("Aarch64") && !message.contains("X86_64"),
+            "diagnostic should use CLI architecture names: {message}"
+        );
+    }
+
+    #[test]
+    fn resolve_opt_target_rejects_riscv() {
+        // RISC-V has no supported opt path (ADR-0005) — reject it regardless
+        // of the requested algorithm.
+        for arch in [CliArch::Riscv32, CliArch::Riscv64] {
+            assert_eq!(
+                resolve_opt_target(Some(arch), arch, CliAlgorithm::Enumerative),
+                Err(OptTargetError::RiscvUnsupported)
+            );
+        }
+        assert_eq!(
+            resolve_opt_target(
+                Some(CliArch::Riscv64),
+                CliArch::Riscv64,
+                CliAlgorithm::Symbolic
+            )
+            .unwrap_err()
+            .to_string(),
+            "RISC-V optimization is not yet supported (ISA traits available but not integrated)"
+        );
+    }
+
+    #[test]
+    fn resolve_opt_target_rejects_x86_with_aarch64_only_algorithms() {
+        // Hybrid and LLM remain AArch64-only (ADR-0004 decision 3).
+        for algorithm in [CliAlgorithm::Hybrid, CliAlgorithm::Llm] {
+            assert_eq!(
+                resolve_opt_target(None, CliArch::X86_64, algorithm),
+                Err(OptTargetError::AlgorithmNotForArch {
+                    arch: CliArch::X86_64,
+                    algorithm,
+                })
+            );
+            assert_eq!(
+                resolve_opt_target(None, CliArch::X86_32, algorithm),
+                Err(OptTargetError::AlgorithmNotForArch {
+                    arch: CliArch::X86_32,
+                    algorithm,
+                })
+            );
+        }
+        let err = resolve_opt_target(None, CliArch::X86_64, CliAlgorithm::Hybrid)
+            .expect_err("x86 + hybrid should be rejected");
+        assert_eq!(
+            err.to_string(),
+            "x86 supports --algorithm enumerative / stochastic / symbolic in this release; \
+             hybrid and llm remain AArch64-only."
+        );
+    }
+
+    #[test]
+    fn resolve_opt_target_allows_x86_with_shared_algorithms() {
+        // Enumerative / stochastic / symbolic run on x86.
+        for algorithm in [
+            CliAlgorithm::Enumerative,
+            CliAlgorithm::Stochastic,
+            CliAlgorithm::Symbolic,
+        ] {
+            assert_eq!(
+                resolve_opt_target(None, CliArch::X86_64, algorithm),
+                Ok(SupportedArch::X86_64)
+            );
+        }
+    }
+
+    #[test]
+    fn resolve_opt_target_allows_aarch64_with_every_algorithm() {
+        // AArch64 supports the full algorithm set, including hybrid and LLM.
+        for algorithm in [
+            CliAlgorithm::Enumerative,
+            CliAlgorithm::Stochastic,
+            CliAlgorithm::Symbolic,
+            CliAlgorithm::Hybrid,
+            CliAlgorithm::Llm,
+        ] {
+            assert_eq!(
+                resolve_opt_target(None, CliArch::Aarch64, algorithm),
+                Ok(SupportedArch::Aarch64)
+            );
+        }
     }
 
     #[test]
