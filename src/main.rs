@@ -2708,6 +2708,98 @@ fn run_llm_opt(
     Ok(())
 }
 
+/// Structured outcome of an `s11 equiv` run: the verdict plus, for a fast-path
+/// counterexample, the live-out register values that distinguish the two
+/// sequences.
+///
+/// Extracting this from `run_equiv` separates the *decision* — which registers
+/// to show, how to re-run the counterexample, what process exit code the
+/// verdict implies — from the *I/O* of printing and calling
+/// `std::process::exit`, so every branch is unit-testable without spawning the
+/// binary. Register lists are ordered by architectural index, which makes a
+/// counterexample deterministic and reproducible: the raw
+/// `ConcreteMachineState::registers()` HashMap iteration order was previously
+/// printed directly.
+#[derive(Debug, PartialEq)]
+enum EquivReport {
+    /// The sequences agree on the live-out contract.
+    Equivalent,
+    /// Z3 proved the sequences differ; no concrete counterexample surfaced.
+    NotEquivalentSmt,
+    /// The fast concrete path refuted equivalence. Carries the live-out
+    /// register values of the counterexample input and of each sequence's
+    /// output, each in architectural-index order.
+    Counterexample {
+        input: Vec<(Register, u64)>,
+        output1: Vec<(Register, u64)>,
+        output2: Vec<(Register, u64)>,
+    },
+    /// Equivalence could not be determined (solver timeout / unknown).
+    Unknown(String),
+}
+
+impl EquivReport {
+    /// Process exit code the verdict maps to: `0` equivalent, `1`
+    /// not-equivalent (SMT or counterexample), `2` unknown. Owns the exit-code
+    /// policy `run_equiv` previously spelled out across four separate
+    /// `std::process::exit` calls.
+    fn exit_code(&self) -> i32 {
+        match self {
+            EquivReport::Equivalent => 0,
+            EquivReport::NotEquivalentSmt | EquivReport::Counterexample { .. } => 1,
+            EquivReport::Unknown(_) => 2,
+        }
+    }
+}
+
+/// Collect a concrete state's live-out register values, ordered by
+/// architectural register index so the list is deterministic across runs.
+fn live_out_register_values(
+    state: &semantics::ConcreteMachineState,
+    live_out: &semantics::LiveOut,
+) -> Vec<(Register, u64)> {
+    let mut values: Vec<(Register, u64)> = state
+        .registers()
+        .iter()
+        .filter(|(reg, _)| live_out.contains_register(**reg))
+        .map(|(reg, val)| (*reg, val.as_u64()))
+        .collect();
+    values.sort_by_key(|(reg, _)| reg.index().unwrap_or(u8::MAX));
+    values
+}
+
+/// Turn an equivalence-check result into a structured [`EquivReport`].
+///
+/// For a fast-path counterexample this strips terminators (issue #69: the
+/// concrete interpreter panics on branch stubs, and the equivalence layer
+/// already excluded the terminator from its comparison), re-runs both
+/// straight-line prefixes on the counterexample input, and captures each
+/// side's live-out register values. The other verdicts map straight through.
+fn equivalence_report(
+    seq1: &[Instruction],
+    seq2: &[Instruction],
+    live_out: &semantics::LiveOut,
+    result: semantics::EquivalenceResult,
+) -> EquivReport {
+    use semantics::EquivalenceResult;
+    match result {
+        EquivalenceResult::Equivalent => EquivReport::Equivalent,
+        EquivalenceResult::NotEquivalent => EquivReport::NotEquivalentSmt,
+        EquivalenceResult::NotEquivalentFast(input_state) => {
+            let (prefix1, _) = split_terminator(seq1);
+            let (prefix2, _) = split_terminator(seq2);
+            let output1 = semantics::apply_sequence_concrete(input_state.clone(), prefix1);
+            let output2 = semantics::apply_sequence_concrete(input_state.clone(), prefix2);
+            EquivReport::Counterexample {
+                input: live_out_register_values(&input_state, live_out),
+                output1: live_out_register_values(&output1, live_out),
+                output2: live_out_register_values(&output2, live_out),
+            }
+        }
+        EquivalenceResult::Unknown(reason) => EquivReport::Unknown(reason),
+    }
+}
+
 fn run_equiv(
     file1: &Path,
     file2: &Path,
@@ -2716,7 +2808,7 @@ fn run_equiv(
     fast_only: bool,
     verbose: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    use semantics::{EquivalenceConfig, EquivalenceResult, check_equivalence_with_config};
+    use semantics::{EquivalenceConfig, check_equivalence_with_config};
 
     // Parse assembly files
     if verbose {
@@ -2769,60 +2861,49 @@ fn run_equiv(
         }
     }
 
-    // Check equivalence
+    // Check equivalence, then turn the result into a structured report so the
+    // verdict formatting and the process exit code live behind one tested seam.
     let result = check_equivalence_with_config(&seq1, &seq2, &config);
+    let report = equivalence_report(&seq1, &seq2, &config.live_out, result);
 
-    match result {
-        EquivalenceResult::Equivalent => {
+    match &report {
+        EquivReport::Equivalent => {
             println!("EQUIVALENT: The two sequences are semantically equivalent.");
-            Ok(())
         }
-        EquivalenceResult::NotEquivalent => {
+        EquivReport::NotEquivalentSmt => {
             println!(
                 "NOT EQUIVALENT: The two sequences produce different results (verified by SMT)."
             );
-            std::process::exit(1);
         }
-        EquivalenceResult::NotEquivalentFast(input_state) => {
+        EquivReport::Counterexample {
+            input,
+            output1,
+            output2,
+        } => {
             println!("NOT EQUIVALENT: The two sequences produce different results.");
             println!("\nCounterexample found:");
-
-            // Issue #69: strip terminators before re-running on the counterexample.
-            // The B1/B2 stubs panic if a branch reaches the concrete interpreter;
-            // the equivalence layer already excluded the terminator from its
-            // comparison via the precheck.
-            let (prefix1, _) = split_terminator(&seq1);
-            let (prefix2, _) = split_terminator(&seq2);
-
-            // Run both sequences on the counterexample input
-            let output1 = semantics::apply_sequence_concrete(input_state.clone(), prefix1);
-            let output2 = semantics::apply_sequence_concrete(input_state.clone(), prefix2);
-
             println!("  Input state:");
-            for (reg, val) in input_state.registers() {
-                if config.live_out.contains_register(*reg) {
-                    println!("    {} = 0x{:016x}", reg, val.as_u64());
-                }
+            for (reg, val) in input {
+                println!("    {} = 0x{:016x}", reg, val);
             }
             println!("  Output from sequence 1:");
-            for (reg, val) in output1.registers() {
-                if config.live_out.contains_register(*reg) {
-                    println!("    {} = 0x{:016x}", reg, val.as_u64());
-                }
+            for (reg, val) in output1 {
+                println!("    {} = 0x{:016x}", reg, val);
             }
             println!("  Output from sequence 2:");
-            for (reg, val) in output2.registers() {
-                if config.live_out.contains_register(*reg) {
-                    println!("    {} = 0x{:016x}", reg, val.as_u64());
-                }
+            for (reg, val) in output2 {
+                println!("    {} = 0x{:016x}", reg, val);
             }
-            std::process::exit(1);
         }
-        EquivalenceResult::Unknown(reason) => {
+        EquivReport::Unknown(reason) => {
             println!("UNKNOWN: Could not determine equivalence.");
             println!("  Reason: {}", reason);
-            std::process::exit(2);
         }
+    }
+
+    match report.exit_code() {
+        0 => Ok(()),
+        code => std::process::exit(code),
     }
 }
 
@@ -6187,6 +6268,139 @@ mod cli_helper_tests {
             err.contains("larger") || err.contains("preserve"),
             "expected explanatory error, got: {}",
             err
+        );
+    }
+}
+
+#[cfg(test)]
+mod equivalence_report_tests {
+    use super::*;
+    use semantics::{ConcreteMachineState, ConcreteValue, EquivalenceResult};
+
+    fn live_out(regs: &[Register]) -> semantics::LiveOut {
+        semantics::LiveOut::from_registers(regs.to_vec())
+    }
+
+    fn state_with(regs: &[(Register, u64)]) -> ConcreteMachineState {
+        let mut state = ConcreteMachineState::new_zeroed();
+        for (reg, val) in regs {
+            state.set_register(*reg, ConcreteValue::new(*val));
+        }
+        state
+    }
+
+    #[test]
+    fn equivalent_result_reports_equivalent_and_exits_zero() {
+        let report = equivalence_report(
+            &[],
+            &[],
+            &live_out(&[Register::X0]),
+            EquivalenceResult::Equivalent,
+        );
+        assert_eq!(report.exit_code(), 0);
+        assert_eq!(report, EquivReport::Equivalent);
+    }
+
+    #[test]
+    fn smt_not_equivalent_reports_and_exits_one() {
+        let report = equivalence_report(
+            &[],
+            &[],
+            &live_out(&[Register::X0]),
+            EquivalenceResult::NotEquivalent,
+        );
+        assert_eq!(report.exit_code(), 1);
+        assert_eq!(report, EquivReport::NotEquivalentSmt);
+    }
+
+    #[test]
+    fn unknown_result_preserves_reason_and_exits_two() {
+        let report = equivalence_report(
+            &[],
+            &[],
+            &live_out(&[Register::X0]),
+            EquivalenceResult::Unknown("solver timeout".to_string()),
+        );
+        assert_eq!(report.exit_code(), 2);
+        assert_eq!(report, EquivReport::Unknown("solver timeout".to_string()));
+    }
+
+    #[test]
+    fn fast_counterexample_reruns_prefixes_and_filters_to_live_out() {
+        // seq1 forces x0=11, seq2 forces x0=12 regardless of the input state.
+        // Worked example: applying each to the counterexample input yields the
+        // two constants; x1 is present in the input but not live-out, so it must
+        // be filtered out of every reported register list.
+        let seq1 = [Instruction::MovImm {
+            rd: Register::X0,
+            imm: 11,
+        }];
+        let seq2 = [Instruction::MovImm {
+            rd: Register::X0,
+            imm: 12,
+        }];
+        let input = state_with(&[(Register::X0, 99), (Register::X1, 7)]);
+
+        let report = equivalence_report(
+            &seq1,
+            &seq2,
+            &live_out(&[Register::X0]),
+            EquivalenceResult::NotEquivalentFast(input),
+        );
+
+        assert_eq!(report.exit_code(), 1);
+        assert_eq!(
+            report,
+            EquivReport::Counterexample {
+                input: vec![(Register::X0, 99)],
+                output1: vec![(Register::X0, 11)],
+                output2: vec![(Register::X0, 12)],
+            }
+        );
+    }
+
+    #[test]
+    fn counterexample_register_values_are_sorted_by_index() {
+        // Two live-out registers with the higher-index one (X2) written first in
+        // the sequences. The report must order every list by architectural index
+        // (X0 before X2) so counterexample output is deterministic regardless of
+        // the underlying HashMap iteration order.
+        let seq1 = [
+            Instruction::MovImm {
+                rd: Register::X2,
+                imm: 33,
+            },
+            Instruction::MovImm {
+                rd: Register::X0,
+                imm: 11,
+            },
+        ];
+        let seq2 = [
+            Instruction::MovImm {
+                rd: Register::X2,
+                imm: 34,
+            },
+            Instruction::MovImm {
+                rd: Register::X0,
+                imm: 12,
+            },
+        ];
+        let input = state_with(&[(Register::X2, 50), (Register::X0, 99)]);
+
+        let report = equivalence_report(
+            &seq1,
+            &seq2,
+            &live_out(&[Register::X2, Register::X0]),
+            EquivalenceResult::NotEquivalentFast(input),
+        );
+
+        assert_eq!(
+            report,
+            EquivReport::Counterexample {
+                input: vec![(Register::X0, 99), (Register::X2, 50)],
+                output1: vec![(Register::X0, 11), (Register::X2, 33)],
+                output2: vec![(Register::X0, 12), (Register::X2, 34)],
+            }
         );
     }
 }
