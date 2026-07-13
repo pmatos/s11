@@ -259,6 +259,59 @@ impl SearchStatistics {
         tally.proved_equivalent
     }
 
+    /// Combine the per-worker statistics collected by the parallel coordinator
+    /// into a single cross-worker aggregate for a hybrid search.
+    ///
+    /// This is the single home for the reduce rules the parallel coordinator
+    /// used to inline into its receive loop. Keeping the field list next to
+    /// [`SearchStatistics`] means adding a counter can no longer silently
+    /// under-report in the aggregate.
+    ///
+    /// The rules, matching the [`ParallelResult`](crate::search::parallel::coordinator)
+    /// contract:
+    /// * every counter field **sums** across workers;
+    /// * `original_cost` takes the **max** — workers see the same target, so the
+    ///   max is robust against a worker that exited before recording it;
+    /// * `best_cost_found` takes the **minimum nonzero** value, falling back to
+    ///   the aggregated `original_cost` so the CLI never reports a best cost of 0
+    ///   when some worker verified a candidate;
+    /// * `algorithm` is always [`Algorithm::Hybrid`] (the parallel coordinator's
+    ///   identity) and `elapsed_time` is the coordinator wall-clock, passed in so
+    ///   every aggregate shares one time origin.
+    ///
+    /// The worker id in each entry is not part of the aggregation; it is accepted
+    /// so callers can pass the coordinator's `worker_stats` vector directly.
+    pub fn aggregate_workers(
+        worker_stats: &[(usize, SearchStatistics)],
+        elapsed: Duration,
+    ) -> SearchStatistics {
+        let mut total = SearchStatistics::new(Algorithm::Hybrid);
+        total.elapsed_time = elapsed;
+        for (_, s) in worker_stats {
+            total.candidates_evaluated += s.candidates_evaluated;
+            total.candidates_pruned_by_cost += s.candidates_pruned_by_cost;
+            total.candidates_passed_fast += s.candidates_passed_fast;
+            total.smt_queries += s.smt_queries;
+            total.smt_elapsed += s.smt_elapsed;
+            total.smt_equivalent += s.smt_equivalent;
+            total.iterations += s.iterations;
+            total.accepted_proposals += s.accepted_proposals;
+            total.improvements_found += s.improvements_found;
+        }
+        total.original_cost = worker_stats
+            .iter()
+            .map(|(_, s)| s.original_cost)
+            .max()
+            .unwrap_or(0);
+        total.best_cost_found = worker_stats
+            .iter()
+            .map(|(_, s)| s.best_cost_found)
+            .filter(|&c| c > 0)
+            .min()
+            .unwrap_or(total.original_cost);
+        total
+    }
+
     /// Record the start of timing
     pub fn start_timer(&mut self) {
         self.elapsed_time = Duration::ZERO;
@@ -665,5 +718,177 @@ mod tests {
         assert_eq!(refuted.smt_elapsed, Duration::ZERO);
         assert!(!refuted.reached_solver);
         assert!(!refuted.proved_equivalent);
+    }
+
+    // --- Cross-worker aggregation seam (aggregate_workers) ---
+    //
+    // These pin the reduce rules the parallel coordinator used to inline into
+    // its receive loop: counter sums, max original_cost, min-nonzero
+    // best_cost_found with a fallback, and the hybrid identity. Expected values
+    // are hand-computed, independent of the aggregation code.
+
+    /// Two workers whose counter fields are distinct primes/round numbers so a
+    /// dropped or double-counted field is visible in the sum.
+    fn two_worker_stats() -> Vec<(usize, SearchStatistics)> {
+        let a = SearchStatistics {
+            algorithm: Algorithm::Stochastic,
+            candidates_evaluated: 10,
+            candidates_pruned_by_cost: 2,
+            candidates_passed_fast: 5,
+            smt_queries: 3,
+            smt_elapsed: Duration::from_millis(4),
+            smt_equivalent: 1,
+            iterations: 100,
+            accepted_proposals: 20,
+            improvements_found: 2,
+            original_cost: 6,
+            best_cost_found: 4,
+            elapsed_time: Duration::from_millis(900),
+        };
+        let b = SearchStatistics {
+            algorithm: Algorithm::Symbolic,
+            candidates_evaluated: 7,
+            candidates_pruned_by_cost: 1,
+            candidates_passed_fast: 3,
+            smt_queries: 2,
+            smt_elapsed: Duration::from_millis(6),
+            smt_equivalent: 1,
+            iterations: 50,
+            accepted_proposals: 10,
+            improvements_found: 1,
+            original_cost: 6,
+            best_cost_found: 3,
+            elapsed_time: Duration::from_millis(500),
+        };
+        vec![(0, a), (1, b)]
+    }
+
+    #[test]
+    fn aggregate_workers_sums_counters_and_labels_hybrid() {
+        let total =
+            SearchStatistics::aggregate_workers(&two_worker_stats(), Duration::from_millis(250));
+
+        // Every counter field is the sum of the two workers' values.
+        assert_eq!(total.candidates_evaluated, 17);
+        assert_eq!(total.candidates_pruned_by_cost, 3);
+        assert_eq!(total.candidates_passed_fast, 8);
+        assert_eq!(total.smt_queries, 5);
+        assert_eq!(total.smt_elapsed, Duration::from_millis(10));
+        assert_eq!(total.smt_equivalent, 2);
+        assert_eq!(total.iterations, 150);
+        assert_eq!(total.accepted_proposals, 30);
+        assert_eq!(total.improvements_found, 3);
+
+        // The aggregate is labelled Hybrid and carries the passed-in wall-clock,
+        // regardless of the per-worker algorithms or elapsed times.
+        assert_eq!(total.algorithm, Algorithm::Hybrid);
+        assert_eq!(total.elapsed_time, Duration::from_millis(250));
+    }
+
+    #[test]
+    fn aggregate_workers_takes_max_original_cost() {
+        // original_cost is a max, not a sum: workers see the same target, so its
+        // real cost is the largest any worker recorded. A worker that exited
+        // before recording it (original_cost 0) must not drag the aggregate down.
+        let workers = vec![
+            (
+                0,
+                SearchStatistics {
+                    original_cost: 6,
+                    ..SearchStatistics::new(Algorithm::Stochastic)
+                },
+            ),
+            (
+                1,
+                SearchStatistics {
+                    original_cost: 0,
+                    ..SearchStatistics::new(Algorithm::Symbolic)
+                },
+            ),
+        ];
+
+        let total = SearchStatistics::aggregate_workers(&workers, Duration::from_millis(1));
+
+        assert_eq!(total.original_cost, 6);
+    }
+
+    #[test]
+    fn aggregate_workers_takes_min_nonzero_best_cost() {
+        // best_cost_found is the smallest cost any worker actually achieved. A
+        // best_cost_found of 0 means "this worker never verified a candidate"
+        // and must be skipped, not treated as the (unbeatable) minimum.
+        let workers = vec![
+            (
+                0,
+                SearchStatistics {
+                    original_cost: 6,
+                    best_cost_found: 0, // never found one
+                    ..SearchStatistics::new(Algorithm::Stochastic)
+                },
+            ),
+            (
+                1,
+                SearchStatistics {
+                    original_cost: 6,
+                    best_cost_found: 4,
+                    ..SearchStatistics::new(Algorithm::Symbolic)
+                },
+            ),
+            (
+                2,
+                SearchStatistics {
+                    original_cost: 6,
+                    best_cost_found: 3,
+                    ..SearchStatistics::new(Algorithm::Symbolic)
+                },
+            ),
+        ];
+
+        let total = SearchStatistics::aggregate_workers(&workers, Duration::from_millis(1));
+
+        assert_eq!(total.best_cost_found, 3);
+    }
+
+    #[test]
+    fn aggregate_workers_best_cost_falls_back_to_original_cost_when_none_found() {
+        // When no worker verified a candidate (every best_cost_found is 0), the
+        // aggregate falls back to the aggregated original_cost so the CLI never
+        // prints a best cost of 0 for a run that simply found no improvement.
+        let workers = vec![
+            (
+                0,
+                SearchStatistics {
+                    original_cost: 5,
+                    best_cost_found: 0,
+                    ..SearchStatistics::new(Algorithm::Stochastic)
+                },
+            ),
+            (
+                1,
+                SearchStatistics {
+                    original_cost: 5,
+                    best_cost_found: 0,
+                    ..SearchStatistics::new(Algorithm::Symbolic)
+                },
+            ),
+        ];
+
+        let total = SearchStatistics::aggregate_workers(&workers, Duration::from_millis(1));
+
+        assert_eq!(total.best_cost_found, 5);
+    }
+
+    #[test]
+    fn aggregate_workers_of_no_workers_is_a_zeroed_hybrid_aggregate() {
+        // The empty case must not panic: with no workers, every field is zero
+        // (best_cost_found falls back to the zero original_cost), and the
+        // aggregate is still a Hybrid record carrying the passed-in wall-clock.
+        let total = SearchStatistics::aggregate_workers(&[], Duration::from_millis(42));
+
+        assert_eq!(total.algorithm, Algorithm::Hybrid);
+        assert_eq!(total.elapsed_time, Duration::from_millis(42));
+        assert_eq!(total.candidates_evaluated, 0);
+        assert_eq!(total.original_cost, 0);
+        assert_eq!(total.best_cost_found, 0);
     }
 }

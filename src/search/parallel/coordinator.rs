@@ -225,36 +225,11 @@ fn run_coordinator(
         }
     }
 
-    // Build cross-worker aggregate. Counters sum; original_cost takes the
-    // max across workers (defensive against a worker that exited before
-    // recording it); best_cost_found takes the min nonzero, falling back
-    // to original_cost so the CLI never prints 0 when workers verified a
-    // candidate.
-    let elapsed = start_time.elapsed();
-    let mut total_stats = SearchStatistics::new(Algorithm::Hybrid);
-    total_stats.elapsed_time = elapsed;
-    for (_, s) in &worker_stats {
-        total_stats.candidates_evaluated += s.candidates_evaluated;
-        total_stats.candidates_pruned_by_cost += s.candidates_pruned_by_cost;
-        total_stats.candidates_passed_fast += s.candidates_passed_fast;
-        total_stats.smt_queries += s.smt_queries;
-        total_stats.smt_elapsed += s.smt_elapsed;
-        total_stats.smt_equivalent += s.smt_equivalent;
-        total_stats.iterations += s.iterations;
-        total_stats.accepted_proposals += s.accepted_proposals;
-        total_stats.improvements_found += s.improvements_found;
-    }
-    total_stats.original_cost = worker_stats
-        .iter()
-        .map(|(_, s)| s.original_cost)
-        .max()
-        .unwrap_or(0);
-    total_stats.best_cost_found = worker_stats
-        .iter()
-        .map(|(_, s)| s.best_cost_found)
-        .filter(|&c| c > 0)
-        .min()
-        .unwrap_or(total_stats.original_cost);
+    // Fold the per-worker statistics into the cross-worker aggregate. The
+    // reduce rules (counter sums, max original_cost, min-nonzero best_cost
+    // with fallback) live on SearchStatistics so they stay tested in one place
+    // and can't silently under-report when a counter is added.
+    let total_stats = SearchStatistics::aggregate_workers(&worker_stats, start_time.elapsed());
 
     // Finalise best_result.statistics with the winning worker's own
     // statistics so the CLI surfaces real SMT/improvement numbers rather
