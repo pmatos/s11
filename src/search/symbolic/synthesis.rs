@@ -312,6 +312,7 @@ where
     /// not strictly cheaper than `best_cost`, and otherwise runs the SMT check.
     /// On a cheaper, equivalent candidate it lowers `*best_cost` and returns the
     /// winner; the caller owns only candidate generation and verbose reporting.
+    #[allow(clippy::too_many_arguments)]
     fn evaluate_candidate(
         &mut self,
         target: &[I::Instruction],
