@@ -76,6 +76,25 @@ impl<I> SymbolicSearch<I> {
     }
 }
 
+/// Outcome of evaluating one enumerated candidate inside `search_at_length`.
+///
+/// Concentrates the cost-prune plus verification-accounting that was previously
+/// copy-pasted across the length-1 / length-2 / length->=3 branches, so the
+/// three can never drift in how they count `candidates_evaluated`,
+/// `candidates_pruned_by_cost`, or `improvements_found`. This is the symbolic
+/// analogue of the enumerative search's `evaluate_candidate` seam.
+#[derive(Debug)]
+enum CandidateEval<Insn> {
+    /// A stop (timeout / cooperative-cancel) was observed after costing the
+    /// candidate; the enclosing length loop must return its best-so-far.
+    Stopped,
+    /// Pruned by cost or refuted by SMT; keep enumerating.
+    Rejected,
+    /// New cheapest-at-length. Carries the winning candidate and its cost (for
+    /// the caller's verbose reporting); `best_cost` is already updated.
+    Improved { candidate: Vec<Insn>, cost: u64 },
+}
+
 impl<I> SymbolicSearch<I>
 where
     I: ISA + SymbolicBackend<I>,
@@ -175,28 +194,16 @@ where
                 }
 
                 let candidate = with_term(vec![*instr]);
-                let candidate_cost = <I as SymbolicBackend<I>>::sequence_cost(
-                    &candidate,
-                    &config.cost_metric,
-                    width,
-                );
-                if should_stop(config, start_time) {
-                    return best_at_length;
-                }
-
-                self.statistics.candidates_evaluated += 1;
-                if candidate_cost >= *best_cost {
-                    self.statistics.candidates_pruned_by_cost += 1;
-                    continue;
-                }
-
-                if self.verify_equivalence(target, &candidate, live_out, config) {
-                    *best_cost = candidate_cost;
-                    best_at_length = Some(candidate);
-                    self.statistics.improvements_found += 1;
-
-                    if config.verbose {
-                        println!("Found equivalent: {} (cost {})", instr, candidate_cost);
+                match self.evaluate_candidate(
+                    target, live_out, config, width, candidate, best_cost, start_time,
+                ) {
+                    CandidateEval::Stopped => return best_at_length,
+                    CandidateEval::Rejected => {}
+                    CandidateEval::Improved { candidate, cost } => {
+                        best_at_length = Some(candidate);
+                        if config.verbose {
+                            println!("Found equivalent: {} (cost {})", instr, cost);
+                        }
                     }
                 }
             }
@@ -214,31 +221,19 @@ where
                     }
 
                     let candidate = with_term(vec![*instr1, *instr2]);
-                    let candidate_cost = <I as SymbolicBackend<I>>::sequence_cost(
-                        &candidate,
-                        &config.cost_metric,
-                        width,
-                    );
-                    if should_stop(config, start_time) {
-                        return best_at_length;
-                    }
-
-                    self.statistics.candidates_evaluated += 1;
-                    if candidate_cost >= *best_cost {
-                        self.statistics.candidates_pruned_by_cost += 1;
-                        continue;
-                    }
-
-                    if self.verify_equivalence(target, &candidate, live_out, config) {
-                        *best_cost = candidate_cost;
-                        best_at_length = Some(candidate);
-                        self.statistics.improvements_found += 1;
-
-                        if config.verbose {
-                            println!(
-                                "Found equivalent: {}; {} (cost {})",
-                                instr1, instr2, candidate_cost
-                            );
+                    match self.evaluate_candidate(
+                        target, live_out, config, width, candidate, best_cost, start_time,
+                    ) {
+                        CandidateEval::Stopped => return best_at_length,
+                        CandidateEval::Rejected => {}
+                        CandidateEval::Improved { candidate, cost } => {
+                            best_at_length = Some(candidate);
+                            if config.verbose {
+                                println!(
+                                    "Found equivalent: {}; {} (cost {})",
+                                    instr1, instr2, cost
+                                );
+                            }
                         }
                     }
                 }
@@ -284,32 +279,19 @@ where
                             with_term(seq)
                         };
 
-                        let candidate_cost = <I as SymbolicBackend<I>>::sequence_cost(
-                            &candidate,
-                            &config.cost_metric,
-                            width,
-                        );
-                        if should_stop(config, start_time) {
-                            return best_at_length;
-                        }
-
-                        self.statistics.candidates_evaluated += 1;
-                        if candidate_cost >= *best_cost {
-                            self.statistics.candidates_pruned_by_cost += 1;
-                            count += 1;
-                            continue;
-                        }
-
-                        if self.verify_equivalence(target, &candidate, live_out, config) {
-                            *best_cost = candidate_cost;
-                            best_at_length = Some(candidate.clone());
-                            self.statistics.improvements_found += 1;
-
-                            if config.verbose {
-                                println!(
-                                    "Found equivalent sequence of length {} (cost {})",
-                                    length, candidate_cost
-                                );
+                        match self.evaluate_candidate(
+                            target, live_out, config, width, candidate, best_cost, start_time,
+                        ) {
+                            CandidateEval::Stopped => return best_at_length,
+                            CandidateEval::Rejected => {}
+                            CandidateEval::Improved { candidate, cost } => {
+                                best_at_length = Some(candidate);
+                                if config.verbose {
+                                    println!(
+                                        "Found equivalent sequence of length {} (cost {})",
+                                        length, cost
+                                    );
+                                }
                             }
                         }
 
@@ -320,6 +302,49 @@ where
         }
 
         best_at_length
+    }
+
+    /// Cost, prune, verify, and account for a single enumerated `candidate`.
+    ///
+    /// The one place the length branches converge: it costs the candidate,
+    /// honours a mid-evaluation stop (after the potentially-slow cost so a
+    /// cancel is observed promptly), counts the candidate, prunes it when it is
+    /// not strictly cheaper than `best_cost`, and otherwise runs the SMT check.
+    /// On a cheaper, equivalent candidate it lowers `*best_cost` and returns the
+    /// winner; the caller owns only candidate generation and verbose reporting.
+    #[allow(clippy::too_many_arguments)]
+    fn evaluate_candidate(
+        &mut self,
+        target: &[I::Instruction],
+        live_out: &<I as SymbolicBackend<I>>::LiveOut,
+        config: &SearchConfig,
+        width: u32,
+        candidate: Vec<I::Instruction>,
+        best_cost: &mut u64,
+        start_time: Instant,
+    ) -> CandidateEval<I::Instruction> {
+        let candidate_cost =
+            <I as SymbolicBackend<I>>::sequence_cost(&candidate, &config.cost_metric, width);
+        if should_stop(config, start_time) {
+            return CandidateEval::Stopped;
+        }
+
+        self.statistics.candidates_evaluated += 1;
+        if candidate_cost >= *best_cost {
+            self.statistics.candidates_pruned_by_cost += 1;
+            return CandidateEval::Rejected;
+        }
+
+        if self.verify_equivalence(target, &candidate, live_out, config) {
+            *best_cost = candidate_cost;
+            self.statistics.improvements_found += 1;
+            CandidateEval::Improved {
+                candidate,
+                cost: candidate_cost,
+            }
+        } else {
+            CandidateEval::Rejected
+        }
     }
 
     /// Verify equivalence using SMT
@@ -1689,5 +1714,135 @@ mod tests {
         assert_eq!(optimized.len(), 1);
         assert_ne!(optimized, target);
         assert!(result.statistics.original_cost > result.statistics.best_cost_found);
+    }
+
+    #[test]
+    fn evaluate_candidate_prunes_candidate_that_is_not_cheaper() {
+        let _guard = SYMBOLIC_INNER_LOOP_TEST_LOCK
+            .lock()
+            .expect("symbolic inner-loop test lock poisoned");
+        reset_symbolic_inner_loop_test_state();
+
+        let mut search: SymbolicSearch<TestIsa> = SymbolicSearch::new();
+        let config = SearchConfig::default();
+        let mut best_cost = 1;
+        // TestIsa::sequence_cost == seq.len(); a one-instruction candidate costs
+        // 1, which is not strictly cheaper than best_cost 1.
+        let outcome = search.evaluate_candidate(
+            &[TestInstruction(100)],
+            &(),
+            &config,
+            64,
+            vec![TestInstruction(0)],
+            &mut best_cost,
+            Instant::now(),
+        );
+
+        assert!(matches!(outcome, CandidateEval::Rejected));
+        assert_eq!(search.statistics.candidates_evaluated, 1);
+        assert_eq!(search.statistics.candidates_pruned_by_cost, 1);
+        assert_eq!(search.statistics.improvements_found, 0);
+        assert_eq!(best_cost, 1);
+        // Cost pruning must happen before any SMT query runs.
+        assert_eq!(TEST_EQUIVALENCE_CHECKS.load(Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn evaluate_candidate_records_cheaper_equivalent_as_improvement() {
+        let _guard = SYMBOLIC_INNER_LOOP_TEST_LOCK
+            .lock()
+            .expect("symbolic inner-loop test lock poisoned");
+        reset_symbolic_inner_loop_test_state();
+        // Make the first equivalence check report Equivalent.
+        TEST_EQUIVALENCE_EQUIVALENT_ON_CHECK.store(1, Ordering::SeqCst);
+
+        let mut search: SymbolicSearch<TestIsa> = SymbolicSearch::new();
+        let config = SearchConfig::default();
+        let mut best_cost = 5;
+        let outcome = search.evaluate_candidate(
+            &[TestInstruction(100)],
+            &(),
+            &config,
+            64,
+            vec![TestInstruction(0)],
+            &mut best_cost,
+            Instant::now(),
+        );
+
+        match outcome {
+            CandidateEval::Improved { candidate, cost } => {
+                assert_eq!(candidate, vec![TestInstruction(0)]);
+                assert_eq!(cost, 1);
+            }
+            other => panic!("expected Improved, got {other:?}"),
+        }
+        assert_eq!(best_cost, 1);
+        assert_eq!(search.statistics.candidates_evaluated, 1);
+        assert_eq!(search.statistics.candidates_pruned_by_cost, 0);
+        assert_eq!(search.statistics.improvements_found, 1);
+        assert_eq!(TEST_EQUIVALENCE_CHECKS.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn evaluate_candidate_rejects_cheaper_but_inequivalent_candidate() {
+        let _guard = SYMBOLIC_INNER_LOOP_TEST_LOCK
+            .lock()
+            .expect("symbolic inner-loop test lock poisoned");
+        reset_symbolic_inner_loop_test_state();
+        // Leave TEST_EQUIVALENCE_EQUIVALENT_ON_CHECK at 0 so no check is
+        // equivalent; the candidate is cheaper but refuted by SMT.
+
+        let mut search: SymbolicSearch<TestIsa> = SymbolicSearch::new();
+        let config = SearchConfig::default();
+        let mut best_cost = 5;
+        let outcome = search.evaluate_candidate(
+            &[TestInstruction(100)],
+            &(),
+            &config,
+            64,
+            vec![TestInstruction(0)],
+            &mut best_cost,
+            Instant::now(),
+        );
+
+        assert!(matches!(outcome, CandidateEval::Rejected));
+        // Cheaper than best_cost, so it is counted and SMT-checked, but not
+        // pruned and not recorded as an improvement.
+        assert_eq!(search.statistics.candidates_evaluated, 1);
+        assert_eq!(search.statistics.candidates_pruned_by_cost, 0);
+        assert_eq!(search.statistics.improvements_found, 0);
+        assert_eq!(best_cost, 5);
+        assert_eq!(TEST_EQUIVALENCE_CHECKS.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn evaluate_candidate_stops_before_counting_when_cancelled() {
+        let _guard = SYMBOLIC_INNER_LOOP_TEST_LOCK
+            .lock()
+            .expect("symbolic inner-loop test lock poisoned");
+        reset_symbolic_inner_loop_test_state();
+
+        let stop = Arc::new(AtomicBool::new(true));
+        let mut search: SymbolicSearch<TestIsa> = SymbolicSearch::new();
+        let config = SearchConfig::default().with_stop_flag(Arc::clone(&stop));
+        let mut best_cost = 5;
+        let outcome = search.evaluate_candidate(
+            &[TestInstruction(100)],
+            &(),
+            &config,
+            64,
+            vec![TestInstruction(0)],
+            &mut best_cost,
+            Instant::now(),
+        );
+
+        assert!(matches!(outcome, CandidateEval::Stopped));
+        // A stop observed after costing must not count the candidate, prune it,
+        // or run SMT.
+        assert_eq!(search.statistics.candidates_evaluated, 0);
+        assert_eq!(search.statistics.candidates_pruned_by_cost, 0);
+        assert_eq!(search.statistics.improvements_found, 0);
+        assert_eq!(best_cost, 5);
+        assert_eq!(TEST_EQUIVALENCE_CHECKS.load(Ordering::SeqCst), 0);
     }
 }
