@@ -258,7 +258,7 @@ fn verify_candidate<I>(
 where
     I: ISA + EnumerativeBackend<I>,
 {
-    let Some(smt_timeout) = candidate_solver_timeout(config, start) else {
+    let Some(smt_timeout) = config.solver_timeout_within_budget(start.elapsed()) else {
         // No millisecond-granularity SMT budget remains for this candidate, so
         // stop the whole parallel enumerative search rather than just this arm.
         shared.stop.store(true, Ordering::Relaxed);
@@ -395,29 +395,6 @@ where
             .expect("candidate pool must be populated")
             .instructions
     }
-}
-
-fn configured_solver_timeout(config: &SearchConfig) -> Duration {
-    config.solver_timeout.unwrap_or(Duration::from_secs(5))
-}
-
-fn candidate_solver_timeout_for_elapsed(
-    config: &SearchConfig,
-    elapsed: Duration,
-) -> Option<Duration> {
-    let solver_timeout = configured_solver_timeout(config);
-    let timeout = match config.timeout {
-        Some(search_timeout) => solver_timeout.min(search_timeout.checked_sub(elapsed)?),
-        None => solver_timeout,
-    };
-
-    // Z3 timeouts are configured in whole milliseconds; a sub-millisecond
-    // remainder cannot be represented usefully, so treat it as exhausted.
-    (timeout.as_millis() > 0).then_some(timeout)
-}
-
-fn candidate_solver_timeout(config: &SearchConfig, start: Instant) -> Option<Duration> {
-    candidate_solver_timeout_for_elapsed(config, start.elapsed())
 }
 
 fn evaluate_candidate<I>(
@@ -1763,56 +1740,6 @@ mod tests {
     }
 
     #[test]
-    fn candidate_solver_timeout_is_bounded_by_search_budget() {
-        let configured_solver = SearchConfig::default()
-            .with_timeout(std::time::Duration::from_secs(10))
-            .with_solver_timeout(std::time::Duration::from_millis(250));
-        assert_eq!(
-            candidate_solver_timeout_for_elapsed(
-                &configured_solver,
-                std::time::Duration::from_secs(1)
-            ),
-            Some(std::time::Duration::from_millis(250))
-        );
-
-        let capped_by_remaining_search = SearchConfig::default()
-            .with_timeout(std::time::Duration::from_millis(100))
-            .with_solver_timeout(std::time::Duration::from_secs(1));
-        assert_eq!(
-            candidate_solver_timeout_for_elapsed(
-                &capped_by_remaining_search,
-                std::time::Duration::from_millis(40)
-            ),
-            Some(std::time::Duration::from_millis(60))
-        );
-        assert_eq!(
-            candidate_solver_timeout_for_elapsed(
-                &capped_by_remaining_search,
-                std::time::Duration::from_millis(100)
-            ),
-            None
-        );
-        assert_eq!(
-            candidate_solver_timeout_for_elapsed(
-                &capped_by_remaining_search,
-                std::time::Duration::from_micros(99_500)
-            ),
-            None
-        );
-
-        let no_search_timeout = SearchConfig::default()
-            .with_timeout_option(None)
-            .with_solver_timeout_option(None);
-        assert_eq!(
-            candidate_solver_timeout_for_elapsed(
-                &no_search_timeout,
-                std::time::Duration::from_secs(999)
-            ),
-            Some(std::time::Duration::from_secs(5))
-        );
-    }
-
-    #[test]
     fn verify_candidate_stops_without_smt_when_search_budget_is_exhausted() {
         let target = vec![Instruction::MovImm {
             rd: Register::X0,
@@ -1998,7 +1925,7 @@ mod tests {
             &target,
             &candidate,
             &live_out,
-            configured_solver_timeout(&SearchConfig::default()),
+            SearchConfig::default().solver_timeout(),
         );
 
         assert_eq!(result.0, EquivalenceResult::Equivalent);
@@ -2007,7 +1934,7 @@ mod tests {
             &target,
             &candidate,
             &live_out.with_flags(true),
-            configured_solver_timeout(&SearchConfig::default()),
+            SearchConfig::default().solver_timeout(),
         );
 
         assert_ne!(flags_live_result.0, EquivalenceResult::Equivalent);

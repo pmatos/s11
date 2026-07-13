@@ -17,7 +17,7 @@ use crate::search::symbolic::backend::SymbolicBackend;
 use crate::search::{Algorithm, SearchAlgorithm};
 use std::marker::PhantomData;
 use std::sync::atomic::Ordering;
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 /// Whether the symbolic search loop should exit at the next checkpoint.
 ///
@@ -335,7 +335,7 @@ where
             return CandidateEval::Rejected;
         }
 
-        if self.verify_equivalence(target, &candidate, live_out, config) {
+        if self.verify_equivalence(target, &candidate, live_out, config, start_time) {
             *best_cost = candidate_cost;
             self.statistics.improvements_found += 1;
             CandidateEval::Improved {
@@ -354,8 +354,14 @@ where
         candidate: &[I::Instruction],
         live_out: &<I as SymbolicBackend<I>>::LiveOut,
         config: &SearchConfig,
+        start_time: Instant,
     ) -> bool {
-        let timeout = config.solver_timeout.unwrap_or(Duration::from_secs(5));
+        let Some(timeout) = config.solver_timeout_within_budget(start_time.elapsed()) else {
+            // No millisecond-granularity SMT budget remains: we cannot fund a
+            // query, so treat the candidate as unproven rather than hand Z3 a
+            // timeout it cannot honour.
+            return false;
+        };
         let width = <I as SymbolicBackend<I>>::width();
 
         let (verdict, metrics) = <I as SymbolicBackend<I>>::check_equivalence(
@@ -1354,7 +1360,13 @@ mod tests {
             width: crate::ir::RegisterWidth::X64,
         }];
 
-        assert!(search.verify_equivalence(&target, &candidate, &live_out, &config));
+        assert!(search.verify_equivalence(
+            &target,
+            &candidate,
+            &live_out,
+            &config,
+            std::time::Instant::now()
+        ));
     }
 
     #[test]
@@ -1373,7 +1385,13 @@ mod tests {
             imm: 1,
         }];
 
-        assert!(!search.verify_equivalence(&target, &candidate, &live_out, &config));
+        assert!(!search.verify_equivalence(
+            &target,
+            &candidate,
+            &live_out,
+            &config,
+            std::time::Instant::now()
+        ));
     }
 
     #[test]
@@ -1389,7 +1407,13 @@ mod tests {
         let target = [TestInstruction(1)];
         let candidate = [TestInstruction(2)];
 
-        assert!(!search.verify_equivalence(&target, &candidate, &(), &config));
+        assert!(!search.verify_equivalence(
+            &target,
+            &candidate,
+            &(),
+            &config,
+            std::time::Instant::now()
+        ));
 
         let stats = search.statistics();
         assert_eq!(stats.smt_queries, 1);
@@ -1409,9 +1433,38 @@ mod tests {
         let target = [TestInstruction(1)];
         let candidate = [TestInstruction(2)];
 
-        let _ = search.verify_equivalence(&target, &candidate, &(), &config);
+        let _ =
+            search.verify_equivalence(&target, &candidate, &(), &config, std::time::Instant::now());
 
         assert_eq!(TEST_RECORDED_TIMEOUT_MS.load(Ordering::SeqCst), 31);
+    }
+
+    #[test]
+    fn symbolic_smt_timeout_is_clamped_to_remaining_search_budget() {
+        let _guard = SYMBOLIC_INNER_LOOP_TEST_LOCK
+            .lock()
+            .expect("symbolic inner-loop test lock poisoned");
+        reset_symbolic_inner_loop_test_state();
+
+        // Solver timeout (30s) vastly exceeds the remaining search budget
+        // (50ms). The query handed to Z3 must be clamped to the budget rather
+        // than the full solver timeout — the behaviour this seam restores to
+        // the symbolic path.
+        let mut search: SymbolicSearch<TestIsa> = SymbolicSearch::new();
+        let config = SearchConfig::default()
+            .with_timeout(Duration::from_millis(50))
+            .with_solver_timeout(Duration::from_secs(30));
+        let target = [TestInstruction(1)];
+        let candidate = [TestInstruction(2)];
+
+        let _ =
+            search.verify_equivalence(&target, &candidate, &(), &config, std::time::Instant::now());
+
+        let recorded = TEST_RECORDED_TIMEOUT_MS.load(Ordering::SeqCst);
+        assert!(
+            (1..=50).contains(&recorded),
+            "solver timeout should be clamped to the ~50ms budget, got {recorded}ms",
+        );
     }
 
     #[test]
@@ -1427,12 +1480,24 @@ mod tests {
         reset_symbolic_inner_loop_test_state();
         let explicit_config =
             SearchConfig::default().with_solver_timeout(Duration::from_millis(17));
-        assert!(!search.verify_equivalence(&target, &candidate, &(), &explicit_config));
+        assert!(!search.verify_equivalence(
+            &target,
+            &candidate,
+            &(),
+            &explicit_config,
+            std::time::Instant::now()
+        ));
         assert_eq!(TEST_RECORDED_TIMEOUT_MS.load(Ordering::SeqCst), 17);
 
         reset_symbolic_inner_loop_test_state();
         let defaulted_config = SearchConfig::default().with_solver_timeout_option(None);
-        assert!(!search.verify_equivalence(&target, &candidate, &(), &defaulted_config));
+        assert!(!search.verify_equivalence(
+            &target,
+            &candidate,
+            &(),
+            &defaulted_config,
+            std::time::Instant::now()
+        ));
         assert_eq!(TEST_RECORDED_TIMEOUT_MS.load(Ordering::SeqCst), 5000);
     }
 
@@ -1449,7 +1514,13 @@ mod tests {
         let target = [TestInstruction(1)];
         let candidate = [TestInstruction(2)];
 
-        assert!(!search.verify_equivalence(&target, &candidate, &(), &config));
+        assert!(!search.verify_equivalence(
+            &target,
+            &candidate,
+            &(),
+            &config,
+            std::time::Instant::now()
+        ));
 
         let stats = search.statistics();
         assert_eq!(stats.smt_queries, 0);

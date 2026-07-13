@@ -31,7 +31,7 @@ use rand::{RngExt, SeedableRng};
 use rand_chacha::ChaCha8Rng;
 use std::marker::PhantomData;
 use std::sync::atomic::Ordering;
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 /// Stochastic search using MCMC-style proposals and Metropolis cost
 /// acceptance, generic over ISA.
@@ -161,7 +161,6 @@ where
         // tail, so length-change proposals only vary the prefix length.
         let min_length = 1 + terminator_len;
         let max_length = target.len();
-        let smt_timeout = config.solver_timeout.unwrap_or(Duration::from_secs(5));
 
         for iteration in 0..config.stochastic.iterations {
             self.statistics.iterations = iteration + 1;
@@ -241,6 +240,14 @@ where
 
             let mut smt_refuted = false;
             if proposal_cost < best_cost {
+                let Some(smt_timeout) = config.solver_timeout_within_budget(start_time.elapsed())
+                else {
+                    // No millisecond-granularity SMT budget remains, so the
+                    // overall search deadline is effectively reached; stop
+                    // rather than hand Z3 a timeout it cannot honour. Mirrors
+                    // the enumerative path.
+                    break;
+                };
                 let (verdict, metrics) = <I as StochasticBackend<I>>::check_equivalence(
                     target,
                     &proposal,
