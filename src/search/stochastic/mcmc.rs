@@ -743,6 +743,41 @@ mod tests {
     }
 
     #[test]
+    fn stochastic_smt_timeout_is_clamped_to_remaining_search_budget() {
+        // Solver timeout (30s) vastly exceeds the remaining search budget
+        // (50ms). The timeout handed to Z3 must be clamped to the budget rather
+        // than the full solver timeout — the deadline-respecting behaviour this
+        // seam restores to the MCMC path. Mirrors the symbolic backend's
+        // `symbolic_smt_timeout_is_clamped_to_remaining_search_budget`, using
+        // the deterministic `TimeoutProbeIsa` probe rather than wall-clock
+        // timing.
+        let (statistics, recorded_timeout) = run_timeout_probe_search_with(
+            SearchConfig::default()
+                .with_stochastic(
+                    StochasticConfig::default()
+                        .with_iterations(1)
+                        .with_test_count(0)
+                        .with_seed(1),
+                )
+                .with_timeout(Duration::from_millis(50))
+                .with_solver_timeout(Duration::from_secs(30)),
+            TIMEOUT_PROBE_EQUIVALENT,
+            true,
+        );
+
+        // The cheaper proposal still reaches the solver (the budget is not yet
+        // exhausted at ~0ms elapsed), so exactly one SMT query runs...
+        assert_eq!(statistics.smt_queries, 1);
+        // ...and the timeout it was handed is clamped to the ~50ms budget, not
+        // the 30s solver timeout.
+        let recorded = recorded_timeout.expect("an SMT query should have recorded a timeout");
+        assert!(
+            (1..=50).contains(&recorded),
+            "solver timeout should be clamped to the ~50ms budget, got {recorded}ms",
+        );
+    }
+
+    #[test]
     fn stochastic_search_falls_back_to_five_seconds_when_solver_timeout_unset() {
         let recorded_timeout = run_timeout_probe_search(
             SearchConfig::default()
