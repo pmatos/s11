@@ -311,7 +311,7 @@ fn verification_timeout_for_remaining(
     config: &SearchConfig,
     remaining: Duration,
 ) -> Option<Duration> {
-    let solver_timeout = config.solver_timeout.unwrap_or(Duration::from_secs(5));
+    let solver_timeout = config.solver_timeout();
     let timeout = remaining.min(solver_timeout);
     (timeout >= MIN_SMT_TIMEOUT).then_some(timeout)
 }

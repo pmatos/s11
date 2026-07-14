@@ -31,7 +31,7 @@ use rand::{RngExt, SeedableRng};
 use rand_chacha::ChaCha8Rng;
 use std::marker::PhantomData;
 use std::sync::atomic::Ordering;
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 /// Stochastic search using MCMC-style proposals and Metropolis cost
 /// acceptance, generic over ISA.
@@ -161,7 +161,6 @@ where
         // tail, so length-change proposals only vary the prefix length.
         let min_length = 1 + terminator_len;
         let max_length = target.len();
-        let smt_timeout = config.solver_timeout.unwrap_or(Duration::from_secs(5));
 
         for iteration in 0..config.stochastic.iterations {
             self.statistics.iterations = iteration + 1;
@@ -241,6 +240,14 @@ where
 
             let mut smt_refuted = false;
             if proposal_cost < best_cost {
+                let Some(smt_timeout) = config.solver_timeout_within_budget(start_time.elapsed())
+                else {
+                    // No millisecond-granularity SMT budget remains, so the
+                    // overall search deadline is effectively reached; stop
+                    // rather than hand Z3 a timeout it cannot honour. Mirrors
+                    // the enumerative path.
+                    break;
+                };
                 let (verdict, metrics) = <I as StochasticBackend<I>>::check_equivalence(
                     target,
                     &proposal,
@@ -733,6 +740,41 @@ mod tests {
         );
 
         assert_eq!(recorded_timeout, Some(17));
+    }
+
+    #[test]
+    fn stochastic_smt_timeout_is_clamped_to_remaining_search_budget() {
+        // Solver timeout (30s) vastly exceeds the remaining search budget
+        // (50ms). The timeout handed to Z3 must be clamped to the budget rather
+        // than the full solver timeout — the deadline-respecting behaviour this
+        // seam restores to the MCMC path. Mirrors the symbolic backend's
+        // `symbolic_smt_timeout_is_clamped_to_remaining_search_budget`, using
+        // the deterministic `TimeoutProbeIsa` probe rather than wall-clock
+        // timing.
+        let (statistics, recorded_timeout) = run_timeout_probe_search_with(
+            SearchConfig::default()
+                .with_stochastic(
+                    StochasticConfig::default()
+                        .with_iterations(1)
+                        .with_test_count(0)
+                        .with_seed(1),
+                )
+                .with_timeout(Duration::from_millis(50))
+                .with_solver_timeout(Duration::from_secs(30)),
+            TIMEOUT_PROBE_EQUIVALENT,
+            true,
+        );
+
+        // The cheaper proposal still reaches the solver (the budget is not yet
+        // exhausted at ~0ms elapsed), so exactly one SMT query runs...
+        assert_eq!(statistics.smt_queries, 1);
+        // ...and the timeout it was handed is clamped to the ~50ms budget, not
+        // the 30s solver timeout.
+        let recorded = recorded_timeout.expect("an SMT query should have recorded a timeout");
+        assert!(
+            (1..=50).contains(&recorded),
+            "solver timeout should be clamped to the ~50ms budget, got {recorded}ms",
+        );
     }
 
     #[test]

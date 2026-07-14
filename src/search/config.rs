@@ -487,6 +487,40 @@ impl SearchConfig {
         self.x86_same_count_code_size_allowed = allowed;
         self
     }
+
+    /// Per-query SMT solver timeout, resolving the fallback when unset.
+    ///
+    /// Single home for the fallback used when [`solver_timeout`] is `None`;
+    /// the search backends resolve the timeout here rather than each repeating
+    /// the literal. The fallback is `5s` — the value every backend used before
+    /// this seam existed; note it differs from the `30s` the default config
+    /// ships in the `Some` field, and only applies when a caller explicitly
+    /// clears the timeout.
+    ///
+    /// [`solver_timeout`]: Self::solver_timeout
+    pub fn solver_timeout(&self) -> Duration {
+        self.solver_timeout.unwrap_or(Duration::from_secs(5))
+    }
+
+    /// Per-query SMT solver timeout clamped to the remaining search budget.
+    ///
+    /// `elapsed` is how long the overall search has been running. The result
+    /// is [`solver_timeout`](Self::solver_timeout) capped at the time left
+    /// before [`timeout`](Self::timeout) elapses (unbounded when `timeout` is
+    /// `None`). Returns `None` when the budget is exhausted: Z3 timeouts are
+    /// configured in whole milliseconds, so a sub-millisecond remainder cannot
+    /// be represented usefully and is treated as exhausted.
+    ///
+    /// All SMT-driven backends resolve their per-query timeout here so the
+    /// budget-clamping rule cannot drift between them.
+    pub fn solver_timeout_within_budget(&self, elapsed: Duration) -> Option<Duration> {
+        let solver_timeout = self.solver_timeout();
+        let timeout = match self.timeout {
+            Some(search_timeout) => solver_timeout.min(search_timeout.checked_sub(elapsed)?),
+            None => solver_timeout,
+        };
+        (timeout.as_millis() > 0).then_some(timeout)
+    }
 }
 
 #[cfg(test)]
@@ -597,6 +631,90 @@ mod tests {
 
         let unset = SearchConfig::default().with_solver_timeout_option(None);
         assert_eq!(unset.solver_timeout, None);
+    }
+
+    #[test]
+    fn solver_timeout_resolves_default_fallback() {
+        // Default config ships an explicit solver timeout.
+        assert_eq!(
+            SearchConfig::default().solver_timeout(),
+            Duration::from_secs(30)
+        );
+        // An explicit value is returned verbatim.
+        assert_eq!(
+            SearchConfig::default()
+                .with_solver_timeout(Duration::from_millis(250))
+                .solver_timeout(),
+            Duration::from_millis(250)
+        );
+        // When unset, the shared fallback is 5s (the value every backend used).
+        assert_eq!(
+            SearchConfig::default()
+                .with_solver_timeout_option(None)
+                .solver_timeout(),
+            Duration::from_secs(5)
+        );
+    }
+
+    #[test]
+    fn solver_timeout_within_budget_clamps_to_remaining_search_time() {
+        // Solver timeout below the remaining budget is used unchanged.
+        let solver_smaller = SearchConfig::default()
+            .with_timeout(Duration::from_secs(10))
+            .with_solver_timeout(Duration::from_millis(250));
+        assert_eq!(
+            solver_smaller.solver_timeout_within_budget(Duration::from_secs(1)),
+            Some(Duration::from_millis(250))
+        );
+
+        // Solver timeout larger than the remaining budget is clamped down.
+        let capped = SearchConfig::default()
+            .with_timeout(Duration::from_millis(100))
+            .with_solver_timeout(Duration::from_secs(1));
+        assert_eq!(
+            capped.solver_timeout_within_budget(Duration::from_millis(40)),
+            Some(Duration::from_millis(60))
+        );
+
+        // Exactly-exhausted budget yields None.
+        assert_eq!(
+            capped.solver_timeout_within_budget(Duration::from_millis(100)),
+            None
+        );
+
+        // A sub-millisecond remainder cannot be represented as a Z3 timeout,
+        // so it is treated as exhausted.
+        assert_eq!(
+            capped.solver_timeout_within_budget(Duration::from_micros(99_500)),
+            None
+        );
+
+        // Over-elapsed (elapsed beyond the deadline) is also exhausted.
+        assert_eq!(
+            capped.solver_timeout_within_budget(Duration::from_millis(250)),
+            None
+        );
+    }
+
+    #[test]
+    fn solver_timeout_within_budget_is_unbounded_without_search_timeout() {
+        // No overall timeout: the resolved solver timeout is returned as-is
+        // regardless of elapsed time, falling back to 5s when unset.
+        let unbounded = SearchConfig::default()
+            .with_timeout_option(None)
+            .with_solver_timeout_option(None);
+        assert_eq!(
+            unbounded.solver_timeout_within_budget(Duration::from_secs(999)),
+            Some(Duration::from_secs(5))
+        );
+
+        let unbounded_explicit = SearchConfig::default()
+            .with_timeout_option(None)
+            .with_solver_timeout(Duration::from_secs(30));
+        assert_eq!(
+            unbounded_explicit.solver_timeout_within_budget(Duration::from_secs(999)),
+            Some(Duration::from_secs(30))
+        );
     }
 
     #[test]
