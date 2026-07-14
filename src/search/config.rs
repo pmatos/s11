@@ -165,15 +165,30 @@ impl Default for MutationWeights {
 }
 
 impl MutationWeights {
-    /// Get cumulative thresholds for random selection
-    pub fn cumulative_thresholds(&self) -> [f64; 4] {
+    /// Bucket a uniform draw `r ∈ [0, 1)` into one of the four mutation
+    /// categories, indexed in `MutationType` order: 0 = operand, 1 = opcode,
+    /// 2 = swap, 3 = instruction. A category is chosen with probability
+    /// proportional to its weight.
+    ///
+    /// Degenerate all-zero weights (total ≤ 0) collapse the whole interval
+    /// onto the last bucket instead of dividing by zero into NaN thresholds.
+    pub fn select_index(&self, r: f64) -> usize {
         let total = self.operand + self.opcode + self.swap + self.instruction;
-        [
-            self.operand / total,
-            (self.operand + self.opcode) / total,
-            (self.operand + self.opcode + self.swap) / total,
-            1.0,
-        ]
+        if total <= 0.0 {
+            return 3;
+        }
+        let t0 = self.operand / total;
+        let t1 = (self.operand + self.opcode) / total;
+        let t2 = (self.operand + self.opcode + self.swap) / total;
+        if r < t0 {
+            0
+        } else if r < t1 {
+            1
+        } else if r < t2 {
+            2
+        } else {
+            3
+        }
     }
 }
 
@@ -592,14 +607,74 @@ mod tests {
     }
 
     #[test]
-    fn test_mutation_weights_cumulative() {
-        let weights = MutationWeights::default();
-        let thresholds = weights.cumulative_thresholds();
+    fn select_index_partitions_unit_interval_by_weight() {
+        // Equal weights split [0, 1) into exact quarters (0.25/0.5/0.75 are
+        // all representable in f64), so bucket boundaries are unambiguous.
+        let weights = MutationWeights {
+            operand: 1.0,
+            opcode: 1.0,
+            swap: 1.0,
+            instruction: 1.0,
+        };
+        assert_eq!(weights.select_index(0.0), 0);
+        assert_eq!(weights.select_index(0.24), 0);
+        assert_eq!(weights.select_index(0.25), 1);
+        assert_eq!(weights.select_index(0.49), 1);
+        assert_eq!(weights.select_index(0.50), 2);
+        assert_eq!(weights.select_index(0.74), 2);
+        assert_eq!(weights.select_index(0.75), 3);
+        assert_eq!(weights.select_index(0.999), 3);
+    }
 
-        assert!(thresholds[0] > 0.0);
-        assert!(thresholds[0] < thresholds[1]);
-        assert!(thresholds[1] < thresholds[2]);
-        assert!((thresholds[3] - 1.0).abs() < 1e-10);
+    #[test]
+    fn select_index_default_weights_keep_operand_first() {
+        // Defaults: operand 0.50, opcode 0.16, swap 0.16, instruction 0.18
+        // (sum 1.0), so cutoffs sit at 0.50 / 0.66 / 0.82.
+        let weights = MutationWeights::default();
+        assert_eq!(weights.select_index(0.0), 0);
+        assert_eq!(weights.select_index(0.49), 0);
+        assert_eq!(weights.select_index(0.60), 1);
+        assert_eq!(weights.select_index(0.70), 2);
+        assert_eq!(weights.select_index(0.90), 3);
+    }
+
+    #[test]
+    fn select_index_honours_skewed_weights() {
+        // All mass on operand: every draw in [0, 1) buckets to operand (0).
+        let weights = MutationWeights {
+            operand: 1.0,
+            opcode: 0.0,
+            swap: 0.0,
+            instruction: 0.0,
+        };
+        assert_eq!(weights.select_index(0.0), 0);
+        assert_eq!(weights.select_index(0.5), 0);
+        assert_eq!(weights.select_index(0.999), 0);
+
+        // All mass on swap: every draw buckets to swap (2).
+        let swap_only = MutationWeights {
+            operand: 0.0,
+            opcode: 0.0,
+            swap: 1.0,
+            instruction: 0.0,
+        };
+        assert_eq!(swap_only.select_index(0.0), 2);
+        assert_eq!(swap_only.select_index(0.999), 2);
+    }
+
+    #[test]
+    fn select_index_with_zero_total_is_defined() {
+        // Degenerate all-zero weights must stay well-defined (no NaN from a
+        // divide-by-zero); the whole interval collapses to the last bucket.
+        let weights = MutationWeights {
+            operand: 0.0,
+            opcode: 0.0,
+            swap: 0.0,
+            instruction: 0.0,
+        };
+        assert_eq!(weights.select_index(0.0), 3);
+        assert_eq!(weights.select_index(0.5), 3);
+        assert_eq!(weights.select_index(0.999), 3);
     }
 
     #[test]

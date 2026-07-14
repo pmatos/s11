@@ -1576,16 +1576,12 @@ impl crate::isa::traits::ISAMutator<X86Instruction> for X86Mutator {
             return sequence.to_vec();
         }
         let mut out = sequence.to_vec();
-        let thresholds = self.weights.cumulative_thresholds();
         let r: f64 = rng.random();
-        if r < thresholds[0] {
-            self.mutate_operand(rng, &mut out);
-        } else if r < thresholds[1] {
-            self.mutate_opcode(rng, &mut out);
-        } else if r < thresholds[2] {
-            self.mutate_swap(rng, &mut out);
-        } else {
-            self.mutate_instruction(rng, &mut out);
+        match self.weights.select_index(r) {
+            0 => self.mutate_operand(rng, &mut out),
+            1 => self.mutate_opcode(rng, &mut out),
+            2 => self.mutate_swap(rng, &mut out),
+            _ => self.mutate_instruction(rng, &mut out),
         }
         out
     }
