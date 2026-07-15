@@ -1271,6 +1271,31 @@ fn live_out_for_optimization_prefix(
     LiveOut::from_registers(live_registers).with_flags(flags_live)
 }
 
+/// Shared base `SearchConfig` for the AArch64 stochastic/enumerative/hybrid/
+/// symbolic/LLM builders. Sets the fields every AArch64 algorithm configures
+/// identically — cost metric, overall and SMT solver timeouts, verbosity, and
+/// the register + immediate pools — so each builder only layers on its
+/// algorithm-specific pieces. Mirrors `build_x86_base_search_config`.
+///
+/// Issue #243 was exactly the failure this base prevents: a per-algorithm
+/// config that hand-rolls these fields inline can silently drop one (the CLI
+/// once forgot to propagate `options.timeout` into the hybrid config, leaving
+/// workers on the default 60 s timeout). Routing every builder through one
+/// base means no algorithm arm can omit a shared field.
+fn build_aarch64_base_search_config(
+    options: &OptimizationOptions,
+    available_registers: Vec<Register>,
+    available_immediates: Vec<i64>,
+) -> SearchConfig {
+    SearchConfig::default()
+        .with_cost_metric(options.cost_metric)
+        .with_solver_timeout(options.solver_timeout)
+        .with_timeout_option(options.timeout)
+        .with_verbose(options.verbose)
+        .with_registers(available_registers)
+        .with_immediates(available_immediates)
+}
+
 fn build_stochastic_search_config(
     options: &OptimizationOptions,
     available_registers: Vec<Register>,
@@ -1281,14 +1306,8 @@ fn build_stochastic_search_config(
         .with_iterations(options.iterations)
         .with_seed_option(options.seed);
 
-    SearchConfig::default()
+    build_aarch64_base_search_config(options, available_registers, available_immediates)
         .with_stochastic(stochastic_config)
-        .with_solver_timeout(options.solver_timeout)
-        .with_cost_metric(options.cost_metric)
-        .with_timeout_option(options.timeout)
-        .with_verbose(options.verbose)
-        .with_registers(available_registers)
-        .with_immediates(available_immediates)
 }
 
 fn build_enumerative_search_config(
@@ -1296,13 +1315,7 @@ fn build_enumerative_search_config(
     available_registers: Vec<Register>,
     available_immediates: Vec<i64>,
 ) -> SearchConfig {
-    SearchConfig::default()
-        .with_cost_metric(options.cost_metric)
-        .with_solver_timeout(options.solver_timeout)
-        .with_timeout_option(options.timeout)
-        .with_verbose(options.verbose)
-        .with_registers(available_registers)
-        .with_immediates(available_immediates)
+    build_aarch64_base_search_config(options, available_registers, available_immediates)
         .with_cores(options.cores)
 }
 
@@ -1314,7 +1327,8 @@ fn build_enumerative_search_config(
 /// even when the user passed a smaller `--timeout`. The coordinator-level
 /// `ParallelConfig::timeout` still acts as the primary deadline (now wired
 /// through `SharedBest::should_stop`); the search-config timeout is a
-/// per-worker backstop in case the coordinator itself stalls.
+/// per-worker backstop in case the coordinator itself stalls. The `--timeout`
+/// propagation is now inherited from `build_aarch64_base_search_config`.
 fn build_hybrid_search_config(
     options: &OptimizationOptions,
     available_registers: Vec<Register>,
@@ -1326,15 +1340,37 @@ fn build_hybrid_search_config(
 
     let symbolic_config = SymbolicConfig::default().with_search_mode(options.search_mode);
 
-    SearchConfig::default()
+    build_aarch64_base_search_config(options, available_registers, available_immediates)
         .with_stochastic(stochastic_config)
         .with_symbolic(symbolic_config)
-        .with_solver_timeout(options.solver_timeout)
-        .with_cost_metric(options.cost_metric)
-        .with_verbose(options.verbose)
-        .with_registers(available_registers)
-        .with_immediates(available_immediates)
-        .with_timeout_option(options.timeout)
+}
+
+/// Build the `SearchConfig` for AArch64 symbolic (SMT) search: the shared base
+/// plus the symbolic search mode.
+fn build_symbolic_search_config(
+    options: &OptimizationOptions,
+    available_registers: Vec<Register>,
+    available_immediates: Vec<i64>,
+) -> SearchConfig {
+    let symbolic_config = SymbolicConfig::default().with_search_mode(options.search_mode);
+
+    build_aarch64_base_search_config(options, available_registers, available_immediates)
+        .with_symbolic(symbolic_config)
+}
+
+/// Build the `SearchConfig` for AArch64 LLM-assisted (Codex) search: the shared
+/// base plus the Codex model and call budget.
+fn build_llm_search_config(
+    options: &OptimizationOptions,
+    available_registers: Vec<Register>,
+    available_immediates: Vec<i64>,
+) -> SearchConfig {
+    let llm = LlmConfig::default()
+        .with_max_codex_calls(options.llm_max_calls)
+        .with_model(options.llm_model.clone());
+
+    build_aarch64_base_search_config(options, available_registers, available_immediates)
+        .with_llm(llm)
 }
 
 /// Shared base `SearchConfig` for the x86 stochastic/symbolic/enumerative
@@ -1492,16 +1528,8 @@ fn run_optimization(
             println!("  Search mode: {:?}", options.search_mode);
             println!("  Solver timeout: {:?}", options.solver_timeout);
 
-            let symbolic_config = SymbolicConfig::default().with_search_mode(options.search_mode);
-
-            let config = SearchConfig::default()
-                .with_symbolic(symbolic_config)
-                .with_solver_timeout(options.solver_timeout)
-                .with_cost_metric(options.cost_metric)
-                .with_timeout_option(options.timeout)
-                .with_verbose(options.verbose)
-                .with_registers(available_registers)
-                .with_immediates(available_immediates);
+            let config =
+                build_symbolic_search_config(options, available_registers, available_immediates);
 
             let mut search: SymbolicSearch<isa::AArch64> = SymbolicSearch::new();
             let result: search::result::SearchResult =
@@ -1520,18 +1548,8 @@ fn run_optimization(
             println!("  Model: {}", options.llm_model);
             println!("  Max codex calls: {}", options.llm_max_calls);
 
-            let llm = LlmConfig::default()
-                .with_max_codex_calls(options.llm_max_calls)
-                .with_model(options.llm_model.clone());
-
-            let config = SearchConfig::default()
-                .with_cost_metric(options.cost_metric)
-                .with_solver_timeout(options.solver_timeout)
-                .with_timeout_option(options.timeout)
-                .with_verbose(options.verbose)
-                .with_registers(available_registers)
-                .with_immediates(available_immediates)
-                .with_llm(llm);
+            let config =
+                build_llm_search_config(options, available_registers, available_immediates);
 
             let mut search = search::llm::LlmSearch::new();
             let result = search.search(prefix, &live_out, &config);
@@ -5348,6 +5366,85 @@ mod cli_helper_tests {
         assert!(config.verbose);
         assert_eq!(config.available_registers, regs);
         assert_eq!(config.available_immediates, imms);
+    }
+
+    #[test]
+    fn build_aarch64_base_search_config_sets_shared_fields_only() {
+        // The base seam sets exactly the fields every AArch64 algorithm shares
+        // — cost metric, overall + SMT solver timeouts, verbosity, and the
+        // register/immediate pools — and applies no algorithm-specific layer,
+        // so `cores` (the enumerative layer) stays at its default.
+        let mut opts = options_for(Algorithm::Enumerative);
+        opts.timeout = Some(Duration::from_millis(8));
+        opts.solver_timeout = Duration::from_millis(12);
+        opts.cost_metric = CostMetric::CodeSize;
+        opts.verbose = true;
+
+        let regs = vec![Register::X2, Register::X5];
+        let imms = vec![3, 4, 9];
+        let config = build_aarch64_base_search_config(&opts, regs.clone(), imms.clone());
+
+        assert_eq!(config.timeout, Some(Duration::from_millis(8)));
+        assert_eq!(config.solver_timeout, Some(Duration::from_millis(12)));
+        assert_eq!(config.cost_metric, CostMetric::CodeSize);
+        assert!(config.verbose);
+        assert_eq!(config.available_registers, regs);
+        assert_eq!(config.available_immediates, imms);
+        // No algorithm layer applied: cores is left at the SearchConfig default.
+        assert_eq!(config.cores, SearchConfig::default().cores);
+    }
+
+    /// Regression for issue #243, generalised: every AArch64 algorithm builder
+    /// must propagate the shared base fields (`--timeout`, `--solver-timeout`,
+    /// cost metric, verbosity, register/immediate pools) identically. They all
+    /// route through `build_aarch64_base_search_config`, so a future arm cannot
+    /// silently drop one the way the hybrid path once dropped `--timeout`.
+    #[test]
+    fn aarch64_algorithm_builders_share_one_base_config() {
+        let mut opts = options_for(Algorithm::Hybrid);
+        opts.timeout = Some(Duration::from_millis(21));
+        opts.solver_timeout = Duration::from_millis(19);
+        opts.cost_metric = CostMetric::Latency;
+        opts.verbose = true;
+
+        let regs = vec![Register::X0, Register::X3];
+        let imms = vec![0, 5, 42];
+
+        let assert_base = |config: &SearchConfig| {
+            assert_eq!(config.timeout, Some(Duration::from_millis(21)));
+            assert_eq!(config.solver_timeout, Some(Duration::from_millis(19)));
+            assert_eq!(config.cost_metric, CostMetric::Latency);
+            assert!(config.verbose);
+            assert_eq!(config.available_registers, regs);
+            assert_eq!(config.available_immediates, imms);
+        };
+
+        assert_base(&build_aarch64_base_search_config(
+            &opts,
+            regs.clone(),
+            imms.clone(),
+        ));
+        assert_base(&build_stochastic_search_config(
+            &opts,
+            regs.clone(),
+            imms.clone(),
+        ));
+        assert_base(&build_enumerative_search_config(
+            &opts,
+            regs.clone(),
+            imms.clone(),
+        ));
+        assert_base(&build_hybrid_search_config(
+            &opts,
+            regs.clone(),
+            imms.clone(),
+        ));
+        assert_base(&build_symbolic_search_config(
+            &opts,
+            regs.clone(),
+            imms.clone(),
+        ));
+        assert_base(&build_llm_search_config(&opts, regs.clone(), imms.clone()));
     }
 
     #[test]
