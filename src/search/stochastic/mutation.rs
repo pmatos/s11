@@ -156,17 +156,12 @@ impl Mutator {
 
     /// Select a mutation type based on weights
     pub fn select_mutation_type<R: RngExt>(&self, rng: &mut R) -> MutationType {
-        let thresholds = self.weights.cumulative_thresholds();
         let r: f64 = rng.random();
-
-        if r < thresholds[0] {
-            MutationType::Operand
-        } else if r < thresholds[1] {
-            MutationType::Opcode
-        } else if r < thresholds[2] {
-            MutationType::Swap
-        } else {
-            MutationType::Instruction
+        match self.weights.select_index(r) {
+            0 => MutationType::Operand,
+            1 => MutationType::Opcode,
+            2 => MutationType::Swap,
+            _ => MutationType::Instruction,
         }
     }
 
@@ -3496,6 +3491,58 @@ mod tests {
         assert!(opcode_count > 0);
         assert!(swap_count > 0);
         assert!(instr_count > 0);
+    }
+
+    #[test]
+    fn select_mutation_type_maps_each_weight_bucket_to_its_variant() {
+        // Concentrating all weight on one category forces `select_index` to
+        // that bucket for every draw, which pins the bucket-index -> variant
+        // mapping regardless of the RNG stream.
+        let cases = [
+            (
+                MutationWeights {
+                    operand: 1.0,
+                    opcode: 0.0,
+                    swap: 0.0,
+                    instruction: 0.0,
+                },
+                MutationType::Operand,
+            ),
+            (
+                MutationWeights {
+                    operand: 0.0,
+                    opcode: 1.0,
+                    swap: 0.0,
+                    instruction: 0.0,
+                },
+                MutationType::Opcode,
+            ),
+            (
+                MutationWeights {
+                    operand: 0.0,
+                    opcode: 0.0,
+                    swap: 1.0,
+                    instruction: 0.0,
+                },
+                MutationType::Swap,
+            ),
+            (
+                MutationWeights {
+                    operand: 0.0,
+                    opcode: 0.0,
+                    swap: 0.0,
+                    instruction: 1.0,
+                },
+                MutationType::Instruction,
+            ),
+        ];
+        let mut rng = rand::rng();
+        for (weights, expected) in cases {
+            let mutator = Mutator::new(vec![Register::X0], vec![0], weights);
+            for _ in 0..64 {
+                assert_eq!(mutator.select_mutation_type(&mut rng), expected);
+            }
+        }
     }
 
     #[test]
