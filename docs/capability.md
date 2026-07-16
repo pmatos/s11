@@ -105,6 +105,10 @@ Rewritable straight-line mnemonic families:
 - Load effective address: `lea` (register-base + displacement only)
 - Conditional moves: `cmov<cond>`
 
+Synthesizable-only pseudo-instruction families:
+
+- Conditional full-width sets: `set<cond>`
+
 The data-movement/arithmetic/logical/comparison families have register and
 immediate forms where the x86 IR models them. `cmp` and `test` are
 flag-setting: each discards its result and writes only EFLAGS (`cmp` from a
@@ -145,15 +149,28 @@ register-base + displacement form, `lea rd, [base + disp]`, computing
 `rd = base + disp` (wrapping at width). It is non-destructive (`base` is read,
 `rd` is purely written, like `mov`) and affects NO flags. The index*scale
 (`[base + index*scale + disp]`) and RIP/EIP-relative addressing forms are
-deferred and rejected as unsupported shapes. `cmov<cond>` has register operands
-and reads EFLAGS without modifying them.
+deferred and rejected as unsupported shapes. `cmov<cond>` reads EFLAGS without
+modifying them and has two register operands. The synthesizable-only
+`set<cond>` pseudo-family also reads EFLAGS without modifying them and uses the
+interim native-width abstraction `rd = zext(condition)`: the IR, concrete
+interpreter, and SMT lowering fully overwrite `rd` with 0 or 1. Candidate
+assembly emits architectural byte `SETcc` followed by same-register `MOVZX`
+into the 32-bit destination; that destination write also clears bits 63:32 in
+x86-64, so the emitted pair matches the full-width IR semantics.
 
 The x86 IR does not yet carry operand width. To avoid rewriting partial-width
 operations as full-width operations, the binary optimization path currently
 accepts only mode-width register aliases: `rax`/`r8`-style 64-bit names for
-x86-64, and `eax`-style 32-bit i386 names for x86-32. x86-64 `eax`/`ax`/`al`
-forms, x86-32 `ax`/`al` forms, and x86-32 extended-register aliases such as
-`r8d` are rejected until operand width is represented end to end.
+x86-64, and `eax`-style 32-bit i386 names for x86-32. Architectural byte SETcc
+from ELF input is rejected until #75 rather than lifted into the full-width
+pseudo-IR. Width-agnostic text accepts only the pseudo-family's canonical
+full-register spelling (`setne rax`, for example), not byte/word/dword aliases.
+In x86-32, synthesized SETcc remains limited to destinations backed by
+`al`/`cl`/`dl`/`bl`, because byte-register encoding slots 4–7 name the legacy
+high-byte registers without a REX prefix. Other instructions using x86-64
+`eax`/`ax`/`al` forms, x86-32 `ax`/`al` forms, or x86-32 extended-register
+aliases such as `r8d` are rejected until operand width is represented end to
+end.
 
 Fixed control-flow terminators:
 

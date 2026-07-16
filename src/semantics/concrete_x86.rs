@@ -75,6 +75,10 @@ pub fn apply_instruction_concrete_x86(
             }
             // CMOV does not write EFLAGS regardless of the branch taken.
         }
+        X86Instruction::Setcc { rd, cond } => {
+            let value = u64::from(state.get_flags().evaluate(*cond));
+            state.set_register(*rd, ConcreteValue::new(value));
+        }
         // Jcc transfers control; PC is unmodelled and the search peels
         // it off via `split_terminator_x86`. Treat as a no-op for
         // safety if a stray Jcc reaches the concrete executor.
@@ -1471,6 +1475,135 @@ mod tests {
     }
 
     // --- CMOVcc concrete semantics ---
+
+    #[test]
+    fn setcc_materializes_every_condition_and_preserves_flags() {
+        use crate::isa::x86::X86Condition;
+
+        fn flags(cf: bool, pf: bool, zf: bool, sf: bool, of: bool) -> Eflags {
+            Eflags {
+                cf,
+                pf,
+                af: false,
+                zf,
+                sf,
+                of,
+            }
+        }
+
+        let cases = [
+            (
+                X86Condition::E,
+                flags(false, false, true, false, false),
+                flags(false, false, false, false, false),
+            ),
+            (
+                X86Condition::NE,
+                flags(false, false, false, false, false),
+                flags(false, false, true, false, false),
+            ),
+            (
+                X86Condition::B,
+                flags(true, false, false, false, false),
+                flags(false, false, false, false, false),
+            ),
+            (
+                X86Condition::AE,
+                flags(false, false, false, false, false),
+                flags(true, false, false, false, false),
+            ),
+            (
+                X86Condition::BE,
+                flags(true, false, false, false, false),
+                flags(false, false, false, false, false),
+            ),
+            (
+                X86Condition::A,
+                flags(false, false, false, false, false),
+                flags(true, false, false, false, false),
+            ),
+            (
+                X86Condition::L,
+                flags(false, false, false, true, false),
+                flags(false, false, false, false, false),
+            ),
+            (
+                X86Condition::GE,
+                flags(false, false, false, true, true),
+                flags(false, false, false, true, false),
+            ),
+            (
+                X86Condition::LE,
+                flags(false, false, true, false, false),
+                flags(false, false, false, false, false),
+            ),
+            (
+                X86Condition::G,
+                flags(false, false, false, true, true),
+                flags(false, false, true, false, false),
+            ),
+            (
+                X86Condition::S,
+                flags(false, false, false, true, false),
+                flags(false, false, false, false, false),
+            ),
+            (
+                X86Condition::NS,
+                flags(false, false, false, false, false),
+                flags(false, false, false, true, false),
+            ),
+            (
+                X86Condition::O,
+                flags(false, false, false, false, true),
+                flags(false, false, false, false, false),
+            ),
+            (
+                X86Condition::NO,
+                flags(false, false, false, false, false),
+                flags(false, false, false, false, true),
+            ),
+            (
+                X86Condition::P,
+                flags(false, true, false, false, false),
+                flags(false, false, false, false, false),
+            ),
+            (
+                X86Condition::NP,
+                flags(false, false, false, false, false),
+                flags(false, true, false, false, false),
+            ),
+        ];
+
+        for width in [32, 64] {
+            for (cond, true_flags, false_flags) in cases {
+                for (input_flags, expected) in [(true_flags, 1), (false_flags, 0)] {
+                    let mut state = X86ConcreteMachineState::new_zeroed(width);
+                    state.set_register(X86Register::RAX, ConcreteValue::new(u64::MAX));
+                    state.set_flags(input_flags);
+
+                    let after = apply_instruction_concrete_x86(
+                        state,
+                        &X86Instruction::Setcc {
+                            rd: X86Register::RAX,
+                            cond,
+                        },
+                    );
+                    assert_eq!(
+                        after.get_register(X86Register::RAX).as_u64(),
+                        expected,
+                        "x86-{width} SET{} result",
+                        cond.suffix()
+                    );
+                    assert_eq!(
+                        after.get_flags(),
+                        input_flags,
+                        "x86-{width} SET{} modified EFLAGS",
+                        cond.suffix()
+                    );
+                }
+            }
+        }
+    }
 
     #[test]
     fn cmov_when_condition_true_writes_source() {

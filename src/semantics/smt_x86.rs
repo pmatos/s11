@@ -624,6 +624,12 @@ pub fn apply_instruction(
             let rd_old = state.get_register(*rd).clone();
             state.set_register(*rd, pred.ite(&rs_val, &rd_old));
         }
+        X86Instruction::Setcc { rd, cond } => {
+            let pred = x86_condition_to_smt(*cond, state.get_flags());
+            let one = BV::from_u64(1, state.width());
+            let zero = BV::from_u64(0, state.width());
+            state.set_register(*rd, pred.ite(&one, &zero));
+        }
         // Jcc reads EFLAGS but transfers control; nothing is observable
         // in the data-state machine modelled here. Cycle 10 peels Jccs
         // off the sequence before applying it symbolically.
