@@ -1206,7 +1206,13 @@ fn find_candidate_windows_with_backend<B: ElfOptimizationBackend>(
                     run_start.get_or_insert(instruction.address());
                     run_end = instruction_end;
                 }
-                Ok(CandidateInstructionDisposition::Terminator) | Err(_) => {
+                Ok(CandidateInstructionDisposition::Terminator) => {
+                    if run_start.is_some() {
+                        run_end = instruction_end;
+                    }
+                    flush_candidate_run(&mut candidates, &mut run_start, run_end);
+                }
+                Err(_) => {
                     flush_candidate_run(&mut candidates, &mut run_start, run_end);
                 }
             }
@@ -4327,6 +4333,39 @@ mod cli_helper_tests {
         assert_eq!(sections[0].candidates[0].end, 0x1004);
         assert_eq!(sections[0].candidates[1].start, 0x1008);
         assert_eq!(sections[0].candidates[1].end, 0x100c);
+    }
+
+    #[test]
+    fn candidate_windows_hold_supported_terminator_only_at_end() {
+        // add rax, 1; je +0; sub rbx, 1
+        let text = [0x48, 0x83, 0xc0, 0x01, 0x74, 0x00, 0x48, 0x83, 0xeb, 0x01];
+        let terminator_only = [0x74, 0x00]; // je +0
+        let elf_bytes = build_elf64_with_executable_sections(
+            &[
+                (".text", &text, 0x1000),
+                (".terminator", &terminator_only, 0x2000),
+            ],
+            elf::abi::EM_X86_64,
+        );
+        let input = TempFile::new_bytes("s11-candidate-terminators", "elf", &elf_bytes);
+        let patcher = ElfPatcher::new(input.path()).expect("x86-64 ELF should parse");
+
+        let sections =
+            find_candidate_windows(&patcher).expect("candidate discovery should succeed");
+
+        assert_eq!(sections.len(), 2);
+        assert_eq!(sections[0].candidates.len(), 2);
+        assert_eq!(sections[0].candidates[0].start, 0x1000);
+        assert_eq!(
+            sections[0].candidates[0].end, 0x1006,
+            "the Jcc may appear only as the first run's held-fixed final instruction"
+        );
+        assert_eq!(sections[0].candidates[1].start, 0x1006);
+        assert_eq!(sections[0].candidates[1].end, 0x100a);
+        assert!(
+            sections[1].candidates.is_empty(),
+            "a terminator without a straight-line prefix is not a useful candidate"
+        );
     }
 
     #[test]
