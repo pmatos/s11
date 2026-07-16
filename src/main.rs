@@ -607,6 +607,9 @@ impl Default for OptimizationContext {
     }
 }
 
+// This discovery seam is consumed by the later auto-driver loop (#620). Until
+// then it is exercised directly by tests but has no production CLI caller.
+#[cfg_attr(not(test), allow(dead_code))]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum CandidateInstructionDisposition {
     StraightLine,
@@ -633,6 +636,7 @@ trait ElfOptimizationBackend {
         instructions: &capstone::Instructions,
     ) -> Result<Vec<Self::Instruction>, String>;
 
+    #[cfg_attr(not(test), allow(dead_code))]
     fn classify_candidate_instruction(
         &self,
         instruction: &capstone::Insn<'_>,
@@ -1083,6 +1087,137 @@ impl ElfOptimizationBackend for X86OptimizationBackend {
             original_prefix_byte_size,
         )?;
         Ok(OptimizedWindowBytes::Patch(new_bytes))
+    }
+}
+
+#[cfg_attr(not(test), allow(dead_code))]
+#[derive(Debug, Clone)]
+struct SectionCandidateWindows {
+    section: TextSection,
+    candidates: Vec<AddressWindow>,
+}
+
+#[cfg_attr(not(test), allow(dead_code))]
+fn find_candidate_windows(
+    patcher: &ElfPatcher,
+) -> Result<Vec<SectionCandidateWindows>, Box<dyn std::error::Error>> {
+    match patcher.arch() {
+        DetectedArch::Aarch64 => {
+            find_candidate_windows_with_backend(AArch64OptimizationBackend, patcher)
+        }
+        DetectedArch::X86_64 | DetectedArch::X86_32 => find_candidate_windows_with_backend(
+            X86OptimizationBackend::new(X86Arch::try_from(patcher.arch())?),
+            patcher,
+        ),
+    }
+}
+
+#[cfg_attr(not(test), allow(dead_code))]
+fn find_candidate_windows_with_backend<B: ElfOptimizationBackend>(
+    backend: B,
+    patcher: &ElfPatcher,
+) -> Result<Vec<SectionCandidateWindows>, Box<dyn std::error::Error>> {
+    let cs = backend.disassembler()?;
+    let mut section_results = Vec::new();
+
+    for section in patcher.get_text_sections()? {
+        let section_end = section
+            .virtual_addr
+            .checked_add(section.size)
+            .ok_or_else(|| {
+                format!(
+                    "executable section '{}' range overflows: start 0x{:x}, size {}",
+                    section.name, section.virtual_addr, section.size
+                )
+            })?;
+        let section_window = AddressWindow {
+            start: section.virtual_addr,
+            end: section_end,
+        };
+        let bytes = patcher
+            .get_instructions_in_window(&section_window)
+            .map_err(|error| {
+                format!(
+                    "failed to read executable section '{}' at 0x{:x}-0x{:x}: {}",
+                    section.name, section.virtual_addr, section_end, error
+                )
+            })?;
+        let instructions = cs
+            .disasm_all(&bytes, section.virtual_addr)
+            .map_err(|error| {
+                format!(
+                    "failed to disassemble executable section '{}' at 0x{:x}-0x{:x}: {}",
+                    section.name, section.virtual_addr, section_end, error
+                )
+            })?;
+        let decoded_bytes = instructions.iter().try_fold(0usize, |total, instruction| {
+            total.checked_add(instruction.bytes().len())
+        });
+        let decoded_bytes = decoded_bytes.ok_or_else(|| {
+            format!(
+                "decoded byte count overflowed for executable section '{}' at 0x{:x}-0x{:x}",
+                section.name, section.virtual_addr, section_end
+            )
+        })?;
+        ensure_window_fully_decoded_for_arch(
+            decode_arch_label(backend.arch()),
+            decoded_bytes,
+            bytes.len(),
+            section.virtual_addr,
+            section_end,
+        )
+        .map_err(|error| format!("executable section '{}': {}", section.name, error))?;
+
+        let mut candidates = Vec::new();
+        let mut run_start = None;
+        let mut run_end = section.virtual_addr;
+
+        for instruction in instructions.iter() {
+            let instruction_end = instruction
+                .address()
+                .checked_add(
+                    u64::try_from(instruction.bytes().len())
+                        .expect("instruction byte length always fits u64"),
+                )
+                .ok_or_else(|| {
+                    format!(
+                        "instruction range overflows in executable section '{}' at 0x{:x}",
+                        section.name,
+                        instruction.address()
+                    )
+                })?;
+
+            match backend.classify_candidate_instruction(instruction) {
+                Ok(CandidateInstructionDisposition::StraightLine) => {
+                    run_start.get_or_insert(instruction.address());
+                    run_end = instruction_end;
+                }
+                Ok(CandidateInstructionDisposition::Terminator) | Err(_) => {
+                    flush_candidate_run(&mut candidates, &mut run_start, run_end);
+                }
+            }
+        }
+        flush_candidate_run(&mut candidates, &mut run_start, run_end);
+        section_results.push(SectionCandidateWindows {
+            section,
+            candidates,
+        });
+    }
+
+    Ok(section_results)
+}
+
+#[cfg_attr(not(test), allow(dead_code))]
+fn flush_candidate_run(
+    candidates: &mut Vec<AddressWindow>,
+    run_start: &mut Option<u64>,
+    run_end: u64,
+) {
+    if let Some(start) = run_start.take() {
+        candidates.push(AddressWindow {
+            start,
+            end: run_end,
+        });
     }
 }
 
@@ -3075,13 +3210,37 @@ mod cli_helper_tests {
         assert_eq!(optimized[0].destination(), Some(X86Register::R10));
     }
 
-    fn build_minimal_elf64(text_bytes: &[u8], text_vaddr: u64, machine: u16) -> Vec<u8> {
+    fn build_elf64_with_executable_sections(
+        sections: &[(&str, &[u8], u64)],
+        machine: u16,
+    ) -> Vec<u8> {
         let elf_header_size = 64usize;
         let shentsize = 64usize;
-        let shnum = 3usize;
-        let shstrtab: &[u8] = b"\0.text\0.shstrtab\0";
-        let text_offset = elf_header_size;
-        let shstrtab_offset = text_offset + text_bytes.len();
+        let shnum = sections.len() + 2;
+
+        let mut shstrtab = vec![0u8];
+        let section_name_offsets: Vec<usize> = sections
+            .iter()
+            .map(|(name, _, _)| {
+                let offset = shstrtab.len();
+                shstrtab.extend_from_slice(name.as_bytes());
+                shstrtab.push(0);
+                offset
+            })
+            .collect();
+        let shstrtab_name_offset = shstrtab.len();
+        shstrtab.extend_from_slice(b".shstrtab\0");
+
+        let mut next_offset = elf_header_size;
+        let section_file_offsets: Vec<usize> = sections
+            .iter()
+            .map(|(_, bytes, _)| {
+                let offset = next_offset;
+                next_offset += bytes.len();
+                offset
+            })
+            .collect();
+        let shstrtab_offset = next_offset;
         let shoff = shstrtab_offset + shstrtab.len();
         let total_size = shoff + shentsize * shnum;
 
@@ -3097,11 +3256,21 @@ mod cli_helper_tests {
         buf[40..48].copy_from_slice(&(shoff as u64).to_le_bytes());
         buf[52..54].copy_from_slice(&(elf_header_size as u16).to_le_bytes());
         buf[58..60].copy_from_slice(&(shentsize as u16).to_le_bytes());
-        buf[60..62].copy_from_slice(&(shnum as u16).to_le_bytes());
-        buf[62..64].copy_from_slice(&2u16.to_le_bytes());
+        buf[60..62].copy_from_slice(
+            &u16::try_from(shnum)
+                .expect("test section count should fit ELF64 header")
+                .to_le_bytes(),
+        );
+        buf[62..64].copy_from_slice(
+            &u16::try_from(sections.len() + 1)
+                .expect("test string-table index should fit ELF64 header")
+                .to_le_bytes(),
+        );
 
-        buf[text_offset..text_offset + text_bytes.len()].copy_from_slice(text_bytes);
-        buf[shstrtab_offset..shstrtab_offset + shstrtab.len()].copy_from_slice(shstrtab);
+        for ((_, bytes, _), offset) in sections.iter().zip(&section_file_offsets) {
+            buf[*offset..*offset + bytes.len()].copy_from_slice(bytes);
+        }
+        buf[shstrtab_offset..shstrtab_offset + shstrtab.len()].copy_from_slice(&shstrtab);
 
         let mut write_shdr = |index: usize, fields: [u64; 10]| {
             let base = shoff + index * shentsize;
@@ -3117,25 +3286,33 @@ mod cli_helper_tests {
             buf[base + 56..base + 64].copy_from_slice(&fields[9].to_le_bytes());
         };
         write_shdr(0, [0; 10]);
+
+        for (index, (((_, bytes, virtual_addr), name_offset), file_offset)) in sections
+            .iter()
+            .zip(&section_name_offsets)
+            .zip(&section_file_offsets)
+            .enumerate()
+        {
+            write_shdr(
+                index + 1,
+                [
+                    *name_offset as u64,
+                    elf::abi::SHT_PROGBITS as u64,
+                    (elf::abi::SHF_ALLOC | elf::abi::SHF_EXECINSTR) as u64,
+                    *virtual_addr,
+                    *file_offset as u64,
+                    bytes.len() as u64,
+                    0,
+                    0,
+                    1,
+                    0,
+                ],
+            );
+        }
         write_shdr(
-            1,
+            sections.len() + 1,
             [
-                1,
-                elf::abi::SHT_PROGBITS as u64,
-                (elf::abi::SHF_ALLOC | elf::abi::SHF_EXECINSTR) as u64,
-                text_vaddr,
-                text_offset as u64,
-                text_bytes.len() as u64,
-                0,
-                0,
-                1,
-                0,
-            ],
-        );
-        write_shdr(
-            2,
-            [
-                7,
+                shstrtab_name_offset as u64,
                 elf::abi::SHT_STRTAB as u64,
                 0,
                 0,
@@ -3149,6 +3326,38 @@ mod cli_helper_tests {
         );
 
         buf
+    }
+
+    fn build_minimal_elf64(text_bytes: &[u8], text_vaddr: u64, machine: u16) -> Vec<u8> {
+        build_elf64_with_executable_sections(&[(".text", text_bytes, text_vaddr)], machine)
+    }
+
+    #[test]
+    fn candidate_windows_find_maximal_supported_runs_in_each_executable_section() {
+        // push rax; mov rax, rbx; add rax, 1; pop rax
+        let text = [0x50, 0x48, 0x89, 0xd8, 0x48, 0x83, 0xc0, 0x01, 0x58];
+        // A non-empty executable section containing only unsupported separators.
+        let init = [0x50, 0x58];
+        let elf_bytes = build_elf64_with_executable_sections(
+            &[(".text", &text, 0x1000), (".init", &init, 0x2000)],
+            elf::abi::EM_X86_64,
+        );
+        let input = TempFile::new_bytes("s11-candidate-runs", "elf", &elf_bytes);
+        let patcher = ElfPatcher::new(input.path()).expect("x86-64 ELF should parse");
+
+        let sections =
+            find_candidate_windows(&patcher).expect("candidate discovery should succeed");
+
+        assert_eq!(sections.len(), 2);
+        assert_eq!(sections[0].section.name, ".text");
+        assert_eq!(sections[0].candidates.len(), 1);
+        assert_eq!(sections[0].candidates[0].start, 0x1001);
+        assert_eq!(sections[0].candidates[0].end, 0x1008);
+        assert_eq!(sections[1].section.name, ".init");
+        assert!(
+            sections[1].candidates.is_empty(),
+            "separator-only sections must retain an empty result record"
+        );
     }
 
     #[test]
