@@ -1840,31 +1840,101 @@ mod tests {
     }
 
     #[test]
-    fn imul_dword_accepts_canonical_high_bit_imm32() {
-        // Regression (PR #675): the 3-operand IMUL immediate is a 32-bit
-        // field, so a canonical bit pattern like 0xffffffff (== -1) is a legal
-        // dword / native-32 encoding. `x86_can_assemble_instruction` already
-        // admits it, so the encoder must agree instead of aborting through the
-        // signed-only helper reserved for the sign-extended 64-bit form.
-        let mut a64 = X86Assembler::new_64();
-        let bytes = a64
-            .assemble_instructions(&[X86Instruction::ImulRegImm {
-                rd: X86Register::EAX,
-                rs: X86Register::ECX,
-                imm: i64::from(u32::MAX),
-            }])
-            .expect("dword IMUL should encode a canonical imm32 bit pattern");
-        assert_eq!(disasm_x86_64(&bytes)[0].0, "imul");
+    fn imul_32_bit_operands_accept_canonical_imm32_bitpatterns() {
+        let can_assemble =
+            |mode, instruction: &X86Instruction| match mode {
+                X86Mode::Mode64 => <crate::isa::x86::X86_64 as crate::isa::Assembler<
+                    X86Instruction,
+                >>::can_assemble(
+                    &crate::isa::x86::X86_64, instruction
+                ),
+                X86Mode::Mode32 => <crate::isa::x86::X86_32 as crate::isa::Assembler<
+                    X86Instruction,
+                >>::can_assemble(
+                    &crate::isa::x86::X86_32, instruction
+                ),
+            };
+        let assemble = |mode, instruction| {
+            match mode {
+                X86Mode::Mode64 => X86Assembler::new_64(),
+                X86Mode::Mode32 => X86Assembler::new_32(),
+            }
+            .assemble_instructions(&[instruction])
+        };
 
-        let mut a32 = X86Assembler::new_32();
-        let bytes = a32
-            .assemble_instructions(&[X86Instruction::ImulRegImm {
-                rd: X86Register::RCX,
-                rs: X86Register::RDX,
-                imm: i64::from(u32::MAX),
-            }])
-            .expect("x86-32 IMUL should encode a canonical imm32 bit pattern");
-        assert_eq!(disasm_x86_32(&bytes)[0].0, "imul");
+        let canonical_u32_max = i64::from(u32::MAX);
+        let accepted = [
+            (
+                "x86-64 dword",
+                X86Mode::Mode64,
+                X86Register::EAX,
+                X86Register::EBX,
+            ),
+            (
+                "x86-32 native",
+                X86Mode::Mode32,
+                X86Register::RAX,
+                X86Register::RBX,
+            ),
+        ];
+        for (description, mode, rd, rs) in accepted {
+            let unsigned = X86Instruction::ImulRegImm {
+                rd,
+                rs,
+                imm: canonical_u32_max,
+            };
+            assert!(
+                can_assemble(mode, &unsigned),
+                "{description}: prefilter rejected a canonical imm32 bit pattern"
+            );
+            let unsigned_bytes = assemble(mode, unsigned)
+                .unwrap_or_else(|error| panic!("{description}: encoding failed: {error}"));
+            let signed_bytes = assemble(mode, X86Instruction::ImulRegImm { rd, rs, imm: -1 })
+                .unwrap_or_else(|error| panic!("{description}: signed encoding failed: {error}"));
+            assert_eq!(
+                unsigned_bytes, signed_bytes,
+                "{description}: equivalent imm32 spellings encoded differently"
+            );
+        }
+
+        let above_u32_max = canonical_u32_max + 1;
+        let rejected = [
+            (
+                "x86-64 native IMUL cannot encode positive u32::MAX",
+                X86Mode::Mode64,
+                X86Instruction::ImulRegImm {
+                    rd: X86Register::RAX,
+                    rs: X86Register::RBX,
+                    imm: canonical_u32_max,
+                },
+            ),
+            (
+                "x86-64 dword IMUL rejects values above u32::MAX",
+                X86Mode::Mode64,
+                X86Instruction::ImulRegImm {
+                    rd: X86Register::EAX,
+                    rs: X86Register::EBX,
+                    imm: above_u32_max,
+                },
+            ),
+            (
+                "x86-32 native IMUL rejects values above u32::MAX",
+                X86Mode::Mode32,
+                X86Instruction::ImulRegImm {
+                    rd: X86Register::RAX,
+                    rs: X86Register::RBX,
+                    imm: above_u32_max,
+                },
+            ),
+        ];
+        for (description, mode, instruction) in rejected {
+            assert!(
+                !can_assemble(mode, &instruction),
+                "{description}: prefilter accepted it"
+            );
+            let encoded = assemble(mode, instruction);
+            assert!(encoded.is_err(), "{description}: encoder accepted it");
+        }
     }
 
     #[test]
