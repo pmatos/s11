@@ -501,6 +501,8 @@ fn x86_ir_from_mnemonic_impl(
                 mnemonic, parts[0]
             ));
         }
+        // MOVZX to 32 bits and then architectural zero-extension is equivalent
+        // to the widthless IR's full-width zero-extension; MOVSX is not.
         if mode.is_none() && mnemonic == "movsx" && destination_width == 32 {
             return Err(format!(
                 "widthless x86 parser cannot represent a 32-bit destination for movsx: '{}'",
@@ -906,6 +908,20 @@ mod tests {
                 expected
             );
         }
+    }
+
+    #[test]
+    fn movzx_widthless_parser_accepts_32_bit_destination() {
+        assert_eq!(
+            x86_ir_from_mnemonic("movzx", "eax, bl")
+                .unwrap()
+                .expect("32-bit MOVZX destination is sound in the widthless IR"),
+            X86Instruction::Movzx {
+                rd: X86Register::RAX,
+                rs: X86Register::RBX,
+                src_width: 8,
+            }
+        );
     }
 
     #[test]
