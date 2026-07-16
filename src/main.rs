@@ -1200,6 +1200,12 @@ fn find_candidate_windows_with_backend<B: ElfOptimizationBackend>(
                 flush_candidate_run(&mut candidates, &mut run_start, run_end);
                 continue;
             }
+            if backend.arch() == DetectedArch::X86_64
+                && capstone_detail_has_rip_relative_memory(&detail)
+            {
+                flush_candidate_run(&mut candidates, &mut run_start, run_end);
+                continue;
+            }
 
             match backend.classify_candidate_instruction(instruction) {
                 Ok(CandidateInstructionDisposition::StraightLine) => {
@@ -1231,6 +1237,20 @@ fn capstone_detail_is_call(detail: &capstone::InsnDetail<'_>) -> bool {
     let call_group =
         capstone::InsnGroupId(capstone::InsnGroupType::CS_GRP_CALL as capstone::InsnGroupIdInt);
     detail.groups().contains(&call_group)
+}
+
+fn capstone_detail_has_rip_relative_memory(detail: &capstone::InsnDetail<'_>) -> bool {
+    let arch_detail = detail.arch_detail();
+    let Some(x86_detail) = arch_detail.x86() else {
+        return false;
+    };
+    let rip = capstone::RegId(capstone::arch::x86::X86Reg::X86_REG_RIP as capstone::RegIdInt);
+    x86_detail.operands().any(|operand| {
+        matches!(
+            operand.op_type,
+            capstone::arch::x86::X86OperandType::Mem(memory) if memory.base() == rip
+        )
+    })
 }
 
 #[cfg_attr(not(test), allow(dead_code))]
@@ -4214,6 +4234,7 @@ mod cli_helper_tests {
             .x86()
             .mode(capstone::arch::x86::ArchMode::Mode64)
             .syntax(capstone::arch::x86::ArchSyntax::Intel)
+            .detail(true)
             .build()
             .expect("test capstone should build")
     }
@@ -4366,6 +4387,41 @@ mod cli_helper_tests {
             sections[1].candidates.is_empty(),
             "a terminator without a straight-line prefix is not a useful candidate"
         );
+    }
+
+    #[test]
+    fn candidate_windows_exclude_x86_64_rip_relative_memory_operands() {
+        let cs = x86_64_test_capstone();
+        let rip_relative = cs
+            .disasm_all(&[0x48, 0x8d, 0x05, 0x00, 0x00, 0x00, 0x00], 0x1004)
+            .expect("RIP-relative LEA should disassemble");
+        let instruction = rip_relative.iter().next().expect("one LEA");
+        let detail = cs
+            .insn_detail(instruction)
+            .expect("LEA detail should be available");
+        assert!(
+            capstone_detail_has_rip_relative_memory(&detail),
+            "RIP-relative exclusion must inspect the typed memory-base operand"
+        );
+
+        // add rax, 1; lea rax, [rip]; sub rbx, 1
+        let bytes = [
+            0x48, 0x83, 0xc0, 0x01, 0x48, 0x8d, 0x05, 0x00, 0x00, 0x00, 0x00, 0x48, 0x83, 0xeb,
+            0x01,
+        ];
+        let elf_bytes = build_minimal_elf64(&bytes, 0x1000, elf::abi::EM_X86_64);
+        let input = TempFile::new_bytes("s11-candidate-rip-relative", "elf", &elf_bytes);
+        let patcher = ElfPatcher::new(input.path()).expect("x86-64 ELF should parse");
+
+        let sections =
+            find_candidate_windows(&patcher).expect("candidate discovery should succeed");
+
+        assert_eq!(sections.len(), 1);
+        assert_eq!(sections[0].candidates.len(), 2);
+        assert_eq!(sections[0].candidates[0].start, 0x1000);
+        assert_eq!(sections[0].candidates[0].end, 0x1004);
+        assert_eq!(sections[0].candidates[1].start, 0x100b);
+        assert_eq!(sections[0].candidates[1].end, 0x100f);
     }
 
     #[test]
