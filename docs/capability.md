@@ -171,6 +171,9 @@ accepts mode-width register aliases for every ordinary instruction:
 `rax`/`r8`-style 64-bit names for x86-64, and `eax`-style 32-bit i386 names for
 x86-32. MOVZX/MOVSX are the narrow, explicit exception: their IR variants carry
 the 8- or 16-bit source width while their destination remains the mode width.
+Width-agnostic text accepts only 64-bit MOVSX destinations because its IR cannot
+preserve the distinct zero-extension effect of a 32-bit destination write;
+mode-aware x86-32 parsing accepts 32-bit MOVSX destinations.
 Architectural byte SETcc from ELF input is rejected until #75 rather than lifted
 into the full-width pseudo-IR; width-agnostic text accepts only the SETcc
 pseudo-family's canonical full-register spelling (`setne rax`, for example), not

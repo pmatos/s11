@@ -501,6 +501,12 @@ fn x86_ir_from_mnemonic_impl(
                 mnemonic, parts[0]
             ));
         }
+        if mode.is_none() && mnemonic == "movsx" && destination_width == 32 {
+            return Err(format!(
+                "widthless x86 parser cannot represent a 32-bit destination for movsx: '{}'",
+                parts[0]
+            ));
+        }
 
         let (rs, src_width) =
             classify_x86_register_alias(parts[1]).map_err(|err| err.to_string())?;
@@ -900,6 +906,16 @@ mod tests {
                 expected
             );
         }
+    }
+
+    #[test]
+    fn movsx_widthless_parser_rejects_32_bit_destination() {
+        let err = x86_ir_from_mnemonic("movsx", "eax, bl")
+            .expect_err("widthless parser cannot preserve a 32-bit MOVSX destination");
+        assert!(
+            err.contains("cannot represent a 32-bit destination"),
+            "unexpected error: {err}"
+        );
     }
 
     #[test]
