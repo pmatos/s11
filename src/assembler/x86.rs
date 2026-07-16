@@ -699,6 +699,45 @@ mod tests {
     }
 
     #[test]
+    fn movzx_movsx_round_trip_64_bit_rex_byte_sources() {
+        let instructions = [
+            X86Instruction::Movzx {
+                rd: X86Register::RAX,
+                rs: X86Register::RSP,
+                src_width: 8,
+            },
+            X86Instruction::Movsx {
+                rd: X86Register::RCX,
+                rs: X86Register::RBP,
+                src_width: 8,
+            },
+            X86Instruction::Movzx {
+                rd: X86Register::RDX,
+                rs: X86Register::RSI,
+                src_width: 8,
+            },
+            X86Instruction::Movsx {
+                rd: X86Register::RBX,
+                rs: X86Register::RDI,
+                src_width: 8,
+            },
+        ];
+        let bytes = X86Assembler::new_64()
+            .assemble_instructions(&instructions)
+            .expect("encode REX-only byte sources in x86-64");
+
+        assert_eq!(
+            disasm_x86_64(&bytes),
+            vec![
+                ("movzx".to_string(), "rax, spl".to_string()),
+                ("movsx".to_string(), "rcx, bpl".to_string()),
+                ("movzx".to_string(), "rdx, sil".to_string()),
+                ("movsx".to_string(), "rbx, dil".to_string()),
+            ]
+        );
+    }
+
+    #[test]
     fn movzx_movsx_round_trip_32_bit_sources() {
         let instructions = [
             X86Instruction::Movzx {
