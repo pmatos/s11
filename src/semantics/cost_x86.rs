@@ -496,6 +496,41 @@ mod tests {
         assert_eq!(sequence_cost(&seq, &CostMetric::Latency, 64), 1);
     }
 
+    #[test]
+    fn partial_write_keeps_old_destination_on_the_critical_path() {
+        let producer = X86Instruction::AddReg {
+            rd: X86Register::RAX,
+            rs: X86Register::RCX,
+        };
+        let consumer = X86Instruction::AddReg {
+            rd: X86Register::RDX,
+            rs: X86Register::RAX,
+        };
+        let partial = [
+            producer,
+            X86Instruction::MovImm {
+                rd: X86Register::AL,
+                imm: 1,
+            },
+            consumer,
+        ];
+        let dword = [
+            producer,
+            X86Instruction::MovImm {
+                rd: X86Register::EAX,
+                imm: 1,
+            },
+            consumer,
+        ];
+
+        assert_eq!(sequence_cost(&partial, &CostMetric::Latency, 64), 3);
+        assert_eq!(
+            sequence_cost(&dword, &CostMetric::Latency, 64),
+            2,
+            "an EAX write replaces the old RAX value and breaks its dependency"
+        );
+    }
+
     /// IMUL's 3-cycle latency shows up on the critical path: a single IMUL costs
     /// 3, and chaining it after an ADD that produces its input costs 1 + 3 = 4.
     #[test]

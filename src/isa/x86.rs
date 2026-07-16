@@ -440,9 +440,12 @@ impl fmt::Display for X86Operand {
 /// the destination) would silently regress liveness for x86.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum X86Instruction {
-    /// `mov rd, rs` — non-destructive register copy; no EFLAGS effect.
+    /// `mov rd, rs` — register copy; no EFLAGS effect. Word and byte
+    /// destinations implicitly read `rd` because their writes preserve the
+    /// surrounding bits of its canonical register.
     MovReg { rd: X86Register, rs: X86Register },
-    /// `mov rd, imm` — load immediate; no EFLAGS effect.
+    /// `mov rd, imm` — load immediate; no EFLAGS effect. Word and byte
+    /// destinations implicitly read `rd` to preserve surrounding bits.
     MovImm { rd: X86Register, imm: i64 },
     /// `movzx rd, rs_sub` — zero-extend the low `src_width` bits of `rs`
     /// into the mode-width destination. The supported source widths are 8 and
@@ -555,9 +558,10 @@ pub enum X86Instruction {
     ImulReg { rd: X86Register, rs: X86Register },
     /// `imul rd, rs, imm` — three-operand signed multiply: `rd = rs * imm`
     /// (low `width` bits). The project's FIRST 3-operand x86 variant. `rd` is
-    /// purely WRITTEN (not read), so `source_registers()` is just `[rs]`. Same
-    /// flag model as `ImulReg`: CF/OF on signed overflow, SF/ZF/PF
-    /// Intel-undefined and modelled deterministically.
+    /// purely WRITTEN at native/dword width, so `source_registers()` is just
+    /// `[rs]` there. A word destination also reads `rd` to preserve its
+    /// surrounding bits. Same flag model as `ImulReg`: CF/OF on signed
+    /// overflow, SF/ZF/PF Intel-undefined and modelled deterministically.
     ImulRegImm {
         rd: X86Register,
         rs: X86Register,
@@ -565,10 +569,11 @@ pub enum X86Instruction {
     },
     /// `lea rd, [base + disp]` — load effective address in its minimal
     /// register-base + displacement form: `rd = base + disp` (wrapping at
-    /// width). NON-destructive: `base` is read, `rd` is purely WRITTEN (not
-    /// read), exactly like `MovReg`. Affects NO flags. The `index*scale` and
-    /// RIP-relative addressing forms are deferred; the parser rejects them as
-    /// unsupported shapes.
+    /// width). NON-destructive at native/dword width: `base` is read and `rd`
+    /// is purely written. A word destination also reads `rd` to preserve its
+    /// surrounding bits. Affects NO flags. The `index*scale` and RIP-relative
+    /// addressing forms are deferred; the parser rejects them as unsupported
+    /// shapes.
     Lea {
         rd: X86Register,
         base: X86Register,
@@ -679,12 +684,21 @@ impl X86Instruction {
     ///
     /// **x86 destructive-form divergence**: for `AddReg/SubReg/AndReg/OrReg/XorReg`
     /// and their immediate forms, `rd` is BOTH source and destination, so it
-    /// appears here. `MovReg`/`MovImm` are non-destructive (rd is purely
-    /// written), so rd is NOT in the source list. See the enum doc-comment.
+    /// appears here. Nominally pure writes also include `rd` when a word or
+    /// byte destination preserves surrounding bits of the canonical register.
+    /// Native and dword destinations fully overwrite it. See the enum
+    /// doc-comment.
     pub fn source_registers(&self) -> Vec<X86Register> {
+        let pure_write_sources = |rd: X86Register, sources: Vec<X86Register>| -> Vec<X86Register> {
+            if rd.fully_overwrites_architectural_register() {
+                sources
+            } else {
+                std::iter::once(rd).chain(sources).collect()
+            }
+        };
         let operands = match self {
-            X86Instruction::MovReg { rs, .. } => vec![*rs],
-            X86Instruction::MovImm { .. } => vec![],
+            X86Instruction::MovReg { rd, rs } => pure_write_sources(*rd, vec![*rs]),
+            X86Instruction::MovImm { rd, .. } => pure_write_sources(*rd, vec![]),
             X86Instruction::Movzx { rs, .. } | X86Instruction::Movsx { rs, .. } => vec![*rs],
             X86Instruction::AddReg { rd, rs }
             | X86Instruction::SubReg { rd, rs }
@@ -693,11 +707,13 @@ impl X86Instruction {
             // IMUL rd, rs is destructive (`rd = rd * rs`), so rd is read too.
             | X86Instruction::ImulReg { rd, rs }
             | X86Instruction::XorReg { rd, rs } => vec![*rd, *rs],
-            // IMUL rd, rs, imm writes rd purely from `rs * imm`; rd is NOT read.
-            X86Instruction::ImulRegImm { rs, .. } => vec![*rs],
-            // LEA writes rd purely from `base + disp`; rd is NOT read (it is
-            // non-destructive, like MovReg). Only `base` is a source.
-            X86Instruction::Lea { base, .. } => vec![*base],
+            // At native/dword width these write rd purely from the explicit
+            // sources. A word destination also reads rd to preserve the
+            // surrounding canonical-register bits.
+            X86Instruction::ImulRegImm { rd, rs, .. } => {
+                pure_write_sources(*rd, vec![*rs])
+            }
+            X86Instruction::Lea { rd, base, .. } => pure_write_sources(*rd, vec![*base]),
             X86Instruction::AddImm { rd, .. }
             | X86Instruction::SubImm { rd, .. }
             | X86Instruction::AndImm { rd, .. }
@@ -3494,6 +3510,59 @@ mod tests {
         // NEG / NOT are single-operand: each reads its own destination.
         assert_eq!(X86Instruction::Neg { rd }.source_registers(), vec![rd]);
         assert_eq!(X86Instruction::Not { rd }.source_registers(), vec![rd]);
+    }
+
+    #[test]
+    fn partial_pure_writes_read_the_preserved_canonical_destination() {
+        let cases = [
+            (
+                X86Instruction::MovReg {
+                    rd: X86Register::AL,
+                    rs: X86Register::BL,
+                },
+                vec![X86Register::RAX, X86Register::RBX],
+            ),
+            (
+                X86Instruction::MovImm {
+                    rd: X86Register::AH,
+                    imm: 1,
+                },
+                vec![X86Register::RAX],
+            ),
+            (
+                X86Instruction::ImulRegImm {
+                    rd: X86Register::AX,
+                    rs: X86Register::BX,
+                    imm: 3,
+                },
+                vec![X86Register::RAX, X86Register::RBX],
+            ),
+            (
+                X86Instruction::Lea {
+                    rd: X86Register::AX,
+                    base: X86Register::RBX,
+                    disp: 1,
+                },
+                vec![X86Register::RAX, X86Register::RBX],
+            ),
+        ];
+
+        for (instruction, expected) in cases {
+            assert_eq!(
+                instruction.source_registers(),
+                expected,
+                "{instruction} must read the canonical destination bits it preserves"
+            );
+        }
+
+        for rd in [X86Register::RAX, X86Register::EAX] {
+            assert!(
+                X86Instruction::MovImm { rd, imm: 1 }
+                    .source_registers()
+                    .is_empty(),
+                "{rd} fully overwrites the architectural register"
+            );
+        }
     }
 
     #[test]

@@ -1206,8 +1206,8 @@ mod tests {
             }];
             assert_eq!(
                 x86_reg_downstream_liveness(X86Register::RAX, &suffix),
-                DownstreamRegLiveness::Uncertain,
-                "{partial} preserves part of RAX"
+                DownstreamRegLiveness::Read,
+                "{partial} reads the old RAX bits that its partial write preserves"
             );
         }
     }
