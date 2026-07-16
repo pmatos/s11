@@ -12,7 +12,7 @@ use std::time::{Duration, Instant};
 
 use rayon::prelude::*;
 
-use crate::isa::{AArch64, CostModel, ISA, InstructionGenerator};
+use crate::isa::{AArch64, Assembler, CostModel, ISA, InstructionGenerator};
 use crate::search::SearchAlgorithm;
 use crate::search::candidate::generate_all_encodable_instructions;
 use crate::search::config::{Algorithm, SearchConfig};
@@ -211,7 +211,11 @@ impl EnumerativeBackend<crate::isa::X86_32> for crate::isa::X86_32 {
         regs: &[crate::isa::x86::X86Register],
         imms: &[i64],
     ) -> Vec<crate::isa::x86::X86Instruction> {
-        crate::isa::x86::X86InstructionGenerator.generate_all(regs, imms)
+        crate::isa::x86::X86InstructionGenerator
+            .generate_all(regs, imms)
+            .into_iter()
+            .filter(|instruction| crate::isa::X86_32.can_assemble(instruction))
+            .collect()
     }
 
     fn sequence_cost(seq: &[crate::isa::x86::X86Instruction], config: &SearchConfig) -> u64 {
@@ -2601,6 +2605,45 @@ mod tests {
         );
         assert!(result.statistics.smt_queries > 0);
         assert!(result.statistics.smt_equivalent > 0);
+    }
+
+    #[test]
+    fn x86_32_enumerative_candidates_are_encodable() {
+        use crate::isa::x86::{X86Instruction, X86Register};
+        use crate::isa::{Assembler, X86_32};
+
+        let candidates = <X86_32 as EnumerativeBackend<X86_32>>::enumerate_all(
+            &[X86Register::RAX, X86Register::RSI, X86Register::RDI],
+            &[0],
+        );
+
+        assert!(
+            candidates
+                .iter()
+                .all(|instruction| X86_32.can_assemble(instruction))
+        );
+        for rs in [X86Register::RSI, X86Register::RDI] {
+            assert!(!candidates.contains(&X86Instruction::Movzx {
+                rd: X86Register::RAX,
+                rs,
+                src_width: 8,
+            }));
+            assert!(!candidates.contains(&X86Instruction::Movsx {
+                rd: X86Register::RAX,
+                rs,
+                src_width: 8,
+            }));
+            assert!(candidates.contains(&X86Instruction::Movzx {
+                rd: X86Register::RAX,
+                rs,
+                src_width: 16,
+            }));
+            assert!(candidates.contains(&X86Instruction::Movsx {
+                rd: X86Register::RAX,
+                rs,
+                src_width: 16,
+            }));
+        }
     }
 
     // --- Latency pruning-soundness (issue #622) ---
