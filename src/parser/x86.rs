@@ -13,7 +13,7 @@
 use crate::isa::x86::{X86Condition, X86Instruction, X86Operand, X86Register};
 use crate::parser::ParseError;
 
-/// Parse a condition-code suffix from a CMOVcc / Jcc mnemonic. Accepts
+/// Parse a condition-code suffix from a SETcc / CMOVcc / Jcc mnemonic. Accepts
 /// the canonical 16 codes plus the most common GAS aliases
 /// (`z`/`nz`/`nae`/`nb`/`nc`/`pe`/`po`/`nge`/`nl`/`ng`/`nle`).
 /// Returns `Err` on anything unrecognised so callers surface bad input
@@ -250,6 +250,32 @@ fn parse_x86_register_with_mode(
     }
 }
 
+/// Parse the interim full-width SETcc pseudo-instruction's destination.
+///
+/// Width-agnostic text accepts only the canonical register spelling emitted by
+/// `Display`. Mode-aware input comes from real machine code, where SETcc is a
+/// partial byte write that the current IR cannot soundly represent (#75).
+fn parse_x86_setcc_register_with_mode(
+    reg_str: &str,
+    mode: Option<X86ParseMode>,
+) -> Result<X86Register, String> {
+    if let Some(mode) = mode {
+        return Err(format!(
+            "architectural byte SETcc from {} binary input cannot be represented until #75",
+            mode.arch_label()
+        ));
+    }
+    let (reg, alias_width) = classify_x86_register_alias(reg_str).map_err(|err| err.to_string())?;
+    if alias_width != 64 {
+        return Err(format!(
+            "SETcc full-width pseudo-instruction requires a canonical 64-bit register spelling, \
+             got '{}'",
+            reg_str.trim()
+        ));
+    }
+    Ok(reg)
+}
+
 /// Operand sibling of [`parse_x86_register_with_mode`]: `Some(mode)` enforces
 /// the mode's register width, `None` is the width-agnostic assembly-text path.
 fn parse_x86_operand_with_mode(
@@ -319,6 +345,27 @@ fn x86_ir_from_mnemonic_impl(
     mode: Option<X86ParseMode>,
 ) -> Result<Option<X86Instruction>, String> {
     let mnemonic = mnemonic.trim().to_lowercase();
+
+    // SETcc — one canonical full-register destination in text pseudo-syntax.
+    // Mode-aware binary input is rejected because real SETcc is a byte write
+    // that cannot be represented soundly until #75.
+    if let Some(suffix) = mnemonic.strip_prefix("set") {
+        let cond = parse_x86_condition(suffix)?;
+        let parts: Vec<&str> = op_str.split(',').map(|s| s.trim()).collect();
+        if parts.len() != 1 || parts[0].is_empty() {
+            let operand_count = if op_str.trim().is_empty() {
+                0
+            } else {
+                parts.len()
+            };
+            return Err(format!(
+                "set{} expects 1 operand, got {}",
+                suffix, operand_count
+            ));
+        }
+        let rd = parse_x86_setcc_register_with_mode(parts[0], mode)?;
+        return Ok(Some(X86Instruction::Setcc { rd, cond }));
+    }
 
     // CMOVcc — strip "cmov" prefix, parse suffix, expect
     // two register operands. Unknown suffixes are errors, not Ok(None).
@@ -674,7 +721,7 @@ fn parse_x86_lea_memory_operand(
 /// test, the single-operand neg/not/inc/dec, the immediate-count shifts
 /// shl/sal/shr/sar, the immediate-count rotates rol/ror, the two- and
 /// three-operand signed multiply imul, lea in its register-base +
-/// displacement form, plus the conditional cmovCC and jCC variants).
+/// displacement form, plus the conditional setCC, cmovCC, and jCC variants).
 /// Anything else is a parse error.
 pub fn parse_x86_assembly_string(
     content: &str,
@@ -1638,7 +1685,64 @@ mod tests {
         );
     }
 
-    // --- CMOV / Jcc mnemonic parsing ---
+    // --- SETcc / CMOV / Jcc mnemonic parsing ---
+
+    #[test]
+    fn parses_and_displays_all_canonical_setcc_suffixes() {
+        for cond in X86Condition::ALL {
+            let mnemonic = format!("set{}", cond.suffix());
+            let parsed = x86_ir_from_mnemonic(&mnemonic, "rax").unwrap().unwrap();
+            let expected = X86Instruction::Setcc {
+                rd: X86Register::RAX,
+                cond,
+            };
+            assert_eq!(parsed, expected, "parsing {mnemonic} failed");
+            assert_eq!(parsed.to_string(), format!("{mnemonic} rax"));
+            assert_eq!(
+                parse_x86_assembly_string(&parsed.to_string(), "setcc-round-trip".to_string())
+                    .unwrap(),
+                vec![parsed],
+                "canonical {mnemonic} display must parse back to the same IR"
+            );
+        }
+
+        for partial_width in ["al", "ax", "eax"] {
+            let err = x86_ir_from_mnemonic("setne", partial_width)
+                .expect_err("partial-width SETcc text must not enter the full-width pseudo-IR");
+            assert!(
+                err.contains("full-width pseudo-instruction"),
+                "unexpected error for {partial_width}: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn mode_aware_setcc_parsing_rejects_architectural_byte_instructions_until_issue_75() {
+        for (mode, operand) in [
+            (X86ParseMode::Mode64, "al"),
+            (X86ParseMode::Mode64, "spl"),
+            (X86ParseMode::Mode64, "r8b"),
+            (X86ParseMode::Mode64, "ah"),
+            (X86ParseMode::Mode64, "byte ptr [rax]"),
+            (X86ParseMode::Mode32, "al"),
+            (X86ParseMode::Mode32, "bl"),
+        ] {
+            let err = x86_ir_from_mnemonic_for_mode("setne", operand, mode)
+                .expect_err("architectural byte SETcc must not enter the full-width pseudo-IR");
+            assert!(
+                err.contains("cannot be represented until #75"),
+                "unexpected error for {} {operand}: {err}",
+                mode.arch_label()
+            );
+        }
+    }
+
+    #[test]
+    fn setcc_rejects_unknown_conditions_and_wrong_arity() {
+        assert!(x86_ir_from_mnemonic("setxx", "rax").is_err());
+        assert!(x86_ir_from_mnemonic("setne", "").is_err());
+        assert!(x86_ir_from_mnemonic("setne", "rax, rbx").is_err());
+    }
 
     #[test]
     fn parses_cmove_rax_rbx() {

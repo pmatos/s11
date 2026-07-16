@@ -2646,6 +2646,47 @@ mod tests {
         }
     }
 
+    #[test]
+    fn x86_32_enumerative_only_generates_assemblable_setcc_candidates() {
+        use crate::isa::x86::{X86Instruction, X86Register};
+        use crate::isa::{Assembler, X86_32};
+
+        let regs = [
+            X86Register::RAX,
+            X86Register::RSP,
+            X86Register::RBP,
+            X86Register::RSI,
+            X86Register::RDI,
+        ];
+        let candidates = <X86_32 as EnumerativeBackend<X86_32>>::enumerate_all(&regs, &[0]);
+        let setcc_count = candidates
+            .iter()
+            .filter(|instruction| matches!(instruction, X86Instruction::Setcc { .. }))
+            .count();
+
+        assert!(
+            candidates
+                .iter()
+                .all(|instruction| X86_32.can_assemble(instruction)),
+            "x86-32 enumerative search generated an unassemblable candidate"
+        );
+        assert_eq!(
+            setcc_count,
+            crate::isa::x86::X86Condition::ALL.len(),
+            "enumerative search must retain every SETcc condition for EAX"
+        );
+        assert!(
+            candidates.iter().any(|instruction| matches!(
+                instruction,
+                X86Instruction::MovImm {
+                    rd: X86Register::RSI,
+                    ..
+                }
+            )),
+            "mode-specific SETcc filtering must not remove encodable ESI candidates"
+        );
+    }
+
     // --- Latency pruning-soundness (issue #622) ---
     //
     // The enumerative search prunes whole lengths via `length_cost_lower_bound`.

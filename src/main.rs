@@ -4507,6 +4507,65 @@ mod cli_helper_tests {
     }
 
     #[test]
+    fn x86_capstone_bridge_rejects_architectural_setcc_byte_destinations() {
+        for (mode, parse_mode) in [
+            (
+                capstone::arch::x86::ArchMode::Mode64,
+                parser::x86::X86ParseMode::Mode64,
+            ),
+            (
+                capstone::arch::x86::ArchMode::Mode32,
+                parser::x86::X86ParseMode::Mode32,
+            ),
+        ] {
+            let cs = capstone::Capstone::new()
+                .x86()
+                .mode(mode)
+                .syntax(capstone::arch::x86::ArchSyntax::Intel)
+                .build()
+                .expect("capstone init");
+            let setne_al = cs
+                .disasm_all(&[0x0f, 0x95, 0xc0], 0x1000)
+                .expect("disassemble setne al");
+            let instruction = setne_al.iter().next().expect("one instruction");
+            assert_eq!(instruction.mnemonic(), Some("setne"));
+            assert_eq!(instruction.op_str(), Some("al"));
+            let err = convert_to_x86_ir(&setne_al, parse_mode)
+                .expect_err("architectural byte SETcc must not enter the full-width pseudo-IR");
+            assert!(
+                err.contains("cannot be represented until #75"),
+                "unexpected error: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn x86_64_optimizer_rejects_architectural_setcc_before_search() {
+        let elf_bytes = build_minimal_elf64(
+            &[0x0f, 0x95, 0xc0, 0x0f, 0x95, 0xc0],
+            0x1000,
+            elf::abi::EM_X86_64,
+        );
+        let input = TempFile::new_bytes("s11-x86-64-setcc-byte", "elf", &elf_bytes);
+        let patcher = ElfPatcher::new(input.path()).expect("read synthetic ELF");
+        let mut opts = options_for(Algorithm::Enumerative);
+        opts.timeout = Some(Duration::from_secs(5));
+        opts.cost_metric = CostMetric::CodeSize;
+
+        let err = optimize_elf_binary(&patcher, input.path(), 0x1000, 0x1006, &opts)
+            .expect_err("architectural byte SETcc should be rejected before search");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("failed to parse x86 instruction 'setne al'"),
+            "unexpected error: {msg}"
+        );
+        assert!(
+            msg.contains("cannot be represented until #75"),
+            "unexpected error: {msg}"
+        );
+    }
+
+    #[test]
     fn x86_64_optimizer_rejects_narrow_register_alias_before_search() {
         let elf_bytes = build_minimal_elf64(
             &[0x83, 0xc0, 0x00, 0x83, 0xc0, 0x00],

@@ -68,6 +68,53 @@ fn reg_index_32(reg: X86Register) -> Result<u8, String> {
     Ok(i)
 }
 
+fn setcc_opcode(cond: X86Condition) -> u8 {
+    match cond {
+        X86Condition::E => 0x94,
+        X86Condition::NE => 0x95,
+        X86Condition::B => 0x92,
+        X86Condition::AE => 0x93,
+        X86Condition::BE => 0x96,
+        X86Condition::A => 0x97,
+        X86Condition::L => 0x9c,
+        X86Condition::GE => 0x9d,
+        X86Condition::LE => 0x9e,
+        X86Condition::G => 0x9f,
+        X86Condition::S => 0x98,
+        X86Condition::NS => 0x99,
+        X86Condition::O => 0x90,
+        X86Condition::NO => 0x91,
+        X86Condition::P => 0x9a,
+        X86Condition::NP => 0x9b,
+    }
+}
+
+/// Lower the full-width SETcc pseudo-instruction to an architectural byte
+/// SETcc followed by a same-register MOVZX into the 32-bit destination.
+///
+/// Writing the 32-bit destination produces the intended native-width 0/1 in
+/// both modes: x86-64 zeroes bits 63:32 on every 32-bit register write.
+fn encode_full_width_setcc(ops: &mut impl DynasmApi, rd: u8, cond: X86Condition, mode64: bool) {
+    let low = rd & 7;
+    if mode64 {
+        if rd >= 8 {
+            ops.push(0x41); // REX.B selects R8B..R15B.
+        } else if rd >= 4 {
+            ops.push(0x40); // Bare REX selects SPL/BPL/SIL/DIL.
+        }
+    }
+    ops.extend([0x0f, setcc_opcode(cond), 0xc0 | low]);
+
+    if mode64 {
+        if rd >= 8 {
+            ops.push(0x45); // REX.R + REX.B select the same extended register.
+        } else if rd >= 4 {
+            ops.push(0x40); // Required for the low-byte source.
+        }
+    }
+    ops.extend([0x0f, 0xb6, 0xc0 | (low << 3) | low]);
+}
+
 fn assemble_64(instructions: &[X86Instruction]) -> Result<Vec<u8>, String> {
     let mut ops =
         dynasmrt::x64::Assembler::new().map_err(|e| format!("dynasm x64 init failed: {:?}", e))?;
@@ -310,6 +357,11 @@ fn encode_64(ops: &mut dynasmrt::x64::Assembler, instr: &X86Instruction) -> Resu
                 X86Condition::P => dynasm!(ops ; .arch x64 ; cmovp Rq(rd), Rq(rs)),
                 X86Condition::NP => dynasm!(ops ; .arch x64 ; cmovnp Rq(rd), Rq(rs)),
             }
+            Ok(())
+        }
+        X86Instruction::Setcc { rd, cond } => {
+            let rd = reg_index(*rd)?;
+            encode_full_width_setcc(ops, rd, *cond, true);
             Ok(())
         }
         X86Instruction::Jcc { cond } => {
@@ -590,6 +642,17 @@ fn encode_32(ops: &mut dynasmrt::x86::Assembler, instr: &X86Instruction) -> Resu
                 X86Condition::P => dynasm!(ops ; .arch x86 ; cmovp Rd(rd), Rd(rs)),
                 X86Condition::NP => dynasm!(ops ; .arch x86 ; cmovnp Rd(rd), Rd(rs)),
             }
+            Ok(())
+        }
+        X86Instruction::Setcc { rd, cond } => {
+            let rd_index = reg_index_32(*rd)?;
+            if rd_index >= 4 {
+                return Err(format!(
+                    "register {:?} has no low-byte encoding in x86-32 mode",
+                    rd
+                ));
+            }
+            encode_full_width_setcc(ops, rd_index, *cond, false);
             Ok(())
         }
         X86Instruction::Jcc { cond } => {
@@ -1548,7 +1611,103 @@ mod tests {
         }
     }
 
-    // --- CMOV encoding round-trips through Capstone ---
+    #[test]
+    fn setcc_code_size_matches_assembled_length() {
+        use crate::semantics::cost::CostMetric;
+        use crate::semantics::cost_x86::instruction_cost;
+
+        for cond in X86Condition::ALL {
+            for rd in [X86Register::RAX, X86Register::RSP, X86Register::R8] {
+                let instr = X86Instruction::Setcc { rd, cond };
+                let bytes = X86Assembler::new_64()
+                    .assemble_instructions(&[instr])
+                    .expect("x86-64 SETcc lowering");
+                assert_eq!(
+                    instruction_cost(&instr, &CostMetric::CodeSize, 64),
+                    bytes.len() as u64,
+                    "x86-64 SET{} {rd:?} cost must match assembled bytes",
+                    cond.suffix()
+                );
+            }
+
+            let instr = X86Instruction::Setcc {
+                rd: X86Register::RAX,
+                cond,
+            };
+            let bytes = X86Assembler::new_32()
+                .assemble_instructions(&[instr])
+                .expect("x86-32 SETcc lowering");
+            assert_eq!(
+                instruction_cost(&instr, &CostMetric::CodeSize, 32),
+                bytes.len() as u64,
+                "x86-32 SET{} cost must match assembled bytes",
+                cond.suffix()
+            );
+        }
+    }
+
+    // --- SETcc / CMOV encoding round-trips through Capstone ---
+
+    #[test]
+    fn all_setcc_suffixes_lower_to_setcc_movzx_in_both_x86_modes() {
+        for cond in X86Condition::ALL {
+            let mnemonic = cond.set_mnemonic();
+            let instr = X86Instruction::Setcc {
+                rd: X86Register::RAX,
+                cond,
+            };
+
+            let bytes64 = X86Assembler::new_64()
+                .assemble_instructions(&[instr])
+                .expect("x86-64 SETcc lowering");
+            assert_eq!(bytes64.len(), 6, "unexpected x86-64 {mnemonic} size");
+            assert_eq!(
+                disasm_x86_64(&bytes64),
+                vec![
+                    (mnemonic.to_string(), "al".to_string()),
+                    ("movzx".to_string(), "eax, al".to_string()),
+                ],
+                "unexpected x86-64 {mnemonic} lowering"
+            );
+
+            let bytes32 = X86Assembler::new_32()
+                .assemble_instructions(&[instr])
+                .expect("x86-32 SETcc lowering");
+            assert_eq!(bytes32.len(), 6, "unexpected x86-32 {mnemonic} size");
+            assert_eq!(
+                disasm_x86_32(&bytes32),
+                vec![
+                    (mnemonic.to_string(), "al".to_string()),
+                    ("movzx".to_string(), "eax, al".to_string()),
+                ],
+                "unexpected x86-32 {mnemonic} lowering"
+            );
+        }
+    }
+
+    #[test]
+    fn setcc_x86_64_encodes_rex_low_byte_registers() {
+        for (rd, byte_name, dword_name) in [
+            (X86Register::RSP, "spl", "esp"),
+            (X86Register::R8, "r8b", "r8d"),
+        ] {
+            let bytes = X86Assembler::new_64()
+                .assemble_instructions(&[X86Instruction::Setcc {
+                    rd,
+                    cond: X86Condition::NE,
+                }])
+                .expect("REX byte-register SETcc lowering");
+            assert_eq!(bytes.len(), 8, "unexpected {rd:?} SETcc lowering size");
+            assert_eq!(
+                disasm_x86_64(&bytes),
+                vec![
+                    ("setne".to_string(), byte_name.to_string()),
+                    ("movzx".to_string(), format!("{dword_name}, {byte_name}"),),
+                ],
+                "SETcc and MOVZX must use the same logical register"
+            );
+        }
+    }
 
     #[test]
     fn cmove_x86_64_round_trips() {

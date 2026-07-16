@@ -398,12 +398,12 @@ pub fn compute_live_in_registers(instructions: &[Instruction]) -> RegisterSet<Re
 /// Build an x86 `RegisterSet` from a target sequence by treating every
 /// written register as live-out and declaring EFLAGS live whenever the
 /// target contains any instruction with observable side effects (i.e.
-/// any non-MOV / non-CMOV / non-Jcc variant — see
+/// any non-MOV / non-SETcc / non-CMOV / non-Jcc variant — see
 /// `InstructionType::has_side_effects` for the contract).
 ///
-/// **Asymmetry:** CMOV and Jcc READ EFLAGS but report
-/// `has_side_effects=false` (they don't write flags), so a CMOV-only or
-/// Jcc-only target gets `flags_live=false` from this helper.
+/// **Asymmetry:** SETcc, CMOV, and Jcc READ EFLAGS but report
+/// `has_side_effects=false` (they don't write flags), so a target containing
+/// only these families gets `flags_live=false` from this helper.
 /// x86 equivalence compensates for a fixed trailing Jcc by forcing flags into
 /// the effective live-out contract before comparing prefixes. Direct callers
 /// that bypass the generic equivalence entry point must apply their own
