@@ -4425,6 +4425,41 @@ mod cli_helper_tests {
     }
 
     #[test]
+    fn candidate_windows_flush_supported_run_at_section_end() {
+        let bytes = [0x48, 0x89, 0xd8]; // mov rax, rbx
+        let elf_bytes = build_minimal_elf64(&bytes, 0x4000, elf::abi::EM_X86_64);
+        let input = TempFile::new_bytes("s11-candidate-section-end", "elf", &elf_bytes);
+        let patcher = ElfPatcher::new(input.path()).expect("x86-64 ELF should parse");
+
+        let sections =
+            find_candidate_windows(&patcher).expect("candidate discovery should succeed");
+
+        assert_eq!(sections.len(), 1);
+        assert_eq!(sections[0].candidates.len(), 1);
+        assert_eq!(sections[0].candidates[0].start, 0x4000);
+        assert_eq!(
+            sections[0].candidates[0].end, 0x4003,
+            "the exclusive end must come from the final decoded instruction"
+        );
+    }
+
+    #[test]
+    fn candidate_windows_fail_closed_when_section_is_only_partially_decoded() {
+        let elf_bytes = build_minimal_elf64(&[0x48], 0x5000, elf::abi::EM_X86_64);
+        let input = TempFile::new_bytes("s11-candidate-partial-decode", "elf", &elf_bytes);
+        let patcher = ElfPatcher::new(input.path()).expect("x86-64 ELF should parse");
+
+        let error = find_candidate_windows(&patcher)
+            .expect_err("an incomplete x86 prefix must not publish partial candidates")
+            .to_string();
+
+        assert!(error.contains("executable section '.text'"), "{error}");
+        assert!(error.contains("x86-64 window 0x5000-0x5001"), "{error}");
+        assert!(error.contains("decoded only 0 bytes"), "{error}");
+        assert!(error.contains("first undecoded byte at 0x5000"), "{error}");
+    }
+
+    #[test]
     fn downstream_flags_live_scan_marks_dead_when_first_flag_event_writes() {
         let bytes = assemble_aarch64_test_bytes(&[
             Instruction::Cmp {
