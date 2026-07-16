@@ -97,7 +97,7 @@ with width-parameterised SMT equivalence.
 
 Rewritable straight-line mnemonic families:
 
-- `mov`, `add`, `sub`, `and`, `or`, `xor`, `cmp`, `test`
+- `mov`, `movzx`, `movsx`, `add`, `sub`, `and`, `or`, `xor`, `cmp`, `test`
 - Single-operand: `neg`, `not`, `inc`, `dec`
 - Immediate-count shifts: `shl`/`sal`, `shr`, `sar`
 - Immediate-count rotates: `rol`, `ror`
@@ -106,7 +106,14 @@ Rewritable straight-line mnemonic families:
 - Conditional moves: `cmov<cond>`
 
 The data-movement/arithmetic/logical/comparison families have register and
-immediate forms where the x86 IR models them. `cmp` and `test` are
+immediate forms where the x86 IR models them. `movzx` and `movsx` are
+register-only width-changing moves: they extract the low 8 or 16 bits named by
+the source alias and zero- or sign-extend them into the native-width destination
+(64 bits in x86-64, 32 bits in x86-32), without changing EFLAGS. Legacy
+high-byte sources (`ah`/`bh`/`ch`/`dh`) are not modelled. The 32-to-64 signed
+form is the distinct `movsxd` family and remains unsupported; x86 has no
+`movzx r64, r32` encoding because a 32-bit GPR write already provides that zero
+extension. `cmp` and `test` are
 flag-setting: each discards its result and writes only EFLAGS (`cmp` from a
 subtraction, `test` from a bitwise AND that clears CF/OF). `neg` and `not`
 are single-operand: `neg` computes `rd = -rd` and sets EFLAGS as if from
@@ -148,12 +155,17 @@ register-base + displacement form, `lea rd, [base + disp]`, computing
 deferred and rejected as unsupported shapes. `cmov<cond>` has register operands
 and reads EFLAGS without modifying them.
 
-The x86 IR does not yet carry operand width. To avoid rewriting partial-width
-operations as full-width operations, the binary optimization path currently
-accepts only mode-width register aliases: `rax`/`r8`-style 64-bit names for
-x86-64, and `eax`-style 32-bit i386 names for x86-32. x86-64 `eax`/`ax`/`al`
-forms, x86-32 `ax`/`al` forms, and x86-32 extended-register aliases such as
-`r8d` are rejected until operand width is represented end to end.
+The x86 IR does not yet carry general operand width. To avoid rewriting
+partial-width operations as full-width operations, the binary optimization path
+accepts mode-width register aliases for every ordinary instruction:
+`rax`/`r8`-style 64-bit names for x86-64, and `eax`-style 32-bit i386 names for
+x86-32. MOVZX/MOVSX are the narrow, explicit exception: their IR variants carry
+the 8- or 16-bit source width while their destination remains the mode width.
+Other x86-64 `eax`/`ax`/`al` forms, other x86-32 `ax`/`al` forms, and x86-32
+extended-register aliases such as `r8d` are rejected until operand width is
+represented end to end. In x86-32, only `al`/`cl`/`dl`/`bl` are encodable as
+8-bit sources; `spl`/`bpl`/`sil`/`dil` require a 64-bit-mode REX prefix and are
+rejected.
 
 Fixed control-flow terminators:
 
