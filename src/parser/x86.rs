@@ -250,27 +250,26 @@ fn parse_x86_register_with_mode(
     }
 }
 
-/// Parse SETcc's byte destination. Text input uses the interim IR's canonical
-/// native-width spelling; mode-aware Capstone input must use an architectural
-/// low-byte alias and is canonicalized to the corresponding full register.
+/// Parse the interim full-width SETcc pseudo-instruction's destination.
+///
+/// Width-agnostic text accepts only the canonical register spelling emitted by
+/// `Display`. Mode-aware input comes from real machine code, where SETcc is a
+/// partial byte write that the current IR cannot soundly represent (#75).
 fn parse_x86_setcc_register_with_mode(
     reg_str: &str,
     mode: Option<X86ParseMode>,
 ) -> Result<X86Register, String> {
-    let Some(mode) = mode else {
-        return parse_x86_register(reg_str);
-    };
-    let (reg, alias_width) = classify_x86_register_alias(reg_str).map_err(|err| err.to_string())?;
-    if alias_width != 8 {
+    if let Some(mode) = mode {
         return Err(format!(
-            "setcc expects an 8-bit destination from {} binary input, got '{}'",
-            mode.arch_label(),
-            reg_str.trim()
+            "architectural byte SETcc from {} binary input cannot be represented until #75",
+            mode.arch_label()
         ));
     }
-    if mode == X86ParseMode::Mode32 && reg.index().is_some_and(|index| index >= 4) {
+    let (reg, alias_width) = classify_x86_register_alias(reg_str).map_err(|err| err.to_string())?;
+    if alias_width != 64 {
         return Err(format!(
-            "unsupported x86-32 SETcc low-byte register '{}'",
+            "SETcc full-width pseudo-instruction requires a canonical 64-bit register spelling, \
+             got '{}'",
             reg_str.trim()
         ));
     }
@@ -346,8 +345,9 @@ fn x86_ir_from_mnemonic_impl(
 ) -> Result<Option<X86Instruction>, String> {
     let mnemonic = mnemonic.trim().to_lowercase();
 
-    // SETcc — one byte-register destination in machine-code input, represented
-    // as a full native-width zero-extended write by the interim IR (#75).
+    // SETcc — one canonical full-register destination in text pseudo-syntax.
+    // Mode-aware binary input is rejected because real SETcc is a byte write
+    // that cannot be represented soundly until #75.
     if let Some(suffix) = mnemonic.strip_prefix("set") {
         let cond = parse_x86_condition(suffix)?;
         let parts: Vec<&str> = op_str.split(',').map(|s| s.trim()).collect();
@@ -1558,36 +1558,43 @@ mod tests {
             };
             assert_eq!(parsed, expected, "parsing {mnemonic} failed");
             assert_eq!(parsed.to_string(), format!("{mnemonic} rax"));
+            assert_eq!(
+                parse_x86_assembly_string(&parsed.to_string(), "setcc-round-trip".to_string())
+                    .unwrap(),
+                vec![parsed],
+                "canonical {mnemonic} display must parse back to the same IR"
+            );
+        }
+
+        for partial_width in ["al", "ax", "eax"] {
+            let err = x86_ir_from_mnemonic("setne", partial_width)
+                .expect_err("partial-width SETcc text must not enter the full-width pseudo-IR");
+            assert!(
+                err.contains("full-width pseudo-instruction"),
+                "unexpected error for {partial_width}: {err}"
+            );
         }
     }
 
     #[test]
-    fn mode_aware_setcc_parsing_canonicalizes_architectural_low_byte_aliases() {
-        for (mode, operand, expected_rd) in [
-            (X86ParseMode::Mode64, "al", X86Register::RAX),
-            (X86ParseMode::Mode64, "spl", X86Register::RSP),
-            (X86ParseMode::Mode64, "r8b", X86Register::R8),
-            (X86ParseMode::Mode32, "al", X86Register::RAX),
-            (X86ParseMode::Mode32, "bl", X86Register::RBX),
+    fn mode_aware_setcc_parsing_rejects_architectural_byte_instructions_until_issue_75() {
+        for (mode, operand) in [
+            (X86ParseMode::Mode64, "al"),
+            (X86ParseMode::Mode64, "spl"),
+            (X86ParseMode::Mode64, "r8b"),
+            (X86ParseMode::Mode64, "ah"),
+            (X86ParseMode::Mode64, "byte ptr [rax]"),
+            (X86ParseMode::Mode32, "al"),
+            (X86ParseMode::Mode32, "bl"),
         ] {
-            assert_eq!(
-                x86_ir_from_mnemonic_for_mode("setne", operand, mode)
-                    .unwrap()
-                    .unwrap(),
-                X86Instruction::Setcc {
-                    rd: expected_rd,
-                    cond: X86Condition::NE,
-                }
+            let err = x86_ir_from_mnemonic_for_mode("setne", operand, mode)
+                .expect_err("architectural byte SETcc must not enter the full-width pseudo-IR");
+            assert!(
+                err.contains("cannot be represented until #75"),
+                "unexpected error for {} {operand}: {err}",
+                mode.arch_label()
             );
         }
-
-        let err = x86_ir_from_mnemonic_for_mode("setne", "sil", X86ParseMode::Mode32)
-            .expect_err("i386 has no SIL byte register");
-        assert!(err.contains("unsupported x86-32 SETcc low-byte register"));
-
-        let err = x86_ir_from_mnemonic_for_mode("setne", "rax", X86ParseMode::Mode64)
-            .expect_err("Capstone SETcc input must name a byte register");
-        assert!(err.contains("expects an 8-bit destination"));
     }
 
     #[test]
