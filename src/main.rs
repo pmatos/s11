@@ -4331,10 +4331,7 @@ mod cli_helper_tests {
         let disassembly = cs
             .disasm_all(&bytes, 0x1000)
             .expect("fixture should disassemble");
-        let call = disassembly
-            .iter()
-            .nth(1)
-            .expect("fixture should contain BL");
+        let call = disassembly.get(1).expect("fixture should contain BL");
         let detail = cs.insn_detail(call).expect("BL detail should be available");
         assert!(
             capstone_detail_is_call(&detail),
