@@ -607,6 +607,15 @@ impl Default for OptimizationContext {
     }
 }
 
+// This discovery seam is consumed by the later auto-driver loop (#620). Until
+// then it is exercised directly by tests but has no production CLI caller.
+#[cfg_attr(not(test), allow(dead_code))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum CandidateInstructionDisposition {
+    StraightLine,
+    Terminator,
+}
+
 trait ElfOptimizationBackend {
     type Instruction: std::fmt::Display;
 
@@ -626,6 +635,12 @@ trait ElfOptimizationBackend {
         &self,
         instructions: &capstone::Instructions,
     ) -> Result<Vec<Self::Instruction>, String>;
+
+    #[cfg_attr(not(test), allow(dead_code))]
+    fn classify_candidate_instruction(
+        &self,
+        instruction: &capstone::Insn<'_>,
+    ) -> Result<CandidateInstructionDisposition, String>;
 
     fn validate_window_ir(&self, ir: &[Self::Instruction]) -> Result<(), String>;
 
@@ -691,6 +706,21 @@ impl ElfOptimizationBackend for AArch64OptimizationBackend {
         instructions: &capstone::Instructions,
     ) -> Result<Vec<Self::Instruction>, String> {
         convert_to_ir(instructions)
+    }
+
+    fn classify_candidate_instruction(
+        &self,
+        instruction: &capstone::Insn<'_>,
+    ) -> Result<CandidateInstructionDisposition, String> {
+        let converted = convert_capstone_op_for_optimization(
+            instruction.mnemonic().unwrap_or(""),
+            instruction.op_str().unwrap_or(""),
+            instruction.address(),
+        )?;
+        Ok(match converted {
+            Some(ir) if ir.is_terminator() => CandidateInstructionDisposition::Terminator,
+            Some(_) | None => CandidateInstructionDisposition::StraightLine,
+        })
     }
 
     fn validate_window_ir(&self, ir: &[Self::Instruction]) -> Result<(), String> {
@@ -856,6 +886,7 @@ impl ElfOptimizationBackend for X86OptimizationBackend {
         };
         Ok(builder
             .syntax(capstone::arch::x86::ArchSyntax::Intel)
+            .detail(true)
             .build()?)
     }
 
@@ -864,6 +895,23 @@ impl ElfOptimizationBackend for X86OptimizationBackend {
         instructions: &capstone::Instructions,
     ) -> Result<Vec<Self::Instruction>, String> {
         convert_to_x86_ir(instructions, self.parse_mode())
+    }
+
+    fn classify_candidate_instruction(
+        &self,
+        instruction: &capstone::Insn<'_>,
+    ) -> Result<CandidateInstructionDisposition, String> {
+        let ir = convert_x86_capstone_op_for_optimization(
+            instruction.mnemonic().unwrap_or(""),
+            instruction.op_str().unwrap_or(""),
+            instruction.address(),
+            self.parse_mode(),
+        )?;
+        Ok(if ir.is_terminator() {
+            CandidateInstructionDisposition::Terminator
+        } else {
+            CandidateInstructionDisposition::StraightLine
+        })
     }
 
     fn validate_window_ir(&self, ir: &[Self::Instruction]) -> Result<(), String> {
@@ -1034,6 +1082,182 @@ impl ElfOptimizationBackend for X86OptimizationBackend {
             original_prefix_byte_size,
         )?;
         Ok(OptimizedWindowBytes::Patch(new_bytes))
+    }
+}
+
+#[cfg_attr(not(test), allow(dead_code))]
+#[derive(Debug, Clone)]
+struct SectionCandidateWindows {
+    section: TextSection,
+    candidates: Vec<AddressWindow>,
+}
+
+#[cfg_attr(not(test), allow(dead_code))]
+fn find_candidate_windows(
+    patcher: &ElfPatcher,
+) -> Result<Vec<SectionCandidateWindows>, Box<dyn std::error::Error>> {
+    match patcher.arch() {
+        DetectedArch::Aarch64 => {
+            find_candidate_windows_with_backend(AArch64OptimizationBackend, patcher)
+        }
+        DetectedArch::X86_64 | DetectedArch::X86_32 => find_candidate_windows_with_backend(
+            X86OptimizationBackend::new(X86Arch::try_from(patcher.arch())?),
+            patcher,
+        ),
+    }
+}
+
+#[cfg_attr(not(test), allow(dead_code))]
+fn find_candidate_windows_with_backend<B: ElfOptimizationBackend>(
+    backend: B,
+    patcher: &ElfPatcher,
+) -> Result<Vec<SectionCandidateWindows>, Box<dyn std::error::Error>> {
+    let cs = backend.disassembler()?;
+    let mut section_results = Vec::new();
+
+    for section in patcher.get_text_sections()? {
+        let section_end = section
+            .virtual_addr
+            .checked_add(section.size)
+            .ok_or_else(|| {
+                format!(
+                    "executable section '{}' range overflows: start 0x{:x}, size {}",
+                    section.name, section.virtual_addr, section.size
+                )
+            })?;
+        let section_window = AddressWindow {
+            start: section.virtual_addr,
+            end: section_end,
+        };
+        let bytes = patcher
+            .get_instructions_in_window(&section_window)
+            .map_err(|error| {
+                format!(
+                    "failed to read executable section '{}' at 0x{:x}-0x{:x}: {}",
+                    section.name, section.virtual_addr, section_end, error
+                )
+            })?;
+        let instructions = cs
+            .disasm_all(&bytes, section.virtual_addr)
+            .map_err(|error| {
+                format!(
+                    "failed to disassemble executable section '{}' at 0x{:x}-0x{:x}: {}",
+                    section.name, section.virtual_addr, section_end, error
+                )
+            })?;
+        let decoded_bytes = instructions.iter().try_fold(0usize, |total, instruction| {
+            total.checked_add(instruction.bytes().len())
+        });
+        let decoded_bytes = decoded_bytes.ok_or_else(|| {
+            format!(
+                "decoded byte count overflowed for executable section '{}' at 0x{:x}-0x{:x}",
+                section.name, section.virtual_addr, section_end
+            )
+        })?;
+        ensure_window_fully_decoded_for_arch(
+            decode_arch_label(backend.arch()),
+            decoded_bytes,
+            bytes.len(),
+            section.virtual_addr,
+            section_end,
+        )
+        .map_err(|error| format!("executable section '{}': {}", section.name, error))?;
+
+        let mut candidates = Vec::new();
+        let mut run_start = None;
+        let mut run_end = section.virtual_addr;
+
+        for instruction in instructions.iter() {
+            let instruction_end = instruction
+                .address()
+                .checked_add(
+                    u64::try_from(instruction.bytes().len())
+                        .expect("instruction byte length always fits u64"),
+                )
+                .ok_or_else(|| {
+                    format!(
+                        "instruction range overflows in executable section '{}' at 0x{:x}",
+                        section.name,
+                        instruction.address()
+                    )
+                })?;
+            let detail = cs.insn_detail(instruction).map_err(|error| {
+                format!(
+                    "failed to inspect instruction detail in executable section '{}' at 0x{:x}: {}",
+                    section.name,
+                    instruction.address(),
+                    error
+                )
+            })?;
+
+            if capstone_detail_is_call(&detail) {
+                flush_candidate_run(&mut candidates, &mut run_start, run_end);
+                continue;
+            }
+            if backend.arch() == DetectedArch::X86_64
+                && capstone_detail_has_rip_relative_memory(&detail)
+            {
+                flush_candidate_run(&mut candidates, &mut run_start, run_end);
+                continue;
+            }
+
+            match backend.classify_candidate_instruction(instruction) {
+                Ok(CandidateInstructionDisposition::StraightLine) => {
+                    run_start.get_or_insert(instruction.address());
+                    run_end = instruction_end;
+                }
+                Ok(CandidateInstructionDisposition::Terminator) => {
+                    if run_start.is_some() {
+                        run_end = instruction_end;
+                    }
+                    flush_candidate_run(&mut candidates, &mut run_start, run_end);
+                }
+                Err(_) => {
+                    flush_candidate_run(&mut candidates, &mut run_start, run_end);
+                }
+            }
+        }
+        flush_candidate_run(&mut candidates, &mut run_start, run_end);
+        section_results.push(SectionCandidateWindows {
+            section,
+            candidates,
+        });
+    }
+
+    Ok(section_results)
+}
+
+fn capstone_detail_is_call(detail: &capstone::InsnDetail<'_>) -> bool {
+    let call_group =
+        capstone::InsnGroupId(capstone::InsnGroupType::CS_GRP_CALL as capstone::InsnGroupIdInt);
+    detail.groups().contains(&call_group)
+}
+
+fn capstone_detail_has_rip_relative_memory(detail: &capstone::InsnDetail<'_>) -> bool {
+    let arch_detail = detail.arch_detail();
+    let Some(x86_detail) = arch_detail.x86() else {
+        return false;
+    };
+    let rip = capstone::RegId(capstone::arch::x86::X86Reg::X86_REG_RIP as capstone::RegIdInt);
+    x86_detail.operands().any(|operand| {
+        matches!(
+            operand.op_type,
+            capstone::arch::x86::X86OperandType::Mem(memory) if memory.base() == rip
+        )
+    })
+}
+
+#[cfg_attr(not(test), allow(dead_code))]
+fn flush_candidate_run(
+    candidates: &mut Vec<AddressWindow>,
+    run_start: &mut Option<u64>,
+    run_end: u64,
+) {
+    if let Some(start) = run_start.take() {
+        candidates.push(AddressWindow {
+            start,
+            end: run_end,
+        });
     }
 }
 
@@ -2287,34 +2511,41 @@ fn convert_to_x86_ir(
     for instruction in instructions.iter() {
         let mn = instruction.mnemonic().unwrap_or("");
         let ops = instruction.op_str().unwrap_or("");
-        match x86_ir_from_mnemonic_for_mode(mn, ops, mode) {
-            Ok(Some(ir)) => out.push(ir),
-            Ok(None) => {
-                // Refusing the window is safer than silently dropping the
-                // unsupported instruction: the patcher overwrites the entire
-                // byte window with the reassembled IR, so a dropped `lea`,
-                // `call`, etc. would lose its side effect from the binary.
-                return Err(format!(
-                    "x86 window contains unsupported mnemonic '{} {}' at 0x{:x}; \
-                     narrow the --start-addr/--end-addr range \
-                     to exclude it, or add the mnemonic to the supported set.",
-                    mn,
-                    ops,
-                    instruction.address()
-                ));
-            }
-            Err(e) => {
-                return Err(format!(
-                    "failed to parse x86 instruction '{} {}' at 0x{:x}: {}",
-                    mn,
-                    ops,
-                    instruction.address(),
-                    e
-                ));
-            }
-        }
+        out.push(convert_x86_capstone_op_for_optimization(
+            mn,
+            ops,
+            instruction.address(),
+            mode,
+        )?);
     }
     Ok(out)
+}
+
+fn convert_x86_capstone_op_for_optimization(
+    mnemonic: &str,
+    op_str: &str,
+    address: u64,
+    mode: X86ParseMode,
+) -> Result<isa::x86::X86Instruction, String> {
+    match x86_ir_from_mnemonic_for_mode(mnemonic, op_str, mode) {
+        Ok(Some(ir)) => Ok(ir),
+        Ok(None) => {
+            // Refusing the window is safer than silently dropping the
+            // unsupported instruction: the patcher overwrites the entire
+            // byte window with the reassembled IR, so a dropped `lea`,
+            // `call`, etc. would lose its side effect from the binary.
+            Err(format!(
+                "x86 window contains unsupported mnemonic '{} {}' at 0x{:x}; \
+                 narrow the --start-addr/--end-addr range \
+                 to exclude it, or add the mnemonic to the supported set.",
+                mnemonic, op_str, address
+            ))
+        }
+        Err(error) => Err(format!(
+            "failed to parse x86 instruction '{} {}' at 0x{:x}: {}",
+            mnemonic, op_str, address, error
+        )),
+    }
 }
 
 /// Candidate register pool for x86 search, drawn from the target's original
@@ -2987,13 +3218,37 @@ mod cli_helper_tests {
         assert_eq!(optimized[0].destination(), Some(X86Register::R10));
     }
 
-    fn build_minimal_elf64(text_bytes: &[u8], text_vaddr: u64, machine: u16) -> Vec<u8> {
+    fn build_elf64_with_executable_sections(
+        sections: &[(&str, &[u8], u64)],
+        machine: u16,
+    ) -> Vec<u8> {
         let elf_header_size = 64usize;
         let shentsize = 64usize;
-        let shnum = 3usize;
-        let shstrtab: &[u8] = b"\0.text\0.shstrtab\0";
-        let text_offset = elf_header_size;
-        let shstrtab_offset = text_offset + text_bytes.len();
+        let shnum = sections.len() + 2;
+
+        let mut shstrtab = vec![0u8];
+        let section_name_offsets: Vec<usize> = sections
+            .iter()
+            .map(|(name, _, _)| {
+                let offset = shstrtab.len();
+                shstrtab.extend_from_slice(name.as_bytes());
+                shstrtab.push(0);
+                offset
+            })
+            .collect();
+        let shstrtab_name_offset = shstrtab.len();
+        shstrtab.extend_from_slice(b".shstrtab\0");
+
+        let mut next_offset = elf_header_size;
+        let section_file_offsets: Vec<usize> = sections
+            .iter()
+            .map(|(_, bytes, _)| {
+                let offset = next_offset;
+                next_offset += bytes.len();
+                offset
+            })
+            .collect();
+        let shstrtab_offset = next_offset;
         let shoff = shstrtab_offset + shstrtab.len();
         let total_size = shoff + shentsize * shnum;
 
@@ -3009,11 +3264,21 @@ mod cli_helper_tests {
         buf[40..48].copy_from_slice(&(shoff as u64).to_le_bytes());
         buf[52..54].copy_from_slice(&(elf_header_size as u16).to_le_bytes());
         buf[58..60].copy_from_slice(&(shentsize as u16).to_le_bytes());
-        buf[60..62].copy_from_slice(&(shnum as u16).to_le_bytes());
-        buf[62..64].copy_from_slice(&2u16.to_le_bytes());
+        buf[60..62].copy_from_slice(
+            &u16::try_from(shnum)
+                .expect("test section count should fit ELF64 header")
+                .to_le_bytes(),
+        );
+        buf[62..64].copy_from_slice(
+            &u16::try_from(sections.len() + 1)
+                .expect("test string-table index should fit ELF64 header")
+                .to_le_bytes(),
+        );
 
-        buf[text_offset..text_offset + text_bytes.len()].copy_from_slice(text_bytes);
-        buf[shstrtab_offset..shstrtab_offset + shstrtab.len()].copy_from_slice(shstrtab);
+        for ((_, bytes, _), offset) in sections.iter().zip(&section_file_offsets) {
+            buf[*offset..*offset + bytes.len()].copy_from_slice(bytes);
+        }
+        buf[shstrtab_offset..shstrtab_offset + shstrtab.len()].copy_from_slice(&shstrtab);
 
         let mut write_shdr = |index: usize, fields: [u64; 10]| {
             let base = shoff + index * shentsize;
@@ -3029,25 +3294,33 @@ mod cli_helper_tests {
             buf[base + 56..base + 64].copy_from_slice(&fields[9].to_le_bytes());
         };
         write_shdr(0, [0; 10]);
+
+        for (index, (((_, bytes, virtual_addr), name_offset), file_offset)) in sections
+            .iter()
+            .zip(&section_name_offsets)
+            .zip(&section_file_offsets)
+            .enumerate()
+        {
+            write_shdr(
+                index + 1,
+                [
+                    *name_offset as u64,
+                    elf::abi::SHT_PROGBITS as u64,
+                    (elf::abi::SHF_ALLOC | elf::abi::SHF_EXECINSTR) as u64,
+                    *virtual_addr,
+                    *file_offset as u64,
+                    bytes.len() as u64,
+                    0,
+                    0,
+                    1,
+                    0,
+                ],
+            );
+        }
         write_shdr(
-            1,
+            sections.len() + 1,
             [
-                1,
-                elf::abi::SHT_PROGBITS as u64,
-                (elf::abi::SHF_ALLOC | elf::abi::SHF_EXECINSTR) as u64,
-                text_vaddr,
-                text_offset as u64,
-                text_bytes.len() as u64,
-                0,
-                0,
-                1,
-                0,
-            ],
-        );
-        write_shdr(
-            2,
-            [
-                7,
+                shstrtab_name_offset as u64,
                 elf::abi::SHT_STRTAB as u64,
                 0,
                 0,
@@ -3061,6 +3334,62 @@ mod cli_helper_tests {
         );
 
         buf
+    }
+
+    fn build_minimal_elf64(text_bytes: &[u8], text_vaddr: u64, machine: u16) -> Vec<u8> {
+        build_elf64_with_executable_sections(&[(".text", text_bytes, text_vaddr)], machine)
+    }
+
+    #[test]
+    fn candidate_windows_find_maximal_supported_runs_in_each_executable_section() {
+        // push rax; mov rax, rbx; add rax, 1; pop rax
+        let text = [0x50, 0x48, 0x89, 0xd8, 0x48, 0x83, 0xc0, 0x01, 0x58];
+        // A non-empty executable section containing only unsupported separators.
+        let init = [0x50, 0x58];
+        let elf_bytes = build_elf64_with_executable_sections(
+            &[(".text", &text, 0x1000), (".init", &init, 0x2000)],
+            elf::abi::EM_X86_64,
+        );
+        let input = TempFile::new_bytes("s11-candidate-runs", "elf", &elf_bytes);
+        let patcher = ElfPatcher::new(input.path()).expect("x86-64 ELF should parse");
+
+        let sections =
+            find_candidate_windows(&patcher).expect("candidate discovery should succeed");
+
+        assert_eq!(sections.len(), 2);
+        assert_eq!(sections[0].section.name, ".text");
+        assert_eq!(sections[0].candidates.len(), 1);
+        assert_eq!(sections[0].candidates[0].start, 0x1001);
+        assert_eq!(sections[0].candidates[0].end, 0x1008);
+        assert_eq!(sections[1].section.name, ".init");
+        assert!(
+            sections[1].candidates.is_empty(),
+            "separator-only sections must retain an empty result record"
+        );
+    }
+
+    #[test]
+    fn candidate_windows_split_run_at_unsupported_instruction() {
+        // add rax, 1; push rax; sub rbx, 1
+        // The unsupported `push rax` sits between two supported runs and must
+        // split them into two windows through the `Err(_)` flush branch,
+        // pinning the "split at unsupported instructions" claim directly.
+        let text = [0x48, 0x83, 0xc0, 0x01, 0x50, 0x48, 0x83, 0xeb, 0x01];
+        let elf_bytes =
+            build_elf64_with_executable_sections(&[(".text", &text, 0x1000)], elf::abi::EM_X86_64);
+        let input = TempFile::new_bytes("s11-candidate-split", "elf", &elf_bytes);
+        let patcher = ElfPatcher::new(input.path()).expect("x86-64 ELF should parse");
+
+        let sections =
+            find_candidate_windows(&patcher).expect("candidate discovery should succeed");
+
+        assert_eq!(sections.len(), 1);
+        assert_eq!(sections[0].section.name, ".text");
+        assert_eq!(sections[0].candidates.len(), 2);
+        assert_eq!(sections[0].candidates[0].start, 0x1000);
+        assert_eq!(sections[0].candidates[0].end, 0x1004);
+        assert_eq!(sections[0].candidates[1].start, 0x1005);
+        assert_eq!(sections[0].candidates[1].end, 0x1009);
     }
 
     #[test]
@@ -3891,8 +4220,226 @@ mod cli_helper_tests {
             .x86()
             .mode(capstone::arch::x86::ArchMode::Mode64)
             .syntax(capstone::arch::x86::ArchSyntax::Intel)
+            .detail(true)
             .build()
             .expect("test capstone should build")
+    }
+
+    #[test]
+    fn candidate_instruction_classification_uses_aarch64_conversion_outcome() {
+        let backend = AArch64OptimizationBackend;
+        let cs = aarch64_test_capstone();
+
+        let nop = cs
+            .disasm_all(&[0x1f, 0x20, 0x03, 0xd5], 0x1000)
+            .expect("NOP should disassemble");
+        assert_eq!(
+            backend
+                .classify_candidate_instruction(nop.iter().next().expect("one NOP"))
+                .expect("NOP is a supported skip"),
+            CandidateInstructionDisposition::StraightLine
+        );
+
+        let branch_bytes = assemble_aarch64_test_bytes(&[Instruction::B {
+            target: s11::ir::LabelId(0x1000),
+        }]);
+        let branch = cs
+            .disasm_all(&branch_bytes, 0x1000)
+            .expect("branch should disassemble");
+        assert_eq!(
+            backend
+                .classify_candidate_instruction(branch.iter().next().expect("one branch"))
+                .expect("B is a supported terminator"),
+            CandidateInstructionDisposition::Terminator
+        );
+    }
+
+    #[test]
+    fn candidate_instruction_classification_matches_x86_window_conversion() {
+        let backend = X86OptimizationBackend::new(X86Arch::X86_64);
+        let cs = x86_64_test_capstone();
+        let supported = cs
+            .disasm_all(&[0x48, 0x83, 0xc0, 0x01], 0x2000)
+            .expect("add rax, 1 should disassemble");
+        let instruction = supported.iter().next().expect("one add");
+
+        assert_eq!(
+            backend
+                .classify_candidate_instruction(instruction)
+                .expect("add rax, 1 is supported"),
+            CandidateInstructionDisposition::StraightLine
+        );
+        assert_eq!(
+            convert_x86_capstone_op_for_optimization(
+                instruction.mnemonic().unwrap_or(""),
+                instruction.op_str().unwrap_or(""),
+                instruction.address(),
+                parser::x86::X86ParseMode::Mode64,
+            )
+            .expect("single-instruction conversion should succeed"),
+            convert_to_x86_ir(&supported, parser::x86::X86ParseMode::Mode64)
+                .expect("whole-window conversion should succeed")
+                .into_iter()
+                .next()
+                .expect("one IR instruction")
+        );
+
+        let unsupported = cs
+            .disasm_all(&[0x50], 0x3000)
+            .expect("push rax should disassemble");
+        let instruction = unsupported.iter().next().expect("one push");
+        let classifier_error = backend
+            .classify_candidate_instruction(instruction)
+            .expect_err("push rax is unsupported");
+        let window_error = convert_to_x86_ir(&unsupported, parser::x86::X86ParseMode::Mode64)
+            .expect_err("whole-window conversion must also reject push rax");
+        assert_eq!(classifier_error, window_error);
+    }
+
+    #[test]
+    fn candidate_windows_exclude_calls_and_split_both_sides() {
+        let bytes = assemble_aarch64_test_bytes(&[
+            Instruction::Add {
+                rd: Register::X0,
+                rn: Register::X0,
+                rm: Operand::Immediate(1),
+            },
+            Instruction::Bl {
+                target: s11::ir::LabelId(0x1000),
+            },
+            Instruction::Sub {
+                rd: Register::X1,
+                rn: Register::X1,
+                rm: Operand::Immediate(1),
+            },
+        ]);
+        let cs = aarch64_test_capstone();
+        let disassembly = cs
+            .disasm_all(&bytes, 0x1000)
+            .expect("fixture should disassemble");
+        let call = disassembly.get(1).expect("fixture should contain BL");
+        let detail = cs.insn_detail(call).expect("BL detail should be available");
+        assert!(
+            capstone_detail_is_call(&detail),
+            "call exclusion must use Capstone's semantic call group"
+        );
+
+        let elf_bytes = build_minimal_elf64(&bytes, 0x1000, elf::abi::EM_AARCH64);
+        let input = TempFile::new_bytes("s11-candidate-calls", "elf", &elf_bytes);
+        let patcher = ElfPatcher::new(input.path()).expect("AArch64 ELF should parse");
+
+        let sections =
+            find_candidate_windows(&patcher).expect("candidate discovery should succeed");
+
+        assert_eq!(sections.len(), 1);
+        assert_eq!(sections[0].candidates.len(), 2);
+        assert_eq!(sections[0].candidates[0].start, 0x1000);
+        assert_eq!(sections[0].candidates[0].end, 0x1004);
+        assert_eq!(sections[0].candidates[1].start, 0x1008);
+        assert_eq!(sections[0].candidates[1].end, 0x100c);
+    }
+
+    #[test]
+    fn candidate_windows_hold_supported_terminator_only_at_end() {
+        // add rax, 1; je +0; sub rbx, 1
+        let text = [0x48, 0x83, 0xc0, 0x01, 0x74, 0x00, 0x48, 0x83, 0xeb, 0x01];
+        let terminator_only = [0x74, 0x00]; // je +0
+        let elf_bytes = build_elf64_with_executable_sections(
+            &[
+                (".text", &text, 0x1000),
+                (".terminator", &terminator_only, 0x2000),
+            ],
+            elf::abi::EM_X86_64,
+        );
+        let input = TempFile::new_bytes("s11-candidate-terminators", "elf", &elf_bytes);
+        let patcher = ElfPatcher::new(input.path()).expect("x86-64 ELF should parse");
+
+        let sections =
+            find_candidate_windows(&patcher).expect("candidate discovery should succeed");
+
+        assert_eq!(sections.len(), 2);
+        assert_eq!(sections[0].candidates.len(), 2);
+        assert_eq!(sections[0].candidates[0].start, 0x1000);
+        assert_eq!(
+            sections[0].candidates[0].end, 0x1006,
+            "the Jcc may appear only as the first run's held-fixed final instruction"
+        );
+        assert_eq!(sections[0].candidates[1].start, 0x1006);
+        assert_eq!(sections[0].candidates[1].end, 0x100a);
+        assert!(
+            sections[1].candidates.is_empty(),
+            "a terminator without a straight-line prefix is not a useful candidate"
+        );
+    }
+
+    #[test]
+    fn candidate_windows_exclude_x86_64_rip_relative_memory_operands() {
+        let cs = x86_64_test_capstone();
+        let rip_relative = cs
+            .disasm_all(&[0x48, 0x8d, 0x05, 0x00, 0x00, 0x00, 0x00], 0x1004)
+            .expect("RIP-relative LEA should disassemble");
+        let instruction = rip_relative.iter().next().expect("one LEA");
+        let detail = cs
+            .insn_detail(instruction)
+            .expect("LEA detail should be available");
+        assert!(
+            capstone_detail_has_rip_relative_memory(&detail),
+            "RIP-relative exclusion must inspect the typed memory-base operand"
+        );
+
+        // add rax, 1; lea rax, [rip]; sub rbx, 1
+        let bytes = [
+            0x48, 0x83, 0xc0, 0x01, 0x48, 0x8d, 0x05, 0x00, 0x00, 0x00, 0x00, 0x48, 0x83, 0xeb,
+            0x01,
+        ];
+        let elf_bytes = build_minimal_elf64(&bytes, 0x1000, elf::abi::EM_X86_64);
+        let input = TempFile::new_bytes("s11-candidate-rip-relative", "elf", &elf_bytes);
+        let patcher = ElfPatcher::new(input.path()).expect("x86-64 ELF should parse");
+
+        let sections =
+            find_candidate_windows(&patcher).expect("candidate discovery should succeed");
+
+        assert_eq!(sections.len(), 1);
+        assert_eq!(sections[0].candidates.len(), 2);
+        assert_eq!(sections[0].candidates[0].start, 0x1000);
+        assert_eq!(sections[0].candidates[0].end, 0x1004);
+        assert_eq!(sections[0].candidates[1].start, 0x100b);
+        assert_eq!(sections[0].candidates[1].end, 0x100f);
+    }
+
+    #[test]
+    fn candidate_windows_flush_supported_run_at_section_end() {
+        let bytes = [0x48, 0x89, 0xd8]; // mov rax, rbx
+        let elf_bytes = build_minimal_elf64(&bytes, 0x4000, elf::abi::EM_X86_64);
+        let input = TempFile::new_bytes("s11-candidate-section-end", "elf", &elf_bytes);
+        let patcher = ElfPatcher::new(input.path()).expect("x86-64 ELF should parse");
+
+        let sections =
+            find_candidate_windows(&patcher).expect("candidate discovery should succeed");
+
+        assert_eq!(sections.len(), 1);
+        assert_eq!(sections[0].candidates.len(), 1);
+        assert_eq!(sections[0].candidates[0].start, 0x4000);
+        assert_eq!(
+            sections[0].candidates[0].end, 0x4003,
+            "the exclusive end must come from the final decoded instruction"
+        );
+    }
+
+    #[test]
+    fn candidate_windows_fail_closed_when_section_is_only_partially_decoded() {
+        let elf_bytes = build_minimal_elf64(&[0x48], 0x5000, elf::abi::EM_X86_64);
+        let input = TempFile::new_bytes("s11-candidate-partial-decode", "elf", &elf_bytes);
+        let patcher = ElfPatcher::new(input.path()).expect("x86-64 ELF should parse");
+
+        let error = find_candidate_windows(&patcher)
+            .expect_err("an incomplete x86 prefix must not publish partial candidates")
+            .to_string();
+
+        assert!(error.contains("executable section '.text'"), "{error}");
+        assert!(error.contains("x86-64 window 0x5000-0x5001"), "{error}");
+        assert!(error.contains("decoded only 0 bytes"), "{error}");
+        assert!(error.contains("first undecoded byte at 0x5000"), "{error}");
     }
 
     #[test]
@@ -4404,6 +4951,45 @@ mod cli_helper_tests {
 
         optimize_elf_binary(&patcher, input.path(), 0x1000, 0x100a, &opts)
             .expect("narrow register aliases should reach search");
+    }
+
+    #[test]
+    fn x86_capstone_bridge_accepts_extension_move_source_widths() {
+        let cs64 = capstone::Capstone::new()
+            .x86()
+            .mode(capstone::arch::x86::ArchMode::Mode64)
+            .syntax(capstone::arch::x86::ArchSyntax::Intel)
+            .build()
+            .expect("capstone x86-64 init");
+        let movzx = cs64
+            .disasm_all(&[0x48, 0x0f, 0xb6, 0xc3], 0x1000)
+            .expect("disassemble movzx rax, bl");
+        assert_eq!(
+            convert_to_x86_ir(&movzx, parser::x86::X86ParseMode::Mode64).unwrap(),
+            vec![X86Instruction::Movzx {
+                rd: X86Register::RAX,
+                rs: X86Register::RBX,
+                src_width: 8,
+            }]
+        );
+
+        let cs32 = capstone::Capstone::new()
+            .x86()
+            .mode(capstone::arch::x86::ArchMode::Mode32)
+            .syntax(capstone::arch::x86::ArchSyntax::Intel)
+            .build()
+            .expect("capstone x86-32 init");
+        let movsx = cs32
+            .disasm_all(&[0x0f, 0xbf, 0xc2], 0x1000)
+            .expect("disassemble movsx eax, dx");
+        assert_eq!(
+            convert_to_x86_ir(&movsx, parser::x86::X86ParseMode::Mode32).unwrap(),
+            vec![X86Instruction::Movsx {
+                rd: X86Register::RAX,
+                rs: X86Register::RDX,
+                src_width: 16,
+            }]
+        );
     }
 
     #[test]

@@ -495,6 +495,24 @@ pub fn apply_instruction(
             let value = state.imm_bv(*imm, width);
             state.write_operand(*rd, value);
         }
+        X86Instruction::Movzx { rd, rs, src_width } => {
+            assert!(
+                matches!(src_width, 8 | 16),
+                "MOVZX source width must be 8 or 16 bits"
+            );
+            let narrow = state.get_register(*rs).extract(*src_width - 1, 0);
+            let value = narrow.zero_ext(state.width() - *src_width);
+            state.set_register(*rd, value);
+        }
+        X86Instruction::Movsx { rd, rs, src_width } => {
+            assert!(
+                matches!(src_width, 8 | 16),
+                "MOVSX source width must be 8 or 16 bits"
+            );
+            let narrow = state.get_register(*rs).extract(*src_width - 1, 0);
+            let value = narrow.sign_ext(state.width() - *src_width);
+            state.set_register(*rd, value);
+        }
         X86Instruction::AddReg { rd, rs } => {
             let rhs = state.read_operand(*rs);
             apply_binop_smt(&mut state, *rd, rhs, Binop::Add);
@@ -700,6 +718,25 @@ mod tests {
             let r = X86Register::from_index(i).unwrap();
             assert_eq!(state.get_register(r).get_size(), 32);
         }
+    }
+
+    #[test]
+    fn movsx_symbolically_sign_extends_the_extracted_source_word() {
+        let before = MachineStateX86::new_symbolic("movsx", 64);
+        let source = before.get_register(X86Register::RBX).clone();
+        let expected = source.extract(15, 0).sign_ext(48);
+        let after = apply_instruction(
+            before,
+            &X86Instruction::Movsx {
+                rd: X86Register::RAX,
+                rs: X86Register::RBX,
+                src_width: 16,
+            },
+        );
+
+        let solver = Solver::new();
+        solver.assert(after.get_register(X86Register::RAX).eq(&expected).not());
+        assert_eq!(solver.check(), SatResult::Unsat);
     }
 
     #[test]
@@ -1734,6 +1771,17 @@ mod tests {
                 .get_register(X86Register::RBX)
                 .eq(BV::from_u64(rhs, 64)),
         );
+        let zero_flag = BV::from_u64(0, 1);
+        let symbolic_pre_flags = symbolic_pre.get_flags();
+        for flag in [
+            symbolic_pre_flags.cf,
+            symbolic_pre_flags.pf,
+            symbolic_pre_flags.zf,
+            symbolic_pre_flags.sf,
+            symbolic_pre_flags.of,
+        ] {
+            solver.assert(flag.eq(&zero_flag));
+        }
         let symbolic_post = apply_instruction(symbolic_pre, instr);
 
         // Build inequality disjunct over all five tracked flags and rd
@@ -1857,6 +1905,28 @@ mod tests {
         (0x8000_0000_0000_0000, 0x8000_0000_0000_0000),
         (0xDEAD_BEEF_CAFE_BABE, 0x1234_5678_9ABC_DEF0),
     ];
+
+    #[test]
+    fn parity_extension_moves() {
+        for src_width in [8, 16] {
+            for instruction in [
+                X86Instruction::Movzx {
+                    rd: X86Register::RAX,
+                    rs: X86Register::RBX,
+                    src_width,
+                },
+                X86Instruction::Movsx {
+                    rd: X86Register::RAX,
+                    rs: X86Register::RBX,
+                    src_width,
+                },
+            ] {
+                for &(a, b) in PARITY_SAMPLES {
+                    assert_x86_concrete_smt_parity(&instruction, a, b);
+                }
+            }
+        }
+    }
 
     #[test]
     fn parity_add_reg() {
@@ -2164,6 +2234,51 @@ mod tests {
             solver.check(),
             SatResult::Unsat,
             "CMOV must not write any flag"
+        );
+    }
+
+    #[test]
+    fn extension_moves_do_not_modify_flags() {
+        let s0 = MachineStateX86::new_symbolic("s", 64);
+        let flags0 = {
+            let flags = s0.get_flags();
+            EflagsBvs {
+                cf: flags.cf.clone(),
+                pf: flags.pf.clone(),
+                zf: flags.zf.clone(),
+                sf: flags.sf.clone(),
+                of: flags.of.clone(),
+            }
+        };
+        let s1 = apply_sequence(
+            s0,
+            &[
+                X86Instruction::Movzx {
+                    rd: X86Register::RAX,
+                    rs: X86Register::RBX,
+                    src_width: 8,
+                },
+                X86Instruction::Movsx {
+                    rd: X86Register::RCX,
+                    rs: X86Register::RDX,
+                    src_width: 16,
+                },
+            ],
+        );
+        let flags1 = s1.get_flags();
+        let diff = z3::ast::Bool::or(&[
+            &flags1.cf.eq(&flags0.cf).not(),
+            &flags1.pf.eq(&flags0.pf).not(),
+            &flags1.zf.eq(&flags0.zf).not(),
+            &flags1.sf.eq(&flags0.sf).not(),
+            &flags1.of.eq(&flags0.of).not(),
+        ]);
+        let solver = Solver::new();
+        solver.assert(&diff);
+        assert_eq!(
+            solver.check(),
+            SatResult::Unsat,
+            "MOVZX/MOVSX must not write any flag"
         );
     }
 

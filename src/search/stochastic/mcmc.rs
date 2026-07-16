@@ -1097,9 +1097,9 @@ mod tests {
         let config = SearchConfig::default()
             .with_stochastic(
                 // Adding rewritable families shifts the seeded mutation
-                // trajectory. With SETcc raising the opcode count to 30, seed 2
-                // reaches the equally valid `imul rax, rbx, 1` collapse within
-                // 500 iterations (flags are dead in this test).
+                // trajectory. With MOVZX/MOVSX and SETcc raising the opcode
+                // count to 32, seed 2 reaches the equally valid `mov rax, rbx`
+                // collapse within 500 iterations (flags are dead in this test).
                 StochasticConfig::default()
                     .with_iterations(500)
                     .with_seed(2),
@@ -1130,10 +1130,9 @@ mod tests {
         assert_eq!(result.cost_savings(), 1);
         assert_eq!(
             result.optimized_sequence,
-            Some(vec![X86Instruction::ImulRegImm {
+            Some(vec![X86Instruction::MovReg {
                 rd: X86Register::RAX,
                 rs: X86Register::RBX,
-                imm: 1,
             }])
         );
     }

@@ -109,6 +109,21 @@ fn validate_single_register(reg: X86Register, mode_width: u32) -> Result<(), Str
     Ok(())
 }
 
+fn validate_extension_move_registers(
+    rd: X86Register,
+    rs: X86Register,
+    mode_width: u32,
+) -> Result<(), String> {
+    if !rd.is_native() || !rs.is_native() {
+        return Err(format!(
+            "MOVZX/MOVSX explicit-width IR requires canonical registers, got {}, {}",
+            rd, rs
+        ));
+    }
+    validate_single_register(rd, mode_width)?;
+    validate_single_register(rs, mode_width)
+}
+
 macro_rules! legacy_byte_reg_reg_opcode {
     (mov) => {
         0x88u8
@@ -493,6 +508,28 @@ fn encode_64(ops: &mut dynasmrt::x64::Assembler, instr: &X86Instruction) -> Resu
             }
             Ok(())
         }
+        X86Instruction::Movzx { rd, rs, src_width } => {
+            validate_extension_move_registers(*rd, *rs, 64)?;
+            let rd = reg_index(*rd)?;
+            let rs = reg_index(*rs)?;
+            match src_width {
+                8 => dynasm!(ops ; .arch x64 ; movzx Rq(rd), Rb(rs)),
+                16 => dynasm!(ops ; .arch x64 ; movzx Rq(rd), Rw(rs)),
+                _ => return Err(format!("MOVZX source width {} is not encodable", src_width)),
+            }
+            Ok(())
+        }
+        X86Instruction::Movsx { rd, rs, src_width } => {
+            validate_extension_move_registers(*rd, *rs, 64)?;
+            let rd = reg_index(*rd)?;
+            let rs = reg_index(*rs)?;
+            match src_width {
+                8 => dynasm!(ops ; .arch x64 ; movsx Rq(rd), Rb(rs)),
+                16 => dynasm!(ops ; .arch x64 ; movsx Rq(rd), Rw(rs)),
+                _ => return Err(format!("MOVSX source width {} is not encodable", src_width)),
+            }
+            Ok(())
+        }
         X86Instruction::AddReg { rd, rs } => {
             emit_reg_reg_64!(ops, add, *rd, *rs);
             Ok(())
@@ -759,6 +796,42 @@ fn encode_32(ops: &mut dynasmrt::x86::Assembler, instr: &X86Instruction) -> Resu
             emit_reg_imm_32!(ops, mov, *rd, *imm);
             Ok(())
         }
+        X86Instruction::Movzx { rd, rs, src_width } => {
+            validate_extension_move_registers(*rd, *rs, 32)?;
+            let rd = reg_index_32(*rd)?;
+            let source = *rs;
+            let rs = reg_index_32(*rs)?;
+            match src_width {
+                8 if rs < 4 => dynasm!(ops ; .arch x86 ; movzx Rd(rd), Rb(rs)),
+                8 => {
+                    return Err(format!(
+                        "8-bit source register {:?} is not encodable in x86-32 mode",
+                        source
+                    ));
+                }
+                16 => dynasm!(ops ; .arch x86 ; movzx Rd(rd), Rw(rs)),
+                _ => return Err(format!("MOVZX source width {} is not encodable", src_width)),
+            }
+            Ok(())
+        }
+        X86Instruction::Movsx { rd, rs, src_width } => {
+            validate_extension_move_registers(*rd, *rs, 32)?;
+            let rd = reg_index_32(*rd)?;
+            let source = *rs;
+            let rs = reg_index_32(*rs)?;
+            match src_width {
+                8 if rs < 4 => dynasm!(ops ; .arch x86 ; movsx Rd(rd), Rb(rs)),
+                8 => {
+                    return Err(format!(
+                        "8-bit source register {:?} is not encodable in x86-32 mode",
+                        source
+                    ));
+                }
+                16 => dynasm!(ops ; .arch x86 ; movsx Rd(rd), Rw(rs)),
+                _ => return Err(format!("MOVSX source width {} is not encodable", src_width)),
+            }
+            Ok(())
+        }
         X86Instruction::AddReg { rd, rs } => {
             emit_reg_reg_32!(ops, add, *rd, *rs);
             Ok(())
@@ -1008,6 +1081,137 @@ mod tests {
                 )
             })
             .collect()
+    }
+
+    #[test]
+    fn movzx_movsx_round_trip_64_bit_sources() {
+        let instructions = [
+            X86Instruction::Movzx {
+                rd: X86Register::RAX,
+                rs: X86Register::RBX,
+                src_width: 8,
+            },
+            X86Instruction::Movzx {
+                rd: X86Register::R8,
+                rs: X86Register::R9,
+                src_width: 16,
+            },
+            X86Instruction::Movsx {
+                rd: X86Register::RCX,
+                rs: X86Register::RDX,
+                src_width: 8,
+            },
+            X86Instruction::Movsx {
+                rd: X86Register::R10,
+                rs: X86Register::R11,
+                src_width: 16,
+            },
+        ];
+        let bytes = X86Assembler::new_64()
+            .assemble_instructions(&instructions)
+            .expect("encode MOVZX/MOVSX in x86-64");
+
+        assert_eq!(
+            disasm_x86_64(&bytes),
+            vec![
+                ("movzx".to_string(), "rax, bl".to_string()),
+                ("movzx".to_string(), "r8, r9w".to_string()),
+                ("movsx".to_string(), "rcx, dl".to_string()),
+                ("movsx".to_string(), "r10, r11w".to_string()),
+            ]
+        );
+    }
+
+    #[test]
+    fn movzx_movsx_round_trip_64_bit_rex_byte_sources() {
+        let instructions = [
+            X86Instruction::Movzx {
+                rd: X86Register::RAX,
+                rs: X86Register::RSP,
+                src_width: 8,
+            },
+            X86Instruction::Movsx {
+                rd: X86Register::RCX,
+                rs: X86Register::RBP,
+                src_width: 8,
+            },
+            X86Instruction::Movzx {
+                rd: X86Register::RDX,
+                rs: X86Register::RSI,
+                src_width: 8,
+            },
+            X86Instruction::Movsx {
+                rd: X86Register::RBX,
+                rs: X86Register::RDI,
+                src_width: 8,
+            },
+        ];
+        let bytes = X86Assembler::new_64()
+            .assemble_instructions(&instructions)
+            .expect("encode REX-only byte sources in x86-64");
+
+        assert_eq!(
+            disasm_x86_64(&bytes),
+            vec![
+                ("movzx".to_string(), "rax, spl".to_string()),
+                ("movsx".to_string(), "rcx, bpl".to_string()),
+                ("movzx".to_string(), "rdx, sil".to_string()),
+                ("movsx".to_string(), "rbx, dil".to_string()),
+            ]
+        );
+    }
+
+    #[test]
+    fn extension_moves_reject_view_carrying_registers() {
+        for instruction in [
+            X86Instruction::Movzx {
+                rd: X86Register::EAX,
+                rs: X86Register::RBX,
+                src_width: 8,
+            },
+            X86Instruction::Movsx {
+                rd: X86Register::RAX,
+                rs: X86Register::BL,
+                src_width: 8,
+            },
+        ] {
+            let error_64 = X86Assembler::new_64()
+                .assemble_instructions(&[instruction])
+                .expect_err("x86-64 extension move should require canonical registers");
+            assert!(error_64.contains("requires canonical registers"));
+
+            let error_32 = X86Assembler::new_32()
+                .assemble_instructions(&[instruction])
+                .expect_err("x86-32 extension move should require canonical registers");
+            assert!(error_32.contains("requires canonical registers"));
+        }
+    }
+
+    #[test]
+    fn movzx_movsx_round_trip_32_bit_sources() {
+        let instructions = [
+            X86Instruction::Movzx {
+                rd: X86Register::RAX,
+                rs: X86Register::RBX,
+                src_width: 8,
+            },
+            X86Instruction::Movsx {
+                rd: X86Register::RCX,
+                rs: X86Register::RDX,
+                src_width: 16,
+            },
+        ];
+        let bytes = X86Assembler::new_32()
+            .assemble_instructions(&instructions)
+            .expect("encode MOVZX/MOVSX in x86-32");
+
+        assert_eq!(
+            disasm_x86_32(&bytes),
+            vec![
+                ("movzx".to_string(), "eax, bl".to_string()),
+                ("movsx".to_string(), "ecx, dx".to_string()),
+            ]
+        );
     }
 
     fn check_x86_32(instr: X86Instruction, expected_mnemonic: &str, expect_operands: &[&str]) {

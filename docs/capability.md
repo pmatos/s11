@@ -97,7 +97,7 @@ with width-parameterised SMT equivalence.
 
 Rewritable straight-line mnemonic families:
 
-- `mov`, `add`, `sub`, `and`, `or`, `xor`, `cmp`, `test`
+- `mov`, `movzx`, `movsx`, `add`, `sub`, `and`, `or`, `xor`, `cmp`, `test`
 - Single-operand: `neg`, `not`, `inc`, `dec`
 - Immediate-count shifts: `shl`/`sal`, `shr`, `sar`
 - Immediate-count rotates: `rol`, `ror`
@@ -110,7 +110,14 @@ Synthesizable-only pseudo-instruction families:
 - Conditional full-width sets: `set<cond>`
 
 The data-movement/arithmetic/logical/comparison families have register and
-immediate forms where the x86 IR models them. `cmp` and `test` are
+immediate forms where the x86 IR models them. `movzx` and `movsx` are
+register-only width-changing moves: they extract the low 8 or 16 bits named by
+the source alias and zero- or sign-extend them into the native-width destination
+(64 bits in x86-64, 32 bits in x86-32), without changing EFLAGS. Legacy
+high-byte sources (`ah`/`bh`/`ch`/`dh`) are not modelled. The 32-to-64 signed
+form is the distinct `movsxd` family and remains unsupported; x86 has no
+`movzx r64, r32` encoding because a 32-bit GPR write already provides that zero
+extension. `cmp` and `test` are
 flag-setting: each discards its result and writes only EFLAGS (`cmp` from a
 subtraction, `test` from a bitwise AND that clears CF/OF). `neg` and `not`
 are single-operand: `neg` computes `rd = -rd` and sets EFLAGS as if from
@@ -168,6 +175,13 @@ SMT execution, liveness, costing, and assembly. Legacy high-byte operands are
 limited to `ah`/`bh`/`ch`/`dh` and cannot be combined with an encoding that
 requires a REX prefix. x86-32 continues to reject the x86-64-only extended
 register family (`r8` through `r15` and their aliases).
+
+MOVZX/MOVSX carry an explicit 8- or 16-bit source width while keeping a
+native-width destination. This preserves the width-changing operation even
+though the source is stored as its canonical architectural register; display
+and assembly recover the corresponding byte or word spelling. Mode-aware
+x86-32 parsing accepts its 32-bit destination, while width-agnostic parsing
+keeps the canonical x86-64 destination spelling.
 
 The synthesis-only `set<cond>` pseudo-family is the exception to this
 precise-width model and keeps the interim full-width abstraction described

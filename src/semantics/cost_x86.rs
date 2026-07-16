@@ -20,9 +20,10 @@
 //!    accessed 2026-06) for the Intel **Skylake** microarchitecture, cross-checked
 //!    against <https://uops.info/>. On Skylake the simple integer ALU ops
 //!    (MOV/ADD/SUB/AND/OR/XOR/INC/DEC/NEG/NOT/CMP/TEST/shift-by-imm/rotate-by-imm
-//!    and CMOV) have **1-cycle** latency, SETcc's two-operation lowering has
-//!    **2-cycle** dependent latency, and two-operand/three-operand integer
-//!    multiply (`IMUL r,r` / `IMUL r,r,imm`) has **3-cycle** latency. A
+//!    including MOVZX/MOVSX and CMOV) have **1-cycle** latency, SETcc's
+//!    two-operation lowering has **2-cycle** dependent latency, and
+//!    two-operand/three-operand integer multiply
+//!    (`IMUL r,r` / `IMUL r,r,imm`) has **3-cycle** latency. A
 //!    register-to-register MOV is special-cased to **0** because Skylake (and all
 //!    Sandy-Bridge-and-later cores) eliminate it at rename — it never sits on a
 //!    dependency chain. `MovImm` is a real 1-cycle op (it is not move-elimination
@@ -97,9 +98,9 @@ fn instruction_latency(instr: &X86Instruction) -> u64 {
         // Two-/three-operand signed multiply: 3-cycle latency on Skylake.
         X86Instruction::ImulReg { .. } | X86Instruction::ImulRegImm { .. } => 3,
         // Everything else in the supported set is a 1-cycle integer ALU op:
-        // MovImm, ADD/SUB/AND/OR/XOR (reg and imm), CMP/TEST, NEG/NOT/INC/DEC,
-        // SHL/SHR/SAR/ROL/ROR by immediate, CMOV, and the Jcc terminator
-        // (taken-branch latency; misprediction is not modelled).
+        // MovImm, MOVZX/MOVSX, ADD/SUB/AND/OR/XOR (reg and imm), CMP/TEST,
+        // NEG/NOT/INC/DEC, SHL/SHR/SAR/ROL/ROR by immediate, CMOV, and the Jcc
+        // terminator (taken-branch latency; misprediction is not modelled).
         _ => 1,
     }
 }
@@ -163,6 +164,9 @@ fn instruction_code_size(instr: &X86Instruction, width: u32) -> u64 {
     let operand_width = operand.map_or(width, |reg| reg.effective_width(width));
     match instr {
         X86Instruction::MovReg { .. } => 2 + prefixes,
+        // `0F B6/B7 /r` or `0F BE/BF /r`: two-byte opcode plus ModR/M,
+        // with REX.W in native-width x86-64 mode.
+        X86Instruction::Movzx { .. } | X86Instruction::Movsx { .. } => 3 + prefixes,
         // See the module doc-comment: immediate-dependent to stay a valid
         // upper bound on the assembler's MovImm encoding (issue #225).
         X86Instruction::MovImm { imm, .. } => {
@@ -703,6 +707,26 @@ mod tests {
         // CMOV is `0F 4x ModR/M` = 3 bytes, +1 for REX.W on x86-64.
         assert_eq!(instruction_cost(&cmov, &CostMetric::CodeSize, 64), 4);
         assert_eq!(instruction_cost(&cmov, &CostMetric::CodeSize, 32), 3);
+    }
+
+    #[test]
+    fn extension_moves_have_two_byte_opcode_plus_modrm_and_optional_rex() {
+        for instruction in [
+            X86Instruction::Movzx {
+                rd: X86Register::RAX,
+                rs: X86Register::RBX,
+                src_width: 8,
+            },
+            X86Instruction::Movsx {
+                rd: X86Register::RAX,
+                rs: X86Register::RBX,
+                src_width: 16,
+            },
+        ] {
+            assert_eq!(instruction_cost(&instruction, &CostMetric::CodeSize, 64), 4);
+            assert_eq!(instruction_cost(&instruction, &CostMetric::CodeSize, 32), 3);
+            assert_eq!(instruction_cost(&instruction, &CostMetric::Latency, 64), 1);
+        }
     }
 
     #[test]
