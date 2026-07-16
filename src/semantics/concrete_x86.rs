@@ -64,8 +64,9 @@ pub fn apply_instruction_concrete_x86(
         // flags — pure address arithmetic, like MovReg. `write_operand` applies
         // the destination view's truncation and partial-write behavior.
         X86Instruction::Lea { rd, base, disp } => {
+            let address_width = base.effective_width(state.width());
             let base = state.read_operand(*base).as_u64();
-            let result = base.wrapping_add(*disp as u64);
+            let result = mask_width(base.wrapping_add(*disp as u64), address_width);
             state.write_operand(*rd, ConcreteValue::new(result));
         }
         X86Instruction::Cmov { rd, rs, cond } => {
@@ -1752,5 +1753,34 @@ mod tests {
         );
         // 0xffff_fff8 + 0x10 = 0x1_0000_0008, masked to 32 bits = 0x8.
         assert_eq!(after.get_register(X86Register::RAX).as_u64(), 0x8);
+    }
+
+    #[test]
+    fn x86_64_lea_wraps_at_address_override_width() {
+        use crate::parser::x86::{X86ParseMode, x86_ir_from_mnemonic_for_mode};
+
+        // Capstone preserves the 32-bit base on an address-size-overridden
+        // x86-64 LEA. Exercise that binary-input parse path: its effective
+        // address wraps at 32 bits before the native RAX destination is
+        // written.
+        let instruction =
+            x86_ir_from_mnemonic_for_mode("lea", "rax, [ebx - 1]", X86ParseMode::Mode64)
+                .expect("address-size-overridden LEA should parse")
+                .expect("LEA should be supported");
+        assert_eq!(
+            instruction,
+            X86Instruction::Lea {
+                rd: X86Register::RAX,
+                base: X86Register::EBX,
+                disp: -1,
+            }
+        );
+
+        let state = X86ConcreteMachineState::new_zeroed(64);
+        let after = apply_instruction_concrete_x86(state, &instruction);
+        assert_eq!(
+            after.get_register(X86Register::RAX).as_u64(),
+            u64::from(u32::MAX)
+        );
     }
 }
