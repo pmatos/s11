@@ -425,12 +425,13 @@ pub enum X86Instruction {
         rs: X86Register,
         cond: X86Condition,
     },
-    /// `setCC rd` — materialize an EFLAGS condition as native-width 0 or 1.
+    /// `setCC rd` — full-width pseudo-instruction that materializes an EFLAGS
+    /// condition as native-width 0 or 1.
     ///
-    /// This is an interim abstraction until sub-register widths are represented
-    /// by the x86 IR (#75): architectural SETcc writes only the low byte, while
-    /// this variant models a full-register zero-extended result. It reads but
-    /// does not modify EFLAGS.
+    /// Architectural SETcc writes only the low byte, so binary input is rejected
+    /// until sub-register widths are represented by the x86 IR (#75). Candidate
+    /// assembly lowers this variant to byte SETcc followed by same-register
+    /// MOVZX. It reads but does not modify EFLAGS.
     Setcc { rd: X86Register, cond: X86Condition },
     /// `jCC <target>` — conditional branch. Reads EFLAGS;
     /// modelled as an opaque terminator. The branch target is recovered
@@ -1085,8 +1086,9 @@ impl crate::isa::traits::Assembler<X86Instruction> for X86_32 {
             | X86Instruction::Inc { rd }
             | X86Instruction::Dec { rd } => reg_ok_32(*rd),
             X86Instruction::Cmov { rd, rs, .. } => reg_ok_32(*rd) && reg_ok_32(*rs),
-            // Without REX, byte-register encodings 4..=7 name AH..BH rather
-            // than the low byte of ESP..EDI.
+            // The full-width pseudo-op lowers through the matching byte
+            // register. Without REX, slots 4..=7 name AH..BH rather than the
+            // low byte of ESP..EDI, so only EAX..EBX are available in x86-32.
             X86Instruction::Setcc { rd, .. } => {
                 rd.index().is_some_and(|index| index < 4)
             }
