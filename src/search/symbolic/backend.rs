@@ -8,7 +8,7 @@
 //! Both AArch64 and x86 implement this trait by delegating to the
 //! existing free helpers and the generic equivalence checker.
 
-use crate::isa::{CostModel, ISA, InstructionGenerator};
+use crate::isa::{Assembler, CostModel, ISA, InstructionGenerator};
 use crate::search::config::SearchConfig;
 use crate::semantics::cost::CostMetric;
 use crate::semantics::{EquivalenceMetrics, EquivalenceResult};
@@ -215,7 +215,11 @@ impl SymbolicBackend<crate::isa::X86_32> for crate::isa::X86_32 {
         regs: &[crate::isa::x86::X86Register],
         imms: &[i64],
     ) -> Vec<crate::isa::x86::X86Instruction> {
-        crate::isa::x86::X86InstructionGenerator.generate_all(regs, imms)
+        crate::isa::x86::X86InstructionGenerator
+            .generate_all(regs, imms)
+            .into_iter()
+            .filter(|instruction| crate::isa::X86_32.can_assemble(instruction))
+            .collect()
     }
 
     fn target_terminator(
@@ -329,5 +333,44 @@ mod tests {
             <crate::isa::AArch64 as SymbolicBackend<crate::isa::AArch64>>::width(),
             64
         );
+    }
+
+    #[test]
+    fn x86_32_symbolic_candidates_are_encodable() {
+        use crate::isa::x86::{X86Instruction, X86Register};
+        use crate::isa::{Assembler, X86_32};
+
+        let candidates = <X86_32 as SymbolicBackend<X86_32>>::enumerate_all(
+            &[X86Register::RAX, X86Register::RSI, X86Register::RDI],
+            &[0],
+        );
+
+        assert!(
+            candidates
+                .iter()
+                .all(|instruction| X86_32.can_assemble(instruction))
+        );
+        for rs in [X86Register::RSI, X86Register::RDI] {
+            assert!(!candidates.contains(&X86Instruction::Movzx {
+                rd: X86Register::RAX,
+                rs,
+                src_width: 8,
+            }));
+            assert!(!candidates.contains(&X86Instruction::Movsx {
+                rd: X86Register::RAX,
+                rs,
+                src_width: 8,
+            }));
+            assert!(candidates.contains(&X86Instruction::Movzx {
+                rd: X86Register::RAX,
+                rs,
+                src_width: 16,
+            }));
+            assert!(candidates.contains(&X86Instruction::Movsx {
+                rd: X86Register::RAX,
+                rs,
+                src_width: 16,
+            }));
+        }
     }
 }
