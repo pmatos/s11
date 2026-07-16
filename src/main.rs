@@ -886,6 +886,7 @@ impl ElfOptimizationBackend for X86OptimizationBackend {
         };
         Ok(builder
             .syntax(capstone::arch::x86::ArchSyntax::Intel)
+            .detail(true)
             .build()?)
     }
 
@@ -1186,6 +1187,19 @@ fn find_candidate_windows_with_backend<B: ElfOptimizationBackend>(
                         instruction.address()
                     )
                 })?;
+            let detail = cs.insn_detail(instruction).map_err(|error| {
+                format!(
+                    "failed to inspect instruction detail in executable section '{}' at 0x{:x}: {}",
+                    section.name,
+                    instruction.address(),
+                    error
+                )
+            })?;
+
+            if capstone_detail_is_call(&detail) {
+                flush_candidate_run(&mut candidates, &mut run_start, run_end);
+                continue;
+            }
 
             match backend.classify_candidate_instruction(instruction) {
                 Ok(CandidateInstructionDisposition::StraightLine) => {
@@ -1205,6 +1219,12 @@ fn find_candidate_windows_with_backend<B: ElfOptimizationBackend>(
     }
 
     Ok(section_results)
+}
+
+fn capstone_detail_is_call(detail: &capstone::InsnDetail<'_>) -> bool {
+    let call_group =
+        capstone::InsnGroupId(capstone::InsnGroupType::CS_GRP_CALL as capstone::InsnGroupIdInt);
+    detail.groups().contains(&call_group)
 }
 
 #[cfg_attr(not(test), allow(dead_code))]
@@ -4261,6 +4281,52 @@ mod cli_helper_tests {
         let window_error = convert_to_x86_ir(&unsupported, parser::x86::X86ParseMode::Mode64)
             .expect_err("whole-window conversion must also reject push rax");
         assert_eq!(classifier_error, window_error);
+    }
+
+    #[test]
+    fn candidate_windows_exclude_calls_and_split_both_sides() {
+        let bytes = assemble_aarch64_test_bytes(&[
+            Instruction::Add {
+                rd: Register::X0,
+                rn: Register::X0,
+                rm: Operand::Immediate(1),
+            },
+            Instruction::Bl {
+                target: s11::ir::LabelId(0x1000),
+            },
+            Instruction::Sub {
+                rd: Register::X1,
+                rn: Register::X1,
+                rm: Operand::Immediate(1),
+            },
+        ]);
+        let cs = aarch64_test_capstone();
+        let disassembly = cs
+            .disasm_all(&bytes, 0x1000)
+            .expect("fixture should disassemble");
+        let call = disassembly
+            .iter()
+            .nth(1)
+            .expect("fixture should contain BL");
+        let detail = cs.insn_detail(call).expect("BL detail should be available");
+        assert!(
+            capstone_detail_is_call(&detail),
+            "call exclusion must use Capstone's semantic call group"
+        );
+
+        let elf_bytes = build_minimal_elf64(&bytes, 0x1000, elf::abi::EM_AARCH64);
+        let input = TempFile::new_bytes("s11-candidate-calls", "elf", &elf_bytes);
+        let patcher = ElfPatcher::new(input.path()).expect("AArch64 ELF should parse");
+
+        let sections =
+            find_candidate_windows(&patcher).expect("candidate discovery should succeed");
+
+        assert_eq!(sections.len(), 1);
+        assert_eq!(sections[0].candidates.len(), 2);
+        assert_eq!(sections[0].candidates[0].start, 0x1000);
+        assert_eq!(sections[0].candidates[0].end, 0x1004);
+        assert_eq!(sections[0].candidates[1].start, 0x1008);
+        assert_eq!(sections[0].candidates[1].end, 0x100c);
     }
 
     #[test]
