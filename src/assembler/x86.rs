@@ -611,7 +611,12 @@ fn encode_64(ops: &mut dynasmrt::x64::Assembler, instr: &X86Instruction) -> Resu
                     dynasm!(ops ; .arch x64 ; imul Rq(rd), Rq(rs), imm);
                 }
                 X86RegisterView::Dword => {
-                    let imm = signed_imm_i32(*imm)?;
+                    // The 3-operand IMUL immediate is a 32-bit field, so a
+                    // canonical bit pattern (e.g. 0xffffffff == -1) is a legal
+                    // dword encoding; match the encodability filter and the
+                    // sibling dword arithmetic encoders rather than the
+                    // signed-only helper used by the sign-extended 64-bit form.
+                    let imm = imm32_bitpattern_i32(*imm)?;
                     dynasm!(ops ; .arch x64 ; imul Rd(rd), Rd(rs), imm);
                 }
                 X86RegisterView::Word => {
@@ -869,7 +874,10 @@ fn encode_32(ops: &mut dynasmrt::x86::Assembler, instr: &X86Instruction) -> Resu
             let rs = reg_index_32(*rs)?;
             match view {
                 X86RegisterView::Native | X86RegisterView::Dword => {
-                    let imm = signed_imm_i32(*imm)?;
+                    // x86-32 operands are 32-bit, so the IMUL immediate is a
+                    // 32-bit field that admits any canonical bit pattern
+                    // (0xffffffff == -1), matching the encodability filter.
+                    let imm = imm32_bitpattern_i32(*imm)?;
                     dynasm!(ops ; .arch x86 ; imul Rd(rd), Rd(rs), imm);
                 }
                 X86RegisterView::Word => {
@@ -1829,6 +1837,34 @@ mod tests {
             "cmp",
             &["eax", "0xffffffff"],
         );
+    }
+
+    #[test]
+    fn imul_dword_accepts_canonical_high_bit_imm32() {
+        // Regression (PR #675): the 3-operand IMUL immediate is a 32-bit
+        // field, so a canonical bit pattern like 0xffffffff (== -1) is a legal
+        // dword / native-32 encoding. `x86_can_assemble_instruction` already
+        // admits it, so the encoder must agree instead of aborting through the
+        // signed-only helper reserved for the sign-extended 64-bit form.
+        let mut a64 = X86Assembler::new_64();
+        let bytes = a64
+            .assemble_instructions(&[X86Instruction::ImulRegImm {
+                rd: X86Register::EAX,
+                rs: X86Register::ECX,
+                imm: i64::from(u32::MAX),
+            }])
+            .expect("dword IMUL should encode a canonical imm32 bit pattern");
+        assert_eq!(disasm_x86_64(&bytes)[0].0, "imul");
+
+        let mut a32 = X86Assembler::new_32();
+        let bytes = a32
+            .assemble_instructions(&[X86Instruction::ImulRegImm {
+                rd: X86Register::RCX,
+                rs: X86Register::RDX,
+                imm: i64::from(u32::MAX),
+            }])
+            .expect("x86-32 IMUL should encode a canonical imm32 bit pattern");
+        assert_eq!(disasm_x86_32(&bytes)[0].0, "imul");
     }
 
     #[test]
