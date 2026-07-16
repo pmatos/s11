@@ -13,7 +13,7 @@
 use crate::isa::x86::{X86Condition, X86Instruction, X86Operand, X86Register};
 use crate::parser::ParseError;
 
-/// Parse a condition-code suffix from a CMOVcc / Jcc mnemonic. Accepts
+/// Parse a condition-code suffix from a SETcc / CMOVcc / Jcc mnemonic. Accepts
 /// the canonical 16 codes plus the most common GAS aliases
 /// (`z`/`nz`/`nae`/`nb`/`nc`/`pe`/`po`/`nge`/`nl`/`ng`/`nle`).
 /// Returns `Err` on anything unrecognised so callers surface bad input
@@ -250,6 +250,33 @@ fn parse_x86_register_with_mode(
     }
 }
 
+/// Parse SETcc's byte destination. Text input uses the interim IR's canonical
+/// native-width spelling; mode-aware Capstone input must use an architectural
+/// low-byte alias and is canonicalized to the corresponding full register.
+fn parse_x86_setcc_register_with_mode(
+    reg_str: &str,
+    mode: Option<X86ParseMode>,
+) -> Result<X86Register, String> {
+    let Some(mode) = mode else {
+        return parse_x86_register(reg_str);
+    };
+    let (reg, alias_width) = classify_x86_register_alias(reg_str).map_err(|err| err.to_string())?;
+    if alias_width != 8 {
+        return Err(format!(
+            "setcc expects an 8-bit destination from {} binary input, got '{}'",
+            mode.arch_label(),
+            reg_str.trim()
+        ));
+    }
+    if mode == X86ParseMode::Mode32 && reg.index().is_some_and(|index| index >= 4) {
+        return Err(format!(
+            "unsupported x86-32 SETcc low-byte register '{}'",
+            reg_str.trim()
+        ));
+    }
+    Ok(reg)
+}
+
 /// Operand sibling of [`parse_x86_register_with_mode`]: `Some(mode)` enforces
 /// the mode's register width, `None` is the width-agnostic assembly-text path.
 fn parse_x86_operand_with_mode(
@@ -318,6 +345,26 @@ fn x86_ir_from_mnemonic_impl(
     mode: Option<X86ParseMode>,
 ) -> Result<Option<X86Instruction>, String> {
     let mnemonic = mnemonic.trim().to_lowercase();
+
+    // SETcc — one byte-register destination in machine-code input, represented
+    // as a full native-width zero-extended write by the interim IR (#75).
+    if let Some(suffix) = mnemonic.strip_prefix("set") {
+        let cond = parse_x86_condition(suffix)?;
+        let parts: Vec<&str> = op_str.split(',').map(|s| s.trim()).collect();
+        if parts.len() != 1 || parts[0].is_empty() {
+            let operand_count = if op_str.trim().is_empty() {
+                0
+            } else {
+                parts.len()
+            };
+            return Err(format!(
+                "set{} expects 1 operand, got {}",
+                suffix, operand_count
+            ));
+        }
+        let rd = parse_x86_setcc_register_with_mode(parts[0], mode)?;
+        return Ok(Some(X86Instruction::Setcc { rd, cond }));
+    }
 
     // CMOVcc — strip "cmov" prefix, parse suffix, expect
     // two register operands. Unknown suffixes are errors, not Ok(None).
@@ -617,7 +664,7 @@ fn parse_x86_lea_memory_operand(
 /// test, the single-operand neg/not/inc/dec, the immediate-count shifts
 /// shl/sal/shr/sar, the immediate-count rotates rol/ror, the two- and
 /// three-operand signed multiply imul, lea in its register-base +
-/// displacement form, plus the conditional cmovCC and jCC variants).
+/// displacement form, plus the conditional setCC, cmovCC, and jCC variants).
 /// Anything else is a parse error.
 pub fn parse_x86_assembly_string(
     content: &str,
@@ -1498,7 +1545,57 @@ mod tests {
         );
     }
 
-    // --- CMOV / Jcc mnemonic parsing ---
+    // --- SETcc / CMOV / Jcc mnemonic parsing ---
+
+    #[test]
+    fn parses_and_displays_all_canonical_setcc_suffixes() {
+        for cond in X86Condition::ALL {
+            let mnemonic = format!("set{}", cond.suffix());
+            let parsed = x86_ir_from_mnemonic(&mnemonic, "rax").unwrap().unwrap();
+            let expected = X86Instruction::Setcc {
+                rd: X86Register::RAX,
+                cond,
+            };
+            assert_eq!(parsed, expected, "parsing {mnemonic} failed");
+            assert_eq!(parsed.to_string(), format!("{mnemonic} rax"));
+        }
+    }
+
+    #[test]
+    fn mode_aware_setcc_parsing_canonicalizes_architectural_low_byte_aliases() {
+        for (mode, operand, expected_rd) in [
+            (X86ParseMode::Mode64, "al", X86Register::RAX),
+            (X86ParseMode::Mode64, "spl", X86Register::RSP),
+            (X86ParseMode::Mode64, "r8b", X86Register::R8),
+            (X86ParseMode::Mode32, "al", X86Register::RAX),
+            (X86ParseMode::Mode32, "bl", X86Register::RBX),
+        ] {
+            assert_eq!(
+                x86_ir_from_mnemonic_for_mode("setne", operand, mode)
+                    .unwrap()
+                    .unwrap(),
+                X86Instruction::Setcc {
+                    rd: expected_rd,
+                    cond: X86Condition::NE,
+                }
+            );
+        }
+
+        let err = x86_ir_from_mnemonic_for_mode("setne", "sil", X86ParseMode::Mode32)
+            .expect_err("i386 has no SIL byte register");
+        assert!(err.contains("unsupported x86-32 SETcc low-byte register"));
+
+        let err = x86_ir_from_mnemonic_for_mode("setne", "rax", X86ParseMode::Mode64)
+            .expect_err("Capstone SETcc input must name a byte register");
+        assert!(err.contains("expects an 8-bit destination"));
+    }
+
+    #[test]
+    fn setcc_rejects_unknown_conditions_and_wrong_arity() {
+        assert!(x86_ir_from_mnemonic("setxx", "rax").is_err());
+        assert!(x86_ir_from_mnemonic("setne", "").is_err());
+        assert!(x86_ir_from_mnemonic("setne", "rax, rbx").is_err());
+    }
 
     #[test]
     fn parses_cmove_rax_rbx() {

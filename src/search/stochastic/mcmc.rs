@@ -1096,11 +1096,10 @@ mod tests {
         let mut search: StochasticSearch<X86_64> = StochasticSearch::new();
         let config = SearchConfig::default()
             .with_stochastic(
-                // Seed retuned to 2 when LEA raised the rewritable opcode count
-                // to 29, shifting the seeded mutation trajectory. A 0..64 seed
-                // sweep confirms seed 2 reaches `mov rax, rbx` within 500 iters
-                // (many other seeds also work; 2 was picked as the lowest
-                // passing value).
+                // Adding rewritable families shifts the seeded mutation
+                // trajectory. With SETcc raising the opcode count to 30, seed 2
+                // reaches the equally valid `imul rax, rbx, 1` collapse within
+                // 500 iterations (flags are dead in this test).
                 StochasticConfig::default()
                     .with_iterations(500)
                     .with_seed(2),
@@ -1131,9 +1130,10 @@ mod tests {
         assert_eq!(result.cost_savings(), 1);
         assert_eq!(
             result.optimized_sequence,
-            Some(vec![X86Instruction::MovReg {
+            Some(vec![X86Instruction::ImulRegImm {
                 rd: X86Register::RAX,
                 rs: X86Register::RBX,
+                imm: 1,
             }])
         );
     }

@@ -292,6 +292,28 @@ fn encode_64(ops: &mut dynasmrt::x64::Assembler, instr: &X86Instruction) -> Resu
             }
             Ok(())
         }
+        X86Instruction::Setcc { rd, cond } => {
+            let rd = reg_index(*rd)?;
+            match cond {
+                X86Condition::E => dynasm!(ops ; .arch x64 ; sete Rb(rd)),
+                X86Condition::NE => dynasm!(ops ; .arch x64 ; setne Rb(rd)),
+                X86Condition::B => dynasm!(ops ; .arch x64 ; setb Rb(rd)),
+                X86Condition::AE => dynasm!(ops ; .arch x64 ; setae Rb(rd)),
+                X86Condition::BE => dynasm!(ops ; .arch x64 ; setbe Rb(rd)),
+                X86Condition::A => dynasm!(ops ; .arch x64 ; seta Rb(rd)),
+                X86Condition::L => dynasm!(ops ; .arch x64 ; setl Rb(rd)),
+                X86Condition::GE => dynasm!(ops ; .arch x64 ; setge Rb(rd)),
+                X86Condition::LE => dynasm!(ops ; .arch x64 ; setle Rb(rd)),
+                X86Condition::G => dynasm!(ops ; .arch x64 ; setg Rb(rd)),
+                X86Condition::S => dynasm!(ops ; .arch x64 ; sets Rb(rd)),
+                X86Condition::NS => dynasm!(ops ; .arch x64 ; setns Rb(rd)),
+                X86Condition::O => dynasm!(ops ; .arch x64 ; seto Rb(rd)),
+                X86Condition::NO => dynasm!(ops ; .arch x64 ; setno Rb(rd)),
+                X86Condition::P => dynasm!(ops ; .arch x64 ; setp Rb(rd)),
+                X86Condition::NP => dynasm!(ops ; .arch x64 ; setnp Rb(rd)),
+            }
+            Ok(())
+        }
         X86Instruction::Jcc { cond } => {
             // Short-form Jcc to a 0-byte displacement. The optimizer
             // never patches Jcc bytes into the binary (terminators are
@@ -535,6 +557,34 @@ fn encode_32(ops: &mut dynasmrt::x86::Assembler, instr: &X86Instruction) -> Resu
                 X86Condition::NO => dynasm!(ops ; .arch x86 ; cmovno Rd(rd), Rd(rs)),
                 X86Condition::P => dynasm!(ops ; .arch x86 ; cmovp Rd(rd), Rd(rs)),
                 X86Condition::NP => dynasm!(ops ; .arch x86 ; cmovnp Rd(rd), Rd(rs)),
+            }
+            Ok(())
+        }
+        X86Instruction::Setcc { rd, cond } => {
+            let rd_index = reg_index_32(*rd)?;
+            if rd_index >= 4 {
+                return Err(format!(
+                    "register {:?} has no low-byte encoding in x86-32 mode",
+                    rd
+                ));
+            }
+            match cond {
+                X86Condition::E => dynasm!(ops ; .arch x86 ; sete Rb(rd_index)),
+                X86Condition::NE => dynasm!(ops ; .arch x86 ; setne Rb(rd_index)),
+                X86Condition::B => dynasm!(ops ; .arch x86 ; setb Rb(rd_index)),
+                X86Condition::AE => dynasm!(ops ; .arch x86 ; setae Rb(rd_index)),
+                X86Condition::BE => dynasm!(ops ; .arch x86 ; setbe Rb(rd_index)),
+                X86Condition::A => dynasm!(ops ; .arch x86 ; seta Rb(rd_index)),
+                X86Condition::L => dynasm!(ops ; .arch x86 ; setl Rb(rd_index)),
+                X86Condition::GE => dynasm!(ops ; .arch x86 ; setge Rb(rd_index)),
+                X86Condition::LE => dynasm!(ops ; .arch x86 ; setle Rb(rd_index)),
+                X86Condition::G => dynasm!(ops ; .arch x86 ; setg Rb(rd_index)),
+                X86Condition::S => dynasm!(ops ; .arch x86 ; sets Rb(rd_index)),
+                X86Condition::NS => dynasm!(ops ; .arch x86 ; setns Rb(rd_index)),
+                X86Condition::O => dynasm!(ops ; .arch x86 ; seto Rb(rd_index)),
+                X86Condition::NO => dynasm!(ops ; .arch x86 ; setno Rb(rd_index)),
+                X86Condition::P => dynasm!(ops ; .arch x86 ; setp Rb(rd_index)),
+                X86Condition::NP => dynasm!(ops ; .arch x86 ; setnp Rb(rd_index)),
             }
             Ok(())
         }
@@ -1389,7 +1439,50 @@ mod tests {
         }
     }
 
-    // --- CMOV encoding round-trips through Capstone ---
+    // --- SETcc / CMOV encoding round-trips through Capstone ---
+
+    #[test]
+    fn all_setcc_suffixes_round_trip_in_both_x86_modes() {
+        for cond in X86Condition::ALL {
+            let mnemonic = cond.set_mnemonic();
+            check_x86_64(
+                X86Instruction::Setcc {
+                    rd: X86Register::RAX,
+                    cond,
+                },
+                mnemonic,
+                &["al"],
+            );
+            check_x86_32(
+                X86Instruction::Setcc {
+                    rd: X86Register::RAX,
+                    cond,
+                },
+                mnemonic,
+                &["al"],
+            );
+        }
+    }
+
+    #[test]
+    fn setcc_x86_64_encodes_rex_low_byte_registers() {
+        check_x86_64(
+            X86Instruction::Setcc {
+                rd: X86Register::RSP,
+                cond: X86Condition::NE,
+            },
+            "setne",
+            &["spl"],
+        );
+        check_x86_64(
+            X86Instruction::Setcc {
+                rd: X86Register::R8,
+                cond: X86Condition::NE,
+            },
+            "setne",
+            &["r8b"],
+        );
+    }
 
     #[test]
     fn cmove_x86_64_round_trips() {

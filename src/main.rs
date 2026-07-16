@@ -4468,6 +4468,39 @@ mod cli_helper_tests {
     }
 
     #[test]
+    fn x86_capstone_bridge_accepts_architectural_setcc_byte_destinations() {
+        let expected = vec![X86Instruction::Setcc {
+            rd: X86Register::RAX,
+            cond: isa::x86::X86Condition::NE,
+        }];
+
+        for (mode, parse_mode) in [
+            (
+                capstone::arch::x86::ArchMode::Mode64,
+                parser::x86::X86ParseMode::Mode64,
+            ),
+            (
+                capstone::arch::x86::ArchMode::Mode32,
+                parser::x86::X86ParseMode::Mode32,
+            ),
+        ] {
+            let cs = capstone::Capstone::new()
+                .x86()
+                .mode(mode)
+                .syntax(capstone::arch::x86::ArchSyntax::Intel)
+                .build()
+                .expect("capstone init");
+            let setne_al = cs
+                .disasm_all(&[0x0f, 0x95, 0xc0], 0x1000)
+                .expect("disassemble setne al");
+            let instruction = setne_al.iter().next().expect("one instruction");
+            assert_eq!(instruction.mnemonic(), Some("setne"));
+            assert_eq!(instruction.op_str(), Some("al"));
+            assert_eq!(convert_to_x86_ir(&setne_al, parse_mode).unwrap(), expected);
+        }
+    }
+
+    #[test]
     fn x86_64_optimizer_rejects_narrow_register_alias_before_search() {
         let elf_bytes = build_minimal_elf64(
             &[0x83, 0xc0, 0x00, 0x83, 0xc0, 0x00],

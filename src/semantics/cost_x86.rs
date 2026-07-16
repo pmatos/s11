@@ -160,6 +160,12 @@ fn instruction_code_size(instr: &X86Instruction, width: u32) -> u64 {
         | X86Instruction::TestImm { .. } => 6 + rex,
         // CMOV is `0F 4x ModR/M` = 3 bytes plus REX.W on 64-bit.
         X86Instruction::Cmov { .. } => 3 + rex,
+        // SETcc is `0F 9x ModR/M` = 3 bytes. In x86-64, low-byte registers
+        // SPL..DIL and R8B..R15B (indices 4..15) need a REX prefix; AL..BL do
+        // not. x86-32 only admits indices 0..3 for this family.
+        X86Instruction::Setcc { rd, .. } => {
+            3 + u64::from(width == 64 && rd.index().is_some_and(|index| index >= 4))
+        }
         // Short-form Jcc is `7x rel8` = 2 bytes (no REX). Long-form
         // `0F 8x rel32` = 6 bytes is used when the displacement doesn't
         // fit. The optimizer never emits Jcc bytes (terminators stay
@@ -512,7 +518,25 @@ mod tests {
         assert_eq!(instruction_cost(&small, &CostMetric::CodeSize, 32), 5);
     }
 
-    // --- CMOV / Jcc cost ---
+    // --- SETcc / CMOV / Jcc cost ---
+
+    #[test]
+    fn setcc_code_size_accounts_for_optional_rex_prefix() {
+        use crate::isa::x86::X86Condition;
+
+        let setne_rax = X86Instruction::Setcc {
+            rd: X86Register::RAX,
+            cond: X86Condition::NE,
+        };
+        let setne_rsp = X86Instruction::Setcc {
+            rd: X86Register::RSP,
+            cond: X86Condition::NE,
+        };
+        assert_eq!(instruction_cost(&setne_rax, &CostMetric::CodeSize, 64), 3);
+        assert_eq!(instruction_cost(&setne_rsp, &CostMetric::CodeSize, 64), 4);
+        assert_eq!(instruction_cost(&setne_rax, &CostMetric::CodeSize, 32), 3);
+        assert_eq!(instruction_cost(&setne_rax, &CostMetric::Latency, 64), 1);
+    }
 
     #[test]
     fn cmov_code_size_includes_rex_on_64_bit() {
