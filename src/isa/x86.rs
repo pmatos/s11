@@ -1201,11 +1201,12 @@ fn x86_can_assemble_instruction(instruction: &X86Instruction, mode_width: u32) -
         X86Instruction::Cmov { rd, rs, .. } => {
             x86_register_pair_ok(*rd, *rs, mode_width) && !rd.is_byte()
         }
-        // SETcc materializes a boolean byte result and is always encodable in
-        // 64-bit mode. In x86-32 only EAX..EBX (slots 0..=3) name a low byte
-        // without a REX prefix, so restrict the destination there.
+        // SETcc is a full-width pseudo-op. In x86-32 only EAX..EBX
+        // (slots 0..=3) name a low byte without a REX prefix, so restrict the
+        // native destination there.
         X86Instruction::Setcc { rd, .. } => {
-            mode_width == 64 || rd.index().is_some_and(|index| index < 4)
+            rd.view() == X86RegisterView::Native
+                && (mode_width == 64 || rd.index().is_some_and(|index| index < 4))
         }
         X86Instruction::Jcc { .. } => true,
     }
@@ -2765,7 +2766,7 @@ mod tests {
     }
 
     #[test]
-    fn x86_setcc_encodability_matches_available_low_byte_registers() {
+    fn x86_setcc_encodability_requires_native_view_and_available_low_byte_register() {
         use crate::isa::traits::Assembler;
 
         let setne = |rd| X86Instruction::Setcc {
@@ -2776,10 +2777,34 @@ mod tests {
             &X86_64,
             &setne(X86Register::R15)
         ));
+        for rd in [
+            X86Register::EAX,
+            X86Register::AX,
+            X86Register::AL,
+            X86Register::AH,
+            X86Register::R15D,
+            X86Register::R15B,
+        ] {
+            assert!(
+                !<X86_64 as Assembler<X86Instruction>>::can_assemble(&X86_64, &setne(rd)),
+                "x86-64 SETcc pseudo-op should reject non-native destination {rd}"
+            );
+        }
         assert!(<X86_32 as Assembler<X86Instruction>>::can_assemble(
             &X86_32,
             &setne(X86Register::RAX)
         ));
+        for rd in [
+            X86Register::EAX,
+            X86Register::AX,
+            X86Register::AL,
+            X86Register::AH,
+        ] {
+            assert!(
+                !<X86_32 as Assembler<X86Instruction>>::can_assemble(&X86_32, &setne(rd)),
+                "x86-32 SETcc pseudo-op should reject non-native destination {rd}"
+            );
+        }
         assert!(!<X86_32 as Assembler<X86Instruction>>::can_assemble(
             &X86_32,
             &setne(X86Register::RSI)
