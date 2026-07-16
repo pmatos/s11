@@ -3407,6 +3407,30 @@ mod cli_helper_tests {
     }
 
     #[test]
+    fn candidate_windows_split_run_at_unsupported_instruction() {
+        // add rax, 1; push rax; sub rbx, 1
+        // The unsupported `push rax` sits between two supported runs and must
+        // split them into two windows through the `Err(_)` flush branch,
+        // pinning the "split at unsupported instructions" claim directly.
+        let text = [0x48, 0x83, 0xc0, 0x01, 0x50, 0x48, 0x83, 0xeb, 0x01];
+        let elf_bytes =
+            build_elf64_with_executable_sections(&[(".text", &text, 0x1000)], elf::abi::EM_X86_64);
+        let input = TempFile::new_bytes("s11-candidate-split", "elf", &elf_bytes);
+        let patcher = ElfPatcher::new(input.path()).expect("x86-64 ELF should parse");
+
+        let sections =
+            find_candidate_windows(&patcher).expect("candidate discovery should succeed");
+
+        assert_eq!(sections.len(), 1);
+        assert_eq!(sections[0].section.name, ".text");
+        assert_eq!(sections[0].candidates.len(), 2);
+        assert_eq!(sections[0].candidates[0].start, 0x1000);
+        assert_eq!(sections[0].candidates[0].end, 0x1004);
+        assert_eq!(sections[0].candidates[1].start, 0x1005);
+        assert_eq!(sections[0].candidates[1].end, 0x1009);
+    }
+
+    #[test]
     fn supported_arch_from_e_machine_rejects_riscv() {
         assert_eq!(
             SupportedArch::from_e_machine(elf::abi::EM_AARCH64).unwrap(),
