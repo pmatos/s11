@@ -1,7 +1,8 @@
 //! Cost model for the x86 backend.
 //!
 //! x86 is variable-length, so `CodeSize` is an approximation per variant.
-//! `InstructionCount` is a flat per-instruction sum.
+//! `InstructionCount` counts emitted machine instructions; the full-width
+//! SETcc pseudo-instruction counts as its SETcc + MOVZX lowering.
 //! Width-aware: x86-32 encodings save one byte per REX prefix.
 //!
 //! # Latency model (issue #622)
@@ -19,7 +20,8 @@
 //!    accessed 2026-06) for the Intel **Skylake** microarchitecture, cross-checked
 //!    against <https://uops.info/>. On Skylake the simple integer ALU ops
 //!    (MOV/ADD/SUB/AND/OR/XOR/INC/DEC/NEG/NOT/CMP/TEST/shift-by-imm/rotate-by-imm
-//!    and CMOV) have **1-cycle** latency, while two-operand/three-operand integer
+//!    and CMOV) have **1-cycle** latency, SETcc's two-operation lowering has
+//!    **2-cycle** dependent latency, and two-operand/three-operand integer
 //!    multiply (`IMUL r,r` / `IMUL r,r,imm`) has **3-cycle** latency. A
 //!    register-to-register MOV is special-cased to **0** because Skylake (and all
 //!    Sandy-Bridge-and-later cores) eliminate it at rename — it never sits on a
@@ -70,7 +72,10 @@ use crate::semantics::cost::CostMetric;
 /// critical path equals its own latency, so the two agree on length-1 inputs.
 pub fn instruction_cost(instr: &X86Instruction, metric: &CostMetric, width: u32) -> u64 {
     match metric {
-        CostMetric::InstructionCount => 1,
+        CostMetric::InstructionCount => match instr {
+            X86Instruction::Setcc { .. } => 2,
+            _ => 1,
+        },
         CostMetric::Latency => instruction_latency(instr),
         CostMetric::CodeSize => instruction_code_size(instr, width),
     }
@@ -87,6 +92,8 @@ fn instruction_latency(instr: &X86Instruction) -> u64 {
     match instr {
         // Register-rename move elimination: zero-latency on the critical path.
         X86Instruction::MovReg { .. } => 0,
+        // Full-width SETcc lowers to a byte SETcc followed by a dependent MOVZX.
+        X86Instruction::Setcc { .. } => 2,
         // Two-/three-operand signed multiply: 3-cycle latency on Skylake.
         X86Instruction::ImulReg { .. } | X86Instruction::ImulRegImm { .. } => 3,
         // Everything else in the supported set is a 1-cycle integer ALU op:
@@ -219,6 +226,13 @@ fn instruction_code_size(instr: &X86Instruction, width: u32) -> u64 {
         },
         // CMOV is `0F 4x ModR/M` = 3 bytes plus REX.W on 64-bit.
         X86Instruction::Cmov { .. } => 3 + prefixes,
+        // Full-width SETcc lowers to `0F 9x ModR/M` plus
+        // `0F B6 ModR/M` (MOVZX), 6 bytes total. In x86-64, SPL..DIL and
+        // R8B..R15B (indices 4..15) need a REX prefix on both instructions.
+        // x86-32 only admits indices 0..3 for this family.
+        X86Instruction::Setcc { rd, .. } => {
+            6 + 2 * u64::from(width == 64 && rd.index().is_some_and(|index| index >= 4))
+        }
         // Short-form Jcc is `7x rel8` = 2 bytes (no REX). Long-form
         // `0F 8x rel32` = 6 bytes is used when the displacement doesn't
         // fit. The optimizer never emits Jcc bytes (terminators stay
@@ -438,6 +452,28 @@ mod tests {
         assert_eq!(sequence_cost(&seq, &CostMetric::Latency, 64), 2);
     }
 
+    /// SETcc's two-instruction lowering contributes its internal dependency:
+    /// CMP (1) -> SETcc+MOVZX (2) -> consumer (1) is a 4-cycle chain.
+    #[test]
+    fn critical_path_accounts_for_setcc_macro_lowering() {
+        use crate::isa::x86::X86Condition;
+        let seq = [
+            X86Instruction::CmpReg {
+                rn: X86Register::RAX,
+                rs: X86Register::RBX,
+            },
+            X86Instruction::Setcc {
+                rd: X86Register::RCX,
+                cond: X86Condition::NE,
+            },
+            X86Instruction::AddReg {
+                rd: X86Register::RDX,
+                rs: X86Register::RCX,
+            },
+        ];
+        assert_eq!(sequence_cost(&seq, &CostMetric::Latency, 64), 4);
+    }
+
     /// A register-to-register MOV is eliminated at rename, so it adds 0 to the
     /// critical path: `mov rax, rbx; add rax, rcx` costs the same as the lone
     /// `add` (1 cycle), not 2.
@@ -627,7 +663,34 @@ mod tests {
         assert_eq!(instruction_cost(&small, &CostMetric::CodeSize, 32), 5);
     }
 
-    // --- CMOV / Jcc cost ---
+    // --- SETcc / CMOV / Jcc cost ---
+
+    #[test]
+    fn setcc_cost_accounts_for_two_instruction_lowering() {
+        use crate::isa::x86::X86Condition;
+
+        let setne_rax = X86Instruction::Setcc {
+            rd: X86Register::RAX,
+            cond: X86Condition::NE,
+        };
+        let setne_rsp = X86Instruction::Setcc {
+            rd: X86Register::RSP,
+            cond: X86Condition::NE,
+        };
+        let setne_r8 = X86Instruction::Setcc {
+            rd: X86Register::R8,
+            cond: X86Condition::NE,
+        };
+        assert_eq!(instruction_cost(&setne_rax, &CostMetric::CodeSize, 64), 6);
+        assert_eq!(instruction_cost(&setne_rsp, &CostMetric::CodeSize, 64), 8);
+        assert_eq!(instruction_cost(&setne_r8, &CostMetric::CodeSize, 64), 8);
+        assert_eq!(instruction_cost(&setne_rax, &CostMetric::CodeSize, 32), 6);
+        assert_eq!(
+            instruction_cost(&setne_rax, &CostMetric::InstructionCount, 64),
+            2
+        );
+        assert_eq!(instruction_cost(&setne_rax, &CostMetric::Latency, 64), 2);
+    }
 
     #[test]
     fn cmov_code_size_includes_rex_on_64_bit() {

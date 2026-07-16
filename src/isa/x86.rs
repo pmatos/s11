@@ -5,8 +5,8 @@
 //! serve the `X86_64` and `X86_32` ISA marker structs.
 //!
 //! **Initial instruction set**: MOV, ADD, SUB, AND, OR, XOR, CMP — each with
-//! register and immediate forms — plus rewritable CMOVcc and fixed Jcc
-//! terminators.
+//! register and immediate forms — plus rewritable SETcc / CMOVcc and fixed
+//! Jcc terminators.
 
 // x86 register names are conventionally uppercase (RAX, RBX, ...) in every
 // Intel/AMD manual, Capstone disassembly output, GAS/Intel syntax, and gdb
@@ -19,7 +19,7 @@ use crate::isa::traits::{ISA, InstructionGenerator, InstructionType, OperandType
 use rand::{Rng, RngExt};
 use std::fmt;
 
-/// x86 condition codes consumed by CMOVcc / Jcc.
+/// x86 condition codes consumed by SETcc / CMOVcc / Jcc.
 ///
 /// The 16 canonical codes here cover every short-form jump / cmov GAS
 /// emits. Aliases (`NB` for `AE`, `Z` for `E`, etc.) are normalized to
@@ -108,6 +108,27 @@ impl X86Condition {
             X86Condition::NO => "cmovno",
             X86Condition::P => "cmovp",
             X86Condition::NP => "cmovnp",
+        }
+    }
+
+    pub const fn set_mnemonic(self) -> &'static str {
+        match self {
+            X86Condition::E => "sete",
+            X86Condition::NE => "setne",
+            X86Condition::B => "setb",
+            X86Condition::AE => "setae",
+            X86Condition::BE => "setbe",
+            X86Condition::A => "seta",
+            X86Condition::L => "setl",
+            X86Condition::GE => "setge",
+            X86Condition::LE => "setle",
+            X86Condition::G => "setg",
+            X86Condition::S => "sets",
+            X86Condition::NS => "setns",
+            X86Condition::O => "seto",
+            X86Condition::NO => "setno",
+            X86Condition::P => "setp",
+            X86Condition::NP => "setnp",
         }
     }
 
@@ -513,6 +534,14 @@ pub enum X86Instruction {
         rs: X86Register,
         cond: X86Condition,
     },
+    /// `setCC rd` — full-width pseudo-instruction that materializes an EFLAGS
+    /// condition as native-width 0 or 1.
+    ///
+    /// Architectural SETcc writes only the low byte, so binary input is rejected
+    /// until sub-register widths are represented by the x86 IR (#75). Candidate
+    /// assembly lowers this variant to byte SETcc followed by same-register
+    /// MOVZX. It reads but does not modify EFLAGS.
+    Setcc { rd: X86Register, cond: X86Condition },
     /// `jCC <target>` — conditional branch. Reads EFLAGS;
     /// modelled as an opaque terminator. The branch target is recovered
     /// from the surrounding ELF disassembly and is not carried in the IR
@@ -556,7 +585,8 @@ impl X86Instruction {
             | X86Instruction::ImulReg { rd, .. }
             | X86Instruction::ImulRegImm { rd, .. }
             | X86Instruction::Lea { rd, .. }
-            | X86Instruction::Cmov { rd, .. } => Some(*rd),
+            | X86Instruction::Cmov { rd, .. }
+            | X86Instruction::Setcc { rd, .. } => Some(*rd),
             // CMP and TEST discard their result; only EFLAGS is written.
             X86Instruction::CmpReg { .. }
             | X86Instruction::CmpImm { .. }
@@ -588,6 +618,7 @@ impl X86Instruction {
             X86Instruction::ImulReg { .. } | X86Instruction::ImulRegImm { .. } => "imul",
             X86Instruction::Lea { .. } => "lea",
             X86Instruction::Cmov { cond, .. } => cond.cmov_mnemonic(),
+            X86Instruction::Setcc { cond, .. } => cond.set_mnemonic(),
             X86Instruction::Jcc { cond } => cond.jcc_mnemonic(),
         }
     }
@@ -640,6 +671,8 @@ impl X86Instruction {
             | X86Instruction::Dec { rd } => vec![*rd],
             // Cmov reads both rd (kept on false branch) and rs.
             X86Instruction::Cmov { rd, rs, .. } => vec![*rd, *rs],
+            // SETcc reads only EFLAGS and fully overwrites rd in the interim IR.
+            X86Instruction::Setcc { .. } => vec![],
             X86Instruction::Jcc { .. } => vec![],
         };
         operands.into_iter().map(X86Register::canonical).collect()
@@ -695,11 +728,9 @@ impl InstructionType for X86Instruction {
             X86Instruction::ImulReg { .. } => 25,
             X86Instruction::ImulRegImm { .. } => 26,
             X86Instruction::Lea { .. } => 27,
-            // Cmov MUST stay the last rewritable opcode (COUNT - 1 == 28):
-            // the CMOV distinct-register draw at both generation sites is
-            // gated on `opcode == X86_REWRITABLE_OPCODE_COUNT - 1`.
             X86Instruction::Cmov { .. } => 28,
-            X86Instruction::Jcc { .. } => 29,
+            X86Instruction::Setcc { .. } => 29,
+            X86Instruction::Jcc { .. } => 30,
         }
     }
 
@@ -708,8 +739,9 @@ impl InstructionType for X86Instruction {
     }
 
     fn has_side_effects(&self) -> bool {
-        // MOV / NOT / LEA / CMOV / Jcc do not write EFLAGS (CMOV and Jcc read
-        // them, but reading is not a side effect on observable state; NOT
+        // MOV / NOT / LEA / SETcc / CMOV / Jcc do not write EFLAGS (the
+        // conditional families read them, but reading is not a side effect on
+        // observable state; NOT
         // is bitwise complement and leaves EFLAGS untouched, exactly like
         // MOV; LEA is pure address arithmetic that writes only its destination
         // register). Every other variant — including NEG — sets or clobbers
@@ -721,6 +753,7 @@ impl InstructionType for X86Instruction {
                 | X86Instruction::Not { .. }
                 | X86Instruction::Lea { .. }
                 | X86Instruction::Cmov { .. }
+                | X86Instruction::Setcc { .. }
                 | X86Instruction::Jcc { .. }
         )
     }
@@ -776,6 +809,7 @@ impl fmt::Display for X86Instruction {
             | X86Instruction::Inc { rd }
             | X86Instruction::Dec { rd } => write!(f, "{} {}", mn, rd),
             X86Instruction::Cmov { rd, rs, .. } => write!(f, "{} {}, {}", mn, rd, rs),
+            X86Instruction::Setcc { rd, .. } => write!(f, "{} {}", mn, rd),
             // Target is opaque to the IR; render with a placeholder.
             X86Instruction::Jcc { .. } => write!(f, "{} <target>", mn),
         }
@@ -855,10 +889,10 @@ impl ISA for X86_32 {
 }
 
 /// Helper used by both `FlagsAnalysis<X86Instruction> for X86_64` and
-/// `for X86_32`. MOV / NOT / LEA / CMOV / Jcc do not write EFLAGS — CMOV and
-/// Jcc read them via `x86_reads_flags` but do not modify any flag bit; LEA is
-/// pure address arithmetic. Every other variant in the current set writes
-/// EFLAGS.
+/// `for X86_32`. MOV / NOT / LEA / SETcc / CMOV / Jcc do not write EFLAGS —
+/// the conditional families read them via `x86_reads_flags` but do not modify
+/// any flag bit; LEA is pure address arithmetic. Every other variant in the
+/// current set writes EFLAGS.
 ///
 /// Crate-visible so the cost model's critical-path latency
 /// (`crate::semantics::cost_x86::critical_path_latency`) can route flag
@@ -872,18 +906,18 @@ pub(crate) fn x86_modifies_flags(instr: &X86Instruction) -> bool {
             | X86Instruction::Not { .. }
             | X86Instruction::Lea { .. }
             | X86Instruction::Cmov { .. }
+            | X86Instruction::Setcc { .. }
             | X86Instruction::Jcc { .. }
     )
 }
 
-/// CMOV and Jcc read EFLAGS; every other variant in the current set
-/// is flag-agnostic on the read side. Crate-visible so search and
-/// equivalence callers can route through one authoritative match arm —
-/// adding a future flag-reader like SETcc then updates exactly one place.
+/// SETcc, CMOV, and Jcc read EFLAGS; every other variant in the current set
+/// is flag-agnostic on the read side. Public so search and equivalence callers
+/// can route through one authoritative match arm.
 pub fn x86_reads_flags(instr: &X86Instruction) -> bool {
     matches!(
         instr,
-        X86Instruction::Cmov { .. } | X86Instruction::Jcc { .. }
+        X86Instruction::Cmov { .. } | X86Instruction::Setcc { .. } | X86Instruction::Jcc { .. }
     )
 }
 
@@ -1167,6 +1201,12 @@ fn x86_can_assemble_instruction(instruction: &X86Instruction, mode_width: u32) -
         X86Instruction::Cmov { rd, rs, .. } => {
             x86_register_pair_ok(*rd, *rs, mode_width) && !rd.is_byte()
         }
+        // SETcc materializes a boolean byte result and is always encodable in
+        // 64-bit mode. In x86-32 only EAX..EBX (slots 0..=3) name a low byte
+        // without a REX prefix, so restrict the destination there.
+        X86Instruction::Setcc { rd, .. } => {
+            mode_width == 64 || rd.index().is_some_and(|index| index < 4)
+        }
         X86Instruction::Jcc { .. } => true,
     }
 }
@@ -1327,28 +1367,24 @@ impl X86Mutator {
         if self.registers.is_empty() {
             return None;
         }
-        // Rewritable variants only: 7 reg-reg + 7 reg-imm + CMOVcc.
+        // Rewritable variants only, including CMOVcc and SETcc.
         // The RNG draw order/count MUST stay in lock-step with the shared
         // free helper `generate_random_rewritable_x86_instruction`
         // (opcode → rd → rs → imm → cond, all four drawn unconditionally)
         // so callers that interleave the two stay deterministic. Two
-        // helper behaviours must be mirrored exactly: (1) the trailing
-        // CMOV opcode slot is dropped unless the pool holds a distinct
+        // helper behaviours must be mirrored exactly: (1) the
+        // CMOV opcode slot is skipped unless the pool holds a distinct
         // register pair (a self-CMOV is a no-op), and (2) CMOV draws its
         // source via an extra `pick_register_except` so `rs != rd`. The
         // #593 behaviour change is *which* prefiltered pool the single imm
         // draw indexes: opcode 1 (MOV) uses the MOVABS-capable `mov`
         // pool, every other imm form uses the non-MOV pool.
-        // CMOV with rd == rs is a no-op, so the trailing CMOV opcode slot is
-        // only offered when the pool holds a distinct pair. This MUST mirror
+        // CMOV with rd == rs is a no-op, so its opcode slot is only offered
+        // when the pool holds a distinct pair. This MUST mirror
         // `generate_random_rewritable_x86_instruction` so the two stay in
         // lock-step (stream parity) while both filter self-CMOV.
-        let opcode_count = if has_distinct_register_pair(&self.registers) {
-            X86_REWRITABLE_OPCODE_COUNT
-        } else {
-            X86_REWRITABLE_OPCODE_COUNT - 1
-        };
-        let opcode = rng.random_range(0..u32::from(opcode_count));
+        let opcode =
+            pick_random_rewritable_opcode(rng, has_distinct_register_pair(&self.registers));
         let rd = self.pick_register(rng)?;
         let rs = self.pick_register(rng)?;
         let imm = if opcode == 1 {
@@ -1363,8 +1399,7 @@ impl X86Mutator {
         // opcode to preserve the RNG stream that the parity test
         // `x86_mutator_random_instruction_matches_shared_generator_stream`
         // pins against `generate_random_rewritable_x86_instruction`.
-        let opcode = u8::try_from(opcode).expect("opcode index fits in u8");
-        let final_rs = if opcode == X86_REWRITABLE_OPCODE_COUNT - 1 {
+        let final_rs = if opcode == X86_CMOV_OPCODE {
             pick_register_except(rng, &self.registers, rd)
                 .expect("CMOV opcode requires a distinct register pair")
         } else {
@@ -1417,7 +1452,8 @@ impl X86Mutator {
                 // IMUL rd, rs has no immediate, so it is a no-op with no pool.
                 | X86Instruction::ImulReg { .. }
                 | X86Instruction::Jcc { .. } => {}
-                X86Instruction::Cmov { cond, .. } => *cond = self.pick_condition(rng),
+                X86Instruction::Cmov { cond, .. }
+                | X86Instruction::Setcc { cond, .. } => *cond = self.pick_condition(rng),
             }
             return;
         }
@@ -1517,6 +1553,13 @@ impl X86Mutator {
                     0 => *rd = pick_register_except(rng, &self.registers, *rs).unwrap_or(*rd),
                     1 => *rs = pick_register_except(rng, &self.registers, *rd).unwrap_or(*rs),
                     _ => *cond = self.pick_condition(rng),
+                }
+            }
+            X86Instruction::Setcc { rd, cond } => {
+                if rng.random_bool(0.5) {
+                    *rd = self.pick_register(rng).expect("register pool is non-empty");
+                } else {
+                    *cond = self.pick_condition(rng);
                 }
             }
             // Jcc is a terminator; mutation never reaches it because the
@@ -1661,6 +1704,8 @@ impl X86Mutator {
             // Cmov has a unique shape (rd, rs, cond) with no opcode-shape
             // siblings; keep it unchanged in the opcode-bridge mutator.
             X86Instruction::Cmov { .. } => current,
+            // Setcc has a unique (rd, cond) shape.
+            X86Instruction::Setcc { .. } => current,
             // Jcc is a terminator and should never reach mutation; preserve it.
             X86Instruction::Jcc { .. } => current,
         };
@@ -1730,19 +1775,10 @@ pub struct X86InstructionGenerator;
 
 // One entry per rewritable opcode family: 6 reg-reg + 6 reg-imm + CMP + TEST
 // (each reg/imm) + NEG + NOT + INC + DEC + SHL + SHR + SAR + ROL + ROR +
-// IMUL (2-op) + IMUL (3-op) + CMOVcc. CMOVcc counts as a single family here
-// even though `generate_all` expands it across all 16 `X86Condition::ALL`
-// variants per register pair.
-//
-// CMOV MUST remain the LAST opcode (index COUNT - 1 == 28): both
-// `X86Mutator::random_instruction` and
-// `generate_random_rewritable_x86_instruction` gate the extra distinct-source
-// CMOV draw on `opcode == X86_REWRITABLE_OPCODE_COUNT - 1`. New flag-only
-// families (CMP, TEST), single-operand families (NEG, NOT, INC, DEC), the
-// immediate-count shift families (SHL, SHR, SAR), the immediate-count
-// rotate families (ROL, ROR), the two IMUL forms, and LEA are inserted before
-// CMOV in `build_x86_instruction_by_opcode` to preserve that invariant.
-const X86_REWRITABLE_OPCODE_COUNT: u8 = 29;
+// IMUL (2-op) + IMUL (3-op) + CMOVcc + SETcc. The conditional families each
+// count as one opcode here even though `generate_all` expands all 16 conditions.
+const X86_REWRITABLE_OPCODE_COUNT: u8 = 30;
+const X86_CMOV_OPCODE: u8 = 28;
 
 fn has_distinct_register_pair(registers: &[X86Register]) -> bool {
     let Some(first) = registers.first() else {
@@ -1751,15 +1787,28 @@ fn has_distinct_register_pair(registers: &[X86Register]) -> bool {
     registers.iter().any(|reg| reg != first)
 }
 
+/// Draw a rewritable opcode, omitting CMOV when no distinct register pair can
+/// represent its non-no-op shape. SETcc follows CMOV in the opcode table, so a
+/// degenerate pool skips the CMOV hole rather than dropping the final opcode.
+fn pick_random_rewritable_opcode<R: Rng + ?Sized>(rng: &mut R, cmov_available: bool) -> u8 {
+    if cmov_available {
+        return rng.random_range(0..X86_REWRITABLE_OPCODE_COUNT);
+    }
+    let mut opcode = rng.random_range(0..(X86_REWRITABLE_OPCODE_COUNT - 1));
+    if opcode >= X86_CMOV_OPCODE {
+        opcode += 1;
+    }
+    opcode
+}
+
 /// Maps a rewritable opcode index in `0..X86_REWRITABLE_OPCODE_COUNT` to the
 /// `X86Instruction` variant it denotes, using operands the caller has already
 /// drawn. This is the single source of truth for the opcode → variant table;
 /// `X86Mutator::random_instruction` and
 /// `generate_random_rewritable_x86_instruction` both delegate here so the two
 /// dispatch tables cannot drift (see issue #348). Operand drawing and RNG draw
-/// order stay at the call sites; the CMOV slot (the last index,
-/// `X86_REWRITABLE_OPCODE_COUNT - 1`) consumes the `rs` the caller resolved
-/// via `pick_register_except` so `rs != rd`.
+/// order stay at the call sites; the CMOV slot consumes the `rs` the caller
+/// resolved via `pick_register_except` so `rs != rd`.
 ///
 /// Keep this in lock-step with `X86_REWRITABLE_OPCODE_COUNT` and the
 /// `opcode_dispatch_is_consistent` test, which pins the full mapping.
@@ -1818,9 +1867,8 @@ pub(crate) fn build_x86_instruction_by_opcode(
             base: rs,
             disp: imm,
         },
-        // Cmov stays last (index 28 == X86_REWRITABLE_OPCODE_COUNT - 1) so the
-        // CMOV distinct-register draw at the two generation sites stays correct.
         28 => X86Instruction::Cmov { rd, rs, cond },
+        29 => X86Instruction::Setcc { rd, cond },
         _ => unreachable!("opcode out of range"),
     }
 }
@@ -1856,15 +1904,9 @@ fn generate_random_rewritable_x86_instruction<R: Rng + ?Sized>(
         "x86 random instruction generation requires an immediate pool"
     );
 
-    // CMOVcc with rd == rs is a no-op, so it is only a candidate when the
-    // register pool holds two distinct registers. Drop the trailing CMOV
-    // opcode slot when no distinct pair exists.
-    let opcode_count = if has_distinct_register_pair(registers) {
-        X86_REWRITABLE_OPCODE_COUNT
-    } else {
-        X86_REWRITABLE_OPCODE_COUNT - 1
-    };
-    let opcode = rng.random_range(0..u32::from(opcode_count));
+    // CMOVcc with rd == rs is a no-op, so its opcode is only a candidate when
+    // the register pool holds two distinct registers.
+    let opcode = pick_random_rewritable_opcode(rng, has_distinct_register_pair(registers));
     let rd = registers[rng.random_range(0..registers.len())];
     let rs = registers[rng.random_range(0..registers.len())];
     let imm = immediates[rng.random_range(0..immediates.len())];
@@ -1872,8 +1914,7 @@ fn generate_random_rewritable_x86_instruction<R: Rng + ?Sized>(
     // Mirror `X86Mutator::random_instruction`: the CMOV slot draws a distinct
     // source register; every other opcode reuses `rs`. Keep this draw
     // conditional on the CMOV opcode so both paths share one RNG stream.
-    let opcode = u8::try_from(opcode).expect("opcode index fits in u8");
-    let final_rs = if opcode == X86_REWRITABLE_OPCODE_COUNT - 1 {
+    let final_rs = if opcode == X86_CMOV_OPCODE {
         pick_register_except(rng, registers, rd)
             .expect("CMOV opcode requires a distinct register pair")
     } else {
@@ -2025,9 +2066,15 @@ impl InstructionGenerator<X86Instruction> for X86InstructionGenerator {
                 }
             }
         }
-        // CMOVcc is rewritable and reads flags, so enumerate every
-        // condition for each non-identical register pair. Jcc remains
-        // excluded.
+        // SETcc is rewritable and reads flags, so enumerate every condition
+        // for every destination register.
+        for &rd in registers {
+            for &cond in &X86Condition::ALL {
+                out.push(X86Instruction::Setcc { rd, cond });
+            }
+        }
+        // CMOVcc is rewritable and reads flags, so enumerate every condition
+        // for each non-identical register pair. Jcc remains excluded.
         for &rd in registers {
             for &rs in registers {
                 if rd == rs || !x86_register_pair_ok(rd, rs, 64) || rd.is_byte() {
@@ -2144,6 +2191,7 @@ fn with_destination(instr: X86Instruction, new_rd: X86Register) -> X86Instructio
             rs,
             cond,
         },
+        X86Instruction::Setcc { cond, .. } => X86Instruction::Setcc { rd: new_rd, cond },
         // Jcc has no register operand; ignore the requested rd swap.
         X86Instruction::Jcc { cond } => X86Instruction::Jcc { cond },
     }
@@ -2238,6 +2286,7 @@ fn with_sources(instr: X86Instruction, new_rs: X86Register, new_imm: i64) -> X86
             rs: if new_rs == rd { rs } else { new_rs },
             cond,
         },
+        X86Instruction::Setcc { rd, cond } => X86Instruction::Setcc { rd, cond },
         X86Instruction::Jcc { cond } => X86Instruction::Jcc { cond },
     }
 }
@@ -2300,7 +2349,8 @@ mod tests {
         // (NEG, NOT, INC, DEC) + 3 shift families (SHL, SHR, SAR over imm8
         // counts) + 2 rotate families (ROL, ROR over imm8 counts) + IMUL 2-op
         // (every register pair) + IMUL 3-op (every (rd, rs, imm32) triple) +
-        // LEA (every (rd, base, disp32) triple) + CMOVcc over distinct pairs.
+        // LEA (every (rd, base, disp32) triple) + SETcc per register and
+        // condition + CMOVcc over distinct pairs.
         let expected_len = 8 * n * n
             + 8 * n * m
             + 4 * n
@@ -2309,6 +2359,7 @@ mod tests {
             + n * n
             + n * n * imul_m
             + n * n * lea_m
+            + n * X86Condition::ALL.len()
             + n * (n - 1) * X86Condition::ALL.len();
         assert_eq!(
             all.len(),
@@ -2334,6 +2385,24 @@ mod tests {
             }
             for src in instr.source_registers() {
                 assert!(regs.contains(&src));
+            }
+        }
+    }
+
+    #[test]
+    fn x86_generator_enumerates_setcc_for_each_register_and_condition() {
+        use crate::isa::traits::InstructionGenerator;
+
+        let regs = [X86Register::RAX, X86Register::RBX];
+        let all = X86InstructionGenerator.generate_all(&regs, &[0]);
+        for rd in regs {
+            for cond in X86Condition::ALL {
+                assert!(
+                    all.contains(&X86Instruction::Setcc { rd, cond }),
+                    "generator omitted SET{} {}",
+                    cond.suffix(),
+                    rd
+                );
             }
         }
     }
@@ -2509,6 +2578,7 @@ mod tests {
                 | X86Instruction::Dec { .. }
                 | X86Instruction::ImulReg { .. }
                 | X86Instruction::Cmov { .. }
+                | X86Instruction::Setcc { .. }
                 | X86Instruction::Jcc { .. } => {}
             }
         }
@@ -2692,6 +2762,32 @@ mod tests {
                 "{name} should reject extended registers"
             );
         }
+    }
+
+    #[test]
+    fn x86_setcc_encodability_matches_available_low_byte_registers() {
+        use crate::isa::traits::Assembler;
+
+        let setne = |rd| X86Instruction::Setcc {
+            rd,
+            cond: X86Condition::NE,
+        };
+        assert!(<X86_64 as Assembler<X86Instruction>>::can_assemble(
+            &X86_64,
+            &setne(X86Register::R15)
+        ));
+        assert!(<X86_32 as Assembler<X86Instruction>>::can_assemble(
+            &X86_32,
+            &setne(X86Register::RAX)
+        ));
+        assert!(!<X86_32 as Assembler<X86Instruction>>::can_assemble(
+            &X86_32,
+            &setne(X86Register::RSI)
+        ));
+        assert!(!<X86_32 as Assembler<X86Instruction>>::can_assemble(
+            &X86_32,
+            &setne(X86Register::R8)
+        ));
     }
 
     #[test]
@@ -2971,6 +3067,24 @@ mod tests {
             );
             assert_eq!(instr.to_string(), display);
         }
+    }
+
+    #[test]
+    fn setcc_metadata_models_a_flag_reading_full_register_write() {
+        use crate::isa::traits::InstructionType;
+
+        let setne = X86Instruction::Setcc {
+            rd: X86Register::RAX,
+            cond: X86Condition::NE,
+        };
+        assert_eq!(setne.destination(), Some(X86Register::RAX));
+        assert!(setne.source_registers().is_empty());
+        assert_eq!(setne.mnemonic(), "setne");
+        assert_eq!(setne.to_string(), "setne rax");
+        assert!(!setne.is_terminator());
+        assert!(!setne.has_side_effects());
+        assert!(!x86_modifies_flags(&setne));
+        assert!(x86_reads_flags(&setne));
     }
 
     #[test]
@@ -3633,6 +3747,7 @@ mod tests {
                 | X86Instruction::Dec { .. }
                 | X86Instruction::ImulReg { .. }
                 | X86Instruction::Cmov { .. }
+                | X86Instruction::Setcc { .. }
                 | X86Instruction::Jcc { .. } => {}
             }
         }
@@ -3724,8 +3839,8 @@ mod tests {
                     disp: imm,
                 },
             ),
-            // Cmov stays last at COUNT - 1 == 28.
             (28, X86Instruction::Cmov { rd, rs, cond }),
+            (29, X86Instruction::Setcc { rd, cond }),
         ];
 
         for (opcode, want) in expected {
@@ -3768,6 +3883,7 @@ mod tests {
             (26, "imul"),
             (27, "lea"),
             (28, "cmove"),
+            (29, "sete"),
         ];
         for (opcode, mnem) in mnemonics {
             assert_eq!(
@@ -4242,6 +4358,7 @@ mod tests {
                     | X86Instruction::Dec { .. }
                     | X86Instruction::ImulReg { .. }
                     | X86Instruction::Cmov { .. }
+                    | X86Instruction::Setcc { .. }
                     | X86Instruction::Jcc { .. } => {}
                 }
             }
@@ -4447,11 +4564,15 @@ mod tests {
         assert!(!jcc.has_side_effects());
     }
 
-    // --- FlagsAnalysis::reads_flags wired for Cmov / Jcc ---
+    // --- FlagsAnalysis::reads_flags wired for SETcc / Cmov / Jcc ---
 
     #[test]
-    fn x86_64_reads_flags_returns_true_for_cmov_and_jcc() {
+    fn x86_64_reads_flags_returns_true_for_setcc_cmov_and_jcc() {
         use crate::isa::traits::FlagsAnalysis;
+        let setcc = X86Instruction::Setcc {
+            rd: X86Register::RAX,
+            cond: X86Condition::E,
+        };
         let cmov = X86Instruction::Cmov {
             rd: X86Register::RAX,
             rs: X86Register::RBX,
@@ -4461,14 +4582,21 @@ mod tests {
             cond: X86Condition::NE,
         };
         assert!(<X86_64 as FlagsAnalysis<X86Instruction>>::reads_flags(
+            &setcc
+        ));
+        assert!(<X86_64 as FlagsAnalysis<X86Instruction>>::reads_flags(
             &cmov
         ));
         assert!(<X86_64 as FlagsAnalysis<X86Instruction>>::reads_flags(&jcc));
     }
 
     #[test]
-    fn x86_32_reads_flags_returns_true_for_cmov_and_jcc() {
+    fn x86_32_reads_flags_returns_true_for_setcc_cmov_and_jcc() {
         use crate::isa::traits::FlagsAnalysis;
+        let setcc = X86Instruction::Setcc {
+            rd: X86Register::RAX,
+            cond: X86Condition::E,
+        };
         let cmov = X86Instruction::Cmov {
             rd: X86Register::RAX,
             rs: X86Register::RBX,
@@ -4477,6 +4605,9 @@ mod tests {
         let jcc = X86Instruction::Jcc {
             cond: X86Condition::NE,
         };
+        assert!(<X86_32 as FlagsAnalysis<X86Instruction>>::reads_flags(
+            &setcc
+        ));
         assert!(<X86_32 as FlagsAnalysis<X86Instruction>>::reads_flags(
             &cmov
         ));

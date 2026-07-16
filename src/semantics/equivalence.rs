@@ -1582,6 +1582,53 @@ mod tests {
         assert!(metrics.smt_elapsed > Duration::ZERO);
     }
 
+    #[test]
+    fn x86_smt_proves_each_setcc_matches_mov_cmov_construction() {
+        use crate::isa::x86::X86Condition;
+
+        for cond in X86Condition::ALL {
+            let setcc = vec![X86Instruction::Setcc {
+                rd: X86Register::RAX,
+                cond,
+            }];
+            let mov_cmov = vec![
+                X86Instruction::MovImm {
+                    rd: X86Register::RAX,
+                    imm: 0,
+                },
+                X86Instruction::MovImm {
+                    rd: X86Register::RBX,
+                    imm: 1,
+                },
+                X86Instruction::Cmov {
+                    rd: X86Register::RAX,
+                    rs: X86Register::RBX,
+                    cond,
+                },
+            ];
+
+            let mut cfg64 = EquivalenceConfigFor::<crate::isa::X86_64>::default()
+                .live_out(X86LiveOut::from_registers(vec![X86Register::RAX]).with_flags(true));
+            cfg64.random_test_count = 0;
+            assert_eq!(
+                check_equivalence_for::<crate::isa::X86_64>(&setcc, &mov_cmov, &cfg64),
+                EquivalenceResult::Equivalent,
+                "x86-64 SET{} did not match MOV/CMOV construction",
+                cond.suffix()
+            );
+
+            let mut cfg32 = EquivalenceConfigFor::<crate::isa::X86_32>::default()
+                .live_out(X86LiveOut::from_registers(vec![X86Register::RAX]).with_flags(true));
+            cfg32.random_test_count = 0;
+            assert_eq!(
+                check_equivalence_for::<crate::isa::X86_32>(&setcc, &mov_cmov, &cfg32),
+                EquivalenceResult::Equivalent,
+                "x86-32 SET{} did not match MOV/CMOV construction",
+                cond.suffix()
+            );
+        }
+    }
+
     // --- SMT path catches flag-only divergence when flags_live ---
 
     #[test]
