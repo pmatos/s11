@@ -607,6 +607,12 @@ impl Default for OptimizationContext {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum CandidateInstructionDisposition {
+    StraightLine,
+    Terminator,
+}
+
 trait ElfOptimizationBackend {
     type Instruction: std::fmt::Display;
 
@@ -626,6 +632,11 @@ trait ElfOptimizationBackend {
         &self,
         instructions: &capstone::Instructions,
     ) -> Result<Vec<Self::Instruction>, String>;
+
+    fn classify_candidate_instruction(
+        &self,
+        instruction: &capstone::Insn<'_>,
+    ) -> Result<CandidateInstructionDisposition, String>;
 
     fn validate_window_ir(&self, ir: &[Self::Instruction]) -> Result<(), String>;
 
@@ -691,6 +702,21 @@ impl ElfOptimizationBackend for AArch64OptimizationBackend {
         instructions: &capstone::Instructions,
     ) -> Result<Vec<Self::Instruction>, String> {
         convert_to_ir(instructions)
+    }
+
+    fn classify_candidate_instruction(
+        &self,
+        instruction: &capstone::Insn<'_>,
+    ) -> Result<CandidateInstructionDisposition, String> {
+        let converted = convert_capstone_op_for_optimization(
+            instruction.mnemonic().unwrap_or(""),
+            instruction.op_str().unwrap_or(""),
+            instruction.address(),
+        )?;
+        Ok(match converted {
+            Some(ir) if ir.is_terminator() => CandidateInstructionDisposition::Terminator,
+            Some(_) | None => CandidateInstructionDisposition::StraightLine,
+        })
     }
 
     fn validate_window_ir(&self, ir: &[Self::Instruction]) -> Result<(), String> {
@@ -864,6 +890,23 @@ impl ElfOptimizationBackend for X86OptimizationBackend {
         instructions: &capstone::Instructions,
     ) -> Result<Vec<Self::Instruction>, String> {
         convert_to_x86_ir(instructions, self.parse_mode())
+    }
+
+    fn classify_candidate_instruction(
+        &self,
+        instruction: &capstone::Insn<'_>,
+    ) -> Result<CandidateInstructionDisposition, String> {
+        let ir = convert_x86_capstone_op_for_optimization(
+            instruction.mnemonic().unwrap_or(""),
+            instruction.op_str().unwrap_or(""),
+            instruction.address(),
+            self.parse_mode(),
+        )?;
+        Ok(if ir.is_terminator() {
+            CandidateInstructionDisposition::Terminator
+        } else {
+            CandidateInstructionDisposition::StraightLine
+        })
     }
 
     fn validate_window_ir(&self, ir: &[Self::Instruction]) -> Result<(), String> {
@@ -2325,34 +2368,41 @@ fn convert_to_x86_ir(
     for instruction in instructions.iter() {
         let mn = instruction.mnemonic().unwrap_or("");
         let ops = instruction.op_str().unwrap_or("");
-        match x86_ir_from_mnemonic_for_mode(mn, ops, mode) {
-            Ok(Some(ir)) => out.push(ir),
-            Ok(None) => {
-                // Refusing the window is safer than silently dropping the
-                // unsupported instruction: the patcher overwrites the entire
-                // byte window with the reassembled IR, so a dropped `lea`,
-                // `call`, etc. would lose its side effect from the binary.
-                return Err(format!(
-                    "x86 window contains unsupported mnemonic '{} {}' at 0x{:x}; \
-                     narrow the --start-addr/--end-addr range \
-                     to exclude it, or add the mnemonic to the supported set.",
-                    mn,
-                    ops,
-                    instruction.address()
-                ));
-            }
-            Err(e) => {
-                return Err(format!(
-                    "failed to parse x86 instruction '{} {}' at 0x{:x}: {}",
-                    mn,
-                    ops,
-                    instruction.address(),
-                    e
-                ));
-            }
-        }
+        out.push(convert_x86_capstone_op_for_optimization(
+            mn,
+            ops,
+            instruction.address(),
+            mode,
+        )?);
     }
     Ok(out)
+}
+
+fn convert_x86_capstone_op_for_optimization(
+    mnemonic: &str,
+    op_str: &str,
+    address: u64,
+    mode: X86ParseMode,
+) -> Result<isa::x86::X86Instruction, String> {
+    match x86_ir_from_mnemonic_for_mode(mnemonic, op_str, mode) {
+        Ok(Some(ir)) => Ok(ir),
+        Ok(None) => {
+            // Refusing the window is safer than silently dropping the
+            // unsupported instruction: the patcher overwrites the entire
+            // byte window with the reassembled IR, so a dropped `lea`,
+            // `call`, etc. would lose its side effect from the binary.
+            Err(format!(
+                "x86 window contains unsupported mnemonic '{} {}' at 0x{:x}; \
+                 narrow the --start-addr/--end-addr range \
+                 to exclude it, or add the mnemonic to the supported set.",
+                mnemonic, op_str, address
+            ))
+        }
+        Err(error) => Err(format!(
+            "failed to parse x86 instruction '{} {}' at 0x{:x}: {}",
+            mnemonic, op_str, address, error
+        )),
+    }
 }
 
 /// Candidate register pool for x86 search, drawn from the target's original
@@ -3931,6 +3981,77 @@ mod cli_helper_tests {
             .syntax(capstone::arch::x86::ArchSyntax::Intel)
             .build()
             .expect("test capstone should build")
+    }
+
+    #[test]
+    fn candidate_instruction_classification_uses_aarch64_conversion_outcome() {
+        let backend = AArch64OptimizationBackend;
+        let cs = aarch64_test_capstone();
+
+        let nop = cs
+            .disasm_all(&[0x1f, 0x20, 0x03, 0xd5], 0x1000)
+            .expect("NOP should disassemble");
+        assert_eq!(
+            backend
+                .classify_candidate_instruction(nop.iter().next().expect("one NOP"))
+                .expect("NOP is a supported skip"),
+            CandidateInstructionDisposition::StraightLine
+        );
+
+        let branch_bytes = assemble_aarch64_test_bytes(&[Instruction::B {
+            target: s11::ir::LabelId(0x1000),
+        }]);
+        let branch = cs
+            .disasm_all(&branch_bytes, 0x1000)
+            .expect("branch should disassemble");
+        assert_eq!(
+            backend
+                .classify_candidate_instruction(branch.iter().next().expect("one branch"))
+                .expect("B is a supported terminator"),
+            CandidateInstructionDisposition::Terminator
+        );
+    }
+
+    #[test]
+    fn candidate_instruction_classification_matches_x86_window_conversion() {
+        let backend = X86OptimizationBackend::new(X86Arch::X86_64);
+        let cs = x86_64_test_capstone();
+        let supported = cs
+            .disasm_all(&[0x48, 0x83, 0xc0, 0x01], 0x2000)
+            .expect("add rax, 1 should disassemble");
+        let instruction = supported.iter().next().expect("one add");
+
+        assert_eq!(
+            backend
+                .classify_candidate_instruction(instruction)
+                .expect("add rax, 1 is supported"),
+            CandidateInstructionDisposition::StraightLine
+        );
+        assert_eq!(
+            convert_x86_capstone_op_for_optimization(
+                instruction.mnemonic().unwrap_or(""),
+                instruction.op_str().unwrap_or(""),
+                instruction.address(),
+                parser::x86::X86ParseMode::Mode64,
+            )
+            .expect("single-instruction conversion should succeed"),
+            convert_to_x86_ir(&supported, parser::x86::X86ParseMode::Mode64)
+                .expect("whole-window conversion should succeed")
+                .into_iter()
+                .next()
+                .expect("one IR instruction")
+        );
+
+        let unsupported = cs
+            .disasm_all(&[0x50], 0x3000)
+            .expect("push rax should disassemble");
+        let instruction = unsupported.iter().next().expect("one push");
+        let classifier_error = backend
+            .classify_candidate_instruction(instruction)
+            .expect_err("push rax is unsupported");
+        let window_error = convert_to_x86_ir(&unsupported, parser::x86::X86ParseMode::Mode64)
+            .expect_err("whole-window conversion must also reject push rax");
+        assert_eq!(classifier_error, window_error);
     }
 
     #[test]
