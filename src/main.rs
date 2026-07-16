@@ -4468,6 +4468,45 @@ mod cli_helper_tests {
     }
 
     #[test]
+    fn x86_capstone_bridge_accepts_extension_move_source_widths() {
+        let cs64 = capstone::Capstone::new()
+            .x86()
+            .mode(capstone::arch::x86::ArchMode::Mode64)
+            .syntax(capstone::arch::x86::ArchSyntax::Intel)
+            .build()
+            .expect("capstone x86-64 init");
+        let movzx = cs64
+            .disasm_all(&[0x48, 0x0f, 0xb6, 0xc3], 0x1000)
+            .expect("disassemble movzx rax, bl");
+        assert_eq!(
+            convert_to_x86_ir(&movzx, parser::x86::X86ParseMode::Mode64).unwrap(),
+            vec![X86Instruction::Movzx {
+                rd: X86Register::RAX,
+                rs: X86Register::RBX,
+                src_width: 8,
+            }]
+        );
+
+        let cs32 = capstone::Capstone::new()
+            .x86()
+            .mode(capstone::arch::x86::ArchMode::Mode32)
+            .syntax(capstone::arch::x86::ArchSyntax::Intel)
+            .build()
+            .expect("capstone x86-32 init");
+        let movsx = cs32
+            .disasm_all(&[0x0f, 0xbf, 0xc2], 0x1000)
+            .expect("disassemble movsx eax, dx");
+        assert_eq!(
+            convert_to_x86_ir(&movsx, parser::x86::X86ParseMode::Mode32).unwrap(),
+            vec![X86Instruction::Movsx {
+                rd: X86Register::RAX,
+                rs: X86Register::RDX,
+                src_width: 16,
+            }]
+        );
+    }
+
+    #[test]
     fn x86_capstone_bridge_rejects_architectural_setcc_byte_destinations() {
         for (mode, parse_mode) in [
             (

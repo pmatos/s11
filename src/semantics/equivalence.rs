@@ -1207,6 +1207,33 @@ mod tests {
     }
 
     #[test]
+    fn x86_movzx_low_byte_is_smt_equivalent_to_copy_and_mask_when_flags_are_dead() {
+        let movzx = vec![X86Instruction::Movzx {
+            rd: X86Register::RAX,
+            rs: X86Register::RBX,
+            src_width: 8,
+        }];
+        let copy_and_mask = vec![
+            X86Instruction::MovReg {
+                rd: X86Register::RAX,
+                rs: X86Register::RBX,
+            },
+            X86Instruction::AndImm {
+                rd: X86Register::RAX,
+                imm: 0xff,
+            },
+        ];
+        let cfg = EquivalenceConfigFor::<crate::isa::X86_64>::default()
+            .live_out(X86LiveOut::from_registers(vec![X86Register::RAX]))
+            .random_tests(0);
+
+        assert_eq!(
+            check_equivalence_for::<crate::isa::X86_64>(&movzx, &copy_and_mask, &cfg),
+            EquivalenceResult::Equivalent
+        );
+    }
+
+    #[test]
     fn x86_mov_zero_not_equivalent_to_xor_self_when_flags_live() {
         // XOR sets EFLAGS; MOV does not. So with flags_live=true, the two
         // sequences must NOT be considered equivalent.

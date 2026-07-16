@@ -97,7 +97,7 @@ with width-parameterised SMT equivalence.
 
 Rewritable straight-line mnemonic families:
 
-- `mov`, `add`, `sub`, `and`, `or`, `xor`, `cmp`, `test`
+- `mov`, `movzx`, `movsx`, `add`, `sub`, `and`, `or`, `xor`, `cmp`, `test`
 - Single-operand: `neg`, `not`, `inc`, `dec`
 - Immediate-count shifts: `shl`/`sal`, `shr`, `sar`
 - Immediate-count rotates: `rol`, `ror`
@@ -110,7 +110,14 @@ Synthesizable-only pseudo-instruction families:
 - Conditional full-width sets: `set<cond>`
 
 The data-movement/arithmetic/logical/comparison families have register and
-immediate forms where the x86 IR models them. `cmp` and `test` are
+immediate forms where the x86 IR models them. `movzx` and `movsx` are
+register-only width-changing moves: they extract the low 8 or 16 bits named by
+the source alias and zero- or sign-extend them into the native-width destination
+(64 bits in x86-64, 32 bits in x86-32), without changing EFLAGS. Legacy
+high-byte sources (`ah`/`bh`/`ch`/`dh`) are not modelled. The 32-to-64 signed
+form is the distinct `movsxd` family and remains unsupported; x86 has no
+`movzx r64, r32` encoding because a 32-bit GPR write already provides that zero
+extension. `cmp` and `test` are
 flag-setting: each discards its result and writes only EFLAGS (`cmp` from a
 subtraction, `test` from a bitwise AND that clears CF/OF). `neg` and `not`
 are single-operand: `neg` computes `rd = -rd` and sets EFLAGS as if from
@@ -158,19 +165,25 @@ assembly emits architectural byte `SETcc` followed by same-register `MOVZX`
 into the 32-bit destination; that destination write also clears bits 63:32 in
 x86-64, so the emitted pair matches the full-width IR semantics.
 
-The x86 IR does not yet carry operand width. To avoid rewriting partial-width
-operations as full-width operations, the binary optimization path currently
-accepts only mode-width register aliases: `rax`/`r8`-style 64-bit names for
-x86-64, and `eax`-style 32-bit i386 names for x86-32. Architectural byte SETcc
-from ELF input is rejected until #75 rather than lifted into the full-width
-pseudo-IR. Width-agnostic text accepts only the pseudo-family's canonical
-full-register spelling (`setne rax`, for example), not byte/word/dword aliases.
-In x86-32, synthesized SETcc remains limited to destinations backed by
-`al`/`cl`/`dl`/`bl`, because byte-register encoding slots 4–7 name the legacy
-high-byte registers without a REX prefix. Other instructions using x86-64
-`eax`/`ax`/`al` forms, x86-32 `ax`/`al` forms, or x86-32 extended-register
-aliases such as `r8d` are rejected until operand width is represented end to
-end.
+The x86 IR does not yet carry general operand width. To avoid rewriting
+partial-width operations as full-width operations, the binary optimization path
+accepts mode-width register aliases for every ordinary instruction:
+`rax`/`r8`-style 64-bit names for x86-64, and `eax`-style 32-bit i386 names for
+x86-32. MOVZX/MOVSX are the narrow, explicit exception: their IR variants carry
+the 8- or 16-bit source width while their destination remains the mode width.
+Width-agnostic text accepts only 64-bit MOVSX destinations because its IR cannot
+preserve the distinct zero-extension effect of a 32-bit destination write;
+mode-aware x86-32 parsing accepts 32-bit MOVSX destinations.
+Architectural byte SETcc from ELF input is rejected until #75 rather than lifted
+into the full-width pseudo-IR; width-agnostic text accepts only the SETcc
+pseudo-family's canonical full-register spelling (`setne rax`, for example), not
+byte/word/dword aliases. Other x86-64 `eax`/`ax`/`al` forms, other x86-32
+`ax`/`al` forms, and x86-32 extended-register aliases such as `r8d` are rejected
+until operand width is represented end to end. In x86-32, byte-register access
+is limited to `al`/`cl`/`dl`/`bl`: these back both the 8-bit MOVZX/MOVSX sources
+and the synthesized SETcc destinations. `spl`/`bpl`/`sil`/`dil` require a
+64-bit-mode REX prefix (encoding slots 4–7 otherwise name the legacy high-byte
+registers), so they are rejected.
 
 Fixed control-flow terminators:
 

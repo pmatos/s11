@@ -12,7 +12,7 @@
 
 use crate::isa::x86::X86Instruction;
 use crate::semantics::live_out::X86LiveOut;
-use crate::semantics::state::{ConcreteValue, Eflags, X86ConcreteMachineState};
+use crate::semantics::state::{ConcreteValue, Eflags, X86ConcreteMachineState, mask_to_width};
 
 /// Apply a single x86 instruction to a concrete machine state.
 pub fn apply_instruction_concrete_x86(
@@ -26,6 +26,28 @@ pub fn apply_instruction_concrete_x86(
         }
         X86Instruction::MovImm { rd, imm } => {
             state.set_register(*rd, ConcreteValue::from_i64(*imm));
+        }
+        X86Instruction::Movzx { rd, rs, src_width } => {
+            assert!(
+                matches!(src_width, 8 | 16),
+                "MOVZX source width must be 8 or 16 bits"
+            );
+            let narrow = mask_to_width(state.get_register(*rs).as_u64(), *src_width);
+            state.set_register(*rd, ConcreteValue::new(narrow));
+        }
+        X86Instruction::Movsx { rd, rs, src_width } => {
+            assert!(
+                matches!(src_width, 8 | 16),
+                "MOVSX source width must be 8 or 16 bits"
+            );
+            let narrow = mask_to_width(state.get_register(*rs).as_u64(), *src_width);
+            let sign_bit = 1u64 << (*src_width - 1);
+            let extended = if narrow & sign_bit == 0 {
+                narrow
+            } else {
+                narrow | !mask_to_width(u64::MAX, *src_width)
+            };
+            state.set_register(*rd, ConcreteValue::new(extended));
         }
         X86Instruction::AddReg { rd, rs } => apply_binop_reg(&mut state, *rd, *rs, Binop::Add),
         X86Instruction::AddImm { rd, imm } => apply_binop_imm(&mut state, *rd, *imm, Binop::Add),
@@ -1380,6 +1402,69 @@ mod tests {
         assert_eq!(after.get_register(X86Register::RBX).as_u64(), 0xcafebabe);
         // MOV does not change EFLAGS.
         assert_eq!(after.get_flags(), Eflags::default());
+    }
+
+    #[test]
+    fn movzx_zero_extends_low_source_bits_and_preserves_flags() {
+        let mut state = X86ConcreteMachineState::new_zeroed(64);
+        state.set_register(X86Register::RBX, ConcreteValue::new(0xfeed_face_cafe_80a5));
+        state.set_register(X86Register::RAX, ConcreteValue::new(u64::MAX));
+        let mut flags = Eflags::new();
+        flags.cf = true;
+        flags.zf = true;
+        state.set_flags(flags);
+
+        let after = apply_instruction_concrete_x86(
+            state,
+            &X86Instruction::Movzx {
+                rd: X86Register::RAX,
+                rs: X86Register::RBX,
+                src_width: 8,
+            },
+        );
+
+        assert_eq!(after.get_register(X86Register::RAX).as_u64(), 0xa5);
+        assert_eq!(
+            after.get_register(X86Register::RBX).as_u64(),
+            0xfeed_face_cafe_80a5
+        );
+        assert_eq!(after.get_flags(), flags);
+    }
+
+    #[test]
+    fn movsx_sign_extends_byte_and_word_sources_to_the_machine_width() {
+        for (machine_width, src_width, source, expected) in [
+            (64, 8, 0x017f, 0x7f),
+            (64, 8, 0x0180, 0xffff_ffff_ffff_ff80),
+            (64, 16, 0x17fff, 0x7fff),
+            (64, 16, 0x18001, 0xffff_ffff_ffff_8001),
+            (32, 8, 0x017f, 0x7f),
+            (32, 8, 0x0180, 0xffff_ff80),
+            (32, 16, 0x17fff, 0x7fff),
+            (32, 16, 0x18001, 0xffff_8001),
+        ] {
+            let mut state = X86ConcreteMachineState::new_zeroed(machine_width);
+            state.set_register(X86Register::RBX, ConcreteValue::new(source));
+            let mut flags = Eflags::new();
+            flags.of = true;
+            state.set_flags(flags);
+
+            let after = apply_instruction_concrete_x86(
+                state,
+                &X86Instruction::Movsx {
+                    rd: X86Register::RAX,
+                    rs: X86Register::RBX,
+                    src_width,
+                },
+            );
+
+            assert_eq!(
+                after.get_register(X86Register::RAX).as_u64(),
+                expected,
+                "machine width {machine_width}, source width {src_width}"
+            );
+            assert_eq!(after.get_flags(), flags);
+        }
     }
 
     #[test]

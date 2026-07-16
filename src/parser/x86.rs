@@ -328,8 +328,9 @@ pub fn x86_ir_from_mnemonic(
 }
 
 /// Convert a `(mnemonic, op_str)` pair into x86 IR for binary input
-/// disassembled in a known mode. Until x86 IR carries operand width
-/// end-to-end, only mode-width register aliases are accepted.
+/// disassembled in a known mode. Ordinary instructions accept only mode-width
+/// register aliases. MOVZX/MOVSX additionally accept an explicitly modelled
+/// 8- or 16-bit source alias while keeping a mode-width destination.
 pub fn x86_ir_from_mnemonic_for_mode(
     mnemonic: &str,
     op_str: &str,
@@ -476,6 +477,70 @@ fn x86_ir_from_mnemonic_impl(
             return Ok(None);
         };
         return Ok(Some(X86Instruction::Lea { rd, base, disp }));
+    }
+
+    // MOVZX / MOVSX are the narrow exception to the mode-width-only parser
+    // rule: the destination must be the selected mode width, while the source
+    // alias spelling supplies the semantic 8- or 16-bit extraction width.
+    if matches!(mnemonic.as_str(), "movzx" | "movsx") {
+        let parts: Vec<&str> = op_str.split(',').map(|s| s.trim()).collect();
+        if parts.len() != 2 {
+            return Ok(None);
+        }
+
+        let (rd, destination_width) = match mode {
+            Some(mode) => (
+                parse_x86_register_for_mode(parts[0], mode).map_err(|err| err.to_string())?,
+                mode.mode_width(),
+            ),
+            None => parse_x86_register_with_width(parts[0])?,
+        };
+        if !matches!(destination_width, 32 | 64) {
+            return Err(format!(
+                "{} destination '{}' must be a 32- or 64-bit register",
+                mnemonic, parts[0]
+            ));
+        }
+        // MOVZX to 32 bits and then architectural zero-extension is equivalent
+        // to the widthless IR's full-width zero-extension; MOVSX is not.
+        if mode.is_none() && mnemonic == "movsx" && destination_width == 32 {
+            return Err(format!(
+                "widthless x86 parser cannot represent a 32-bit destination for movsx: '{}'",
+                parts[0]
+            ));
+        }
+
+        let (rs, src_width) =
+            classify_x86_register_alias(parts[1]).map_err(|err| err.to_string())?;
+        if !matches!(src_width, 8 | 16) || src_width >= destination_width {
+            return Err(format!(
+                "{} source '{}' must be an 8- or 16-bit register narrower than its destination",
+                mnemonic, parts[1]
+            ));
+        }
+        if mode == Some(X86ParseMode::Mode32) {
+            let index = rs.index().expect("all x86 GPRs have an index");
+            if index >= 8 {
+                return Err(format!(
+                    "unsupported x86-32 register alias: '{}' names an extended register, \
+                     which is not encodable in x86-32",
+                    parts[1]
+                ));
+            }
+            if src_width == 8 && index >= 4 {
+                return Err(format!(
+                    "unsupported x86-32 8-bit register alias: '{}' requires a REX prefix, \
+                     which is unavailable in x86-32",
+                    parts[1]
+                ));
+            }
+        }
+
+        return Ok(Some(if mnemonic == "movzx" {
+            X86Instruction::Movzx { rd, rs, src_width }
+        } else {
+            X86Instruction::Movsx { rd, rs, src_width }
+        }));
     }
 
     // Reject unsupported mnemonics before attempting operand parsing so
@@ -800,6 +865,113 @@ mod tests {
             X86Operand::Register(X86Register::RDI)
         );
         assert_eq!(parse_x86_operand("7").unwrap(), X86Operand::Immediate(7));
+    }
+
+    #[test]
+    fn movzx_movsx_capture_source_width_and_round_trip_display() {
+        let cases = [
+            (
+                "movzx",
+                "rax, bl",
+                X86Instruction::Movzx {
+                    rd: X86Register::RAX,
+                    rs: X86Register::RBX,
+                    src_width: 8,
+                },
+                "movzx rax, bl",
+            ),
+            (
+                "movsx",
+                "r8, r9w",
+                X86Instruction::Movsx {
+                    rd: X86Register::R8,
+                    rs: X86Register::R9,
+                    src_width: 16,
+                },
+                "movsx r8, r9w",
+            ),
+        ];
+
+        for (mnemonic, operands, expected, display) in cases {
+            let parsed = x86_ir_from_mnemonic(mnemonic, operands)
+                .unwrap()
+                .expect("extension mnemonic should be supported");
+            assert_eq!(parsed, expected);
+            assert_eq!(parsed.to_string(), display);
+
+            let (round_trip_mnemonic, round_trip_operands) =
+                display.split_once(char::is_whitespace).unwrap();
+            assert_eq!(
+                x86_ir_from_mnemonic(round_trip_mnemonic, round_trip_operands)
+                    .unwrap()
+                    .unwrap(),
+                expected
+            );
+        }
+    }
+
+    #[test]
+    fn movzx_widthless_parser_accepts_32_bit_destination() {
+        assert_eq!(
+            x86_ir_from_mnemonic("movzx", "eax, bl")
+                .unwrap()
+                .expect("32-bit MOVZX destination is sound in the widthless IR"),
+            X86Instruction::Movzx {
+                rd: X86Register::RAX,
+                rs: X86Register::RBX,
+                src_width: 8,
+            }
+        );
+    }
+
+    #[test]
+    fn movsx_widthless_parser_rejects_32_bit_destination() {
+        let err = x86_ir_from_mnemonic("movsx", "eax, bl")
+            .expect_err("widthless parser cannot preserve a 32-bit MOVSX destination");
+        assert!(
+            err.contains("cannot represent a 32-bit destination"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn movzx_movsx_mode_parser_requires_native_destination_and_encodable_narrow_source() {
+        assert_eq!(
+            x86_ir_from_mnemonic_for_mode("movzx", "rax, bl", X86ParseMode::Mode64)
+                .unwrap()
+                .unwrap(),
+            X86Instruction::Movzx {
+                rd: X86Register::RAX,
+                rs: X86Register::RBX,
+                src_width: 8,
+            }
+        );
+        assert_eq!(
+            x86_ir_from_mnemonic_for_mode("movsx", "eax, dx", X86ParseMode::Mode32)
+                .unwrap()
+                .unwrap(),
+            X86Instruction::Movsx {
+                rd: X86Register::RAX,
+                rs: X86Register::RDX,
+                src_width: 16,
+            }
+        );
+
+        for (mode, operands) in [
+            (X86ParseMode::Mode64, "eax, bl"),
+            (X86ParseMode::Mode64, "rax, ebx"),
+            (X86ParseMode::Mode32, "ax, bl"),
+            (X86ParseMode::Mode32, "eax, ebx"),
+            (X86ParseMode::Mode32, "eax, spl"),
+            (X86ParseMode::Mode32, "eax, r8b"),
+        ] {
+            assert!(
+                x86_ir_from_mnemonic_for_mode("movzx", operands, mode).is_err(),
+                "unsupported extension shape should fail: {mode:?} {operands}"
+            );
+        }
+        assert!(x86_ir_from_mnemonic("movsx", "rax, 1").is_err());
+        assert!(x86_ir_from_mnemonic("movzx", "rax, ah").is_err());
     }
 
     #[test]
