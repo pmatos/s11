@@ -148,12 +148,16 @@ register-base + displacement form, `lea rd, [base + disp]`, computing
 deferred and rejected as unsupported shapes. `cmov<cond>` has register operands
 and reads EFLAGS without modifying them.
 
-The x86 IR does not yet carry operand width. To avoid rewriting partial-width
-operations as full-width operations, the binary optimization path currently
-accepts only mode-width register aliases: `rax`/`r8`-style 64-bit names for
-x86-64, and `eax`-style 32-bit i386 names for x86-32. x86-64 `eax`/`ax`/`al`
-forms, x86-32 `ax`/`al` forms, and x86-32 extended-register aliases such as
-`r8d` are rejected until operand width is represented end to end.
+The x86 IR retains each GPR operand's native, dword, word, low-byte, or
+legacy high-byte view. Reads select the corresponding slice of the canonical
+architectural register. Native writes replace the mode-width register, dword
+writes zero-extend into the full GPR on x86-64, and word/byte writes preserve
+the surrounding bits. Thus `rax`/`eax`/`ax`/`al`/`ah` (and their corresponding
+GPR aliases) are distinct operands throughout parsing, search, concrete and
+SMT execution, liveness, costing, and assembly. Legacy high-byte operands are
+limited to `ah`/`bh`/`ch`/`dh` and cannot be combined with an encoding that
+requires a REX prefix. x86-32 continues to reject the x86-64-only extended
+register family (`r8` through `r15` and their aliases).
 
 Fixed control-flow terminators:
 

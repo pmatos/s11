@@ -354,9 +354,8 @@ pub struct SearchConfig {
     /// AArch64 pool ships at the same cardinality.
     pub x86_available_registers: Vec<crate::isa::x86::X86Register>,
     /// Whether x86 symbolic code-size search may consider same-instruction-count
-    /// candidates. Direct IR callers default to true; the ELF frontend can
-    /// disable this when source operands used partial-register aliases that the
-    /// current x86 IR collapses to full-width registers.
+    /// candidates. Defaults to true; callers may disable it as an additional
+    /// conservative policy gate.
     pub x86_same_count_code_size_allowed: bool,
     /// Stochastic-specific configuration
     pub stochastic: StochasticConfig,

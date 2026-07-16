@@ -109,17 +109,65 @@ fn instruction_latency(instr: &X86Instruction) -> u64 {
 ///   immediate fits in i32, else the 10-byte `REX.W B8+rd io` movabs. These
 ///   match the assembler exactly (a flat cost previously underestimated
 ///   movabs, which is unsound for length-based pruning).
+fn encoding_prefix_bytes(registers: &[X86Register], machine_width: u32) -> u64 {
+    let Some(first) = registers.first() else {
+        return 0;
+    };
+    let operand_width = first.effective_width(machine_width);
+    let operand_size_prefix = u64::from(operand_width == 16);
+    let rex = u64::from(
+        machine_width == 64
+            && (operand_width == 64
+                || registers
+                    .iter()
+                    .any(|reg| reg.index().is_some_and(|index| index >= 8))
+                || registers
+                    .iter()
+                    .any(|reg| reg.is_byte() && !reg.is_high_byte() && reg.index() >= Some(4))),
+    );
+    operand_size_prefix + rex
+}
+
 fn instruction_code_size(instr: &X86Instruction, width: u32) -> u64 {
-    let rex = if width == 64 { 1 } else { 0 };
+    let operand = instr.destination_operand().or(match instr {
+        X86Instruction::CmpReg { rn, .. }
+        | X86Instruction::CmpImm { rn, .. }
+        | X86Instruction::TestReg { rn, .. }
+        | X86Instruction::TestImm { rn, .. } => Some(*rn),
+        _ => None,
+    });
+    let operands: Vec<X86Register> = match instr {
+        X86Instruction::MovReg { rd, rs }
+        | X86Instruction::AddReg { rd, rs }
+        | X86Instruction::SubReg { rd, rs }
+        | X86Instruction::AndReg { rd, rs }
+        | X86Instruction::OrReg { rd, rs }
+        | X86Instruction::XorReg { rd, rs }
+        | X86Instruction::ImulReg { rd, rs }
+        | X86Instruction::Cmov { rd, rs, .. } => vec![*rd, *rs],
+        X86Instruction::CmpReg { rn, rs } | X86Instruction::TestReg { rn, rs } => {
+            vec![*rn, *rs]
+        }
+        X86Instruction::ImulRegImm { rd, rs, .. } => vec![*rd, *rs],
+        X86Instruction::Lea { rd, base, .. } => vec![*rd, *base],
+        _ => operand.into_iter().collect(),
+    };
+    let prefixes = encoding_prefix_bytes(&operands, width);
+    let operand_width = operand.map_or(width, |reg| reg.effective_width(width));
     match instr {
-        X86Instruction::MovReg { .. } => 2 + rex,
+        X86Instruction::MovReg { .. } => 2 + prefixes,
         // See the module doc-comment: immediate-dependent to stay a valid
         // upper bound on the assembler's MovImm encoding (issue #225).
         X86Instruction::MovImm { imm, .. } => {
-            if width == 64 {
+            if operand_width == 64 {
                 if i32::try_from(*imm).is_ok() { 7 } else { 10 }
             } else {
-                5
+                match operand_width {
+                    32 => 5 + prefixes,
+                    16 => 3 + prefixes,
+                    8 => 2 + prefixes,
+                    _ => unreachable!("unsupported x86 operand width"),
+                }
             }
         }
         X86Instruction::AddReg { .. }
@@ -134,7 +182,7 @@ fn instruction_code_size(instr: &X86Instruction, width: u32) -> u64 {
         | X86Instruction::Not { .. }
         // INC / DEC are single-operand `FF /0` / `FF /1` = 2 bytes (+REX.W).
         | X86Instruction::Inc { .. }
-        | X86Instruction::Dec { .. } => 2 + rex,
+        | X86Instruction::Dec { .. } => 2 + prefixes,
         // SHL / SHR / SAR / ROL / ROR by imm8 are `C1 /n ib` = opcode + ModR/M
         // + imm8 = 3 bytes (+REX.W).
         X86Instruction::Shl { .. }
@@ -143,23 +191,34 @@ fn instruction_code_size(instr: &X86Instruction, width: u32) -> u64 {
         | X86Instruction::Rol { .. }
         // IMUL rd, rs is `0F AF /r` = opcode (2) + ModR/M = 3 bytes (+REX.W).
         | X86Instruction::ImulReg { .. }
-        | X86Instruction::Ror { .. } => 3 + rex,
+        | X86Instruction::Ror { .. } => 3 + prefixes,
         // IMUL rd, rs, imm is `69 /r id` = opcode + ModR/M + 4-byte imm
         // = 6 bytes (+REX.W), mirroring the reg-imm arithmetic sizing.
-        X86Instruction::ImulRegImm { .. } => 6 + rex,
+        X86Instruction::ImulRegImm { .. } => {
+            if operand_width == 16 {
+                4 + prefixes
+            } else {
+                6 + prefixes
+            }
+        }
         // LEA rd, [base + disp] is `8D /r` = opcode + ModR/M, plus a possible
         // SIB byte (when base is RSP/R12) and a 4-byte disp32 = up to 7 bytes
         // (+REX.W). A conservative upper bound for length-based pruning.
-        X86Instruction::Lea { .. } => 7 + rex,
+        X86Instruction::Lea { .. } => 7 + prefixes,
         X86Instruction::AddImm { .. }
         | X86Instruction::SubImm { .. }
         | X86Instruction::AndImm { .. }
         | X86Instruction::OrImm { .. }
         | X86Instruction::XorImm { .. }
         | X86Instruction::CmpImm { .. }
-        | X86Instruction::TestImm { .. } => 6 + rex,
+        | X86Instruction::TestImm { .. } => match operand_width {
+            64 | 32 => 6 + prefixes,
+            16 => 4 + prefixes,
+            8 => 3 + prefixes,
+            _ => unreachable!("unsupported x86 operand width"),
+        },
         // CMOV is `0F 4x ModR/M` = 3 bytes plus REX.W on 64-bit.
-        X86Instruction::Cmov { .. } => 3 + rex,
+        X86Instruction::Cmov { .. } => 3 + prefixes,
         // Short-form Jcc is `7x rel8` = 2 bytes (no REX). Long-form
         // `0F 8x rel32` = 6 bytes is used when the displacement doesn't
         // fit. The optimizer never emits Jcc bytes (terminators stay
@@ -447,6 +506,62 @@ mod tests {
         };
         assert_eq!(instruction_cost(&rr, &CostMetric::CodeSize, 32), 2);
         assert_eq!(instruction_cost(&ri, &CostMetric::CodeSize, 32), 6);
+    }
+
+    #[test]
+    fn code_size_tracks_sub_register_prefixes_and_immediates() {
+        let cases = [
+            (
+                X86Instruction::MovImm {
+                    rd: X86Register::EAX,
+                    imm: 1,
+                },
+                5,
+            ),
+            (
+                X86Instruction::MovImm {
+                    rd: X86Register::AX,
+                    imm: 1,
+                },
+                4,
+            ),
+            (
+                X86Instruction::MovImm {
+                    rd: X86Register::AL,
+                    imm: 1,
+                },
+                2,
+            ),
+            (
+                X86Instruction::MovImm {
+                    rd: X86Register::AH,
+                    imm: 1,
+                },
+                2,
+            ),
+            (
+                X86Instruction::XorReg {
+                    rd: X86Register::EAX,
+                    rs: X86Register::EAX,
+                },
+                2,
+            ),
+            (
+                X86Instruction::XorReg {
+                    rd: X86Register::AX,
+                    rs: X86Register::AX,
+                },
+                3,
+            ),
+        ];
+
+        for (instruction, expected) in cases {
+            assert_eq!(
+                instruction_cost(&instruction, &CostMetric::CodeSize, 64),
+                expected,
+                "{instruction}"
+            );
+        }
     }
 
     #[test]

@@ -158,7 +158,16 @@ impl EnumerativeBackend<crate::isa::X86_64> for crate::isa::X86_64 {
         regs: &[crate::isa::x86::X86Register],
         imms: &[i64],
     ) -> Vec<crate::isa::x86::X86Instruction> {
-        crate::isa::x86::X86InstructionGenerator.generate_all(regs, imms)
+        crate::isa::x86::X86InstructionGenerator
+            .generate_all(regs, imms)
+            .into_iter()
+            .filter(|instruction| {
+                crate::search::candidate::is_sequence_encodable_for(
+                    std::slice::from_ref(instruction),
+                    &crate::isa::X86_64,
+                )
+            })
+            .collect()
     }
 
     fn sequence_cost(seq: &[crate::isa::x86::X86Instruction], config: &SearchConfig) -> u64 {
@@ -211,7 +220,16 @@ impl EnumerativeBackend<crate::isa::X86_32> for crate::isa::X86_32 {
         regs: &[crate::isa::x86::X86Register],
         imms: &[i64],
     ) -> Vec<crate::isa::x86::X86Instruction> {
-        crate::isa::x86::X86InstructionGenerator.generate_all(regs, imms)
+        crate::isa::x86::X86InstructionGenerator
+            .generate_all(regs, imms)
+            .into_iter()
+            .filter(|instruction| {
+                crate::search::candidate::is_sequence_encodable_for(
+                    std::slice::from_ref(instruction),
+                    &crate::isa::X86_32,
+                )
+            })
+            .collect()
     }
 
     fn sequence_cost(seq: &[crate::isa::x86::X86Instruction], config: &SearchConfig) -> u64 {

@@ -1,8 +1,8 @@
 //! x86 ISA backend (x86-64 primary, x86-32 secondary).
 //!
-//! Mirrors the dual-variant pattern of `src/isa/riscv.rs`: a single set of
-//! `X86Register` / `X86Operand` / `X86Instruction` enums shared by the
-//! `X86_64` and `X86_32` ISA marker structs.
+//! Mirrors the dual-variant pattern of `src/isa/riscv.rs`: a single
+//! `X86Register` view type plus shared `X86Operand` / `X86Instruction` enums
+//! serve the `X86_64` and `X86_32` ISA marker structs.
 //!
 //! **Initial instruction set**: MOV, ADD, SUB, AND, OR, XOR, CMP — each with
 //! register and immediate forms — plus rewritable CMOVcc and fixed Jcc
@@ -139,89 +139,198 @@ impl fmt::Display for X86Condition {
     }
 }
 
+/// The bit slice selected by an x86 register operand.
+///
+/// `Native` preserves the historical programmatic IR convention: it means the
+/// machine mode's full GPR width (64 bits for [`X86_64`], 32 for [`X86_32`]).
+/// Parsed aliases retain an explicit narrower view. The high-byte view is the
+/// legacy AH/CH/DH/BH slice at bits 15:8, not the low byte.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub enum X86Register {
-    RAX,
-    RCX,
-    RDX,
-    RBX,
-    RSP,
-    RBP,
-    RSI,
-    RDI,
-    R8,
-    R9,
-    R10,
-    R11,
-    R12,
-    R13,
-    R14,
-    R15,
+pub enum X86RegisterView {
+    Native,
+    Dword,
+    Word,
+    LowByte,
+    HighByte,
+}
+
+impl X86RegisterView {
+    pub const fn bit_width(self, mode_width: u32) -> u32 {
+        match self {
+            X86RegisterView::Native => mode_width,
+            X86RegisterView::Dword => 32,
+            X86RegisterView::Word => 16,
+            X86RegisterView::LowByte | X86RegisterView::HighByte => 8,
+        }
+    }
+}
+
+/// An x86 GPR operand: canonical architectural register plus selected view.
+///
+/// Machine state and liveness key on [`Self::canonical`], while instruction
+/// operands retain the view so execution and assembly can distinguish RAX,
+/// EAX, AX, AL, and AH without multiplying instruction variants.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct X86Register {
+    index: u8,
+    view: X86RegisterView,
 }
 
 impl X86Register {
+    const fn new(index: u8, view: X86RegisterView) -> Self {
+        Self { index, view }
+    }
+
+    pub const RAX: Self = Self::new(0, X86RegisterView::Native);
+    pub const RCX: Self = Self::new(1, X86RegisterView::Native);
+    pub const RDX: Self = Self::new(2, X86RegisterView::Native);
+    pub const RBX: Self = Self::new(3, X86RegisterView::Native);
+    pub const RSP: Self = Self::new(4, X86RegisterView::Native);
+    pub const RBP: Self = Self::new(5, X86RegisterView::Native);
+    pub const RSI: Self = Self::new(6, X86RegisterView::Native);
+    pub const RDI: Self = Self::new(7, X86RegisterView::Native);
+    pub const R8: Self = Self::new(8, X86RegisterView::Native);
+    pub const R9: Self = Self::new(9, X86RegisterView::Native);
+    pub const R10: Self = Self::new(10, X86RegisterView::Native);
+    pub const R11: Self = Self::new(11, X86RegisterView::Native);
+    pub const R12: Self = Self::new(12, X86RegisterView::Native);
+    pub const R13: Self = Self::new(13, X86RegisterView::Native);
+    pub const R14: Self = Self::new(14, X86RegisterView::Native);
+    pub const R15: Self = Self::new(15, X86RegisterView::Native);
+
+    pub const EAX: Self = Self::new(0, X86RegisterView::Dword);
+    pub const ECX: Self = Self::new(1, X86RegisterView::Dword);
+    pub const EDX: Self = Self::new(2, X86RegisterView::Dword);
+    pub const EBX: Self = Self::new(3, X86RegisterView::Dword);
+    pub const ESP: Self = Self::new(4, X86RegisterView::Dword);
+    pub const EBP: Self = Self::new(5, X86RegisterView::Dword);
+    pub const ESI: Self = Self::new(6, X86RegisterView::Dword);
+    pub const EDI: Self = Self::new(7, X86RegisterView::Dword);
+    pub const R8D: Self = Self::new(8, X86RegisterView::Dword);
+    pub const R9D: Self = Self::new(9, X86RegisterView::Dword);
+    pub const R10D: Self = Self::new(10, X86RegisterView::Dword);
+    pub const R11D: Self = Self::new(11, X86RegisterView::Dword);
+    pub const R12D: Self = Self::new(12, X86RegisterView::Dword);
+    pub const R13D: Self = Self::new(13, X86RegisterView::Dword);
+    pub const R14D: Self = Self::new(14, X86RegisterView::Dword);
+    pub const R15D: Self = Self::new(15, X86RegisterView::Dword);
+
+    pub const AX: Self = Self::new(0, X86RegisterView::Word);
+    pub const CX: Self = Self::new(1, X86RegisterView::Word);
+    pub const DX: Self = Self::new(2, X86RegisterView::Word);
+    pub const BX: Self = Self::new(3, X86RegisterView::Word);
+    pub const SP: Self = Self::new(4, X86RegisterView::Word);
+    pub const BP: Self = Self::new(5, X86RegisterView::Word);
+    pub const SI: Self = Self::new(6, X86RegisterView::Word);
+    pub const DI: Self = Self::new(7, X86RegisterView::Word);
+    pub const R8W: Self = Self::new(8, X86RegisterView::Word);
+    pub const R9W: Self = Self::new(9, X86RegisterView::Word);
+    pub const R10W: Self = Self::new(10, X86RegisterView::Word);
+    pub const R11W: Self = Self::new(11, X86RegisterView::Word);
+    pub const R12W: Self = Self::new(12, X86RegisterView::Word);
+    pub const R13W: Self = Self::new(13, X86RegisterView::Word);
+    pub const R14W: Self = Self::new(14, X86RegisterView::Word);
+    pub const R15W: Self = Self::new(15, X86RegisterView::Word);
+
+    pub const AL: Self = Self::new(0, X86RegisterView::LowByte);
+    pub const CL: Self = Self::new(1, X86RegisterView::LowByte);
+    pub const DL: Self = Self::new(2, X86RegisterView::LowByte);
+    pub const BL: Self = Self::new(3, X86RegisterView::LowByte);
+    pub const SPL: Self = Self::new(4, X86RegisterView::LowByte);
+    pub const BPL: Self = Self::new(5, X86RegisterView::LowByte);
+    pub const SIL: Self = Self::new(6, X86RegisterView::LowByte);
+    pub const DIL: Self = Self::new(7, X86RegisterView::LowByte);
+    pub const R8B: Self = Self::new(8, X86RegisterView::LowByte);
+    pub const R9B: Self = Self::new(9, X86RegisterView::LowByte);
+    pub const R10B: Self = Self::new(10, X86RegisterView::LowByte);
+    pub const R11B: Self = Self::new(11, X86RegisterView::LowByte);
+    pub const R12B: Self = Self::new(12, X86RegisterView::LowByte);
+    pub const R13B: Self = Self::new(13, X86RegisterView::LowByte);
+    pub const R14B: Self = Self::new(14, X86RegisterView::LowByte);
+    pub const R15B: Self = Self::new(15, X86RegisterView::LowByte);
+
+    pub const AH: Self = Self::new(0, X86RegisterView::HighByte);
+    pub const CH: Self = Self::new(1, X86RegisterView::HighByte);
+    pub const DH: Self = Self::new(2, X86RegisterView::HighByte);
+    pub const BH: Self = Self::new(3, X86RegisterView::HighByte);
+
     pub fn index(&self) -> Option<u8> {
-        Some(match self {
-            X86Register::RAX => 0,
-            X86Register::RCX => 1,
-            X86Register::RDX => 2,
-            X86Register::RBX => 3,
-            X86Register::RSP => 4,
-            X86Register::RBP => 5,
-            X86Register::RSI => 6,
-            X86Register::RDI => 7,
-            X86Register::R8 => 8,
-            X86Register::R9 => 9,
-            X86Register::R10 => 10,
-            X86Register::R11 => 11,
-            X86Register::R12 => 12,
-            X86Register::R13 => 13,
-            X86Register::R14 => 14,
-            X86Register::R15 => 15,
-        })
+        Some(self.index)
     }
 
     pub fn mnemonic(&self) -> &'static str {
-        match self {
-            X86Register::RAX => "rax",
-            X86Register::RCX => "rcx",
-            X86Register::RDX => "rdx",
-            X86Register::RBX => "rbx",
-            X86Register::RSP => "rsp",
-            X86Register::RBP => "rbp",
-            X86Register::RSI => "rsi",
-            X86Register::RDI => "rdi",
-            X86Register::R8 => "r8",
-            X86Register::R9 => "r9",
-            X86Register::R10 => "r10",
-            X86Register::R11 => "r11",
-            X86Register::R12 => "r12",
-            X86Register::R13 => "r13",
-            X86Register::R14 => "r14",
-            X86Register::R15 => "r15",
+        const NATIVE: [&str; 16] = [
+            "rax", "rcx", "rdx", "rbx", "rsp", "rbp", "rsi", "rdi", "r8", "r9", "r10", "r11",
+            "r12", "r13", "r14", "r15",
+        ];
+        const DWORD: [&str; 16] = [
+            "eax", "ecx", "edx", "ebx", "esp", "ebp", "esi", "edi", "r8d", "r9d", "r10d", "r11d",
+            "r12d", "r13d", "r14d", "r15d",
+        ];
+        const WORD: [&str; 16] = [
+            "ax", "cx", "dx", "bx", "sp", "bp", "si", "di", "r8w", "r9w", "r10w", "r11w", "r12w",
+            "r13w", "r14w", "r15w",
+        ];
+        const LOW_BYTE: [&str; 16] = [
+            "al", "cl", "dl", "bl", "spl", "bpl", "sil", "dil", "r8b", "r9b", "r10b", "r11b",
+            "r12b", "r13b", "r14b", "r15b",
+        ];
+        const HIGH_BYTE: [&str; 4] = ["ah", "ch", "dh", "bh"];
+
+        match self.view {
+            X86RegisterView::Native => NATIVE[self.index as usize],
+            X86RegisterView::Dword => DWORD[self.index as usize],
+            X86RegisterView::Word => WORD[self.index as usize],
+            X86RegisterView::LowByte => LOW_BYTE[self.index as usize],
+            X86RegisterView::HighByte => HIGH_BYTE[self.index as usize],
         }
     }
 
     pub fn from_index(i: u8) -> Option<Self> {
-        Some(match i {
-            0 => X86Register::RAX,
-            1 => X86Register::RCX,
-            2 => X86Register::RDX,
-            3 => X86Register::RBX,
-            4 => X86Register::RSP,
-            5 => X86Register::RBP,
-            6 => X86Register::RSI,
-            7 => X86Register::RDI,
-            8 => X86Register::R8,
-            9 => X86Register::R9,
-            10 => X86Register::R10,
-            11 => X86Register::R11,
-            12 => X86Register::R12,
-            13 => X86Register::R13,
-            14 => X86Register::R14,
-            15 => X86Register::R15,
-            _ => return None,
-        })
+        (i < 16).then_some(Self::new(i, X86RegisterView::Native))
+    }
+
+    pub const fn view(self) -> X86RegisterView {
+        self.view
+    }
+
+    pub fn canonical(self) -> Self {
+        Self::from_index(self.index).expect("x86 register index is always valid")
+    }
+
+    pub const fn effective_width(self, mode_width: u32) -> u32 {
+        self.view.bit_width(mode_width)
+    }
+
+    pub const fn is_high_byte(self) -> bool {
+        matches!(self.view, X86RegisterView::HighByte)
+    }
+
+    pub const fn is_byte(self) -> bool {
+        matches!(
+            self.view,
+            X86RegisterView::LowByte | X86RegisterView::HighByte
+        )
+    }
+
+    pub const fn is_native(self) -> bool {
+        matches!(self.view, X86RegisterView::Native)
+    }
+
+    pub const fn fully_overwrites_architectural_register(self) -> bool {
+        matches!(self.view, X86RegisterView::Native | X86RegisterView::Dword)
+    }
+
+    pub fn with_view(self, view: X86RegisterView) -> Option<Self> {
+        if view == X86RegisterView::HighByte && self.index >= 4 {
+            None
+        } else {
+            Some(Self::new(self.index, view))
+        }
+    }
+
+    pub fn with_base(self, base: X86Register) -> Option<Self> {
+        base.canonical().with_view(self.view)
     }
 }
 
@@ -248,7 +357,7 @@ impl RegisterType for X86Register {
         // Only RSP. RBP is not special — modern x86-64 ABIs do not require
         // a frame pointer, so excluding it would bias the search away from
         // valid scratch-register uses.
-        matches!(self, X86Register::RSP)
+        self.canonical() == X86Register::RSP
     }
 }
 
@@ -412,7 +521,16 @@ pub enum X86Instruction {
 }
 
 impl X86Instruction {
+    /// Canonical architectural destination used by liveness and machine-state
+    /// interfaces. The encoded operand view remains available through
+    /// [`Self::destination_operand`].
     pub fn destination(&self) -> Option<X86Register> {
+        self.destination_operand().map(X86Register::canonical)
+    }
+
+    /// Destination exactly as encoded by this instruction, including its
+    /// dword/word/byte view.
+    pub fn destination_operand(&self) -> Option<X86Register> {
         match self {
             X86Instruction::MovReg { rd, .. }
             | X86Instruction::MovImm { rd, .. }
@@ -481,7 +599,7 @@ impl X86Instruction {
     /// appears here. `MovReg`/`MovImm` are non-destructive (rd is purely
     /// written), so rd is NOT in the source list. See the enum doc-comment.
     pub fn source_registers(&self) -> Vec<X86Register> {
-        match self {
+        let operands = match self {
             X86Instruction::MovReg { rs, .. } => vec![*rs],
             X86Instruction::MovImm { .. } => vec![],
             X86Instruction::AddReg { rd, rs }
@@ -523,7 +641,8 @@ impl X86Instruction {
             // Cmov reads both rd (kept on false branch) and rs.
             X86Instruction::Cmov { rd, rs, .. } => vec![*rd, *rs],
             X86Instruction::Jcc { .. } => vec![],
-        }
+        };
+        operands.into_iter().map(X86Register::canonical).collect()
     }
 
     /// Whether this instruction transfers control out of the
@@ -784,6 +903,50 @@ fn x86_imm32_bitpattern_ok(imm: i64) -> bool {
     x86_signed_imm32_ok(imm) || u32::try_from(imm).is_ok()
 }
 
+fn x86_imm16_bitpattern_ok(imm: i64) -> bool {
+    i16::try_from(imm).is_ok() || u16::try_from(imm).is_ok()
+}
+
+fn x86_imm8_bitpattern_ok(imm: i64) -> bool {
+    i8::try_from(imm).is_ok() || u8::try_from(imm).is_ok()
+}
+
+fn x86_register_ok(reg: X86Register, mode_width: u32) -> bool {
+    reg.index().is_some_and(|index| {
+        index < if mode_width == 32 { 8 } else { 16 }
+            && !(mode_width == 32 && reg.view() == X86RegisterView::LowByte && index >= 4)
+    })
+}
+
+fn x86_register_pair_ok(lhs: X86Register, rhs: X86Register, mode_width: u32) -> bool {
+    x86_register_ok(lhs, mode_width)
+        && x86_register_ok(rhs, mode_width)
+        && lhs.effective_width(mode_width) == rhs.effective_width(mode_width)
+        && (!(lhs.is_high_byte() || rhs.is_high_byte())
+            || (lhs.index().is_some_and(|index| index < 4)
+                && rhs.index().is_some_and(|index| index < 4)))
+}
+
+fn x86_operand_immediate_ok(reg: X86Register, imm: i64, mode_width: u32) -> bool {
+    match reg.effective_width(mode_width) {
+        64 => x86_signed_imm32_ok(imm),
+        32 => x86_imm32_bitpattern_ok(imm),
+        16 => x86_imm16_bitpattern_ok(imm),
+        8 => x86_imm8_bitpattern_ok(imm),
+        _ => false,
+    }
+}
+
+fn x86_mov_operand_immediate_ok(reg: X86Register, imm: i64, mode_width: u32) -> bool {
+    match reg.effective_width(mode_width) {
+        64 => true,
+        32 => x86_imm32_bitpattern_ok(imm),
+        16 => x86_imm16_bitpattern_ok(imm),
+        8 => x86_imm8_bitpattern_ok(imm),
+        _ => false,
+    }
+}
+
 fn x86_mov_imm_ok(mode: crate::assembler::x86::X86Mode, imm: i64) -> bool {
     match mode {
         crate::assembler::x86::X86Mode::Mode64 => true,
@@ -951,50 +1114,70 @@ impl crate::isa::traits::CostModel<X86Instruction> for X86_32 {
     }
 }
 
+fn x86_can_assemble_instruction(instruction: &X86Instruction, mode_width: u32) -> bool {
+    match instruction {
+        X86Instruction::MovReg { rd, rs }
+        | X86Instruction::AddReg { rd, rs }
+        | X86Instruction::SubReg { rd, rs }
+        | X86Instruction::AndReg { rd, rs }
+        | X86Instruction::OrReg { rd, rs }
+        | X86Instruction::XorReg { rd, rs } => x86_register_pair_ok(*rd, *rs, mode_width),
+        X86Instruction::CmpReg { rn, rs } | X86Instruction::TestReg { rn, rs } => {
+            x86_register_pair_ok(*rn, *rs, mode_width)
+        }
+        X86Instruction::ImulReg { rd, rs } => {
+            x86_register_pair_ok(*rd, *rs, mode_width) && !rd.is_byte()
+        }
+        X86Instruction::ImulRegImm { rd, rs, imm } => {
+            x86_register_pair_ok(*rd, *rs, mode_width)
+                && !rd.is_byte()
+                && x86_operand_immediate_ok(*rd, *imm, mode_width)
+        }
+        X86Instruction::Lea { rd, base, disp } => {
+            x86_register_ok(*rd, mode_width)
+                && !rd.is_byte()
+                && x86_register_ok(*base, mode_width)
+                && base.effective_width(mode_width) == mode_width
+                && x86_signed_imm32_ok(*disp)
+        }
+        X86Instruction::MovImm { rd, imm } => {
+            x86_register_ok(*rd, mode_width) && x86_mov_operand_immediate_ok(*rd, *imm, mode_width)
+        }
+        X86Instruction::AddImm { rd, imm }
+        | X86Instruction::SubImm { rd, imm }
+        | X86Instruction::AndImm { rd, imm }
+        | X86Instruction::OrImm { rd, imm }
+        | X86Instruction::XorImm { rd, imm } => {
+            x86_register_ok(*rd, mode_width) && x86_operand_immediate_ok(*rd, *imm, mode_width)
+        }
+        X86Instruction::CmpImm { rn, imm } | X86Instruction::TestImm { rn, imm } => {
+            x86_register_ok(*rn, mode_width) && x86_operand_immediate_ok(*rn, *imm, mode_width)
+        }
+        X86Instruction::Shl { rd, imm }
+        | X86Instruction::Shr { rd, imm }
+        | X86Instruction::Sar { rd, imm }
+        | X86Instruction::Rol { rd, imm }
+        | X86Instruction::Ror { rd, imm } => {
+            x86_register_ok(*rd, mode_width) && x86_shift_count_imm8_ok(*imm)
+        }
+        X86Instruction::Neg { rd }
+        | X86Instruction::Not { rd }
+        | X86Instruction::Inc { rd }
+        | X86Instruction::Dec { rd } => x86_register_ok(*rd, mode_width),
+        X86Instruction::Cmov { rd, rs, .. } => {
+            x86_register_pair_ok(*rd, *rs, mode_width) && !rd.is_byte()
+        }
+        X86Instruction::Jcc { .. } => true,
+    }
+}
+
 impl crate::isa::traits::Assembler<X86Instruction> for X86_64 {
     fn assemble(&mut self, instructions: &[X86Instruction]) -> Result<Vec<u8>, String> {
         crate::assembler::x86::X86Assembler::new_64().assemble_instructions(instructions)
     }
 
     fn can_assemble(&self, instruction: &X86Instruction) -> bool {
-        match instruction {
-            X86Instruction::AddImm { imm, .. }
-            | X86Instruction::SubImm { imm, .. }
-            | X86Instruction::AndImm { imm, .. }
-            | X86Instruction::OrImm { imm, .. }
-            | X86Instruction::XorImm { imm, .. }
-            | X86Instruction::CmpImm { imm, .. }
-            // The 3-operand IMUL immediate encodes as imm32 (`69 /r id`).
-            | X86Instruction::ImulRegImm { imm, .. }
-            // LEA's displacement encodes as a signed disp32 in the ModRM/SIB.
-            | X86Instruction::Lea { disp: imm, .. }
-            | X86Instruction::TestImm { imm, .. } => x86_signed_imm32_ok(*imm),
-            // SHL / SHR / SAR / ROL / ROR encode their count as imm8: reject any
-            // count that does not fit a single byte so the search never proposes
-            // an unencodable shift or rotate.
-            X86Instruction::Shl { imm, .. }
-            | X86Instruction::Shr { imm, .. }
-            | X86Instruction::Sar { imm, .. }
-            | X86Instruction::Rol { imm, .. }
-            | X86Instruction::Ror { imm, .. } => x86_shift_count_imm8_ok(*imm),
-            X86Instruction::MovReg { .. }
-            | X86Instruction::MovImm { .. }
-            | X86Instruction::AddReg { .. }
-            | X86Instruction::SubReg { .. }
-            | X86Instruction::AndReg { .. }
-            | X86Instruction::OrReg { .. }
-            | X86Instruction::XorReg { .. }
-            | X86Instruction::CmpReg { .. }
-            | X86Instruction::TestReg { .. }
-            | X86Instruction::Neg { .. }
-            | X86Instruction::Not { .. }
-            | X86Instruction::Inc { .. }
-            | X86Instruction::Dec { .. }
-            // IMUL rd, rs is `0F AF /r` — always encodable.
-            | X86Instruction::ImulReg { .. }
-            | X86Instruction::Cmov { .. }
-            | X86Instruction::Jcc { .. } => true,
-        }
+        x86_can_assemble_instruction(instruction, 64)
     }
 }
 
@@ -1004,55 +1187,7 @@ impl crate::isa::traits::Assembler<X86Instruction> for X86_32 {
     }
 
     fn can_assemble(&self, instruction: &X86Instruction) -> bool {
-        // In 32-bit mode, R8..R15 are illegal. The x86 assembler's reg_index_32
-        // rejects them; reproduce the same check here so trait dispatch can
-        // pre-filter sequences before invoking the heavier assemble path.
-        fn reg_ok_32(r: X86Register) -> bool {
-            r.index().is_some_and(|i| i < 8)
-        }
-        match instruction {
-            X86Instruction::MovReg { rd, rs }
-            | X86Instruction::AddReg { rd, rs }
-            | X86Instruction::SubReg { rd, rs }
-            | X86Instruction::AndReg { rd, rs }
-            | X86Instruction::OrReg { rd, rs }
-            // IMUL rd, rs: both registers must be low-8 in 32-bit mode.
-            | X86Instruction::ImulReg { rd, rs }
-            | X86Instruction::XorReg { rd, rs } => reg_ok_32(*rd) && reg_ok_32(*rs),
-            // IMUL rd, rs, imm: low-8 registers plus an imm32 immediate.
-            X86Instruction::ImulRegImm { rd, rs, imm } => {
-                reg_ok_32(*rd) && reg_ok_32(*rs) && x86_signed_imm32_ok(*imm)
-            }
-            // LEA rd, [base + disp]: low-8 registers plus a signed disp32.
-            X86Instruction::Lea { rd, base, disp } => {
-                reg_ok_32(*rd) && reg_ok_32(*base) && x86_signed_imm32_ok(*disp)
-            }
-            X86Instruction::MovImm { rd, imm }
-            | X86Instruction::AddImm { rd, imm }
-            | X86Instruction::SubImm { rd, imm }
-            | X86Instruction::AndImm { rd, imm }
-            | X86Instruction::OrImm { rd, imm }
-            | X86Instruction::XorImm { rd, imm } => reg_ok_32(*rd) && x86_imm32_bitpattern_ok(*imm),
-            X86Instruction::CmpReg { rn, rs } | X86Instruction::TestReg { rn, rs } => {
-                reg_ok_32(*rn) && reg_ok_32(*rs)
-            }
-            X86Instruction::CmpImm { rn, imm } | X86Instruction::TestImm { rn, imm } => {
-                reg_ok_32(*rn) && x86_imm32_bitpattern_ok(*imm)
-            }
-            // SHL / SHR / SAR / ROL / ROR: legal 32-bit register plus an imm8
-            // count.
-            X86Instruction::Shl { rd, imm }
-            | X86Instruction::Shr { rd, imm }
-            | X86Instruction::Sar { rd, imm }
-            | X86Instruction::Rol { rd, imm }
-            | X86Instruction::Ror { rd, imm } => reg_ok_32(*rd) && x86_shift_count_imm8_ok(*imm),
-            X86Instruction::Neg { rd }
-            | X86Instruction::Not { rd }
-            | X86Instruction::Inc { rd }
-            | X86Instruction::Dec { rd } => reg_ok_32(*rd),
-            X86Instruction::Cmov { rd, rs, .. } => reg_ok_32(*rd) && reg_ok_32(*rs),
-            X86Instruction::Jcc { .. } => true,
-        }
+        x86_can_assemble_instruction(instruction, 32)
     }
 }
 
@@ -1778,6 +1913,9 @@ impl InstructionGenerator<X86Instruction> for X86InstructionGenerator {
         // Register-register variants (8 data mnemonics).
         for &rd in registers {
             for &rs in registers {
+                if !x86_register_pair_ok(rd, rs, 64) {
+                    continue;
+                }
                 out.push(X86Instruction::MovReg { rd, rs });
                 out.push(X86Instruction::AddReg { rd, rs });
                 out.push(X86Instruction::SubReg { rd, rs });
@@ -1791,14 +1929,18 @@ impl InstructionGenerator<X86Instruction> for X86InstructionGenerator {
         // Register-immediate variants (8 data mnemonics).
         for &rd in registers {
             for &imm in immediates {
-                out.push(X86Instruction::MovImm { rd, imm });
-                out.push(X86Instruction::AddImm { rd, imm });
-                out.push(X86Instruction::SubImm { rd, imm });
-                out.push(X86Instruction::AndImm { rd, imm });
-                out.push(X86Instruction::OrImm { rd, imm });
-                out.push(X86Instruction::XorImm { rd, imm });
-                out.push(X86Instruction::CmpImm { rn: rd, imm });
-                out.push(X86Instruction::TestImm { rn: rd, imm });
+                if x86_mov_operand_immediate_ok(rd, imm, 64) {
+                    out.push(X86Instruction::MovImm { rd, imm });
+                }
+                if x86_operand_immediate_ok(rd, imm, 64) {
+                    out.push(X86Instruction::AddImm { rd, imm });
+                    out.push(X86Instruction::SubImm { rd, imm });
+                    out.push(X86Instruction::AndImm { rd, imm });
+                    out.push(X86Instruction::OrImm { rd, imm });
+                    out.push(X86Instruction::XorImm { rd, imm });
+                    out.push(X86Instruction::CmpImm { rn: rd, imm });
+                    out.push(X86Instruction::TestImm { rn: rd, imm });
+                }
             }
         }
         // Single-operand variants (NEG, NOT, INC, DEC): one per register.
@@ -1837,6 +1979,9 @@ impl InstructionGenerator<X86Instruction> for X86InstructionGenerator {
         // including rd == rs (self-multiply is meaningful, unlike self-CMOV).
         for &rd in registers {
             for &rs in registers {
+                if !x86_register_pair_ok(rd, rs, 64) || rd.is_byte() {
+                    continue;
+                }
                 out.push(X86Instruction::ImulReg { rd, rs });
             }
         }
@@ -1845,8 +1990,11 @@ impl InstructionGenerator<X86Instruction> for X86InstructionGenerator {
         // here rather than emitted and later rejected by `can_assemble`.
         for &rd in registers {
             for &rs in registers {
+                if !x86_register_pair_ok(rd, rs, 64) || rd.is_byte() {
+                    continue;
+                }
                 for &imm in immediates {
-                    if i32::try_from(imm).is_err() {
+                    if !x86_operand_immediate_ok(rd, imm, 64) {
                         continue;
                     }
                     out.push(X86Instruction::ImulRegImm { rd, rs, imm });
@@ -1860,6 +2008,15 @@ impl InstructionGenerator<X86Instruction> for X86InstructionGenerator {
         // `can_assemble`.
         for &rd in registers {
             for &base in registers {
+                if rd.is_byte()
+                    || !matches!(
+                        base.view(),
+                        X86RegisterView::Native | X86RegisterView::Dword
+                    )
+                    || !x86_register_ok(rd, 64)
+                {
+                    continue;
+                }
                 for &disp in immediates {
                     if i32::try_from(disp).is_err() {
                         continue;
@@ -1873,7 +2030,7 @@ impl InstructionGenerator<X86Instruction> for X86InstructionGenerator {
         // excluded.
         for &rd in registers {
             for &rs in registers {
-                if rd == rs {
+                if rd == rs || !x86_register_pair_ok(rd, rs, 64) || rd.is_byte() {
                     continue;
                 }
                 for &cond in &X86Condition::ALL {

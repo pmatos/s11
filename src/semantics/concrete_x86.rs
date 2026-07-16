@@ -6,11 +6,11 @@
 //! Issue #77 keeps this file as the x86 instruction interpreter while the
 //! public search/equivalence callers route through the ISA trait surface.
 //!
-//! `X86Instruction` and `X86ConcreteMachineState`. Operand widths follow
-//! `state.width()` — writes to registers are already masked by the
-//! state, and flag computation receives the correct width.
+//! `X86Instruction` and `X86ConcreteMachineState`. Each register operand
+//! carries its architectural view, so reads, writes, and flags use the encoded
+//! operand width rather than assuming every access has the machine width.
 
-use crate::isa::x86::X86Instruction;
+use crate::isa::x86::{X86Instruction, X86Register};
 use crate::semantics::live_out::X86LiveOut;
 use crate::semantics::state::{ConcreteValue, Eflags, X86ConcreteMachineState};
 
@@ -21,11 +21,11 @@ pub fn apply_instruction_concrete_x86(
 ) -> X86ConcreteMachineState {
     match instruction {
         X86Instruction::MovReg { rd, rs } => {
-            let value = state.get_register(*rs);
-            state.set_register(*rd, value);
+            let value = state.read_operand(*rs);
+            state.write_operand(*rd, value);
         }
         X86Instruction::MovImm { rd, imm } => {
-            state.set_register(*rd, ConcreteValue::from_i64(*imm));
+            state.write_operand(*rd, ConcreteValue::from_i64(*imm));
         }
         X86Instruction::AddReg { rd, rs } => apply_binop_reg(&mut state, *rd, *rs, Binop::Add),
         X86Instruction::AddImm { rd, imm } => apply_binop_imm(&mut state, *rd, *imm, Binop::Add),
@@ -51,27 +51,27 @@ pub fn apply_instruction_concrete_x86(
         X86Instruction::Rol { rd, imm } => apply_rotate(&mut state, *rd, *imm, RotateKind::Rol),
         X86Instruction::Ror { rd, imm } => apply_rotate(&mut state, *rd, *imm, RotateKind::Ror),
         X86Instruction::ImulReg { rd, rs } => {
-            let lhs = state.get_register(*rd).as_u64();
-            let rhs = state.get_register(*rs).as_u64();
+            let lhs = state.read_operand(*rd).as_u64();
+            let rhs = state.read_operand(*rs).as_u64();
             apply_imul(&mut state, *rd, lhs, rhs);
         }
         X86Instruction::ImulRegImm { rd, rs, imm } => {
-            let lhs = state.get_register(*rs).as_u64();
+            let lhs = state.read_operand(*rs).as_u64();
             let rhs = *imm as u64;
             apply_imul(&mut state, *rd, lhs, rhs);
         }
         // LEA computes `rd = base + disp` (wrapping at width) and writes NO
-        // flags — pure address arithmetic, like MovReg. `set_register` masks
-        // the result to the state width.
+        // flags — pure address arithmetic, like MovReg. `write_operand` applies
+        // the destination view's truncation and partial-write behavior.
         X86Instruction::Lea { rd, base, disp } => {
-            let base = state.get_register(*base).as_u64();
+            let base = state.read_operand(*base).as_u64();
             let result = base.wrapping_add(*disp as u64);
-            state.set_register(*rd, ConcreteValue::new(result));
+            state.write_operand(*rd, ConcreteValue::new(result));
         }
         X86Instruction::Cmov { rd, rs, cond } => {
             if state.get_flags().evaluate(*cond) {
-                let v = state.get_register(*rs);
-                state.set_register(*rd, v);
+                let v = state.read_operand(*rs);
+                state.write_operand(*rd, v);
             }
             // CMOV does not write EFLAGS regardless of the branch taken.
         }
@@ -83,73 +83,71 @@ pub fn apply_instruction_concrete_x86(
     state
 }
 
-fn apply_cmp_reg(
-    state: &mut X86ConcreteMachineState,
-    rn: crate::isa::x86::X86Register,
-    rs: crate::isa::x86::X86Register,
-) {
-    let lhs = state.get_register(rn).as_u64();
-    let rhs = state.get_register(rs).as_u64();
+fn apply_cmp_reg(state: &mut X86ConcreteMachineState, rn: X86Register, rs: X86Register) {
+    let width = rn.effective_width(state.width());
+    let lhs = state.read_operand(rn).as_u64();
+    let rhs = state.read_operand(rs).as_u64();
     let result = lhs.wrapping_sub(rhs);
-    state.set_flags(Eflags::from_sub(lhs, rhs, result, state.width()));
+    state.set_flags(Eflags::from_sub(lhs, rhs, result, width));
 }
 
-fn apply_cmp_imm(state: &mut X86ConcreteMachineState, rn: crate::isa::x86::X86Register, imm: i64) {
-    let lhs = state.get_register(rn).as_u64();
+fn apply_cmp_imm(state: &mut X86ConcreteMachineState, rn: X86Register, imm: i64) {
+    let width = rn.effective_width(state.width());
+    let lhs = state.read_operand(rn).as_u64();
     let rhs = imm as u64;
     let result = lhs.wrapping_sub(rhs);
-    state.set_flags(Eflags::from_sub(lhs, rhs, result, state.width()));
+    state.set_flags(Eflags::from_sub(lhs, rhs, result, width));
 }
 
 // TEST is the non-destructive sibling of AND: it computes `rn & rhs`, sets
 // flags from the result via the logical path (CF=OF=0, SF/ZF/PF from result),
 // and writes no register — just as CMP discards a SUB result.
-fn apply_test_reg(
-    state: &mut X86ConcreteMachineState,
-    rn: crate::isa::x86::X86Register,
-    rs: crate::isa::x86::X86Register,
-) {
-    let lhs = state.get_register(rn).as_u64();
-    let rhs = state.get_register(rs).as_u64();
+fn apply_test_reg(state: &mut X86ConcreteMachineState, rn: X86Register, rs: X86Register) {
+    let width = rn.effective_width(state.width());
+    let lhs = state.read_operand(rn).as_u64();
+    let rhs = state.read_operand(rs).as_u64();
     let result = lhs & rhs;
-    state.set_flags(Eflags::from_logical(result, state.width()));
+    state.set_flags(Eflags::from_logical(result, width));
 }
 
-fn apply_test_imm(state: &mut X86ConcreteMachineState, rn: crate::isa::x86::X86Register, imm: i64) {
-    let lhs = state.get_register(rn).as_u64();
+fn apply_test_imm(state: &mut X86ConcreteMachineState, rn: X86Register, imm: i64) {
+    let width = rn.effective_width(state.width());
+    let lhs = state.read_operand(rn).as_u64();
     let rhs = imm as u64;
     let result = lhs & rhs;
-    state.set_flags(Eflags::from_logical(result, state.width()));
+    state.set_flags(Eflags::from_logical(result, width));
 }
 
 // NEG computes `rd = -rd` (two's complement) and sets EFLAGS as if computing
 // `0 - rd`: CF = (rd != 0), with OF/SF/ZF/PF from the SUB result. We reuse the
 // SUB flag path with lhs = 0, rhs = old_rd so the carry/overflow semantics
 // match `sub` exactly.
-fn apply_neg(state: &mut X86ConcreteMachineState, rd: crate::isa::x86::X86Register) {
-    let old = state.get_register(rd).as_u64();
+fn apply_neg(state: &mut X86ConcreteMachineState, rd: X86Register) {
+    let width = rd.effective_width(state.width());
+    let old = state.read_operand(rd).as_u64();
     let result = 0u64.wrapping_sub(old);
-    state.set_register(rd, ConcreteValue::new(result));
-    state.set_flags(Eflags::from_sub(0, old, result, state.width()));
+    state.write_operand(rd, ConcreteValue::new(result));
+    state.set_flags(Eflags::from_sub(0, old, result, width));
 }
 
 // NOT computes `rd = !rd` (bitwise complement). It affects NO flags — EFLAGS
 // is left exactly as it was, like MOV.
-fn apply_not(state: &mut X86ConcreteMachineState, rd: crate::isa::x86::X86Register) {
-    let old = state.get_register(rd).as_u64();
-    state.set_register(rd, ConcreteValue::new(!old));
+fn apply_not(state: &mut X86ConcreteMachineState, rd: X86Register) {
+    let old = state.read_operand(rd).as_u64();
+    state.write_operand(rd, ConcreteValue::new(!old));
 }
 
 // INC computes `rd = rd + 1`. It sets OF/SF/ZF/PF exactly as `add rd, 1` would,
 // but — the load-bearing subtlety — it leaves CF UNCHANGED (the incoming carry
 // flows through untouched). We capture the prior CF FIRST, compute the ADD flag
 // path for `rd + 1`, then override CF back to the captured value.
-fn apply_inc(state: &mut X86ConcreteMachineState, rd: crate::isa::x86::X86Register) {
+fn apply_inc(state: &mut X86ConcreteMachineState, rd: X86Register) {
     let prev_cf = state.get_flags().cf;
-    let old = state.get_register(rd).as_u64();
+    let width = rd.effective_width(state.width());
+    let old = state.read_operand(rd).as_u64();
     let result = old.wrapping_add(1);
-    state.set_register(rd, ConcreteValue::new(result));
-    let mut flags = Eflags::from_add(old, 1, result, state.width());
+    state.write_operand(rd, ConcreteValue::new(result));
+    let mut flags = Eflags::from_add(old, 1, result, width);
     flags.cf = prev_cf;
     state.set_flags(flags);
 }
@@ -157,12 +155,13 @@ fn apply_inc(state: &mut X86ConcreteMachineState, rd: crate::isa::x86::X86Regist
 // DEC computes `rd = rd - 1`. Like INC it sets OF/SF/ZF/PF as `sub rd, 1` would
 // while leaving CF UNCHANGED. Capture the prior CF first, derive flags from the
 // SUB path for `rd - 1`, then restore CF.
-fn apply_dec(state: &mut X86ConcreteMachineState, rd: crate::isa::x86::X86Register) {
+fn apply_dec(state: &mut X86ConcreteMachineState, rd: X86Register) {
     let prev_cf = state.get_flags().cf;
-    let old = state.get_register(rd).as_u64();
+    let width = rd.effective_width(state.width());
+    let old = state.read_operand(rd).as_u64();
     let result = old.wrapping_sub(1);
-    state.set_register(rd, ConcreteValue::new(result));
-    let mut flags = Eflags::from_sub(old, 1, result, state.width());
+    state.write_operand(rd, ConcreteValue::new(result));
+    let mut flags = Eflags::from_sub(old, 1, result, width);
     flags.cf = prev_cf;
     state.set_flags(flags);
 }
@@ -193,13 +192,8 @@ fn sign_extend_to_i128(value: u64, width: u32) -> i128 {
 // equivalence checking stays internally consistent and conservative — it never
 // accepts a rewrite that changes a flag a legitimate program could rely on,
 // since legitimate programs do not read IMUL's undefined flags.
-fn apply_imul(
-    state: &mut X86ConcreteMachineState,
-    rd: crate::isa::x86::X86Register,
-    lhs: u64,
-    rhs: u64,
-) {
-    let width = state.width();
+fn apply_imul(state: &mut X86ConcreteMachineState, rd: X86Register, lhs: u64, rhs: u64) {
+    let width = rd.effective_width(state.width());
     let full = sign_extend_to_i128(lhs, width) * sign_extend_to_i128(rhs, width);
     let result = mask_width(full as u64, width);
 
@@ -207,7 +201,7 @@ fn apply_imul(
     // sign-extension of the truncated result.
     let overflow = full != sign_extend_to_i128(result, width);
 
-    state.set_register(rd, ConcreteValue::new(result));
+    state.write_operand(rd, ConcreteValue::new(result));
     // SF/ZF/PF from the truncated result (Intel-undefined; modelled
     // deterministically — see the function comment). CF/OF then overridden.
     let mut flags = Eflags::from_logical(result, width);
@@ -254,16 +248,11 @@ fn msb(value: u64, width: u32) -> bool {
 // equivalence checking stays internally consistent; downstream consumers must
 // not rely on OF after a count > 1 shift because the architecture leaves it
 // undefined.
-fn apply_shift(
-    state: &mut X86ConcreteMachineState,
-    rd: crate::isa::x86::X86Register,
-    imm: i64,
-    kind: ShiftKind,
-) {
-    let width = state.width();
-    let mask = u64::from(width - 1);
+fn apply_shift(state: &mut X86ConcreteMachineState, rd: X86Register, imm: i64, kind: ShiftKind) {
+    let width = rd.effective_width(state.width());
+    let mask = if width == 64 { 0x3f } else { 0x1f };
     let eff = (imm as u64) & mask;
-    let old = mask_width(state.get_register(rd).as_u64(), width);
+    let old = state.read_operand(rd).as_u64();
 
     // Count masks to 0: leave rd and every flag untouched.
     if eff == 0 {
@@ -271,15 +260,35 @@ fn apply_shift(
     }
 
     let result = match kind {
-        ShiftKind::Shl => old << eff,
-        ShiftKind::Shr => old >> eff,
+        ShiftKind::Shl => {
+            if eff >= u64::from(width) {
+                0
+            } else {
+                old << eff
+            }
+        }
+        ShiftKind::Shr => {
+            if eff >= u64::from(width) {
+                0
+            } else {
+                old >> eff
+            }
+        }
         // Arithmetic right shift: sign-extend within the operand width.
         ShiftKind::Sar => {
             let sign = msb(old, width);
-            let logical = old >> eff;
+            let logical = if eff >= u64::from(width) {
+                0
+            } else {
+                old >> eff
+            };
             if sign {
                 // Set the top `eff` bits that the logical shift cleared.
-                let fill = mask_width(!0u64 << (width as u64 - eff), width);
+                let fill = if eff >= u64::from(width) {
+                    mask_width(!0, width)
+                } else {
+                    mask_width(!0u64 << (width as u64 - eff), width)
+                };
                 logical | fill
             } else {
                 logical
@@ -291,9 +300,11 @@ fn apply_shift(
     // CF is the last bit shifted out of the source.
     let cf = match kind {
         // SHL: the bit at index `width - eff` of the original operand.
-        ShiftKind::Shl => (old >> (width as u64 - eff)) & 1 == 1,
+        ShiftKind::Shl if eff <= u64::from(width) => (old >> (width as u64 - eff)) & 1 == 1,
+        ShiftKind::Shl => false,
         // SHR / SAR: the bit at index `eff - 1` of the original operand.
-        ShiftKind::Shr | ShiftKind::Sar => (old >> (eff - 1)) & 1 == 1,
+        ShiftKind::Shr | ShiftKind::Sar if eff <= u64::from(width) => (old >> (eff - 1)) & 1 == 1,
+        ShiftKind::Shr | ShiftKind::Sar => false,
     };
 
     // OF: defined for count == 1 only; we reuse the count-1 formula for all
@@ -304,7 +315,7 @@ fn apply_shift(
         ShiftKind::Sar => false,
     };
 
-    state.set_register(rd, ConcreteValue::new(result));
+    state.write_operand(rd, ConcreteValue::new(result));
     let mut flags = Eflags::from_logical(result, width);
     flags.cf = cf;
     flags.of = of;
@@ -335,22 +346,17 @@ enum RotateKind {
 //   - For count != 1 OF is architecturally UNDEFINED, so we PRESERVE the
 //     incoming OF (deterministic and internally consistent: target and candidate
 //     share this lowering).
-fn apply_rotate(
-    state: &mut X86ConcreteMachineState,
-    rd: crate::isa::x86::X86Register,
-    imm: i64,
-    kind: RotateKind,
-) {
-    let width = state.width();
-    let mask = u64::from(width - 1);
-    let eff = (imm as u64) & mask;
+fn apply_rotate(state: &mut X86ConcreteMachineState, rd: X86Register, imm: i64, kind: RotateKind) {
+    let width = rd.effective_width(state.width());
+    let mask = if width == 64 { 0x3f } else { 0x1f };
+    let eff = ((imm as u64) & mask) % u64::from(width);
 
     // Count masks to 0: leave rd and every flag untouched.
     if eff == 0 {
         return;
     }
 
-    let old = mask_width(state.get_register(rd).as_u64(), width);
+    let old = state.read_operand(rd).as_u64();
     let eff_u32 = eff as u32;
 
     // `(old << eff) | (old >>u (width - eff))` for ROL (and the mirror for ROR),
@@ -381,7 +387,7 @@ fn apply_rotate(
         };
     }
 
-    state.set_register(rd, ConcreteValue::new(result));
+    state.write_operand(rd, ConcreteValue::new(result));
     state.set_flags(flags);
 }
 
@@ -396,34 +402,29 @@ enum Binop {
 
 fn apply_binop_reg(
     state: &mut X86ConcreteMachineState,
-    rd: crate::isa::x86::X86Register,
-    rs: crate::isa::x86::X86Register,
+    rd: X86Register,
+    rs: X86Register,
     op: Binop,
 ) {
-    let lhs = state.get_register(rd).as_u64();
-    let rhs = state.get_register(rs).as_u64();
+    let lhs = state.read_operand(rd).as_u64();
+    let rhs = state.read_operand(rs).as_u64();
     apply_binop(state, rd, lhs, rhs, op);
 }
 
-fn apply_binop_imm(
-    state: &mut X86ConcreteMachineState,
-    rd: crate::isa::x86::X86Register,
-    imm: i64,
-    op: Binop,
-) {
-    let lhs = state.get_register(rd).as_u64();
+fn apply_binop_imm(state: &mut X86ConcreteMachineState, rd: X86Register, imm: i64, op: Binop) {
+    let lhs = state.read_operand(rd).as_u64();
     let rhs = imm as u64;
     apply_binop(state, rd, lhs, rhs, op);
 }
 
 fn apply_binop(
     state: &mut X86ConcreteMachineState,
-    rd: crate::isa::x86::X86Register,
+    rd: X86Register,
     lhs: u64,
     rhs: u64,
     op: Binop,
 ) {
-    let width = state.width();
+    let width = rd.effective_width(state.width());
     let (result, flags) = match op {
         Binop::Add => {
             let r = lhs.wrapping_add(rhs);
@@ -446,7 +447,7 @@ fn apply_binop(
             (r, Eflags::from_logical(r, width))
         }
     };
-    state.set_register(rd, ConcreteValue::new(result));
+    state.write_operand(rd, ConcreteValue::new(result));
     state.set_flags(flags);
 }
 
@@ -487,6 +488,48 @@ pub fn states_equal_for_live_out_x86(
 mod tests {
     use super::*;
     use crate::isa::x86::X86Register;
+
+    #[test]
+    fn mov_uses_register_view_write_semantics() {
+        let cases = [
+            (X86Register::AL, 0xaa, 0x1122_3344_5566_77aa),
+            (X86Register::AH, 0xbb, 0x1122_3344_5566_bb88),
+            (X86Register::AX, 0xccdd, 0x1122_3344_5566_ccdd),
+            (X86Register::EAX, 0xdead_beef, 0x0000_0000_dead_beef),
+        ];
+
+        for (rd, imm, expected) in cases {
+            let mut state = X86ConcreteMachineState::new_zeroed(64);
+            state.set_register(X86Register::RAX, ConcreteValue::new(0x1122_3344_5566_7788));
+            let after = apply_instruction_concrete_x86(state, &X86Instruction::MovImm { rd, imm });
+            assert_eq!(
+                after.get_register(X86Register::RAX).as_u64(),
+                expected,
+                "wrong result for {rd}"
+            );
+        }
+    }
+
+    #[test]
+    fn byte_operations_compute_flags_at_byte_width() {
+        let mut state = X86ConcreteMachineState::new_zeroed(64);
+        state.set_register(X86Register::RAX, ConcreteValue::new(0x1122_3344_5566_77ff));
+        let after = apply_instruction_concrete_x86(
+            state,
+            &X86Instruction::AddImm {
+                rd: X86Register::AL,
+                imm: 1,
+            },
+        );
+
+        assert_eq!(
+            after.get_register(X86Register::RAX).as_u64(),
+            0x1122_3344_5566_7700
+        );
+        assert!(after.get_flags().cf, "0xff + 1 carries at width 8");
+        assert!(after.get_flags().zf, "the byte result is zero");
+        assert!(!after.get_flags().sf);
+    }
 
     #[test]
     fn cmpreg_sets_eflags_without_writing_register() {

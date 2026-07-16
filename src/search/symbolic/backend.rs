@@ -40,10 +40,8 @@ pub trait SymbolicBackend<I: ISA>: Sized {
     /// Whether this backend may find a strict metric improvement without
     /// reducing the number of rewritable instructions for this target/config.
     ///
-    /// For x86 code-size search, the config flag is a binary-patching guard:
-    /// the current x86 IR collapses partial-register aliases to full-width
-    /// registers, so the ELF frontend disables same-count rewrites when the
-    /// original Capstone operands were not full-width for the binary mode.
+    /// For x86 code-size search, the config flag lets callers conservatively
+    /// disable same-count rewrites independently of the metric comparison.
     fn can_improve_at_same_instruction_count(
         _target: &[I::Instruction],
         _config: &SearchConfig,
@@ -137,7 +135,16 @@ impl SymbolicBackend<crate::isa::X86_64> for crate::isa::X86_64 {
         regs: &[crate::isa::x86::X86Register],
         imms: &[i64],
     ) -> Vec<crate::isa::x86::X86Instruction> {
-        crate::isa::x86::X86InstructionGenerator.generate_all(regs, imms)
+        crate::isa::x86::X86InstructionGenerator
+            .generate_all(regs, imms)
+            .into_iter()
+            .filter(|instruction| {
+                crate::search::candidate::is_sequence_encodable_for(
+                    std::slice::from_ref(instruction),
+                    &crate::isa::X86_64,
+                )
+            })
+            .collect()
     }
 
     fn target_terminator(
@@ -215,7 +222,16 @@ impl SymbolicBackend<crate::isa::X86_32> for crate::isa::X86_32 {
         regs: &[crate::isa::x86::X86Register],
         imms: &[i64],
     ) -> Vec<crate::isa::x86::X86Instruction> {
-        crate::isa::x86::X86InstructionGenerator.generate_all(regs, imms)
+        crate::isa::x86::X86InstructionGenerator
+            .generate_all(regs, imms)
+            .into_iter()
+            .filter(|instruction| {
+                crate::search::candidate::is_sequence_encodable_for(
+                    std::slice::from_ref(instruction),
+                    &crate::isa::X86_32,
+                )
+            })
+            .collect()
     }
 
     fn target_terminator(
