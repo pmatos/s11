@@ -8,7 +8,7 @@
 //! Both AArch64 and x86 implement this trait by delegating to the
 //! existing free helpers and the generic equivalence checker.
 
-use crate::isa::{CostModel, ISA, InstructionGenerator};
+use crate::isa::{Assembler, CostModel, ISA, InstructionGenerator};
 use crate::search::config::SearchConfig;
 use crate::semantics::cost::CostMetric;
 use crate::semantics::{EquivalenceMetrics, EquivalenceResult};
@@ -215,7 +215,11 @@ impl SymbolicBackend<crate::isa::X86_32> for crate::isa::X86_32 {
         regs: &[crate::isa::x86::X86Register],
         imms: &[i64],
     ) -> Vec<crate::isa::x86::X86Instruction> {
-        crate::isa::x86::X86InstructionGenerator.generate_all(regs, imms)
+        crate::isa::x86::X86InstructionGenerator
+            .generate_all(regs, imms)
+            .into_iter()
+            .filter(|instruction| crate::isa::X86_32.can_assemble(instruction))
+            .collect()
     }
 
     fn target_terminator(
@@ -328,6 +332,47 @@ mod tests {
         assert_eq!(
             <crate::isa::AArch64 as SymbolicBackend<crate::isa::AArch64>>::width(),
             64
+        );
+    }
+
+    #[test]
+    fn x86_32_symbolic_only_generates_assemblable_setcc_candidates() {
+        use crate::isa::x86::{X86Instruction, X86Register};
+        use crate::isa::{Assembler, X86_32};
+
+        let regs = [
+            X86Register::RAX,
+            X86Register::RSP,
+            X86Register::RBP,
+            X86Register::RSI,
+            X86Register::RDI,
+        ];
+        let candidates = <X86_32 as SymbolicBackend<X86_32>>::enumerate_all(&regs, &[0]);
+        let setcc_count = candidates
+            .iter()
+            .filter(|instruction| matches!(instruction, X86Instruction::Setcc { .. }))
+            .count();
+
+        assert!(
+            candidates
+                .iter()
+                .all(|instruction| X86_32.can_assemble(instruction)),
+            "x86-32 symbolic search generated an unassemblable candidate"
+        );
+        assert_eq!(
+            setcc_count,
+            crate::isa::x86::X86Condition::ALL.len(),
+            "symbolic search must retain every SETcc condition for EAX"
+        );
+        assert!(
+            candidates.iter().any(|instruction| matches!(
+                instruction,
+                X86Instruction::MovImm {
+                    rd: X86Register::RSI,
+                    ..
+                }
+            )),
+            "mode-specific SETcc filtering must not remove encodable ESI candidates"
         );
     }
 }
