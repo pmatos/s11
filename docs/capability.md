@@ -117,7 +117,11 @@ the source alias and zero- or sign-extend them into the native-width destination
 high-byte sources (`ah`/`bh`/`ch`/`dh`) are not modelled. The 32-to-64 signed
 form is the distinct `movsxd` family and remains unsupported; x86 has no
 `movzx r64, r32` encoding because a 32-bit GPR write already provides that zero
-extension. `cmp` and `test` are
+extension. For the same reason, the x86-64 parser normalizes a 32-bit
+destination spelling such as `movzx eax, bl` to the native-width zero-extension
+IR. It rejects `movsx eax, bl`, whose sign extension into EAX followed by
+architectural zero-extension is not equivalent to native-width sign extension.
+`cmp` and `test` are
 flag-setting: each discards its result and writes only EFLAGS (`cmp` from a
 subtraction, `test` from a bitwise AND that clears CF/OF). `neg` and `not`
 are single-operand: `neg` computes `rd = -rd` and sets EFLAGS as if from

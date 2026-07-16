@@ -4972,6 +4972,24 @@ mod cli_helper_tests {
                 src_width: 8,
             }]
         );
+        let movzx_eax = cs64
+            .disasm_all(&[0x0f, 0xb6, 0xc3], 0x1000)
+            .expect("disassemble movzx eax, bl");
+        assert_eq!(
+            convert_to_x86_ir(&movzx_eax, parser::x86::X86ParseMode::Mode64).unwrap(),
+            vec![X86Instruction::Movzx {
+                rd: X86Register::RAX,
+                rs: X86Register::RBX,
+                src_width: 8,
+            }]
+        );
+        let movsx_eax = cs64
+            .disasm_all(&[0x0f, 0xbe, 0xc3], 0x1000)
+            .expect("disassemble movsx eax, bl");
+        assert!(
+            convert_to_x86_ir(&movsx_eax, parser::x86::X86ParseMode::Mode64).is_err(),
+            "MOVSX through EAX is not representable by the native-width extension IR"
+        );
 
         let cs32 = capstone::Capstone::new()
             .x86()

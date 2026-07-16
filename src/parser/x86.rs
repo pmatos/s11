@@ -533,8 +533,16 @@ fn x86_ir_from_mnemonic_impl(
                 mnemonic, parts[0]
             ));
         }
+        // Writing a 32-bit MOVZX destination in x86-64 clears the upper half
+        // of the canonical GPR, so it is exactly representable by the
+        // native-width zero-extension IR. MOVSX is not: sign extension into
+        // EAX followed by architectural zero-extension differs from sign
+        // extension directly into RAX.
+        let mode64_movzx_dword =
+            mnemonic == "movzx" && mode == Some(X86ParseMode::Mode64) && destination_width == 32;
         if let Some(mode) = mode
             && destination_width != mode.mode_width()
+            && !mode64_movzx_dword
         {
             return Err(format!(
                 "{} destination '{}' must match the {}-bit execution mode",
@@ -543,8 +551,8 @@ fn x86_ir_from_mnemonic_impl(
                 mode.mode_width()
             ));
         }
-        // MOVZX to 32 bits and then architectural zero-extension is equivalent
-        // to the widthless IR's full-width zero-extension; MOVSX is not.
+        // The same MOVZX equivalence makes a 32-bit destination sound for the
+        // widthless parser; MOVSX remains unrepresentable there.
         if mode.is_none() && mnemonic == "movsx" && destination_width == 32 {
             return Err(format!(
                 "widthless x86 parser cannot represent a 32-bit destination for movsx: '{}'",
@@ -1041,7 +1049,7 @@ mod tests {
     }
 
     #[test]
-    fn movzx_movsx_mode_parser_requires_native_destination_and_encodable_narrow_source() {
+    fn movzx_movsx_mode_parser_normalizes_sound_destinations_and_rejects_other_widths() {
         assert_eq!(
             x86_ir_from_mnemonic_for_mode("movzx", "rax, bl", X86ParseMode::Mode64)
                 .unwrap()
@@ -1062,9 +1070,22 @@ mod tests {
                 src_width: 16,
             }
         );
+        for (operands, src_width) in [("eax, bl", 8), ("eax, bx", 16)] {
+            assert_eq!(
+                x86_ir_from_mnemonic_for_mode("movzx", operands, X86ParseMode::Mode64)
+                    .unwrap()
+                    .unwrap(),
+                X86Instruction::Movzx {
+                    rd: X86Register::RAX,
+                    rs: X86Register::RBX,
+                    src_width,
+                },
+                "x86-64 MOVZX through EAX must canonicalize its zero-extending write"
+            );
+        }
 
         for (mode, operands) in [
-            (X86ParseMode::Mode64, "eax, bl"),
+            (X86ParseMode::Mode64, "ax, bl"),
             (X86ParseMode::Mode64, "rax, ebx"),
             (X86ParseMode::Mode32, "ax, bl"),
             (X86ParseMode::Mode32, "eax, ebx"),
@@ -1076,6 +1097,10 @@ mod tests {
                 "unsupported extension shape should fail: {mode:?} {operands}"
             );
         }
+        assert!(
+            x86_ir_from_mnemonic_for_mode("movsx", "eax, bl", X86ParseMode::Mode64).is_err(),
+            "MOVSX through EAX is not equivalent to native-width sign extension"
+        );
         assert!(x86_ir_from_mnemonic("movsx", "rax, 1").is_err());
         assert!(x86_ir_from_mnemonic("movzx", "rax, ah").is_err());
     }
