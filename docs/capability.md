@@ -103,6 +103,7 @@ Rewritable straight-line mnemonic families:
 - Immediate-count rotates: `rol`, `ror`
 - Signed multiply: `imul` (2-operand `imul rd, rs` and 3-operand `imul rd, rs, imm`)
 - Load effective address: `lea` (register-base + displacement only)
+- Conditional byte sets: `set<cond>`
 - Conditional moves: `cmov<cond>`
 
 The data-movement/arithmetic/logical/comparison families have register and
@@ -145,15 +146,27 @@ register-base + displacement form, `lea rd, [base + disp]`, computing
 `rd = base + disp` (wrapping at width). It is non-destructive (`base` is read,
 `rd` is purely written, like `mov`) and affects NO flags. The index*scale
 (`[base + index*scale + disp]`) and RIP/EIP-relative addressing forms are
-deferred and rejected as unsupported shapes. `cmov<cond>` has register operands
-and reads EFLAGS without modifying them.
+deferred and rejected as unsupported shapes. `set<cond>` and `cmov<cond>` read
+EFLAGS without modifying them. `cmov<cond>` has two register operands.
+`set<cond>` uses the interim native-width abstraction `rd = zext(condition)`:
+the IR, concrete interpreter, and SMT lowering fully overwrite `rd` with 0 or
+1. Architecturally, the encoded SETcc instruction writes only the low byte and
+preserves the rest of the register. This documented divergence remains until
+sub-register aliasing is represented end to end (#75).
 
 The x86 IR does not yet carry operand width. To avoid rewriting partial-width
 operations as full-width operations, the binary optimization path currently
 accepts only mode-width register aliases: `rax`/`r8`-style 64-bit names for
-x86-64, and `eax`-style 32-bit i386 names for x86-32. x86-64 `eax`/`ax`/`al`
-forms, x86-32 `ax`/`al` forms, and x86-32 extended-register aliases such as
-`r8d` are rejected until operand width is represented end to end.
+x86-64, and `eax`-style 32-bit i386 names for x86-32. The sole exception is
+SETcc, whose architectural low-byte spellings (`al`/`cl`/`dl`/`bl`, plus
+`spl`/`bpl`/`sil`/`dil` and `r8b`–`r15b` in x86-64) are canonicalized to the
+interim full-register `Setcc` destination above. Legacy high-byte aliases
+(`ah`/`ch`/`dh`/`bh`) remain unsupported. In x86-32, only
+`al`/`cl`/`dl`/`bl` are representable SETcc destinations because byte-register
+encoding slots 4–7 name the legacy high-byte registers without a REX prefix.
+Other instructions using x86-64 `eax`/`ax`/`al` forms, x86-32 `ax`/`al`
+forms, or x86-32 extended-register aliases such as `r8d` are rejected until
+operand width is represented end to end.
 
 Fixed control-flow terminators:
 

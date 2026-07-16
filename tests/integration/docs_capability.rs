@@ -316,7 +316,7 @@ fn x86_support_is_visible_in_public_docs() {
         );
     }
 
-    for family in ["cmov<cond>", "j<cond>"] {
+    for family in ["set<cond>", "cmov<cond>", "j<cond>"] {
         assert!(
             matrix.contains(&format!("`{family}`")),
             "docs/capability.md must list x86 family `{family}`"
@@ -325,6 +325,10 @@ fn x86_support_is_visible_in_public_docs() {
     assert!(
         matrix.contains("rewritable") && matrix.contains("`cmov<cond>`"),
         "docs/capability.md must describe CMOVcc as rewritable"
+    );
+    assert!(
+        matrix.contains("rewritable") && matrix.contains("`set<cond>`"),
+        "docs/capability.md must describe SETcc as rewritable"
     );
     assert!(
         matrix.contains("fixed") && matrix.contains("terminator") && matrix.contains("`j<cond>`"),
