@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 
 use s11::docs_support::{
     AARCH64_FIXED_TERMINATORS, AARCH64_REWRITABLE_MNEMONICS, X86_FIXED_TERMINATORS,
-    X86_REWRITABLE_MNEMONICS,
+    X86_REWRITABLE_MNEMONICS, X86_SYNTHESIZABLE_ONLY_MNEMONICS,
 };
 
 fn repo_file(relative: &str) -> PathBuf {
@@ -315,6 +315,12 @@ fn x86_support_is_visible_in_public_docs() {
             "docs/capability.md must list x86 fixed terminator `{terminator}`"
         );
     }
+    for pseudo in X86_SYNTHESIZABLE_ONLY_MNEMONICS {
+        assert!(
+            matrix.contains(&format!("`{pseudo}`")),
+            "docs/capability.md must list x86 synthesizable-only pseudo-family `{pseudo}`"
+        );
+    }
 
     for family in ["set<cond>", "cmov<cond>", "j<cond>"] {
         assert!(
@@ -327,8 +333,26 @@ fn x86_support_is_visible_in_public_docs() {
         "docs/capability.md must describe CMOVcc as rewritable"
     );
     assert!(
-        matrix.contains("rewritable") && matrix.contains("`set<cond>`"),
-        "docs/capability.md must describe SETcc as rewritable"
+        !X86_REWRITABLE_MNEMONICS.contains(&"set<cond>"),
+        "architectural byte SETcc must not be classified as binary-rewritable"
+    );
+    assert!(
+        X86_SYNTHESIZABLE_ONLY_MNEMONICS.contains(&"set<cond>"),
+        "full-width SETcc must be classified as synthesizable-only"
+    );
+    assert!(
+        matrix.contains("synthesizable-only") && matrix.contains("`set<cond>`"),
+        "docs/capability.md must describe SETcc as a synthesizable-only pseudo-family"
+    );
+    assert!(
+        matrix.contains("architectural byte setcc")
+            && matrix.contains("elf")
+            && matrix.contains("rejected until #75"),
+        "docs/capability.md must document architectural byte SETcc ELF rejection"
+    );
+    assert!(
+        matrix.contains("setcc") && matrix.contains("followed by") && matrix.contains("movzx"),
+        "docs/capability.md must document the SETcc followed by MOVZX lowering"
     );
     assert!(
         matrix.contains("fixed") && matrix.contains("terminator") && matrix.contains("`j<cond>`"),

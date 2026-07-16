@@ -18,16 +18,11 @@ pub const AARCH64_FIXED_TERMINATORS: &[&str] = &[
     "b", "b.<cond>", "bl", "br", "ret", "cbz", "cbnz", "tbz", "tbnz",
 ];
 
-pub const X86_REWRITABLE_MNEMONICS: &[&str] = &[
-    "mov",
-    "add",
-    "sub",
-    "and",
-    "or",
-    "xor",
-    "cmp",
-    "set<cond>",
-    "cmov<cond>",
-];
+pub const X86_REWRITABLE_MNEMONICS: &[&str] =
+    &["mov", "add", "sub", "and", "or", "xor", "cmp", "cmov<cond>"];
+
+/// Full-width text-IR families available to search but not liftable from
+/// architectural machine code.
+pub const X86_SYNTHESIZABLE_ONLY_MNEMONICS: &[&str] = &["set<cond>"];
 
 pub const X86_FIXED_TERMINATORS: &[&str] = &["j<cond>"];
