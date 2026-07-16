@@ -4389,7 +4389,10 @@ mod cli_helper_tests {
     #[test]
     fn x86_64_optimizer_accepts_narrow_register_aliases() {
         let elf_bytes = build_minimal_elf64(
-            &[0x83, 0xc0, 0x00, 0x83, 0xc0, 0x00],
+            // Use the five-byte accumulator form so the two-instruction
+            // window has room for any cheaper one-instruction dword-immediate
+            // encoding that dynasm may choose.
+            &[0x05, 0x00, 0x00, 0x00, 0x00, 0x05, 0x00, 0x00, 0x00, 0x00],
             0x1000,
             elf::abi::EM_X86_64,
         );
@@ -4399,7 +4402,7 @@ mod cli_helper_tests {
         opts.timeout = Some(Duration::from_secs(5));
         opts.cost_metric = CostMetric::CodeSize;
 
-        optimize_elf_binary(&patcher, input.path(), 0x1000, 0x1006, &opts)
+        optimize_elf_binary(&patcher, input.path(), 0x1000, 0x100a, &opts)
             .expect("narrow register aliases should reach search");
     }
 
