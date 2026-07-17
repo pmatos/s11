@@ -3964,8 +3964,9 @@ mod cli_helper_tests {
 
     #[test]
     fn resolve_output_path_rejects_in_place_output() {
-        // The same existing file addressed two ways (a `.` component) must be
-        // caught by canonicalization, not just literal string comparison.
+        // The same existing file addressed two ways (a `.` component): on Unix
+        // the guard fires via the (dev, ino) identity check, off-Unix via
+        // canonicalization — either way, not literal string comparison.
         let input = TempFile::new_bytes("s11-resolve-inplace", "elf", &[0u8; 4]);
         let aliased = input
             .path()
@@ -5263,6 +5264,39 @@ mod cli_helper_tests {
         let output = optimized_output_path(input.path());
         optimize_elf_binary(&patcher, input.path(), 0x1000, 0x100a, &output, &opts)
             .expect("narrow register aliases should reach search");
+    }
+
+    #[test]
+    fn optimize_elf_binary_writes_patch_to_custom_output_path() {
+        // Redundant `xor eax, eax; xor eax, eax` is a guaranteed CodeSize win
+        // (collapses to one), so the optimizer definitely emits a patch. This
+        // proves a user-supplied `-o` path is threaded all the way through
+        // optimize_elf_binary -> create_patched_copy, and that the derived
+        // `<stem>_optimized.<ext>` sibling is NOT written when `-o` is given.
+        let elf_bytes = build_minimal_elf64(&[0x31, 0xc0, 0x31, 0xc0], 0x1000, elf::abi::EM_X86_64);
+        let input = TempFile::new_bytes("s11-custom-output-in", "elf", &elf_bytes);
+        let output = TempFile::new_bytes("s11-custom-output-out", "elf", &[]);
+        // Delete the placeholder so the assertion proves the optimizer created it.
+        std::fs::remove_file(output.path()).expect("clear placeholder output file");
+        let patcher = ElfPatcher::new(input.path()).expect("read synthetic ELF");
+        let mut opts = options_for(Algorithm::Enumerative);
+        opts.timeout = Some(Duration::from_secs(5));
+        opts.cost_metric = CostMetric::CodeSize;
+
+        optimize_elf_binary(&patcher, input.path(), 0x1000, 0x1004, output.path(), &opts)
+            .expect("optimization should succeed");
+
+        assert!(
+            output.path().exists(),
+            "patched ELF must be written to the custom -o path"
+        );
+        let derived = optimized_output_path(input.path());
+        let derived_written = derived.exists();
+        let _ = std::fs::remove_file(&derived);
+        assert!(
+            !derived_written,
+            "the derived sibling must not be written when -o is supplied"
+        );
     }
 
     #[test]
