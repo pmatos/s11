@@ -12,7 +12,7 @@
 
 #![allow(dead_code)]
 
-use crate::isa::x86::{X86Instruction, X86Register};
+use crate::isa::x86::{X86Instruction, X86Register, X86RegisterView};
 use std::collections::HashMap;
 use z3::ast::BV;
 
@@ -72,12 +72,51 @@ impl MachineStateX86 {
 
     pub fn get_register(&self, reg: X86Register) -> &BV {
         self.registers
-            .get(&reg)
+            .get(&reg.canonical())
             .expect("register absent from x86 state")
     }
 
     pub fn set_register(&mut self, reg: X86Register, value: BV) {
-        self.registers.insert(reg, value);
+        self.registers.insert(reg.canonical(), value);
+    }
+
+    /// Read the bitvector denoted by an instruction register operand.
+    pub fn read_operand(&self, reg: X86Register) -> BV {
+        let full = self.get_register(reg);
+        match reg.view() {
+            X86RegisterView::Native => full.clone(),
+            X86RegisterView::Dword => full.extract(31, 0),
+            X86RegisterView::Word => full.extract(15, 0),
+            X86RegisterView::LowByte => full.extract(7, 0),
+            X86RegisterView::HighByte => full.extract(15, 8),
+        }
+    }
+
+    /// Write an operand-sized value back into its architectural register.
+    pub fn write_operand(&mut self, reg: X86Register, value: BV) {
+        let full = self.operand_write_value(reg, &value);
+        self.set_register(reg.canonical(), full);
+    }
+
+    fn operand_write_value(&self, reg: X86Register, value: &BV) -> BV {
+        let old = self.get_register(reg).clone();
+        let operand_width = reg.effective_width(self.width);
+        let value = match value.get_size().cmp(&operand_width) {
+            std::cmp::Ordering::Greater => value.extract(operand_width - 1, 0),
+            std::cmp::Ordering::Less => value.zero_ext(operand_width - value.get_size()),
+            std::cmp::Ordering::Equal => value.clone(),
+        };
+        match reg.view() {
+            X86RegisterView::Native => value,
+            X86RegisterView::Dword if self.width == 64 => value.zero_ext(32),
+            X86RegisterView::Dword => value,
+            X86RegisterView::Word => old.extract(self.width - 1, 16).concat(&value),
+            X86RegisterView::LowByte => old.extract(self.width - 1, 8).concat(&value),
+            X86RegisterView::HighByte => old
+                .extract(self.width - 1, 16)
+                .concat(&value)
+                .concat(old.extract(7, 0)),
+        }
     }
 
     /// Return the five tracked flag BVs.
@@ -96,8 +135,8 @@ impl MachineStateX86 {
         self.flags = flags;
     }
 
-    fn imm_bv(&self, imm: i64) -> BV {
-        BV::from_i64(imm, self.width)
+    fn imm_bv(&self, imm: i64, width: u32) -> BV {
+        BV::from_i64(imm, width)
     }
 }
 
@@ -246,14 +285,9 @@ enum ShiftKind {
 ///   with the SAME formula as count 1 (a deterministic value). Target and
 ///   candidate share this lowering, so equivalence stays internally
 ///   consistent; downstream code must not rely on OF after a count > 1 shift.
-fn apply_shift_smt(
-    state: &mut MachineStateX86,
-    rd: crate::isa::x86::X86Register,
-    imm: i64,
-    kind: ShiftKind,
-) {
-    let width = state.width();
-    let mask = u64::from(width - 1);
+fn apply_shift_smt(state: &mut MachineStateX86, rd: X86Register, imm: i64, kind: ShiftKind) {
+    let width = rd.effective_width(state.width());
+    let mask = if width == 64 { 0x3f } else { 0x1f };
     let eff = (imm as u64) & mask;
 
     // Count masks to 0: no register or flag change.
@@ -261,7 +295,7 @@ fn apply_shift_smt(
         return;
     }
 
-    let old = state.get_register(rd).clone();
+    let old = state.read_operand(rd);
     let amount = BV::from_u64(eff, width);
     let result = match kind {
         ShiftKind::Shl => old.bvshl(&amount),
@@ -273,15 +307,17 @@ fn apply_shift_smt(
     // concrete we extract the exact bit index.
     let cf = match kind {
         // SHL: original bit at index `width - eff`.
-        ShiftKind::Shl => {
+        ShiftKind::Shl if eff <= u64::from(width) => {
             let bit = width - eff as u32;
             old.extract(bit, bit)
         }
+        ShiftKind::Shl => bv_zero(),
         // SHR / SAR: original bit at index `eff - 1`.
-        ShiftKind::Shr | ShiftKind::Sar => {
+        ShiftKind::Shr | ShiftKind::Sar if eff <= u64::from(width) => {
             let bit = eff as u32 - 1;
             old.extract(bit, bit)
         }
+        ShiftKind::Shr | ShiftKind::Sar => bv_zero(),
     };
 
     // OF: count-1 formula, reused for all nonzero counts (see doc comment).
@@ -294,7 +330,7 @@ fn apply_shift_smt(
     let mut flags = compute_eflags_logical(&result, width);
     flags.cf = cf;
     flags.of = of;
-    state.set_register(rd, result);
+    state.write_operand(rd, result);
     state.set_flags(flags);
 }
 
@@ -320,22 +356,17 @@ enum RotateKind {
 ///   - ROR: `result = bvrotr(rd, eff)`; CF = the MSB (bit `width-1`) of the
 ///     result. OF (count 1 only) = XOR of the result's two most-significant bits.
 ///   - For count != 1 OF is UNDEFINED on hardware; we preserve the incoming OF.
-fn apply_rotate_smt(
-    state: &mut MachineStateX86,
-    rd: crate::isa::x86::X86Register,
-    imm: i64,
-    kind: RotateKind,
-) {
-    let width = state.width();
-    let mask = u64::from(width - 1);
-    let eff = (imm as u64) & mask;
+fn apply_rotate_smt(state: &mut MachineStateX86, rd: X86Register, imm: i64, kind: RotateKind) {
+    let width = rd.effective_width(state.width());
+    let mask = if width == 64 { 0x3f } else { 0x1f };
+    let eff = ((imm as u64) & mask) % u64::from(width);
 
     // Count masks to 0: no register or flag change.
     if eff == 0 {
         return;
     }
 
-    let old = state.get_register(rd).clone();
+    let old = state.read_operand(rd);
     let amount = BV::from_u64(eff, width);
     let result = match kind {
         RotateKind::Rol => old.bvrotl(&amount),
@@ -368,7 +399,7 @@ fn apply_rotate_smt(
         };
     }
 
-    state.set_register(rd, result);
+    state.write_operand(rd, result);
     state.set_flags(flags);
 }
 
@@ -388,13 +419,8 @@ fn apply_rotate_smt(
 /// PF = low-byte parity). Both target and candidate share this lowering, so
 /// equivalence stays internally consistent and conservative. AF is not modelled
 /// (see module docs).
-fn apply_imul_smt(
-    state: &mut MachineStateX86,
-    rd: crate::isa::x86::X86Register,
-    lhs: &BV,
-    rhs: &BV,
-) {
-    let width = state.width();
+fn apply_imul_smt(state: &mut MachineStateX86, rd: X86Register, lhs: &BV, rhs: &BV) {
+    let width = rd.effective_width(state.width());
     // `sign_ext(width)` adds `width` bits, giving a 2*width-bit BV.
     let wide = lhs.sign_ext(width).bvmul(rhs.sign_ext(width));
     let result = lhs.bvmul(rhs);
@@ -409,25 +435,65 @@ fn apply_imul_smt(
     let mut flags = compute_eflags_logical(&result, width);
     flags.cf = overflow.clone();
     flags.of = overflow;
-    state.set_register(rd, result);
+    state.write_operand(rd, result);
     state.set_flags(flags);
 }
 
-/// Apply a single x86 instruction symbolically. Arithmetic / logic /
-/// CMP arms bind the five tracked flag BVs via `compute_eflags_*`;
-/// CMOV reads them via `x86_condition_to_smt`.
+#[derive(Clone, Copy)]
+enum Binop {
+    Add,
+    Sub,
+    And,
+    Or,
+    Xor,
+}
+
+fn apply_binop_smt(state: &mut MachineStateX86, rd: X86Register, rhs: BV, op: Binop) {
+    let width = rd.effective_width(state.width());
+    let lhs = state.read_operand(rd);
+    let result = match op {
+        Binop::Add => lhs.bvadd(&rhs),
+        Binop::Sub => lhs.bvsub(&rhs),
+        Binop::And => lhs.bvand(&rhs),
+        Binop::Or => lhs.bvor(&rhs),
+        Binop::Xor => lhs.bvxor(&rhs),
+    };
+    let flags = match op {
+        Binop::Add => compute_eflags_add(&lhs, &rhs, width),
+        Binop::Sub => compute_eflags_sub(&lhs, &rhs, width),
+        Binop::And | Binop::Or | Binop::Xor => compute_eflags_logical(&result, width),
+    };
+    state.write_operand(rd, result);
+    state.set_flags(flags);
+}
+
+fn apply_cmp_smt(state: &mut MachineStateX86, rn: X86Register, rhs: BV) {
+    let width = rn.effective_width(state.width());
+    let lhs = state.read_operand(rn);
+    state.set_flags(compute_eflags_sub(&lhs, &rhs, width));
+}
+
+fn apply_test_smt(state: &mut MachineStateX86, rn: X86Register, rhs: BV) {
+    let width = rn.effective_width(state.width());
+    let result = state.read_operand(rn).bvand(&rhs);
+    state.set_flags(compute_eflags_logical(&result, width));
+}
+
+/// Apply a single x86 instruction symbolically. Register views determine the
+/// bitvector width of every read, write, and flag computation.
 pub fn apply_instruction(
     mut state: MachineStateX86,
     instruction: &X86Instruction,
 ) -> MachineStateX86 {
     match instruction {
         X86Instruction::MovReg { rd, rs } => {
-            let value = state.get_register(*rs).clone();
-            state.set_register(*rd, value);
+            let value = state.read_operand(*rs);
+            state.write_operand(*rd, value);
         }
         X86Instruction::MovImm { rd, imm } => {
-            let value = state.imm_bv(*imm);
-            state.set_register(*rd, value);
+            let width = rd.effective_width(state.width());
+            let value = state.imm_bv(*imm, width);
+            state.write_operand(*rd, value);
         }
         X86Instruction::Movzx { rd, rs, src_width } => {
             assert!(
@@ -448,199 +514,115 @@ pub fn apply_instruction(
             state.set_register(*rd, value);
         }
         X86Instruction::AddReg { rd, rs } => {
-            let lhs = state.get_register(*rd).clone();
-            let rhs = state.get_register(*rs).clone();
-            let result = lhs.bvadd(&rhs);
-            let flags = compute_eflags_add(&lhs, &rhs, state.width());
-            state.set_register(*rd, result);
-            state.set_flags(flags);
+            let rhs = state.read_operand(*rs);
+            apply_binop_smt(&mut state, *rd, rhs, Binop::Add);
         }
         X86Instruction::AddImm { rd, imm } => {
-            let lhs = state.get_register(*rd).clone();
-            let rhs = state.imm_bv(*imm);
-            let result = lhs.bvadd(&rhs);
-            let flags = compute_eflags_add(&lhs, &rhs, state.width());
-            state.set_register(*rd, result);
-            state.set_flags(flags);
+            let rhs = state.imm_bv(*imm, rd.effective_width(state.width()));
+            apply_binop_smt(&mut state, *rd, rhs, Binop::Add);
         }
         X86Instruction::SubReg { rd, rs } => {
-            let lhs = state.get_register(*rd).clone();
-            let rhs = state.get_register(*rs).clone();
-            let result = lhs.bvsub(&rhs);
-            let flags = compute_eflags_sub(&lhs, &rhs, state.width());
-            state.set_register(*rd, result);
-            state.set_flags(flags);
+            let rhs = state.read_operand(*rs);
+            apply_binop_smt(&mut state, *rd, rhs, Binop::Sub);
         }
         X86Instruction::SubImm { rd, imm } => {
-            let lhs = state.get_register(*rd).clone();
-            let rhs = state.imm_bv(*imm);
-            let result = lhs.bvsub(&rhs);
-            let flags = compute_eflags_sub(&lhs, &rhs, state.width());
-            state.set_register(*rd, result);
-            state.set_flags(flags);
+            let rhs = state.imm_bv(*imm, rd.effective_width(state.width()));
+            apply_binop_smt(&mut state, *rd, rhs, Binop::Sub);
         }
         X86Instruction::AndReg { rd, rs } => {
-            let lhs = state.get_register(*rd).clone();
-            let rhs = state.get_register(*rs).clone();
-            let result = lhs.bvand(&rhs);
-            let flags = compute_eflags_logical(&result, state.width());
-            state.set_register(*rd, result);
-            state.set_flags(flags);
+            let rhs = state.read_operand(*rs);
+            apply_binop_smt(&mut state, *rd, rhs, Binop::And);
         }
         X86Instruction::AndImm { rd, imm } => {
-            let lhs = state.get_register(*rd).clone();
-            let rhs = state.imm_bv(*imm);
-            let result = lhs.bvand(&rhs);
-            let flags = compute_eflags_logical(&result, state.width());
-            state.set_register(*rd, result);
-            state.set_flags(flags);
+            let rhs = state.imm_bv(*imm, rd.effective_width(state.width()));
+            apply_binop_smt(&mut state, *rd, rhs, Binop::And);
         }
         X86Instruction::OrReg { rd, rs } => {
-            let lhs = state.get_register(*rd).clone();
-            let rhs = state.get_register(*rs).clone();
-            let result = lhs.bvor(&rhs);
-            let flags = compute_eflags_logical(&result, state.width());
-            state.set_register(*rd, result);
-            state.set_flags(flags);
+            let rhs = state.read_operand(*rs);
+            apply_binop_smt(&mut state, *rd, rhs, Binop::Or);
         }
         X86Instruction::OrImm { rd, imm } => {
-            let lhs = state.get_register(*rd).clone();
-            let rhs = state.imm_bv(*imm);
-            let result = lhs.bvor(&rhs);
-            let flags = compute_eflags_logical(&result, state.width());
-            state.set_register(*rd, result);
-            state.set_flags(flags);
+            let rhs = state.imm_bv(*imm, rd.effective_width(state.width()));
+            apply_binop_smt(&mut state, *rd, rhs, Binop::Or);
         }
         X86Instruction::XorReg { rd, rs } => {
-            let lhs = state.get_register(*rd).clone();
-            let rhs = state.get_register(*rs).clone();
-            let result = lhs.bvxor(&rhs);
-            let flags = compute_eflags_logical(&result, state.width());
-            state.set_register(*rd, result);
-            state.set_flags(flags);
+            let rhs = state.read_operand(*rs);
+            apply_binop_smt(&mut state, *rd, rhs, Binop::Xor);
         }
         X86Instruction::XorImm { rd, imm } => {
-            let lhs = state.get_register(*rd).clone();
-            let rhs = state.imm_bv(*imm);
-            let result = lhs.bvxor(&rhs);
-            let flags = compute_eflags_logical(&result, state.width());
-            state.set_register(*rd, result);
-            state.set_flags(flags);
+            let rhs = state.imm_bv(*imm, rd.effective_width(state.width()));
+            apply_binop_smt(&mut state, *rd, rhs, Binop::Xor);
         }
-        // CMP sets EFLAGS without writing a register.
         X86Instruction::CmpReg { rn, rs } => {
-            let lhs = state.get_register(*rn).clone();
-            let rhs = state.get_register(*rs).clone();
-            let flags = compute_eflags_sub(&lhs, &rhs, state.width());
-            state.set_flags(flags);
+            let rhs = state.read_operand(*rs);
+            apply_cmp_smt(&mut state, *rn, rhs);
         }
         X86Instruction::CmpImm { rn, imm } => {
-            let lhs = state.get_register(*rn).clone();
-            let rhs = state.imm_bv(*imm);
-            let flags = compute_eflags_sub(&lhs, &rhs, state.width());
-            state.set_flags(flags);
+            let rhs = state.imm_bv(*imm, rn.effective_width(state.width()));
+            apply_cmp_smt(&mut state, *rn, rhs);
         }
-        // TEST sets EFLAGS from `rn & rhs` (the AND/logical path: CF=OF=0,
-        // SF/ZF/PF from the result) without writing a register — the
-        // non-destructive sibling of AND, mirroring how CMP is to SUB.
         X86Instruction::TestReg { rn, rs } => {
-            let lhs = state.get_register(*rn).clone();
-            let rhs = state.get_register(*rs).clone();
-            let result = lhs.bvand(&rhs);
-            let flags = compute_eflags_logical(&result, state.width());
-            state.set_flags(flags);
+            let rhs = state.read_operand(*rs);
+            apply_test_smt(&mut state, *rn, rhs);
         }
         X86Instruction::TestImm { rn, imm } => {
-            let lhs = state.get_register(*rn).clone();
-            let rhs = state.imm_bv(*imm);
-            let result = lhs.bvand(&rhs);
-            let flags = compute_eflags_logical(&result, state.width());
-            state.set_flags(flags);
+            let rhs = state.imm_bv(*imm, rn.effective_width(state.width()));
+            apply_test_smt(&mut state, *rn, rhs);
         }
-        // NEG computes `rd = -rd` and sets EFLAGS as if from `0 - rd`. We
-        // reuse the SUB flag path with lhs = 0, rhs = old_rd so CF = (rd != 0)
-        // and OF/SF/ZF/PF match `sub` bit-for-bit.
         X86Instruction::Neg { rd } => {
-            let old = state.get_register(*rd).clone();
-            let zero = BV::from_u64(0, state.width());
+            let width = rd.effective_width(state.width());
+            let old = state.read_operand(*rd);
+            let zero = BV::from_u64(0, width);
             let result = old.bvneg();
-            let flags = compute_eflags_sub(&zero, &old, state.width());
-            state.set_register(*rd, result);
+            let flags = compute_eflags_sub(&zero, &old, width);
+            state.write_operand(*rd, result);
             state.set_flags(flags);
         }
-        // NOT computes `rd = !rd` (bitwise complement) and leaves EFLAGS
-        // UNCHANGED — exactly like MOV, which writes only its register and
-        // carries the incoming flag BVs forward untouched.
         X86Instruction::Not { rd } => {
-            let result = state.get_register(*rd).bvnot();
-            state.set_register(*rd, result);
+            let result = state.read_operand(*rd).bvnot();
+            state.write_operand(*rd, result);
         }
-        // INC computes `rd = rd + 1` and sets OF/SF/ZF/PF exactly as `add rd, 1`
-        // would, but — the load-bearing subtlety — leaves CF UNCHANGED (the
-        // incoming carry flows through). Capture the prior CF BV FIRST, compute
-        // the ADD flag path for `rd + 1`, then override CF back to the captured
-        // BV so it equals the incoming CF.
-        X86Instruction::Inc { rd } => {
-            let prev_cf = state.get_flags().cf.clone();
-            let old = state.get_register(*rd).clone();
-            let one = BV::from_u64(1, state.width());
-            let result = old.bvadd(&one);
-            let mut flags = compute_eflags_add(&old, &one, state.width());
-            flags.cf = prev_cf;
-            state.set_register(*rd, result);
+        X86Instruction::Inc { rd } | X86Instruction::Dec { rd } => {
+            let width = rd.effective_width(state.width());
+            let previous_cf = state.get_flags().cf.clone();
+            let old = state.read_operand(*rd);
+            let one = BV::from_u64(1, width);
+            let (result, mut flags) = if matches!(instruction, X86Instruction::Inc { .. }) {
+                (old.bvadd(&one), compute_eflags_add(&old, &one, width))
+            } else {
+                (old.bvsub(&one), compute_eflags_sub(&old, &one, width))
+            };
+            flags.cf = previous_cf;
+            state.write_operand(*rd, result);
             state.set_flags(flags);
         }
-        // DEC computes `rd = rd - 1`. Like INC it sets OF/SF/ZF/PF as `sub rd, 1`
-        // would while leaving CF UNCHANGED. Capture the prior CF BV first, derive
-        // flags from the SUB path for `rd - 1`, then restore CF.
-        X86Instruction::Dec { rd } => {
-            let prev_cf = state.get_flags().cf.clone();
-            let old = state.get_register(*rd).clone();
-            let one = BV::from_u64(1, state.width());
-            let result = old.bvsub(&one);
-            let mut flags = compute_eflags_sub(&old, &one, state.width());
-            flags.cf = prev_cf;
-            state.set_register(*rd, result);
-            state.set_flags(flags);
-        }
-        // Immediate-count shifts. The count is a concrete IR value, so we branch
-        // on the masked count at lowering time — no symbolic-count handling is
-        // needed. See `apply_shift_smt`.
         X86Instruction::Shl { rd, imm } => apply_shift_smt(&mut state, *rd, *imm, ShiftKind::Shl),
         X86Instruction::Shr { rd, imm } => apply_shift_smt(&mut state, *rd, *imm, ShiftKind::Shr),
         X86Instruction::Sar { rd, imm } => apply_shift_smt(&mut state, *rd, *imm, ShiftKind::Sar),
-        // Immediate-count rotates. Same concrete-count handling as the shifts,
-        // but a partial flag update (only CF, plus OF for count 1) — see
-        // `apply_rotate_smt`.
         X86Instruction::Rol { rd, imm } => apply_rotate_smt(&mut state, *rd, *imm, RotateKind::Rol),
         X86Instruction::Ror { rd, imm } => apply_rotate_smt(&mut state, *rd, *imm, RotateKind::Ror),
-        // IMUL (2-op): `rd = rd * rs`. rd is both source and destination.
         X86Instruction::ImulReg { rd, rs } => {
-            let lhs = state.get_register(*rd).clone();
-            let rhs = state.get_register(*rs).clone();
+            let lhs = state.read_operand(*rd);
+            let rhs = state.read_operand(*rs);
             apply_imul_smt(&mut state, *rd, &lhs, &rhs);
         }
-        // IMUL (3-op): `rd = rs * imm`. rd is purely written.
         X86Instruction::ImulRegImm { rd, rs, imm } => {
-            let lhs = state.get_register(*rs).clone();
-            let rhs = state.imm_bv(*imm);
+            let width = rd.effective_width(state.width());
+            let lhs = state.read_operand(*rs);
+            let rhs = state.imm_bv(*imm, width);
             apply_imul_smt(&mut state, *rd, &lhs, &rhs);
         }
-        // LEA computes `rd = base + disp` (wrapping at width) and leaves EFLAGS
-        // UNCHANGED — pure address arithmetic, exactly like MOV/NOT, which write
-        // only their register and carry the incoming flag BVs forward untouched.
-        // `disp` lowers as an immediate at the operand width.
         X86Instruction::Lea { rd, base, disp } => {
-            let base = state.get_register(*base).clone();
-            let disp = state.imm_bv(*disp);
-            let result = base.bvadd(&disp);
-            state.set_register(*rd, result);
+            let base = state.read_operand(*base);
+            let disp = state.imm_bv(*disp, base.get_size());
+            state.write_operand(*rd, base.bvadd(&disp));
         }
         X86Instruction::Cmov { rd, rs, cond } => {
             let pred = x86_condition_to_smt(*cond, state.get_flags());
-            let rs_val = state.get_register(*rs).clone();
-            let rd_old = state.get_register(*rd).clone();
-            state.set_register(*rd, pred.ite(&rs_val, &rd_old));
+            let old = state.get_register(*rd).clone();
+            let source = state.read_operand(*rs);
+            let written = state.operand_write_value(*rd, &source);
+            state.set_register(rd.canonical(), pred.ite(&written, &old));
         }
         X86Instruction::Setcc { rd, cond } => {
             let pred = x86_condition_to_smt(*cond, state.get_flags());
@@ -1103,6 +1085,40 @@ mod tests {
                 solver.check(),
                 SatResult::Unsat,
                 "lea rd,[rs+{imm}] must equal mov rd,rs; add rd,{imm} on the result"
+            );
+        }
+    }
+
+    #[test]
+    fn partial_width_lea_truncates_the_native_address_before_writing() {
+        for (rd, rs) in [
+            (X86Register::EAX, X86Register::EBX),
+            (X86Register::AX, X86Register::BX),
+        ] {
+            let after_lea = apply_instruction(
+                MachineStateX86::new_symbolic("shared", 64),
+                &X86Instruction::Lea {
+                    rd,
+                    base: X86Register::RBX,
+                    disp: 0,
+                },
+            );
+            let after_mov = apply_instruction(
+                MachineStateX86::new_symbolic("shared", 64),
+                &X86Instruction::MovReg { rd, rs },
+            );
+
+            let solver = Solver::new();
+            solver.assert(
+                after_lea
+                    .get_register(X86Register::RAX)
+                    .eq(after_mov.get_register(X86Register::RAX))
+                    .not(),
+            );
+            assert_eq!(
+                solver.check(),
+                SatResult::Unsat,
+                "partial-width lea into {rd} must match the corresponding move from {rs}"
             );
         }
     }

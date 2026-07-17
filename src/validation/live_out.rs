@@ -292,9 +292,8 @@ pub enum DownstreamRegLiveness {
 /// contains `reg` is a clean, full-register kill. AArch64 has no sub-register
 /// aliasing trap for the X/W GPRs the optimization IR models — a W-form write
 /// zero-extends the full 64-bit register, so every modelled destination write
-/// fully redefines the architectural register. (Contrast the x86 helper, which
-/// must refuse to trust writes because that IR carries no operand width — see
-/// `x86_reg_downstream_liveness`.)
+/// fully redefines the architectural register. The x86 helper below must
+/// additionally distinguish full-width and partial-width destination views.
 ///
 /// This helper does **not** itself decide terminators / unsupported
 /// instructions / region boundaries — the byte-level scan in `src/main.rs`
@@ -326,23 +325,10 @@ fn aarch64_destination_fully_kills(instr: &Instruction, reg: Register) -> bool {
 
 /// Scan an x86 suffix to classify the downstream liveness of `reg`.
 ///
-/// Same read-before-overwrite walk as the AArch64 helper, but with a
-/// deliberately weaker kill rule to stay sound under issue #75.
-///
-/// **#75 hazard / x86 kill rule:** the x86 IR does NOT model operand width.
-/// A `MovImm { rd: RAX, .. }` in this IR could, once #75 lands, actually be a
-/// 32-bit (`mov eax, imm`) or 8-bit (`mov al, imm`) write that leaves the
-/// upper bits of RAX intact — i.e. a *partial* write that does NOT kill the
-/// full register. Trusting `destination()` as a full kill would therefore be
-/// unsound (the #224 bug class). So this helper treats **no** x86 write as a
-/// proven full overwrite today: a downstream write to `reg` does not return
-/// `Dead`; it neither observes nor kills `reg` and the scan keeps walking. The
-/// only definitive answer it can produce is `Read`. Because of this, the x86
-/// path can never narrow a register to dead with the current IR — that is the
-/// intended, vacuously-safe behaviour. When #75 adds widths, replace the
-/// `false` in `x86_destination_fully_kills` with a real full-width check and
-/// the narrowing turns on automatically with no change to the soundness
-/// contract.
+/// Same read-before-overwrite walk as the AArch64 helper. Native mode-width
+/// writes and dword writes are full architectural kills (a dword write
+/// zero-extends in x86-64); word and byte writes preserve surrounding bits and
+/// therefore cannot prove the old full-register value dead.
 pub fn x86_reg_downstream_liveness(
     reg: crate::isa::x86::X86Register,
     suffix: &[crate::isa::x86::X86Instruction],
@@ -358,17 +344,15 @@ pub fn x86_reg_downstream_liveness(
     DownstreamRegLiveness::Uncertain
 }
 
-/// True iff `instr` *provably* fully overwrites `reg` on x86.
-///
-/// Always `false` today: the x86 IR carries no operand width (#75), so no
-/// write can be proven to overwrite the whole architectural register. Kept as
-/// a named guard so the conservative posture is explicit and so #75 has one
-/// obvious place to turn on width-aware kills. See `x86_reg_downstream_liveness`.
+/// True iff `instr` provably fully overwrites `reg` on x86.
 fn x86_destination_fully_kills(
-    _instr: &crate::isa::x86::X86Instruction,
-    _reg: crate::isa::x86::X86Register,
+    instr: &crate::isa::x86::X86Instruction,
+    reg: crate::isa::x86::X86Register,
 ) -> bool {
-    false
+    instr.destination_operand().is_some_and(|destination| {
+        destination.canonical() == reg.canonical()
+            && destination.fully_overwrites_architectural_register()
+    })
 }
 
 /// Compute the set of registers read before written by a sequence of instructions.
@@ -1194,20 +1178,52 @@ mod tests {
     }
 
     #[test]
-    fn x86_reg_downstream_liveness_write_is_never_a_full_kill_no_width() {
+    fn x86_reg_downstream_liveness_distinguishes_full_and_partial_writes() {
         use crate::isa::x86::{X86Instruction, X86Register};
-        // `mov rax, rbx` looks like a full overwrite, but the IR carries no
-        // operand width (#75): it could be `mov eax/al, ...`. The predicate
-        // must NOT report Dead — it walks past the write as Uncertain so the
-        // caller keeps rax live.
-        let suffix = vec![X86Instruction::MovReg {
+        let native = [X86Instruction::MovReg {
             rd: X86Register::RAX,
             rs: X86Register::RBX,
         }];
         assert_eq!(
-            x86_reg_downstream_liveness(X86Register::RAX, &suffix),
-            DownstreamRegLiveness::Uncertain,
-            "x86 write must not be trusted as a full overwrite (#75)"
+            x86_reg_downstream_liveness(X86Register::RAX, &native),
+            DownstreamRegLiveness::Dead
+        );
+
+        let dword = [X86Instruction::MovReg {
+            rd: X86Register::EAX,
+            rs: X86Register::EBX,
+        }];
+        assert_eq!(
+            x86_reg_downstream_liveness(X86Register::RAX, &dword),
+            DownstreamRegLiveness::Dead,
+            "EAX zero-extension fully defines RAX"
+        );
+
+        for partial in [X86Register::AX, X86Register::AL, X86Register::AH] {
+            let suffix = [X86Instruction::MovImm {
+                rd: partial,
+                imm: 0,
+            }];
+            assert_eq!(
+                x86_reg_downstream_liveness(X86Register::RAX, &suffix),
+                DownstreamRegLiveness::Read,
+                "{partial} reads the old RAX bits that its partial write preserves"
+            );
+        }
+    }
+
+    #[test]
+    fn x86_instruction_metadata_canonicalizes_register_views() {
+        use crate::isa::x86::{X86Instruction, X86Register};
+        let instruction = X86Instruction::AddReg {
+            rd: X86Register::AL,
+            rs: X86Register::BL,
+        };
+        assert_eq!(instruction.destination_operand(), Some(X86Register::AL));
+        assert_eq!(instruction.destination(), Some(X86Register::RAX));
+        assert_eq!(
+            instruction.source_registers(),
+            vec![X86Register::RAX, X86Register::RBX]
         );
     }
 

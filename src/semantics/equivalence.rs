@@ -1207,6 +1207,37 @@ mod tests {
     }
 
     #[test]
+    fn x86_64_smt_models_partial_byte_writes() {
+        let seq_mov_al = vec![X86Instruction::MovImm {
+            rd: X86Register::AL,
+            imm: 0,
+        }];
+        let seq_clear_low_byte = vec![X86Instruction::AndImm {
+            rd: X86Register::RAX,
+            imm: !0xffu64 as i64,
+        }];
+        let cfg = EquivalenceConfigFor::<crate::isa::X86_64>::default()
+            .live_out(X86LiveOut::from_registers(vec![X86Register::RAX]))
+            .random_tests(0);
+
+        assert_eq!(
+            check_equivalence_for::<crate::isa::X86_64>(&seq_mov_al, &seq_clear_low_byte, &cfg),
+            EquivalenceResult::Equivalent
+        );
+        assert!(matches!(
+            check_equivalence_for::<crate::isa::X86_64>(
+                &seq_mov_al,
+                &[X86Instruction::MovImm {
+                    rd: X86Register::RAX,
+                    imm: 0,
+                }],
+                &cfg
+            ),
+            EquivalenceResult::NotEquivalent
+        ));
+    }
+
+    #[test]
     fn x86_movzx_low_byte_is_smt_equivalent_to_copy_and_mask_when_flags_are_dead() {
         let movzx = vec![X86Instruction::Movzx {
             rd: X86Register::RAX,
@@ -1229,6 +1260,26 @@ mod tests {
 
         assert_eq!(
             check_equivalence_for::<crate::isa::X86_64>(&movzx, &copy_and_mask, &cfg),
+            EquivalenceResult::Equivalent
+        );
+    }
+
+    #[test]
+    fn x86_64_smt_models_dword_writes_as_zero_extending() {
+        let seq_xor_eax = vec![X86Instruction::XorReg {
+            rd: X86Register::EAX,
+            rs: X86Register::EAX,
+        }];
+        let seq_xor_rax = vec![X86Instruction::XorReg {
+            rd: X86Register::RAX,
+            rs: X86Register::RAX,
+        }];
+        let cfg = EquivalenceConfigFor::<crate::isa::X86_64>::default()
+            .live_out(X86LiveOut::from_registers(vec![X86Register::RAX]).with_flags(true))
+            .random_tests(0);
+
+        assert_eq!(
+            check_equivalence_for::<crate::isa::X86_64>(&seq_xor_eax, &seq_xor_rax, &cfg),
             EquivalenceResult::Equivalent
         );
     }
