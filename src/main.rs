@@ -230,17 +230,24 @@ enum Commands {
     },
     /// Optimize a window of instructions in an ELF binary
     #[command(
-        after_help = "Note: enumerative search scales with the generated instruction families in its candidate pool. At the default AArch64 8-register CLI scope, multiply-accumulate and high-half multiply add 9,728 candidates per length bucket; use --timeout or smaller windows to bound runtime."
+        after_help = "Auto mode: `--auto` superoptimizes the whole binary and is mutually exclusive with --start-addr/--end-addr. Use -o/--output to name the result file; when omitted the result is written next to the input as <stem>_optimized.<ext>.\n\nNote: enumerative search scales with the generated instruction families in its candidate pool. At the default AArch64 8-register CLI scope, multiply-accumulate and high-half multiply add 9,728 candidates per length bucket; use --timeout or smaller windows to bound runtime."
     )]
     Opt {
         /// Path to ELF binary to optimize
         binary: PathBuf,
-        /// Start address of optimization window (hex, e.g., 0x1000)
-        #[arg(long)]
-        start_addr: String,
-        /// End address of optimization window (hex, e.g., 0x1100)
-        #[arg(long)]
-        end_addr: String,
+        /// Start address of optimization window (hex, e.g., 0x1000). Required unless --auto is set.
+        #[arg(long, required_unless_present = "auto")]
+        start_addr: Option<String>,
+        /// End address of optimization window (hex, e.g., 0x1100). Required unless --auto is set.
+        #[arg(long, required_unless_present = "auto")]
+        end_addr: Option<String>,
+
+        /// Superoptimize the whole binary (mutually exclusive with --start-addr/--end-addr)
+        #[arg(long, conflicts_with_all = ["start_addr", "end_addr"])]
+        auto: bool,
+        /// Write the optimized binary to PATH (defaults to <stem>_optimized.<ext>)
+        #[arg(long, short = 'o')]
+        output: Option<PathBuf>,
 
         // --- Architecture selection ---
         /// Target architecture (auto-detected from ELF if not specified)
@@ -1276,6 +1283,56 @@ fn optimized_output_path(path: &Path) -> PathBuf {
     new_path
 }
 
+/// Resolve where an `opt` run writes its result.
+///
+/// With no explicit `-o/--output` the derived `<stem>_optimized.<ext>` sibling
+/// is preserved verbatim (the pre-#616 single-window behaviour). An explicit
+/// output is honoured, except when it resolves to the input binary itself: the
+/// driver never rewrites the input in place, so that request is rejected rather
+/// than silently clobbering the source.
+fn resolve_output_path(input: &Path, output: Option<&Path>) -> Result<PathBuf, String> {
+    match output {
+        Some(out) => {
+            if paths_point_to_same_file(input, out) {
+                Err(format!(
+                    "output path '{}' resolves to the input binary; refusing to optimize in place (choose a different -o/--output)",
+                    out.display()
+                ))
+            } else {
+                Ok(out.to_path_buf())
+            }
+        }
+        None => Ok(optimized_output_path(input)),
+    }
+}
+
+/// Whether `a` and `b` name the same file on disk. Canonicalizes both so that
+/// spellings like `bin` and `./bin`, or a symlink and its target, are caught;
+/// falls back to a literal comparison when a path cannot be canonicalized
+/// (e.g. an output file that does not exist yet — which therefore cannot be
+/// the already-present input).
+fn paths_point_to_same_file(a: &Path, b: &Path) -> bool {
+    match (std::fs::canonicalize(a), std::fs::canonicalize(b)) {
+        (Ok(ca), Ok(cb)) => ca == cb,
+        _ => a == b,
+    }
+}
+
+/// Whole-binary `--auto` driver entry point.
+///
+/// Issue #616 wires the `--auto`/`-o` CLI surface through to here; the driver
+/// loop itself (window discovery, the optimize/patch loop) lands in later #615
+/// slices. Until then this is a deterministic not-yet-implemented guard so the
+/// CLI slice never pretends to do work it cannot.
+fn run_auto_optimization(
+    _patcher: &ElfPatcher,
+    _binary: &Path,
+    _output: Option<&Path>,
+    _options: &OptimizationOptions,
+) -> Result<(), Box<dyn std::error::Error>> {
+    Err("whole-binary auto optimization (--auto) is not yet implemented".into())
+}
+
 fn decode_arch_label(arch: DetectedArch) -> &'static str {
     match arch {
         DetectedArch::Aarch64 => "AArch64",
@@ -1289,6 +1346,7 @@ fn optimize_elf_binary(
     path: &Path,
     start_addr: u64,
     end_addr: u64,
+    output_path: &Path,
     options: &OptimizationOptions,
 ) -> Result<(), Box<dyn std::error::Error>> {
     match patcher.arch() {
@@ -1298,6 +1356,7 @@ fn optimize_elf_binary(
             path,
             start_addr,
             end_addr,
+            output_path,
             options,
         ),
         DetectedArch::X86_64 | DetectedArch::X86_32 => optimize_elf_binary_with_backend(
@@ -1307,6 +1366,7 @@ fn optimize_elf_binary(
             path,
             start_addr,
             end_addr,
+            output_path,
             options,
         ),
     }
@@ -1318,6 +1378,7 @@ fn optimize_elf_binary_with_backend<B: ElfOptimizationBackend>(
     path: &Path,
     start_addr: u64,
     end_addr: u64,
+    output_path: &Path,
     options: &OptimizationOptions,
 ) -> Result<(), Box<dyn std::error::Error>> {
     println!("Optimizing ELF binary: {}", path.display());
@@ -1418,11 +1479,8 @@ fn optimize_elf_binary_with_backend<B: ElfOptimizationBackend>(
     };
     println!("Reassembled to {} bytes", assembled_bytes.len());
 
-    // Create output filename
-    let output_path = optimized_output_path(path);
-
-    // Create patched ELF file
-    patcher.create_patched_copy(&output_path, &window, &assembled_bytes)?;
+    // Create patched ELF file at the caller-resolved output path.
+    patcher.create_patched_copy(output_path, &window, &assembled_bytes)?;
     println!("Created optimized binary: {}", output_path.display());
 
     Ok(())
@@ -3072,6 +3130,8 @@ fn main() {
             binary,
             start_addr,
             end_addr,
+            auto,
+            output,
             arch,
             algorithm,
             timeout,
@@ -3104,22 +3164,6 @@ fn main() {
                 eprintln!("{e}");
                 std::process::exit(1);
             }
-            // Optimization mode
-            let start_addr = match parse_hex_address(&start_addr) {
-                Ok(addr) => addr,
-                Err(e) => {
-                    eprintln!("Error parsing start address: {}", e);
-                    std::process::exit(1);
-                }
-            };
-
-            let end_addr = match parse_hex_address(&end_addr) {
-                Ok(addr) => addr,
-                Err(e) => {
-                    eprintln!("Error parsing end address: {}", e);
-                    std::process::exit(1);
-                }
-            };
 
             let options = OptimizationOptions {
                 algorithm: algorithm.into(),
@@ -3137,7 +3181,53 @@ fn main() {
                 llm_model,
             };
 
-            match optimize_elf_binary(&patcher, &binary, start_addr, end_addr, &options) {
+            let result = if auto {
+                // Whole-binary driver. clap already guaranteed --start-addr /
+                // --end-addr are absent (conflicts_with_all); the driver loop
+                // itself is a later #615 slice, so this dispatches to a guard.
+                run_auto_optimization(&patcher, &binary, output.as_deref(), &options)
+            } else {
+                // Single-window path. clap's required_unless_present guarantees
+                // both addresses are present here; guard defensively rather than
+                // unwrap so a future clap change fails loudly, not with a panic.
+                let (Some(start_addr), Some(end_addr)) = (start_addr, end_addr) else {
+                    eprintln!(
+                        "Error: --start-addr and --end-addr are required unless --auto is set"
+                    );
+                    std::process::exit(1);
+                };
+                let start_addr = match parse_hex_address(&start_addr) {
+                    Ok(addr) => addr,
+                    Err(e) => {
+                        eprintln!("Error parsing start address: {}", e);
+                        std::process::exit(1);
+                    }
+                };
+                let end_addr = match parse_hex_address(&end_addr) {
+                    Ok(addr) => addr,
+                    Err(e) => {
+                        eprintln!("Error parsing end address: {}", e);
+                        std::process::exit(1);
+                    }
+                };
+                let output_path = match resolve_output_path(&binary, output.as_deref()) {
+                    Ok(path) => path,
+                    Err(e) => {
+                        eprintln!("Error: {e}");
+                        std::process::exit(1);
+                    }
+                };
+                optimize_elf_binary(
+                    &patcher,
+                    &binary,
+                    start_addr,
+                    end_addr,
+                    &output_path,
+                    &options,
+                )
+            };
+
+            match result {
                 Ok(()) => println!("\nOptimization completed successfully."),
                 Err(e) => {
                     eprintln!("Error during optimization: {}", e);
@@ -3698,6 +3788,191 @@ mod cli_helper_tests {
         assert!(
             opt_help.contains("9,728"),
             "opt help should mention the default AArch64 multiply candidate growth:\n{opt_help}"
+        );
+    }
+
+    /// Parse an `s11` invocation and return the `Opt` subcommand it selected,
+    /// panicking if parsing fails or another subcommand was chosen. Keeps the
+    /// `--auto`/`-o` parse tests terse.
+    fn parse_opt(args: &[&str]) -> Commands {
+        Args::try_parse_from(args)
+            .unwrap_or_else(|e| panic!("expected `{args:?}` to parse: {e}"))
+            .command
+    }
+
+    /// Parse an invocation expected to fail and return the clap error. Written
+    /// by hand rather than `Result::expect_err` so it need not require
+    /// `Args: Debug`.
+    fn parse_opt_err(args: &[&str]) -> clap::Error {
+        match Args::try_parse_from(args) {
+            Ok(_) => panic!("expected `{args:?}` to fail parsing"),
+            Err(e) => e,
+        }
+    }
+
+    #[test]
+    fn opt_auto_with_output_parses() {
+        let Commands::Opt {
+            auto,
+            output,
+            start_addr,
+            end_addr,
+            ..
+        } = parse_opt(&["s11", "opt", "prog.elf", "--auto", "-o", "out.elf"])
+        else {
+            panic!("expected the opt subcommand");
+        };
+        assert!(auto);
+        assert_eq!(output, Some(PathBuf::from("out.elf")));
+        assert_eq!(start_addr, None);
+        assert_eq!(end_addr, None);
+    }
+
+    #[test]
+    fn opt_auto_without_output_parses() {
+        // The driver falls back to the derived path when -o is omitted, so
+        // --auto must be legal on its own — guards against a future change that
+        // makes -o mandatory.
+        let Commands::Opt { auto, output, .. } = parse_opt(&["s11", "opt", "prog.elf", "--auto"])
+        else {
+            panic!("expected the opt subcommand");
+        };
+        assert!(auto);
+        assert_eq!(output, None);
+    }
+
+    #[test]
+    fn opt_auto_conflicts_with_start_addr() {
+        let err = parse_opt_err(&["s11", "opt", "prog.elf", "--auto", "--start-addr", "0x1000"]);
+        assert_eq!(err.kind(), clap::error::ErrorKind::ArgumentConflict);
+    }
+
+    #[test]
+    fn opt_auto_conflicts_with_end_addr() {
+        let err = parse_opt_err(&["s11", "opt", "prog.elf", "--auto", "--end-addr", "0x1100"]);
+        assert_eq!(err.kind(), clap::error::ErrorKind::ArgumentConflict);
+    }
+
+    #[test]
+    fn opt_single_window_requires_addresses_without_auto() {
+        let err = parse_opt_err(&["s11", "opt", "prog.elf"]);
+        assert_eq!(err.kind(), clap::error::ErrorKind::MissingRequiredArgument);
+    }
+
+    #[test]
+    fn opt_single_window_is_unaffected() {
+        let Commands::Opt {
+            auto,
+            output,
+            start_addr,
+            end_addr,
+            ..
+        } = parse_opt(&[
+            "s11",
+            "opt",
+            "prog.elf",
+            "--start-addr",
+            "0x1000",
+            "--end-addr",
+            "0x1100",
+        ])
+        else {
+            panic!("expected the opt subcommand");
+        };
+        assert!(!auto);
+        assert_eq!(output, None);
+        assert_eq!(start_addr.as_deref(), Some("0x1000"));
+        assert_eq!(end_addr.as_deref(), Some("0x1100"));
+    }
+
+    #[test]
+    fn opt_single_window_honors_output() {
+        let Commands::Opt { output, .. } = parse_opt(&[
+            "s11",
+            "opt",
+            "prog.elf",
+            "--start-addr",
+            "0x1000",
+            "--end-addr",
+            "0x1100",
+            "-o",
+            "out.elf",
+        ]) else {
+            panic!("expected the opt subcommand");
+        };
+        assert_eq!(output, Some(PathBuf::from("out.elf")));
+    }
+
+    #[test]
+    fn opt_help_mentions_auto_and_output() {
+        use clap::CommandFactory;
+
+        let mut command = Args::command();
+        let opt_help = command
+            .find_subcommand_mut("opt")
+            .expect("opt subcommand should be registered")
+            .render_long_help()
+            .to_string();
+
+        assert!(
+            opt_help.contains("--auto"),
+            "opt help should document --auto:\n{opt_help}"
+        );
+        assert!(
+            opt_help.contains("--output"),
+            "opt help should document -o/--output:\n{opt_help}"
+        );
+    }
+
+    #[test]
+    fn resolve_output_path_falls_back_to_derived_path() {
+        let input = Path::new("/some/dir/prog.elf");
+        assert_eq!(
+            resolve_output_path(input, None).unwrap(),
+            optimized_output_path(input)
+        );
+    }
+
+    #[test]
+    fn resolve_output_path_honors_explicit_output() {
+        let input = Path::new("/some/dir/prog.elf");
+        let out = Path::new("/other/place/out.bin");
+        assert_eq!(
+            resolve_output_path(input, Some(out)).unwrap(),
+            out.to_path_buf()
+        );
+    }
+
+    #[test]
+    fn resolve_output_path_rejects_in_place_output() {
+        // The same existing file addressed two ways (a `.` component) must be
+        // caught by canonicalization, not just literal string comparison.
+        let input = TempFile::new_bytes("s11-resolve-inplace", "elf", &[0u8; 4]);
+        let aliased = input
+            .path()
+            .parent()
+            .unwrap()
+            .join(".")
+            .join(input.path().file_name().unwrap());
+        let err = resolve_output_path(input.path(), Some(&aliased))
+            .expect_err("output resolving to the input binary must be rejected");
+        assert!(
+            err.contains("refusing to optimize in place"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn run_auto_optimization_is_not_yet_implemented() {
+        let elf = build_minimal_elf64(&[0x90], 0x1000, elf::abi::EM_X86_64);
+        let input = TempFile::new_bytes("s11-auto-guard", "elf", &elf);
+        let patcher = ElfPatcher::new(input.path()).expect("synthetic ELF should parse");
+        let opts = options_for(Algorithm::Enumerative);
+        let err = run_auto_optimization(&patcher, input.path(), None, &opts)
+            .expect_err("--auto driver is a not-yet-implemented guard for now");
+        assert!(
+            err.to_string().contains("not yet implemented"),
+            "unexpected error: {err}"
         );
     }
 
@@ -4949,7 +5224,8 @@ mod cli_helper_tests {
         opts.timeout = Some(Duration::from_secs(5));
         opts.cost_metric = CostMetric::CodeSize;
 
-        optimize_elf_binary(&patcher, input.path(), 0x1000, 0x100a, &opts)
+        let output = optimized_output_path(input.path());
+        optimize_elf_binary(&patcher, input.path(), 0x1000, 0x100a, &output, &opts)
             .expect("narrow register aliases should reach search");
     }
 
@@ -5056,7 +5332,8 @@ mod cli_helper_tests {
         opts.timeout = Some(Duration::from_secs(5));
         opts.cost_metric = CostMetric::CodeSize;
 
-        let err = optimize_elf_binary(&patcher, input.path(), 0x1000, 0x1006, &opts)
+        let output = optimized_output_path(input.path());
+        let err = optimize_elf_binary(&patcher, input.path(), 0x1000, 0x1006, &output, &opts)
             .expect_err("architectural byte SETcc should be rejected before search");
         let msg = err.to_string();
         assert!(
