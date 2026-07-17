@@ -4760,6 +4760,49 @@ mod cli_helper_tests {
     }
 
     #[test]
+    fn candidate_windows_split_at_cross_section_direct_branch_target() {
+        // The global phase-1 target collection exists precisely so a branch in
+        // one executable section can split a run in another. Here `.other` at
+        // 0x2000 holds `jmp 0x1004`, which targets the interior of `.text`'s
+        // straight-line run at 0x1000 — the run must split at 0x1004 even though
+        // no branch lives in `.text` itself.
+        let text = [
+            0x48, 0x83, 0xc0, 0x01, // add rax, 1   @0x1000
+            0x48, 0x83, 0xc0, 0x01, // add rax, 1   @0x1004  <- cross-section target
+            0x48, 0x83, 0xc0, 0x01, // add rax, 1   @0x1008
+        ];
+        // jmp 0x1004 @0x2000: e9 <rel32>, next IP 0x2005, rel32 = 0x1004-0x2005
+        // = -0x1001 = 0xffffefff (little-endian ff ef ff ff).
+        let other = [0xe9, 0xff, 0xef, 0xff, 0xff];
+        let elf_bytes = build_elf64_with_executable_sections(
+            &[(".text", &text, 0x1000), (".other", &other, 0x2000)],
+            elf::abi::EM_X86_64,
+        );
+        let input = TempFile::new_bytes("s11-candidate-cross-section", "elf", &elf_bytes);
+        let patcher = ElfPatcher::new(input.path()).expect("x86-64 ELF should parse");
+
+        let sections =
+            find_candidate_windows(&patcher).expect("candidate discovery should succeed");
+
+        let text_section = sections
+            .iter()
+            .find(|s| s.section.name == ".text")
+            .expect("the .text section must be present");
+        assert_eq!(
+            text_section.candidates.len(),
+            2,
+            "the cross-section jmp target must split .text's run"
+        );
+        assert_eq!(text_section.candidates[0].start, 0x1000);
+        assert_eq!(text_section.candidates[0].end, 0x1004);
+        assert_eq!(
+            text_section.candidates[1].start, 0x1004,
+            "the cross-section target begins the second window"
+        );
+        assert_eq!(text_section.candidates[1].end, 0x100c);
+    }
+
+    #[test]
     fn candidate_windows_flush_supported_run_at_section_end() {
         let bytes = [0x48, 0x89, 0xd8]; // mov rax, rbx
         let elf_bytes = build_minimal_elf64(&bytes, 0x4000, elf::abi::EM_X86_64);
