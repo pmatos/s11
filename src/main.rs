@@ -1113,7 +1113,15 @@ fn find_candidate_windows_with_backend<B: ElfOptimizationBackend>(
     patcher: &ElfPatcher,
 ) -> Result<Vec<SectionCandidateWindows>, Box<dyn std::error::Error>> {
     let cs = backend.disassembler()?;
-    let mut section_results = Vec::new();
+
+    // Phase 1: disassemble every executable section once, fail closed on any
+    // partial decode, and accumulate every direct branch/call target across the
+    // whole binary into one set. The set must be global and complete before any
+    // window is built: a branch (backward, or in another section) can name an
+    // address inside a run we have not yet seen, so a single forward pass cannot
+    // know all targets in time to split correctly (ADR-0009 Decision 4/5).
+    let mut decoded_sections = Vec::new();
+    let mut branch_targets = std::collections::HashSet::new();
 
     for section in patcher.get_text_sections()? {
         let section_end = section
@@ -1163,6 +1171,35 @@ fn find_candidate_windows_with_backend<B: ElfOptimizationBackend>(
         )
         .map_err(|error| format!("executable section '{}': {}", section.name, error))?;
 
+        for instruction in instructions.iter() {
+            let detail = cs.insn_detail(instruction).map_err(|error| {
+                format!(
+                    "failed to inspect instruction detail in executable section '{}' at 0x{:x}: {}",
+                    section.name,
+                    instruction.address(),
+                    error
+                )
+            })?;
+            branch_targets.extend(capstone_detail_direct_branch_targets(&detail));
+        }
+
+        decoded_sections.push((section, instructions));
+    }
+
+    // Phase 2: build maximal supported straight-line runs, splitting a run
+    // whenever an instruction other than the run's first sits at a collected
+    // branch target. In-place patching pins the window *end* but moves interior
+    // instruction addresses, so a target inside a rewritten window would be
+    // jumped into mid-instruction; a window may *begin* at a target (that
+    // address is fixed) but must not contain one past its first instruction.
+    //
+    // Splitting on instruction boundaries is sound for direct branches: linear
+    // disassembly always places a direct target on an instruction start, so a
+    // collected target that lands inside a run coincides with a boundary in
+    // that run. Mid-instruction, overlapping, and indirect targets are out of
+    // scope and are issue #619's soundness gate.
+    let mut section_results = Vec::new();
+    for (section, instructions) in decoded_sections {
         let mut candidates = Vec::new();
         let mut run_start = None;
         let mut run_end = section.virtual_addr;
@@ -1181,6 +1218,17 @@ fn find_candidate_windows_with_backend<B: ElfOptimizationBackend>(
                         instruction.address()
                     )
                 })?;
+
+            // Close the current run just before an interior branch target so
+            // the target begins a fresh window. Within a contiguous run
+            // `run_end` already equals this instruction's address, so the
+            // flushed window ends exactly where the target starts.
+            if run_start.is_some_and(|start| start != instruction.address())
+                && branch_targets.contains(&instruction.address())
+            {
+                flush_candidate_run(&mut candidates, &mut run_start, run_end);
+            }
+
             let detail = cs.insn_detail(instruction).map_err(|error| {
                 format!(
                     "failed to inspect instruction detail in executable section '{}' at 0x{:x}: {}",
@@ -1245,6 +1293,47 @@ fn capstone_detail_has_rip_relative_memory(detail: &capstone::InsnDetail<'_>) ->
             capstone::arch::x86::X86OperandType::Mem(memory) if memory.base() == rip
         )
     })
+}
+
+/// Absolute target addresses named by a *direct* branch or call instruction, or
+/// an empty vector for non-branch instructions and indirect control transfers.
+///
+/// Capstone resolves a direct (PC-relative or absolute-immediate) branch/call
+/// target to an absolute address in an immediate operand, so the driver
+/// recovers the whole in-binary direct-target set by a linear scan
+/// (ADR-0009 Decision 4/5). Indirect control flow — register/memory jumps,
+/// jump tables, PLT stubs, computed gotos — carries no immediate here and is
+/// deliberately invisible; it is the separate soundness gate in issue #619.
+///
+/// Every immediate on a jump/call instruction is collected. On x86 the sole
+/// immediate is the target; on AArch64 `tbz`/`tbnz` also expose a small
+/// bit-position immediate, which is harmlessly over-collected: an extra target
+/// can only cause an extra window split, never an unsound admit, and a 0..=63
+/// bit index never coincides with a real in-section code address.
+#[cfg_attr(not(test), allow(dead_code))]
+fn capstone_detail_direct_branch_targets(detail: &capstone::InsnDetail<'_>) -> Vec<u64> {
+    let jump =
+        capstone::InsnGroupId(capstone::InsnGroupType::CS_GRP_JUMP as capstone::InsnGroupIdInt);
+    let groups = detail.groups();
+    if !groups.contains(&jump) && !capstone_detail_is_call(detail) {
+        return Vec::new();
+    }
+    detail
+        .arch_detail()
+        .operands()
+        .into_iter()
+        .filter_map(|operand| match operand {
+            capstone::arch::ArchOperand::X86Operand(op) => match op.op_type {
+                capstone::arch::x86::X86OperandType::Imm(value) => Some(value as u64),
+                _ => None,
+            },
+            capstone::arch::ArchOperand::Arm64Operand(op) => match op.op_type {
+                capstone::arch::arm64::Arm64OperandType::Imm(value) => Some(value as u64),
+                _ => None,
+            },
+            _ => None,
+        })
+        .collect()
 }
 
 #[cfg_attr(not(test), allow(dead_code))]
@@ -4405,6 +4494,184 @@ mod cli_helper_tests {
         assert_eq!(sections[0].candidates[0].end, 0x1004);
         assert_eq!(sections[0].candidates[1].start, 0x100b);
         assert_eq!(sections[0].candidates[1].end, 0x100f);
+    }
+
+    #[test]
+    fn direct_branch_targets_extract_absolute_x86_targets_and_skip_indirect() {
+        let cs = x86_64_test_capstone();
+
+        // je 0x1006: 74 04 at 0x1000 (next_ip 0x1002 + rel8 0x04). Capstone must
+        // hand back the *absolute* target, not the relative displacement.
+        let je = cs
+            .disasm_all(&[0x74, 0x04], 0x1000)
+            .expect("je should disassemble");
+        let detail = cs
+            .insn_detail(je.iter().next().expect("one je"))
+            .expect("je detail should be available");
+        assert_eq!(capstone_detail_direct_branch_targets(&detail), vec![0x1006]);
+
+        // call 0x1005: e8 00 00 00 00 at 0x1000 (next_ip 0x1005 + rel32 0).
+        let call = cs
+            .disasm_all(&[0xe8, 0x00, 0x00, 0x00, 0x00], 0x1000)
+            .expect("call should disassemble");
+        let detail = cs
+            .insn_detail(call.iter().next().expect("one call"))
+            .expect("call detail should be available");
+        assert_eq!(capstone_detail_direct_branch_targets(&detail), vec![0x1005]);
+
+        // jmp rax: ff e0 — an indirect branch carries no immediate target here
+        // (that is issue #619's territory, not this slice's).
+        let indirect = cs
+            .disasm_all(&[0xff, 0xe0], 0x1000)
+            .expect("jmp rax should disassemble");
+        let detail = cs
+            .insn_detail(indirect.iter().next().expect("one jmp rax"))
+            .expect("jmp rax detail should be available");
+        assert!(
+            capstone_detail_direct_branch_targets(&detail).is_empty(),
+            "indirect branches expose no direct target"
+        );
+
+        // add rax, 1: 48 83 c0 01 — the group filter must reject a plain
+        // arithmetic immediate so ordinary constants never become targets.
+        let add = cs
+            .disasm_all(&[0x48, 0x83, 0xc0, 0x01], 0x1000)
+            .expect("add should disassemble");
+        let detail = cs
+            .insn_detail(add.iter().next().expect("one add"))
+            .expect("add detail should be available");
+        assert!(
+            capstone_detail_direct_branch_targets(&detail).is_empty(),
+            "non-branch immediate operands must not be collected as targets"
+        );
+    }
+
+    #[test]
+    fn direct_branch_targets_extract_absolute_aarch64_targets() {
+        let cs = aarch64_test_capstone();
+        // cbz x0, 0x1000 assembled at 0x1004 resolves to the absolute 0x1000.
+        let bytes = assemble_aarch64_test_bytes(&[
+            Instruction::Add {
+                rd: Register::X0,
+                rn: Register::X0,
+                rm: Operand::Immediate(1),
+            },
+            Instruction::Cbz {
+                rn: Register::X0,
+                target: s11::ir::LabelId(0x1000),
+            },
+        ]);
+        let disassembly = cs
+            .disasm_all(&bytes, 0x1000)
+            .expect("fixture should disassemble");
+        let cbz = disassembly.get(1).expect("fixture should contain CBZ");
+        let detail = cs.insn_detail(cbz).expect("CBZ detail should be available");
+        assert_eq!(
+            capstone_detail_direct_branch_targets(&detail),
+            vec![0x1000],
+            "the register operand is skipped and the branch target resolves absolute"
+        );
+    }
+
+    #[test]
+    fn candidate_windows_split_at_interior_direct_branch_target() {
+        // add rax,1 (0x1000); add rax,1 (0x1004); add rax,1 (0x1008);
+        // jne 0x1004 (0x100c). Without the target split this is one window
+        // [0x1000,0x100e) whose interior contains the branch target 0x1004;
+        // the reorder-safe rule must split it at that boundary.
+        let text = [
+            0x48, 0x83, 0xc0, 0x01, // add rax, 1   @0x1000
+            0x48, 0x83, 0xc0, 0x01, // add rax, 1   @0x1004  <- jne target
+            0x48, 0x83, 0xc0, 0x01, // add rax, 1   @0x1008
+            0x75, 0xf6, // jne 0x1004               @0x100c
+        ];
+        let elf_bytes = build_minimal_elf64(&text, 0x1000, elf::abi::EM_X86_64);
+        let input = TempFile::new_bytes("s11-candidate-interior-target", "elf", &elf_bytes);
+        let patcher = ElfPatcher::new(input.path()).expect("x86-64 ELF should parse");
+
+        let sections =
+            find_candidate_windows(&patcher).expect("candidate discovery should succeed");
+
+        assert_eq!(sections.len(), 1);
+        assert_eq!(sections[0].candidates.len(), 2);
+        assert_eq!(sections[0].candidates[0].start, 0x1000);
+        assert_eq!(
+            sections[0].candidates[0].end, 0x1004,
+            "the run must end where the interior branch target begins"
+        );
+        assert_eq!(
+            sections[0].candidates[1].start, 0x1004,
+            "the branch target begins the second window, never its interior"
+        );
+        assert_eq!(sections[0].candidates[1].end, 0x100e);
+    }
+
+    #[test]
+    fn candidate_windows_admit_window_that_begins_at_direct_branch_target() {
+        // jmp 0x1002 (0x1000); add rax,1 (0x1002); add rax,1 (0x1006). The jump
+        // target 0x1002 is fixed under rewrite, so a window may *begin* there —
+        // the run must be admitted whole, not split or refused at its start.
+        let text = [
+            0xeb, 0x00, // jmp 0x1002               @0x1000  (target 0x1002)
+            0x48, 0x83, 0xc0, 0x01, // add rax, 1   @0x1002  <- window start == target
+            0x48, 0x83, 0xc0, 0x01, // add rax, 1   @0x1006
+        ];
+        let elf_bytes = build_minimal_elf64(&text, 0x1000, elf::abi::EM_X86_64);
+        let input = TempFile::new_bytes("s11-candidate-start-target", "elf", &elf_bytes);
+        let patcher = ElfPatcher::new(input.path()).expect("x86-64 ELF should parse");
+
+        let sections =
+            find_candidate_windows(&patcher).expect("candidate discovery should succeed");
+
+        assert_eq!(sections.len(), 1);
+        assert_eq!(sections[0].candidates.len(), 1);
+        assert_eq!(
+            sections[0].candidates[0].start, 0x1002,
+            "a window may begin exactly at a direct branch target"
+        );
+        assert_eq!(sections[0].candidates[0].end, 0x100a);
+    }
+
+    #[test]
+    fn candidate_windows_split_at_interior_direct_branch_target_aarch64() {
+        // Cross-arch coverage of the arm64 target-extraction path: a backward
+        // cbz whose target lands inside a straight-line run must split it.
+        let bytes = assemble_aarch64_test_bytes(&[
+            Instruction::Add {
+                rd: Register::X0,
+                rn: Register::X0,
+                rm: Operand::Immediate(1),
+            }, // 0x1000
+            Instruction::Add {
+                rd: Register::X0,
+                rn: Register::X0,
+                rm: Operand::Immediate(1),
+            }, // 0x1004  <- cbz target
+            Instruction::Add {
+                rd: Register::X0,
+                rn: Register::X0,
+                rm: Operand::Immediate(1),
+            }, // 0x1008
+            Instruction::Cbz {
+                rn: Register::X0,
+                target: s11::ir::LabelId(0x1004),
+            }, // 0x100c
+        ]);
+        let elf_bytes = build_minimal_elf64(&bytes, 0x1000, elf::abi::EM_AARCH64);
+        let input = TempFile::new_bytes("s11-candidate-interior-target-a64", "elf", &elf_bytes);
+        let patcher = ElfPatcher::new(input.path()).expect("AArch64 ELF should parse");
+
+        let sections =
+            find_candidate_windows(&patcher).expect("candidate discovery should succeed");
+
+        assert_eq!(sections.len(), 1);
+        assert_eq!(sections[0].candidates.len(), 2);
+        assert_eq!(sections[0].candidates[0].start, 0x1000);
+        assert_eq!(sections[0].candidates[0].end, 0x1004);
+        assert_eq!(
+            sections[0].candidates[1].start, 0x1004,
+            "the cbz target begins the second window"
+        );
     }
 
     #[test]
