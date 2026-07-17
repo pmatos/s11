@@ -1306,16 +1306,35 @@ fn resolve_output_path(input: &Path, output: Option<&Path>) -> Result<PathBuf, S
     }
 }
 
-/// Whether `a` and `b` name the same file on disk. Canonicalizes both so that
-/// spellings like `bin` and `./bin`, or a symlink and its target, are caught;
-/// falls back to a literal comparison when a path cannot be canonicalized
-/// (e.g. an output file that does not exist yet — which therefore cannot be
-/// the already-present input).
+/// Whether `a` and `b` are the same file on disk.
+///
+/// On Unix this compares the `(device, inode)` pair, the only check that catches
+/// a **hard link**: two hard links to one inode are distinct directory entries
+/// with distinct canonical paths, so a canonical-path comparison would miss them
+/// and let an `-o` hard link to the input slip through the in-place guard and get
+/// truncated by `create_patched_copy`. `metadata` follows symlinks and requires
+/// the path to exist, so it subsumes the symlink and `./bin` vs `bin` cases too;
+/// a `-o` target that does not exist yet cannot alias the already-present input,
+/// so a failed stat means "different". Off Unix, fall back to comparing canonical
+/// paths (then literal paths when canonicalization fails, which only happens for
+/// a not-yet-created output that therefore cannot be the input).
 fn paths_point_to_same_file(a: &Path, b: &Path) -> bool {
-    match (std::fs::canonicalize(a), std::fs::canonicalize(b)) {
-        (Ok(ca), Ok(cb)) => ca == cb,
-        _ => a == b,
+    #[cfg(unix)]
+    fn same_file(a: &Path, b: &Path) -> bool {
+        use std::os::unix::fs::MetadataExt;
+        match (std::fs::metadata(a), std::fs::metadata(b)) {
+            (Ok(ma), Ok(mb)) => ma.dev() == mb.dev() && ma.ino() == mb.ino(),
+            _ => false,
+        }
     }
+    #[cfg(not(unix))]
+    fn same_file(a: &Path, b: &Path) -> bool {
+        match (std::fs::canonicalize(a), std::fs::canonicalize(b)) {
+            (Ok(ca), Ok(cb)) => ca == cb,
+            _ => a == b,
+        }
+    }
+    same_file(a, b)
 }
 
 /// Whole-binary `--auto` driver entry point.
@@ -3956,6 +3975,23 @@ mod cli_helper_tests {
             .join(input.path().file_name().unwrap());
         let err = resolve_output_path(input.path(), Some(&aliased))
             .expect_err("output resolving to the input binary must be rejected");
+        assert!(
+            err.contains("refusing to optimize in place"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn resolve_output_path_rejects_hard_link_to_input() {
+        // A hard link shares the input's inode but has a distinct canonical
+        // path, so only a (dev, ino) comparison — not canonicalize — catches it.
+        let input = TempFile::new_bytes("s11-resolve-hardlink", "elf", &[0u8; 8]);
+        let link = input.path().with_extension("hardlink");
+        std::fs::hard_link(input.path(), &link).expect("create hard link to input");
+        let result = resolve_output_path(input.path(), Some(&link));
+        let _ = std::fs::remove_file(&link);
+        let err = result.expect_err("a hard link to the input binary must be rejected");
         assert!(
             err.contains("refusing to optimize in place"),
             "unexpected error: {err}"
