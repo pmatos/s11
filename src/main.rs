@@ -1305,17 +1305,29 @@ fn capstone_detail_has_rip_relative_memory(detail: &capstone::InsnDetail<'_>) ->
 /// jump tables, PLT stubs, computed gotos — carries no immediate here and is
 /// deliberately invisible; it is the separate soundness gate in issue #619.
 ///
-/// Every immediate on a jump/call instruction is collected. On x86 the sole
-/// immediate is the target; on AArch64 `tbz`/`tbnz` also expose a small
-/// bit-position immediate, which is harmlessly over-collected: an extra target
-/// can only cause an extra window split, never an unsound admit, and a 0..=63
-/// bit index never coincides with a real in-section code address.
+/// The group filter accepts jumps, calls, and relative branches
+/// (`CS_GRP_BRANCH_RELATIVE`). The relative-branch group is load-bearing: x86
+/// `loop`/`loope`/`loopne` tag *only* as relative branches — Capstone never
+/// adds `CS_GRP_JUMP` to them (their instruction descriptor's `branch` flag is
+/// unset) — so filtering on jump/call alone would silently drop their targets
+/// and admit an unsound interior. Every immediate on such an instruction is
+/// collected. On x86 the sole immediate is the target; on AArch64 `tbz`/`tbnz`
+/// also expose a small bit-position immediate, which is harmlessly
+/// over-collected: an extra target can only cause an extra window split, never
+/// an unsound admit, and a 0..=63 bit index never coincides with a real
+/// in-section code address.
 #[cfg_attr(not(test), allow(dead_code))]
 fn capstone_detail_direct_branch_targets(detail: &capstone::InsnDetail<'_>) -> Vec<u64> {
     let jump =
         capstone::InsnGroupId(capstone::InsnGroupType::CS_GRP_JUMP as capstone::InsnGroupIdInt);
+    let branch_relative = capstone::InsnGroupId(
+        capstone::InsnGroupType::CS_GRP_BRANCH_RELATIVE as capstone::InsnGroupIdInt,
+    );
     let groups = detail.groups();
-    if !groups.contains(&jump) && !capstone_detail_is_call(detail) {
+    if !groups.contains(&jump)
+        && !groups.contains(&branch_relative)
+        && !capstone_detail_is_call(detail)
+    {
         return Vec::new();
     }
     detail
@@ -4543,6 +4555,49 @@ mod cli_helper_tests {
         assert!(
             capstone_detail_direct_branch_targets(&detail).is_empty(),
             "non-branch immediate operands must not be collected as targets"
+        );
+    }
+
+    #[test]
+    fn direct_branch_targets_include_relative_only_loop_family() {
+        // x86 `loop`/`loope`/`loopne` are tagged ONLY with CS_GRP_BRANCH_RELATIVE
+        // — Capstone never adds CS_GRP_JUMP to them — so a jump/call-only filter
+        // would drop their targets and admit an unsound interior. Each encodes a
+        // rel8 of 0xfe (-2): at 0x1000 the next IP is 0x1002, so the target is
+        // 0x1000. `jecxz` (0xe3), by contrast, does get CS_GRP_JUMP and is
+        // covered by the general path — pinned here so the two stay distinct.
+        let cs = x86_64_test_capstone();
+        for (label, opcode) in [("loop", 0xe2u8), ("loope", 0xe1), ("loopne", 0xe0)] {
+            let disasm = cs
+                .disasm_all(&[opcode, 0xfe], 0x1000)
+                .unwrap_or_else(|_| panic!("{label} should disassemble"));
+            let detail = cs
+                .insn_detail(
+                    disasm
+                        .iter()
+                        .next()
+                        .unwrap_or_else(|| panic!("one {label}")),
+                )
+                .unwrap_or_else(|_| panic!("{label} detail should be available"));
+            assert_eq!(
+                capstone_detail_direct_branch_targets(&detail),
+                vec![0x1000],
+                "{label} is a relative-only branch whose target must be collected"
+            );
+        }
+
+        // jecxz: 67 e3 fb — assert only that it is caught (it carries
+        // CS_GRP_JUMP), not its exact target; the point is the general jump path
+        // already covers it, unlike the loop family above.
+        let jecxz = cs
+            .disasm_all(&[0x67, 0xe3, 0xfb], 0x1000)
+            .expect("jecxz should disassemble");
+        let detail = cs
+            .insn_detail(jecxz.iter().next().expect("one jecxz"))
+            .expect("jecxz detail should be available");
+        assert!(
+            !capstone_detail_direct_branch_targets(&detail).is_empty(),
+            "jecxz carries CS_GRP_JUMP and its target must still be collected"
         );
     }
 
