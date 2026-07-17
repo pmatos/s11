@@ -117,7 +117,11 @@ the source alias and zero- or sign-extend them into the native-width destination
 high-byte sources (`ah`/`bh`/`ch`/`dh`) are not modelled. The 32-to-64 signed
 form is the distinct `movsxd` family and remains unsupported; x86 has no
 `movzx r64, r32` encoding because a 32-bit GPR write already provides that zero
-extension. `cmp` and `test` are
+extension. For the same reason, the x86-64 parser normalizes a 32-bit
+destination spelling such as `movzx eax, bl` to the native-width zero-extension
+IR. It rejects `movsx eax, bl`, whose sign extension into EAX followed by
+architectural zero-extension is not equivalent to native-width sign extension.
+`cmp` and `test` are
 flag-setting: each discards its result and writes only EFLAGS (`cmp` from a
 subtraction, `test` from a bitwise AND that clears CF/OF). `neg` and `not`
 are single-operand: `neg` computes `rd = -rd` and sets EFLAGS as if from
@@ -165,25 +169,32 @@ assembly emits architectural byte `SETcc` followed by same-register `MOVZX`
 into the 32-bit destination; that destination write also clears bits 63:32 in
 x86-64, so the emitted pair matches the full-width IR semantics.
 
-The x86 IR does not yet carry general operand width. To avoid rewriting
-partial-width operations as full-width operations, the binary optimization path
-accepts mode-width register aliases for every ordinary instruction:
-`rax`/`r8`-style 64-bit names for x86-64, and `eax`-style 32-bit i386 names for
-x86-32. MOVZX/MOVSX are the narrow, explicit exception: their IR variants carry
-the 8- or 16-bit source width while their destination remains the mode width.
-Width-agnostic text accepts only 64-bit MOVSX destinations because its IR cannot
-preserve the distinct zero-extension effect of a 32-bit destination write;
-mode-aware x86-32 parsing accepts 32-bit MOVSX destinations.
-Architectural byte SETcc from ELF input is rejected until #75 rather than lifted
-into the full-width pseudo-IR; width-agnostic text accepts only the SETcc
-pseudo-family's canonical full-register spelling (`setne rax`, for example), not
-byte/word/dword aliases. Other x86-64 `eax`/`ax`/`al` forms, other x86-32
-`ax`/`al` forms, and x86-32 extended-register aliases such as `r8d` are rejected
-until operand width is represented end to end. In x86-32, byte-register access
-is limited to `al`/`cl`/`dl`/`bl`: these back both the 8-bit MOVZX/MOVSX sources
-and the synthesized SETcc destinations. `spl`/`bpl`/`sil`/`dil` require a
-64-bit-mode REX prefix (encoding slots 4–7 otherwise name the legacy high-byte
-registers), so they are rejected.
+The x86 IR retains each GPR operand's native, dword, word, low-byte, or
+legacy high-byte view. Reads select the corresponding slice of the canonical
+architectural register. Native writes replace the mode-width register, dword
+writes zero-extend into the full GPR on x86-64, and word/byte writes preserve
+the surrounding bits. Thus `rax`/`eax`/`ax`/`al`/`ah` (and their corresponding
+GPR aliases) are distinct operands throughout parsing, search, concrete and
+SMT execution, liveness, costing, and assembly. Legacy high-byte operands are
+limited to `ah`/`bh`/`ch`/`dh` and cannot be combined with an encoding that
+requires a REX prefix. x86-32 continues to reject the x86-64-only extended
+register family (`r8` through `r15` and their aliases).
+
+MOVZX/MOVSX carry an explicit 8- or 16-bit source width while keeping a
+native-width destination. This preserves the width-changing operation even
+though the source is stored as its canonical architectural register; display
+and assembly recover the corresponding byte or word spelling. Mode-aware
+x86-32 parsing accepts its 32-bit destination, while width-agnostic parsing
+keeps the canonical x86-64 destination spelling.
+
+The synthesis-only `set<cond>` pseudo-family is the exception to this
+precise-width model and keeps the interim full-width abstraction described
+above. Architectural byte SETcc from ELF input is rejected until #75 rather
+than lifted into the full-width pseudo-IR, and its width-agnostic text spelling
+is the pseudo-family's canonical full register (`setne rax`, not a
+byte/word/dword alias). In x86-32, synthesized SETcc remains limited to
+destinations backed by `al`/`cl`/`dl`/`bl`, because byte-register encoding
+slots 4–7 name the legacy high-byte registers without a REX prefix.
 
 Fixed control-flow terminators:
 

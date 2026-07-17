@@ -17,7 +17,7 @@
 // disfiguring the macro invocations. Allow at module scope.
 #![allow(clippy::useless_conversion)]
 
-use crate::isa::x86::{X86Condition, X86Instruction, X86Register};
+use crate::isa::x86::{X86Condition, X86Instruction, X86Register, X86RegisterView};
 use dynasm::dynasm;
 use dynasmrt::DynasmApi;
 
@@ -66,6 +66,352 @@ fn reg_index_32(reg: X86Register) -> Result<u8, String> {
         return Err(format!("register {:?} not available in x86-32 mode", reg));
     }
     Ok(i)
+}
+
+fn validate_register_pair(
+    lhs: X86Register,
+    rhs: X86Register,
+    mode_width: u32,
+) -> Result<(), String> {
+    validate_single_register(lhs, mode_width)?;
+    validate_single_register(rhs, mode_width)?;
+    if lhs.effective_width(mode_width) != rhs.effective_width(mode_width) {
+        return Err(format!("register widths do not match: {} and {}", lhs, rhs));
+    }
+    if (lhs.is_high_byte() || rhs.is_high_byte())
+        && (lhs.index().is_some_and(|index| index >= 4)
+            || rhs.index().is_some_and(|index| index >= 4))
+    {
+        return Err(format!(
+            "high-byte register cannot be encoded when a REX prefix is required: {}, {}",
+            lhs, rhs
+        ));
+    }
+    Ok(())
+}
+
+fn validate_single_register(reg: X86Register, mode_width: u32) -> Result<(), String> {
+    if reg.effective_width(mode_width) > mode_width {
+        return Err(format!(
+            "register {} is not available in x86-{}",
+            reg, mode_width
+        ));
+    }
+    if mode_width == 32
+        && reg.view() == X86RegisterView::LowByte
+        && reg.index().is_some_and(|index| index >= 4)
+    {
+        return Err(format!(
+            "register {} requires a REX prefix and is not available in x86-32",
+            reg
+        ));
+    }
+    Ok(())
+}
+
+fn validate_extension_move_registers(
+    rd: X86Register,
+    rs: X86Register,
+    mode_width: u32,
+) -> Result<(), String> {
+    if !rd.is_native() || !rs.is_native() {
+        return Err(format!(
+            "MOVZX/MOVSX explicit-width IR requires canonical registers, got {}, {}",
+            rd, rs
+        ));
+    }
+    validate_single_register(rd, mode_width)?;
+    validate_single_register(rs, mode_width)
+}
+
+macro_rules! legacy_byte_reg_reg_opcode {
+    (mov) => {
+        0x88u8
+    };
+    (add) => {
+        0x00u8
+    };
+    (sub) => {
+        0x28u8
+    };
+    (and) => {
+        0x20u8
+    };
+    (or) => {
+        0x08u8
+    };
+    (xor) => {
+        0x30u8
+    };
+    (cmp) => {
+        0x38u8
+    };
+    (test) => {
+        0x84u8
+    };
+}
+
+macro_rules! emit_legacy_byte_reg_reg {
+    ($ops:expr, $op:ident, $dst:expr, $src:expr) => {{
+        $ops.push(legacy_byte_reg_reg_opcode!($op));
+        $ops.push(0xc0u8 | (($src & 7) << 3) | ($dst & 7));
+    }};
+}
+
+macro_rules! emit_reg_reg_64 {
+    ($ops:expr, $op:ident, $lhs:expr, $rhs:expr) => {{
+        let lhs_reg = $lhs;
+        let rhs_reg = $rhs;
+        validate_register_pair(lhs_reg, rhs_reg, 64)?;
+        let lhs = reg_index(lhs_reg)?;
+        let rhs = reg_index(rhs_reg)?;
+        match (lhs_reg.view(), rhs_reg.view()) {
+            (X86RegisterView::Native, X86RegisterView::Native) => {
+                dynasm!($ops ; .arch x64 ; $op Rq(lhs), Rq(rhs))
+            }
+            (X86RegisterView::Dword, X86RegisterView::Dword) => {
+                dynasm!($ops ; .arch x64 ; $op Rd(lhs), Rd(rhs))
+            }
+            (X86RegisterView::Word, X86RegisterView::Word) => {
+                dynasm!($ops ; .arch x64 ; $op Rw(lhs), Rw(rhs))
+            }
+            (X86RegisterView::LowByte, X86RegisterView::LowByte) => {
+                dynasm!($ops ; .arch x64 ; $op Rb(lhs), Rb(rhs))
+            }
+            (X86RegisterView::HighByte, X86RegisterView::HighByte) => {
+                let lhs = lhs + 4;
+                let rhs = rhs + 4;
+                dynasm!($ops ; .arch x64 ; $op Rh(lhs), Rh(rhs))
+            }
+            (X86RegisterView::LowByte, X86RegisterView::HighByte) => {
+                let rhs = rhs + 4;
+                emit_legacy_byte_reg_reg!($ops, $op, lhs, rhs)
+            }
+            (X86RegisterView::HighByte, X86RegisterView::LowByte) => {
+                let lhs = lhs + 4;
+                emit_legacy_byte_reg_reg!($ops, $op, lhs, rhs)
+            }
+            _ => unreachable!("validated register widths select one encoding family"),
+        }
+    }};
+}
+
+macro_rules! emit_reg_imm_64 {
+    ($ops:expr, $op:ident, $reg:expr, $imm:expr) => {{
+        let register = $reg;
+        validate_single_register(register, 64)?;
+        let index = reg_index(register)?;
+        match register.view() {
+            X86RegisterView::Native => {
+                let imm = signed_imm_i32($imm)?;
+                dynasm!($ops ; .arch x64 ; $op Rq(index), imm);
+            }
+            X86RegisterView::Dword => {
+                let imm = imm32_bitpattern_i32($imm)?;
+                dynasm!($ops ; .arch x64 ; $op Rd(index), imm);
+            }
+            X86RegisterView::Word => {
+                let imm = imm16_bitpattern_i16($imm)?;
+                dynasm!($ops ; .arch x64 ; $op Rw(index), WORD imm);
+            }
+            X86RegisterView::LowByte => {
+                let imm = imm8_bitpattern_i8($imm)?;
+                dynasm!($ops ; .arch x64 ; $op Rb(index), BYTE imm);
+            }
+            X86RegisterView::HighByte => {
+                let imm = imm8_bitpattern_i8($imm)?;
+                let index = index + 4;
+                dynasm!($ops ; .arch x64 ; $op Rh(index), BYTE imm);
+            }
+        }
+    }};
+}
+
+macro_rules! emit_unary_64 {
+    ($ops:expr, $op:ident, $reg:expr) => {{
+        let register = $reg;
+        validate_single_register(register, 64)?;
+        let index = reg_index(register)?;
+        match register.view() {
+            X86RegisterView::Native => dynasm!($ops ; .arch x64 ; $op Rq(index)),
+            X86RegisterView::Dword => dynasm!($ops ; .arch x64 ; $op Rd(index)),
+            X86RegisterView::Word => dynasm!($ops ; .arch x64 ; $op Rw(index)),
+            X86RegisterView::LowByte => dynasm!($ops ; .arch x64 ; $op Rb(index)),
+            X86RegisterView::HighByte => {
+                let index = index + 4;
+                dynasm!($ops ; .arch x64 ; $op Rh(index))
+            }
+        }
+    }};
+}
+
+macro_rules! emit_shift_64 {
+    ($ops:expr, $op:ident, $reg:expr, $count:expr) => {{
+        let register = $reg;
+        validate_single_register(register, 64)?;
+        let index = reg_index(register)?;
+        let count = shift_count_imm8($count)?;
+        match register.view() {
+            X86RegisterView::Native => dynasm!($ops ; .arch x64 ; $op Rq(index), BYTE count),
+            X86RegisterView::Dword => dynasm!($ops ; .arch x64 ; $op Rd(index), BYTE count),
+            X86RegisterView::Word => dynasm!($ops ; .arch x64 ; $op Rw(index), BYTE count),
+            X86RegisterView::LowByte => dynasm!($ops ; .arch x64 ; $op Rb(index), BYTE count),
+            X86RegisterView::HighByte => {
+                let index = index + 4;
+                dynasm!($ops ; .arch x64 ; $op Rh(index), BYTE count)
+            }
+        }
+    }};
+}
+
+macro_rules! emit_reg_reg_32 {
+    ($ops:expr, $op:ident, $lhs:expr, $rhs:expr) => {{
+        let lhs_reg = $lhs;
+        let rhs_reg = $rhs;
+        validate_register_pair(lhs_reg, rhs_reg, 32)?;
+        let lhs = reg_index_32(lhs_reg)?;
+        let rhs = reg_index_32(rhs_reg)?;
+        match (lhs_reg.view(), rhs_reg.view()) {
+            (
+                X86RegisterView::Native | X86RegisterView::Dword,
+                X86RegisterView::Native | X86RegisterView::Dword,
+            ) => {
+                dynasm!($ops ; .arch x86 ; $op Rd(lhs), Rd(rhs))
+            }
+            (X86RegisterView::Word, X86RegisterView::Word) => {
+                dynasm!($ops ; .arch x86 ; $op Rw(lhs), Rw(rhs))
+            }
+            (X86RegisterView::LowByte, X86RegisterView::LowByte) => {
+                dynasm!($ops ; .arch x86 ; $op Rb(lhs), Rb(rhs))
+            }
+            (X86RegisterView::HighByte, X86RegisterView::HighByte) => {
+                let lhs = lhs + 4;
+                let rhs = rhs + 4;
+                dynasm!($ops ; .arch x86 ; $op Rh(lhs), Rh(rhs))
+            }
+            (X86RegisterView::LowByte, X86RegisterView::HighByte) => {
+                let rhs = rhs + 4;
+                emit_legacy_byte_reg_reg!($ops, $op, lhs, rhs)
+            }
+            (X86RegisterView::HighByte, X86RegisterView::LowByte) => {
+                let lhs = lhs + 4;
+                emit_legacy_byte_reg_reg!($ops, $op, lhs, rhs)
+            }
+            _ => unreachable!("validated register widths select one encoding family"),
+        }
+    }};
+}
+
+macro_rules! emit_reg_imm_32 {
+    ($ops:expr, $op:ident, $reg:expr, $imm:expr) => {{
+        let register = $reg;
+        validate_single_register(register, 32)?;
+        let index = reg_index_32(register)?;
+        match register.view() {
+            X86RegisterView::Native | X86RegisterView::Dword => {
+                let imm = imm32_bitpattern_i32($imm)?;
+                dynasm!($ops ; .arch x86 ; $op Rd(index), imm);
+            }
+            X86RegisterView::Word => {
+                let imm = imm16_bitpattern_i16($imm)?;
+                dynasm!($ops ; .arch x86 ; $op Rw(index), WORD imm);
+            }
+            X86RegisterView::LowByte => {
+                let imm = imm8_bitpattern_i8($imm)?;
+                dynasm!($ops ; .arch x86 ; $op Rb(index), BYTE imm);
+            }
+            X86RegisterView::HighByte => {
+                let imm = imm8_bitpattern_i8($imm)?;
+                let index = index + 4;
+                dynasm!($ops ; .arch x86 ; $op Rh(index), BYTE imm);
+            }
+        }
+    }};
+}
+
+macro_rules! emit_unary_32 {
+    ($ops:expr, $op:ident, $reg:expr) => {{
+        let register = $reg;
+        validate_single_register(register, 32)?;
+        let index = reg_index_32(register)?;
+        match register.view() {
+            X86RegisterView::Native | X86RegisterView::Dword => {
+                dynasm!($ops ; .arch x86 ; $op Rd(index))
+            }
+            X86RegisterView::Word => dynasm!($ops ; .arch x86 ; $op Rw(index)),
+            X86RegisterView::LowByte => dynasm!($ops ; .arch x86 ; $op Rb(index)),
+            X86RegisterView::HighByte => {
+                let index = index + 4;
+                dynasm!($ops ; .arch x86 ; $op Rh(index))
+            }
+        }
+    }};
+}
+
+macro_rules! emit_shift_32 {
+    ($ops:expr, $op:ident, $reg:expr, $count:expr) => {{
+        let register = $reg;
+        validate_single_register(register, 32)?;
+        let index = reg_index_32(register)?;
+        let count = shift_count_imm8($count)?;
+        match register.view() {
+            X86RegisterView::Native | X86RegisterView::Dword => {
+                dynasm!($ops ; .arch x86 ; $op Rd(index), BYTE count)
+            }
+            X86RegisterView::Word => dynasm!($ops ; .arch x86 ; $op Rw(index), BYTE count),
+            X86RegisterView::LowByte => dynasm!($ops ; .arch x86 ; $op Rb(index), BYTE count),
+            X86RegisterView::HighByte => {
+                let index = index + 4;
+                dynasm!($ops ; .arch x86 ; $op Rh(index), BYTE count)
+            }
+        }
+    }};
+}
+
+macro_rules! emit_cmov_64_for_family {
+    ($ops:expr, $cond:expr, $family:ident, $rd:expr, $rs:expr) => {
+        match $cond {
+            X86Condition::E => dynasm!($ops ; .arch x64 ; cmove $family($rd), $family($rs)),
+            X86Condition::NE => dynasm!($ops ; .arch x64 ; cmovne $family($rd), $family($rs)),
+            X86Condition::B => dynasm!($ops ; .arch x64 ; cmovb $family($rd), $family($rs)),
+            X86Condition::AE => dynasm!($ops ; .arch x64 ; cmovae $family($rd), $family($rs)),
+            X86Condition::BE => dynasm!($ops ; .arch x64 ; cmovbe $family($rd), $family($rs)),
+            X86Condition::A => dynasm!($ops ; .arch x64 ; cmova $family($rd), $family($rs)),
+            X86Condition::L => dynasm!($ops ; .arch x64 ; cmovl $family($rd), $family($rs)),
+            X86Condition::GE => dynasm!($ops ; .arch x64 ; cmovge $family($rd), $family($rs)),
+            X86Condition::LE => dynasm!($ops ; .arch x64 ; cmovle $family($rd), $family($rs)),
+            X86Condition::G => dynasm!($ops ; .arch x64 ; cmovg $family($rd), $family($rs)),
+            X86Condition::S => dynasm!($ops ; .arch x64 ; cmovs $family($rd), $family($rs)),
+            X86Condition::NS => dynasm!($ops ; .arch x64 ; cmovns $family($rd), $family($rs)),
+            X86Condition::O => dynasm!($ops ; .arch x64 ; cmovo $family($rd), $family($rs)),
+            X86Condition::NO => dynasm!($ops ; .arch x64 ; cmovno $family($rd), $family($rs)),
+            X86Condition::P => dynasm!($ops ; .arch x64 ; cmovp $family($rd), $family($rs)),
+            X86Condition::NP => dynasm!($ops ; .arch x64 ; cmovnp $family($rd), $family($rs)),
+        }
+    };
+}
+
+macro_rules! emit_cmov_32_for_family {
+    ($ops:expr, $cond:expr, $family:ident, $rd:expr, $rs:expr) => {
+        match $cond {
+            X86Condition::E => dynasm!($ops ; .arch x86 ; cmove $family($rd), $family($rs)),
+            X86Condition::NE => dynasm!($ops ; .arch x86 ; cmovne $family($rd), $family($rs)),
+            X86Condition::B => dynasm!($ops ; .arch x86 ; cmovb $family($rd), $family($rs)),
+            X86Condition::AE => dynasm!($ops ; .arch x86 ; cmovae $family($rd), $family($rs)),
+            X86Condition::BE => dynasm!($ops ; .arch x86 ; cmovbe $family($rd), $family($rs)),
+            X86Condition::A => dynasm!($ops ; .arch x86 ; cmova $family($rd), $family($rs)),
+            X86Condition::L => dynasm!($ops ; .arch x86 ; cmovl $family($rd), $family($rs)),
+            X86Condition::GE => dynasm!($ops ; .arch x86 ; cmovge $family($rd), $family($rs)),
+            X86Condition::LE => dynasm!($ops ; .arch x86 ; cmovle $family($rd), $family($rs)),
+            X86Condition::G => dynasm!($ops ; .arch x86 ; cmovg $family($rd), $family($rs)),
+            X86Condition::S => dynasm!($ops ; .arch x86 ; cmovs $family($rd), $family($rs)),
+            X86Condition::NS => dynasm!($ops ; .arch x86 ; cmovns $family($rd), $family($rs)),
+            X86Condition::O => dynasm!($ops ; .arch x86 ; cmovo $family($rd), $family($rs)),
+            X86Condition::NO => dynasm!($ops ; .arch x86 ; cmovno $family($rd), $family($rs)),
+            X86Condition::P => dynasm!($ops ; .arch x86 ; cmovp $family($rd), $family($rs)),
+            X86Condition::NP => dynasm!($ops ; .arch x86 ; cmovnp $family($rd), $family($rs)),
+        }
+    };
 }
 
 fn setcc_opcode(cond: X86Condition) -> u8 {
@@ -142,27 +488,28 @@ fn assemble_32(instructions: &[X86Instruction]) -> Result<Vec<u8>, String> {
 fn encode_64(ops: &mut dynasmrt::x64::Assembler, instr: &X86Instruction) -> Result<(), String> {
     match instr {
         X86Instruction::MovReg { rd, rs } => {
-            let rd = reg_index(*rd)?;
-            let rs = reg_index(*rs)?;
-            dynasm!(ops ; .arch x64 ; mov Rq(rd), Rq(rs));
+            emit_reg_reg_64!(ops, mov, *rd, *rs);
             Ok(())
         }
         X86Instruction::MovImm { rd, imm } => {
-            let rd = reg_index(*rd)?;
-            // Prefer the imm32 sign-extended encoding (`REX.W C7 /0 id`,
-            // 7 bytes) when the immediate fits — Capstone shows this as
-            // canonical "mov rax, 0x...". Fall back to MOVABS
-            // (`REX.W B8+rd io`, 10 bytes) for the full 64-bit immediate
-            // case. The CodeSize cost model mirrors these lengths (issue #225).
-            if let Ok(i32_imm) = i32::try_from(*imm) {
-                dynasm!(ops ; .arch x64 ; mov Rq(rd), i32_imm);
+            if rd.view() == X86RegisterView::Native {
+                let rd = reg_index(*rd)?;
+                // Prefer the imm32 sign-extended encoding (`REX.W C7 /0 id`,
+                // 7 bytes) when the immediate fits. Fall back to MOVABS for a
+                // full 64-bit immediate.
+                if let Ok(i32_imm) = i32::try_from(*imm) {
+                    dynasm!(ops ; .arch x64 ; mov Rq(rd), i32_imm);
+                } else {
+                    let imm = *imm;
+                    dynasm!(ops ; .arch x64 ; mov Rq(rd), QWORD imm);
+                }
             } else {
-                let imm = *imm;
-                dynasm!(ops ; .arch x64 ; mov Rq(rd), QWORD imm);
+                emit_reg_imm_64!(ops, mov, *rd, *imm);
             }
             Ok(())
         }
         X86Instruction::Movzx { rd, rs, src_width } => {
+            validate_extension_move_registers(*rd, *rs, 64)?;
             let rd = reg_index(*rd)?;
             let rs = reg_index(*rs)?;
             match src_width {
@@ -173,6 +520,7 @@ fn encode_64(ops: &mut dynasmrt::x64::Assembler, instr: &X86Instruction) -> Resu
             Ok(())
         }
         X86Instruction::Movsx { rd, rs, src_width } => {
+            validate_extension_move_registers(*rd, *rs, 64)?;
             let rd = reg_index(*rd)?;
             let rs = reg_index(*rs)?;
             match src_width {
@@ -183,179 +531,186 @@ fn encode_64(ops: &mut dynasmrt::x64::Assembler, instr: &X86Instruction) -> Resu
             Ok(())
         }
         X86Instruction::AddReg { rd, rs } => {
-            let rd = reg_index(*rd)?;
-            let rs = reg_index(*rs)?;
-            dynasm!(ops ; .arch x64 ; add Rq(rd), Rq(rs));
+            emit_reg_reg_64!(ops, add, *rd, *rs);
             Ok(())
         }
         X86Instruction::AddImm { rd, imm } => {
-            let rd = reg_index(*rd)?;
-            let imm = signed_imm_i32(*imm)?;
-            dynasm!(ops ; .arch x64 ; add Rq(rd), imm);
+            emit_reg_imm_64!(ops, add, *rd, *imm);
             Ok(())
         }
         X86Instruction::SubReg { rd, rs } => {
-            let rd = reg_index(*rd)?;
-            let rs = reg_index(*rs)?;
-            dynasm!(ops ; .arch x64 ; sub Rq(rd), Rq(rs));
+            emit_reg_reg_64!(ops, sub, *rd, *rs);
             Ok(())
         }
         X86Instruction::SubImm { rd, imm } => {
-            let rd = reg_index(*rd)?;
-            let imm = signed_imm_i32(*imm)?;
-            dynasm!(ops ; .arch x64 ; sub Rq(rd), imm);
+            emit_reg_imm_64!(ops, sub, *rd, *imm);
             Ok(())
         }
         X86Instruction::AndReg { rd, rs } => {
-            let rd = reg_index(*rd)?;
-            let rs = reg_index(*rs)?;
-            dynasm!(ops ; .arch x64 ; and Rq(rd), Rq(rs));
+            emit_reg_reg_64!(ops, and, *rd, *rs);
             Ok(())
         }
         X86Instruction::AndImm { rd, imm } => {
-            let rd = reg_index(*rd)?;
-            let imm = signed_imm_i32(*imm)?;
-            dynasm!(ops ; .arch x64 ; and Rq(rd), imm);
+            emit_reg_imm_64!(ops, and, *rd, *imm);
             Ok(())
         }
         X86Instruction::OrReg { rd, rs } => {
-            let rd = reg_index(*rd)?;
-            let rs = reg_index(*rs)?;
-            dynasm!(ops ; .arch x64 ; or Rq(rd), Rq(rs));
+            emit_reg_reg_64!(ops, or, *rd, *rs);
             Ok(())
         }
         X86Instruction::OrImm { rd, imm } => {
-            let rd = reg_index(*rd)?;
-            let imm = signed_imm_i32(*imm)?;
-            dynasm!(ops ; .arch x64 ; or Rq(rd), imm);
+            emit_reg_imm_64!(ops, or, *rd, *imm);
             Ok(())
         }
         X86Instruction::XorReg { rd, rs } => {
-            let rd = reg_index(*rd)?;
-            let rs = reg_index(*rs)?;
-            dynasm!(ops ; .arch x64 ; xor Rq(rd), Rq(rs));
+            emit_reg_reg_64!(ops, xor, *rd, *rs);
             Ok(())
         }
         X86Instruction::XorImm { rd, imm } => {
-            let rd = reg_index(*rd)?;
-            let imm = signed_imm_i32(*imm)?;
-            dynasm!(ops ; .arch x64 ; xor Rq(rd), imm);
+            emit_reg_imm_64!(ops, xor, *rd, *imm);
             Ok(())
         }
         X86Instruction::CmpReg { rn, rs } => {
-            let rn = reg_index(*rn)?;
-            let rs = reg_index(*rs)?;
-            dynasm!(ops ; .arch x64 ; cmp Rq(rn), Rq(rs));
+            emit_reg_reg_64!(ops, cmp, *rn, *rs);
             Ok(())
         }
         X86Instruction::CmpImm { rn, imm } => {
-            let rn = reg_index(*rn)?;
-            let imm = signed_imm_i32(*imm)?;
-            dynasm!(ops ; .arch x64 ; cmp Rq(rn), imm);
+            emit_reg_imm_64!(ops, cmp, *rn, *imm);
             Ok(())
         }
         X86Instruction::TestReg { rn, rs } => {
-            let rn = reg_index(*rn)?;
-            let rs = reg_index(*rs)?;
-            dynasm!(ops ; .arch x64 ; test Rq(rn), Rq(rs));
+            emit_reg_reg_64!(ops, test, *rn, *rs);
             Ok(())
         }
         X86Instruction::TestImm { rn, imm } => {
-            let rn = reg_index(*rn)?;
-            let imm = signed_imm_i32(*imm)?;
-            dynasm!(ops ; .arch x64 ; test Rq(rn), imm);
+            emit_reg_imm_64!(ops, test, *rn, *imm);
             Ok(())
         }
         X86Instruction::Neg { rd } => {
-            let rd = reg_index(*rd)?;
-            dynasm!(ops ; .arch x64 ; neg Rq(rd));
+            emit_unary_64!(ops, neg, *rd);
             Ok(())
         }
         X86Instruction::Not { rd } => {
-            let rd = reg_index(*rd)?;
-            dynasm!(ops ; .arch x64 ; not Rq(rd));
+            emit_unary_64!(ops, not, *rd);
             Ok(())
         }
         X86Instruction::Inc { rd } => {
-            let rd = reg_index(*rd)?;
-            dynasm!(ops ; .arch x64 ; inc Rq(rd));
+            emit_unary_64!(ops, inc, *rd);
             Ok(())
         }
         X86Instruction::Dec { rd } => {
-            let rd = reg_index(*rd)?;
-            dynasm!(ops ; .arch x64 ; dec Rq(rd));
+            emit_unary_64!(ops, dec, *rd);
             Ok(())
         }
         X86Instruction::Shl { rd, imm } => {
-            let rd = reg_index(*rd)?;
-            let count = shift_count_imm8(*imm)?;
-            dynasm!(ops ; .arch x64 ; shl Rq(rd), BYTE count);
+            emit_shift_64!(ops, shl, *rd, *imm);
             Ok(())
         }
         X86Instruction::Shr { rd, imm } => {
-            let rd = reg_index(*rd)?;
-            let count = shift_count_imm8(*imm)?;
-            dynasm!(ops ; .arch x64 ; shr Rq(rd), BYTE count);
+            emit_shift_64!(ops, shr, *rd, *imm);
             Ok(())
         }
         X86Instruction::Sar { rd, imm } => {
-            let rd = reg_index(*rd)?;
-            let count = shift_count_imm8(*imm)?;
-            dynasm!(ops ; .arch x64 ; sar Rq(rd), BYTE count);
+            emit_shift_64!(ops, sar, *rd, *imm);
             Ok(())
         }
         X86Instruction::Rol { rd, imm } => {
-            let rd = reg_index(*rd)?;
-            let count = shift_count_imm8(*imm)?;
-            dynasm!(ops ; .arch x64 ; rol Rq(rd), BYTE count);
+            emit_shift_64!(ops, rol, *rd, *imm);
             Ok(())
         }
         X86Instruction::Ror { rd, imm } => {
-            let rd = reg_index(*rd)?;
-            let count = shift_count_imm8(*imm)?;
-            dynasm!(ops ; .arch x64 ; ror Rq(rd), BYTE count);
+            emit_shift_64!(ops, ror, *rd, *imm);
             Ok(())
         }
         X86Instruction::ImulReg { rd, rs } => {
+            validate_register_pair(*rd, *rs, 64)?;
+            let view = rd.view();
             let rd = reg_index(*rd)?;
             let rs = reg_index(*rs)?;
-            dynasm!(ops ; .arch x64 ; imul Rq(rd), Rq(rs));
+            match view {
+                X86RegisterView::Native => dynasm!(ops ; .arch x64 ; imul Rq(rd), Rq(rs)),
+                X86RegisterView::Dword => dynasm!(ops ; .arch x64 ; imul Rd(rd), Rd(rs)),
+                X86RegisterView::Word => dynasm!(ops ; .arch x64 ; imul Rw(rd), Rw(rs)),
+                X86RegisterView::LowByte | X86RegisterView::HighByte => {
+                    return Err("IMUL has no byte-register form".to_string());
+                }
+            }
             Ok(())
         }
         X86Instruction::ImulRegImm { rd, rs, imm } => {
+            validate_register_pair(*rd, *rs, 64)?;
+            let view = rd.view();
             let rd = reg_index(*rd)?;
             let rs = reg_index(*rs)?;
-            let imm = signed_imm_i32(*imm)?;
-            dynasm!(ops ; .arch x64 ; imul Rq(rd), Rq(rs), imm);
+            match view {
+                X86RegisterView::Native => {
+                    let imm = signed_imm_i32(*imm)?;
+                    dynasm!(ops ; .arch x64 ; imul Rq(rd), Rq(rs), imm);
+                }
+                X86RegisterView::Dword => {
+                    // The 3-operand IMUL immediate is a 32-bit field, so a
+                    // canonical bit pattern (e.g. 0xffffffff == -1) is a legal
+                    // dword encoding; match the encodability filter and the
+                    // sibling dword arithmetic encoders rather than the
+                    // signed-only helper used by the sign-extended 64-bit form.
+                    let imm = imm32_bitpattern_i32(*imm)?;
+                    dynasm!(ops ; .arch x64 ; imul Rd(rd), Rd(rs), imm);
+                }
+                X86RegisterView::Word => {
+                    let imm = imm16_bitpattern_i16(*imm)?;
+                    dynasm!(ops ; .arch x64 ; imul Rw(rd), Rw(rs), WORD imm);
+                }
+                X86RegisterView::LowByte | X86RegisterView::HighByte => {
+                    return Err("IMUL has no byte-register form".to_string());
+                }
+            }
             Ok(())
         }
         X86Instruction::Lea { rd, base, disp } => {
+            if base.view() != X86RegisterView::Native {
+                return Err(format!(
+                    "64-bit LEA address base must be a native register, got {}",
+                    base
+                ));
+            }
+            let view = rd.view();
             let rd = reg_index(*rd)?;
             let base = reg_index(*base)?;
             let disp = signed_imm_i32(*disp)?;
-            dynasm!(ops ; .arch x64 ; lea Rq(rd), [Rq(base) + disp]);
+            match view {
+                X86RegisterView::Native => {
+                    dynasm!(ops ; .arch x64 ; lea Rq(rd), [Rq(base) + disp])
+                }
+                X86RegisterView::Dword => {
+                    dynasm!(ops ; .arch x64 ; lea Rd(rd), [Rq(base) + disp])
+                }
+                X86RegisterView::Word => {
+                    dynasm!(ops ; .arch x64 ; lea Rw(rd), [Rq(base) + disp])
+                }
+                X86RegisterView::LowByte | X86RegisterView::HighByte => {
+                    return Err("LEA has no byte-register destination".to_string());
+                }
+            }
             Ok(())
         }
         X86Instruction::Cmov { rd, rs, cond } => {
+            validate_register_pair(*rd, *rs, 64)?;
+            let view = rd.view();
             let rd = reg_index(*rd)?;
             let rs = reg_index(*rs)?;
-            match cond {
-                X86Condition::E => dynasm!(ops ; .arch x64 ; cmove Rq(rd), Rq(rs)),
-                X86Condition::NE => dynasm!(ops ; .arch x64 ; cmovne Rq(rd), Rq(rs)),
-                X86Condition::B => dynasm!(ops ; .arch x64 ; cmovb Rq(rd), Rq(rs)),
-                X86Condition::AE => dynasm!(ops ; .arch x64 ; cmovae Rq(rd), Rq(rs)),
-                X86Condition::BE => dynasm!(ops ; .arch x64 ; cmovbe Rq(rd), Rq(rs)),
-                X86Condition::A => dynasm!(ops ; .arch x64 ; cmova Rq(rd), Rq(rs)),
-                X86Condition::L => dynasm!(ops ; .arch x64 ; cmovl Rq(rd), Rq(rs)),
-                X86Condition::GE => dynasm!(ops ; .arch x64 ; cmovge Rq(rd), Rq(rs)),
-                X86Condition::LE => dynasm!(ops ; .arch x64 ; cmovle Rq(rd), Rq(rs)),
-                X86Condition::G => dynasm!(ops ; .arch x64 ; cmovg Rq(rd), Rq(rs)),
-                X86Condition::S => dynasm!(ops ; .arch x64 ; cmovs Rq(rd), Rq(rs)),
-                X86Condition::NS => dynasm!(ops ; .arch x64 ; cmovns Rq(rd), Rq(rs)),
-                X86Condition::O => dynasm!(ops ; .arch x64 ; cmovo Rq(rd), Rq(rs)),
-                X86Condition::NO => dynasm!(ops ; .arch x64 ; cmovno Rq(rd), Rq(rs)),
-                X86Condition::P => dynasm!(ops ; .arch x64 ; cmovp Rq(rd), Rq(rs)),
-                X86Condition::NP => dynasm!(ops ; .arch x64 ; cmovnp Rq(rd), Rq(rs)),
+            match view {
+                X86RegisterView::Native => {
+                    emit_cmov_64_for_family!(ops, cond, Rq, rd, rs)
+                }
+                X86RegisterView::Dword => {
+                    emit_cmov_64_for_family!(ops, cond, Rd, rd, rs)
+                }
+                X86RegisterView::Word => {
+                    emit_cmov_64_for_family!(ops, cond, Rw, rd, rs)
+                }
+                X86RegisterView::LowByte | X86RegisterView::HighByte => {
+                    return Err("CMOV has no byte-register form".to_string());
+                }
             }
             Ok(())
         }
@@ -419,21 +774,30 @@ fn imm32_bitpattern_i32(imm: i64) -> Result<i32, String> {
         .map_err(|_| format!("immediate {} does not fit in 32 bits", imm))
 }
 
+fn imm16_bitpattern_i16(imm: i64) -> Result<i16, String> {
+    i16::try_from(imm)
+        .or_else(|_| u16::try_from(imm).map(|imm| imm as i16))
+        .map_err(|_| format!("immediate {} does not fit in 16 bits", imm))
+}
+
+fn imm8_bitpattern_i8(imm: i64) -> Result<i8, String> {
+    i8::try_from(imm)
+        .or_else(|_| u8::try_from(imm).map(|imm| imm as i8))
+        .map_err(|_| format!("immediate {} does not fit in 8 bits", imm))
+}
+
 fn encode_32(ops: &mut dynasmrt::x86::Assembler, instr: &X86Instruction) -> Result<(), String> {
     match instr {
         X86Instruction::MovReg { rd, rs } => {
-            let rd = reg_index_32(*rd)?;
-            let rs = reg_index_32(*rs)?;
-            dynasm!(ops ; .arch x86 ; mov Rd(rd), Rd(rs));
+            emit_reg_reg_32!(ops, mov, *rd, *rs);
             Ok(())
         }
         X86Instruction::MovImm { rd, imm } => {
-            let rd = reg_index_32(*rd)?;
-            let imm = imm32_bitpattern_i32(*imm)?;
-            dynasm!(ops ; .arch x86 ; mov Rd(rd), imm);
+            emit_reg_imm_32!(ops, mov, *rd, *imm);
             Ok(())
         }
         X86Instruction::Movzx { rd, rs, src_width } => {
+            validate_extension_move_registers(*rd, *rs, 32)?;
             let rd = reg_index_32(*rd)?;
             let source = *rs;
             let rs = reg_index_32(*rs)?;
@@ -451,6 +815,7 @@ fn encode_32(ops: &mut dynasmrt::x86::Assembler, instr: &X86Instruction) -> Resu
             Ok(())
         }
         X86Instruction::Movsx { rd, rs, src_width } => {
+            validate_extension_move_registers(*rd, *rs, 32)?;
             let rd = reg_index_32(*rd)?;
             let source = *rs;
             let rs = reg_index_32(*rs)?;
@@ -468,179 +833,175 @@ fn encode_32(ops: &mut dynasmrt::x86::Assembler, instr: &X86Instruction) -> Resu
             Ok(())
         }
         X86Instruction::AddReg { rd, rs } => {
-            let rd = reg_index_32(*rd)?;
-            let rs = reg_index_32(*rs)?;
-            dynasm!(ops ; .arch x86 ; add Rd(rd), Rd(rs));
+            emit_reg_reg_32!(ops, add, *rd, *rs);
             Ok(())
         }
         X86Instruction::AddImm { rd, imm } => {
-            let rd = reg_index_32(*rd)?;
-            let imm = imm32_bitpattern_i32(*imm)?;
-            dynasm!(ops ; .arch x86 ; add Rd(rd), imm);
+            emit_reg_imm_32!(ops, add, *rd, *imm);
             Ok(())
         }
         X86Instruction::SubReg { rd, rs } => {
-            let rd = reg_index_32(*rd)?;
-            let rs = reg_index_32(*rs)?;
-            dynasm!(ops ; .arch x86 ; sub Rd(rd), Rd(rs));
+            emit_reg_reg_32!(ops, sub, *rd, *rs);
             Ok(())
         }
         X86Instruction::SubImm { rd, imm } => {
-            let rd = reg_index_32(*rd)?;
-            let imm = imm32_bitpattern_i32(*imm)?;
-            dynasm!(ops ; .arch x86 ; sub Rd(rd), imm);
+            emit_reg_imm_32!(ops, sub, *rd, *imm);
             Ok(())
         }
         X86Instruction::AndReg { rd, rs } => {
-            let rd = reg_index_32(*rd)?;
-            let rs = reg_index_32(*rs)?;
-            dynasm!(ops ; .arch x86 ; and Rd(rd), Rd(rs));
+            emit_reg_reg_32!(ops, and, *rd, *rs);
             Ok(())
         }
         X86Instruction::AndImm { rd, imm } => {
-            let rd = reg_index_32(*rd)?;
-            let imm = imm32_bitpattern_i32(*imm)?;
-            dynasm!(ops ; .arch x86 ; and Rd(rd), imm);
+            emit_reg_imm_32!(ops, and, *rd, *imm);
             Ok(())
         }
         X86Instruction::OrReg { rd, rs } => {
-            let rd = reg_index_32(*rd)?;
-            let rs = reg_index_32(*rs)?;
-            dynasm!(ops ; .arch x86 ; or Rd(rd), Rd(rs));
+            emit_reg_reg_32!(ops, or, *rd, *rs);
             Ok(())
         }
         X86Instruction::OrImm { rd, imm } => {
-            let rd = reg_index_32(*rd)?;
-            let imm = imm32_bitpattern_i32(*imm)?;
-            dynasm!(ops ; .arch x86 ; or Rd(rd), imm);
+            emit_reg_imm_32!(ops, or, *rd, *imm);
             Ok(())
         }
         X86Instruction::XorReg { rd, rs } => {
-            let rd = reg_index_32(*rd)?;
-            let rs = reg_index_32(*rs)?;
-            dynasm!(ops ; .arch x86 ; xor Rd(rd), Rd(rs));
+            emit_reg_reg_32!(ops, xor, *rd, *rs);
             Ok(())
         }
         X86Instruction::XorImm { rd, imm } => {
-            let rd = reg_index_32(*rd)?;
-            let imm = imm32_bitpattern_i32(*imm)?;
-            dynasm!(ops ; .arch x86 ; xor Rd(rd), imm);
+            emit_reg_imm_32!(ops, xor, *rd, *imm);
             Ok(())
         }
         X86Instruction::CmpReg { rn, rs } => {
-            let rn = reg_index_32(*rn)?;
-            let rs = reg_index_32(*rs)?;
-            dynasm!(ops ; .arch x86 ; cmp Rd(rn), Rd(rs));
+            emit_reg_reg_32!(ops, cmp, *rn, *rs);
             Ok(())
         }
         X86Instruction::CmpImm { rn, imm } => {
-            let rn = reg_index_32(*rn)?;
-            let imm = imm32_bitpattern_i32(*imm)?;
-            dynasm!(ops ; .arch x86 ; cmp Rd(rn), imm);
+            emit_reg_imm_32!(ops, cmp, *rn, *imm);
             Ok(())
         }
         X86Instruction::TestReg { rn, rs } => {
-            let rn = reg_index_32(*rn)?;
-            let rs = reg_index_32(*rs)?;
-            dynasm!(ops ; .arch x86 ; test Rd(rn), Rd(rs));
+            emit_reg_reg_32!(ops, test, *rn, *rs);
             Ok(())
         }
         X86Instruction::TestImm { rn, imm } => {
-            let rn = reg_index_32(*rn)?;
-            let imm = imm32_bitpattern_i32(*imm)?;
-            dynasm!(ops ; .arch x86 ; test Rd(rn), imm);
+            emit_reg_imm_32!(ops, test, *rn, *imm);
             Ok(())
         }
         X86Instruction::Neg { rd } => {
-            let rd = reg_index_32(*rd)?;
-            dynasm!(ops ; .arch x86 ; neg Rd(rd));
+            emit_unary_32!(ops, neg, *rd);
             Ok(())
         }
         X86Instruction::Not { rd } => {
-            let rd = reg_index_32(*rd)?;
-            dynasm!(ops ; .arch x86 ; not Rd(rd));
+            emit_unary_32!(ops, not, *rd);
             Ok(())
         }
         X86Instruction::Inc { rd } => {
-            let rd = reg_index_32(*rd)?;
-            dynasm!(ops ; .arch x86 ; inc Rd(rd));
+            emit_unary_32!(ops, inc, *rd);
             Ok(())
         }
         X86Instruction::Dec { rd } => {
-            let rd = reg_index_32(*rd)?;
-            dynasm!(ops ; .arch x86 ; dec Rd(rd));
+            emit_unary_32!(ops, dec, *rd);
             Ok(())
         }
         X86Instruction::Shl { rd, imm } => {
-            let rd = reg_index_32(*rd)?;
-            let count = shift_count_imm8(*imm)?;
-            dynasm!(ops ; .arch x86 ; shl Rd(rd), BYTE count);
+            emit_shift_32!(ops, shl, *rd, *imm);
             Ok(())
         }
         X86Instruction::Shr { rd, imm } => {
-            let rd = reg_index_32(*rd)?;
-            let count = shift_count_imm8(*imm)?;
-            dynasm!(ops ; .arch x86 ; shr Rd(rd), BYTE count);
+            emit_shift_32!(ops, shr, *rd, *imm);
             Ok(())
         }
         X86Instruction::Sar { rd, imm } => {
-            let rd = reg_index_32(*rd)?;
-            let count = shift_count_imm8(*imm)?;
-            dynasm!(ops ; .arch x86 ; sar Rd(rd), BYTE count);
+            emit_shift_32!(ops, sar, *rd, *imm);
             Ok(())
         }
         X86Instruction::Rol { rd, imm } => {
-            let rd = reg_index_32(*rd)?;
-            let count = shift_count_imm8(*imm)?;
-            dynasm!(ops ; .arch x86 ; rol Rd(rd), BYTE count);
+            emit_shift_32!(ops, rol, *rd, *imm);
             Ok(())
         }
         X86Instruction::Ror { rd, imm } => {
-            let rd = reg_index_32(*rd)?;
-            let count = shift_count_imm8(*imm)?;
-            dynasm!(ops ; .arch x86 ; ror Rd(rd), BYTE count);
+            emit_shift_32!(ops, ror, *rd, *imm);
             Ok(())
         }
         X86Instruction::ImulReg { rd, rs } => {
+            validate_register_pair(*rd, *rs, 32)?;
+            let view = rd.view();
             let rd = reg_index_32(*rd)?;
             let rs = reg_index_32(*rs)?;
-            dynasm!(ops ; .arch x86 ; imul Rd(rd), Rd(rs));
+            match view {
+                X86RegisterView::Native | X86RegisterView::Dword => {
+                    dynasm!(ops ; .arch x86 ; imul Rd(rd), Rd(rs))
+                }
+                X86RegisterView::Word => dynasm!(ops ; .arch x86 ; imul Rw(rd), Rw(rs)),
+                X86RegisterView::LowByte | X86RegisterView::HighByte => {
+                    return Err("IMUL has no byte-register form".to_string());
+                }
+            }
             Ok(())
         }
         X86Instruction::ImulRegImm { rd, rs, imm } => {
+            validate_register_pair(*rd, *rs, 32)?;
+            let view = rd.view();
             let rd = reg_index_32(*rd)?;
             let rs = reg_index_32(*rs)?;
-            let imm = signed_imm_i32(*imm)?;
-            dynasm!(ops ; .arch x86 ; imul Rd(rd), Rd(rs), imm);
+            match view {
+                X86RegisterView::Native | X86RegisterView::Dword => {
+                    // x86-32 operands are 32-bit, so the IMUL immediate is a
+                    // 32-bit field that admits any canonical bit pattern
+                    // (0xffffffff == -1), matching the encodability filter.
+                    let imm = imm32_bitpattern_i32(*imm)?;
+                    dynasm!(ops ; .arch x86 ; imul Rd(rd), Rd(rs), imm);
+                }
+                X86RegisterView::Word => {
+                    let imm = imm16_bitpattern_i16(*imm)?;
+                    dynasm!(ops ; .arch x86 ; imul Rw(rd), Rw(rs), WORD imm);
+                }
+                X86RegisterView::LowByte | X86RegisterView::HighByte => {
+                    return Err("IMUL has no byte-register form".to_string());
+                }
+            }
             Ok(())
         }
         X86Instruction::Lea { rd, base, disp } => {
+            if base.effective_width(32) != 32 {
+                return Err(format!(
+                    "32-bit LEA address base must be a 32-bit register, got {}",
+                    base
+                ));
+            }
+            let view = rd.view();
             let rd = reg_index_32(*rd)?;
             let base = reg_index_32(*base)?;
             let disp = signed_imm_i32(*disp)?;
-            dynasm!(ops ; .arch x86 ; lea Rd(rd), [Rd(base) + disp]);
+            match view {
+                X86RegisterView::Native | X86RegisterView::Dword => {
+                    dynasm!(ops ; .arch x86 ; lea Rd(rd), [Rd(base) + disp])
+                }
+                X86RegisterView::Word => {
+                    dynasm!(ops ; .arch x86 ; lea Rw(rd), [Rd(base) + disp])
+                }
+                X86RegisterView::LowByte | X86RegisterView::HighByte => {
+                    return Err("LEA has no byte-register destination".to_string());
+                }
+            }
             Ok(())
         }
         X86Instruction::Cmov { rd, rs, cond } => {
+            validate_register_pair(*rd, *rs, 32)?;
+            let view = rd.view();
             let rd = reg_index_32(*rd)?;
             let rs = reg_index_32(*rs)?;
-            match cond {
-                X86Condition::E => dynasm!(ops ; .arch x86 ; cmove Rd(rd), Rd(rs)),
-                X86Condition::NE => dynasm!(ops ; .arch x86 ; cmovne Rd(rd), Rd(rs)),
-                X86Condition::B => dynasm!(ops ; .arch x86 ; cmovb Rd(rd), Rd(rs)),
-                X86Condition::AE => dynasm!(ops ; .arch x86 ; cmovae Rd(rd), Rd(rs)),
-                X86Condition::BE => dynasm!(ops ; .arch x86 ; cmovbe Rd(rd), Rd(rs)),
-                X86Condition::A => dynasm!(ops ; .arch x86 ; cmova Rd(rd), Rd(rs)),
-                X86Condition::L => dynasm!(ops ; .arch x86 ; cmovl Rd(rd), Rd(rs)),
-                X86Condition::GE => dynasm!(ops ; .arch x86 ; cmovge Rd(rd), Rd(rs)),
-                X86Condition::LE => dynasm!(ops ; .arch x86 ; cmovle Rd(rd), Rd(rs)),
-                X86Condition::G => dynasm!(ops ; .arch x86 ; cmovg Rd(rd), Rd(rs)),
-                X86Condition::S => dynasm!(ops ; .arch x86 ; cmovs Rd(rd), Rd(rs)),
-                X86Condition::NS => dynasm!(ops ; .arch x86 ; cmovns Rd(rd), Rd(rs)),
-                X86Condition::O => dynasm!(ops ; .arch x86 ; cmovo Rd(rd), Rd(rs)),
-                X86Condition::NO => dynasm!(ops ; .arch x86 ; cmovno Rd(rd), Rd(rs)),
-                X86Condition::P => dynasm!(ops ; .arch x86 ; cmovp Rd(rd), Rd(rs)),
-                X86Condition::NP => dynasm!(ops ; .arch x86 ; cmovnp Rd(rd), Rd(rs)),
+            match view {
+                X86RegisterView::Native | X86RegisterView::Dword => {
+                    emit_cmov_32_for_family!(ops, cond, Rd, rd, rs)
+                }
+                X86RegisterView::Word => {
+                    emit_cmov_32_for_family!(ops, cond, Rw, rd, rs)
+                }
+                X86RegisterView::LowByte | X86RegisterView::HighByte => {
+                    return Err("CMOV has no byte-register form".to_string());
+                }
             }
             Ok(())
         }
@@ -801,6 +1162,32 @@ mod tests {
     }
 
     #[test]
+    fn extension_moves_reject_view_carrying_registers() {
+        for instruction in [
+            X86Instruction::Movzx {
+                rd: X86Register::EAX,
+                rs: X86Register::RBX,
+                src_width: 8,
+            },
+            X86Instruction::Movsx {
+                rd: X86Register::RAX,
+                rs: X86Register::BL,
+                src_width: 8,
+            },
+        ] {
+            let error_64 = X86Assembler::new_64()
+                .assemble_instructions(&[instruction])
+                .expect_err("x86-64 extension move should require canonical registers");
+            assert!(error_64.contains("requires canonical registers"));
+
+            let error_32 = X86Assembler::new_32()
+                .assemble_instructions(&[instruction])
+                .expect_err("x86-32 extension move should require canonical registers");
+            assert!(error_32.contains("requires canonical registers"));
+        }
+    }
+
+    #[test]
     fn movzx_movsx_round_trip_32_bit_sources() {
         let instructions = [
             X86Instruction::Movzx {
@@ -909,6 +1296,129 @@ mod tests {
                 disasm[0].1
             );
         }
+    }
+
+    #[test]
+    fn x86_64_emits_each_rax_register_view() {
+        for (reg, spelling) in [
+            (X86Register::EAX, "eax"),
+            (X86Register::AX, "ax"),
+            (X86Register::AL, "al"),
+            (X86Register::AH, "ah"),
+        ] {
+            check_x86_64(
+                X86Instruction::MovImm { rd: reg, imm: 1 },
+                "mov",
+                &[spelling, "1"],
+            );
+        }
+        check_x86_64(
+            X86Instruction::XorReg {
+                rd: X86Register::EAX,
+                rs: X86Register::EBX,
+            },
+            "xor",
+            &["eax", "ebx"],
+        );
+    }
+
+    #[test]
+    fn x86_64_round_trips_mixed_legacy_byte_views() {
+        for (instruction, mnemonic) in [
+            (
+                X86Instruction::MovReg {
+                    rd: X86Register::AH,
+                    rs: X86Register::BL,
+                },
+                "mov",
+            ),
+            (
+                X86Instruction::AddReg {
+                    rd: X86Register::AH,
+                    rs: X86Register::BL,
+                },
+                "add",
+            ),
+            (
+                X86Instruction::SubReg {
+                    rd: X86Register::AH,
+                    rs: X86Register::BL,
+                },
+                "sub",
+            ),
+            (
+                X86Instruction::AndReg {
+                    rd: X86Register::AH,
+                    rs: X86Register::BL,
+                },
+                "and",
+            ),
+            (
+                X86Instruction::OrReg {
+                    rd: X86Register::AH,
+                    rs: X86Register::BL,
+                },
+                "or",
+            ),
+            (
+                X86Instruction::XorReg {
+                    rd: X86Register::AH,
+                    rs: X86Register::BL,
+                },
+                "xor",
+            ),
+            (
+                X86Instruction::CmpReg {
+                    rn: X86Register::AH,
+                    rs: X86Register::BL,
+                },
+                "cmp",
+            ),
+            (
+                X86Instruction::TestReg {
+                    rn: X86Register::AH,
+                    rs: X86Register::BL,
+                },
+                "test",
+            ),
+        ] {
+            check_x86_64(instruction, mnemonic, &["ah", "bl"]);
+        }
+        check_x86_64(
+            X86Instruction::MovReg {
+                rd: X86Register::AL,
+                rs: X86Register::BH,
+            },
+            "mov",
+            &["al", "bh"],
+        );
+    }
+
+    #[test]
+    fn x86_32_emits_word_and_byte_register_views() {
+        for (reg, spelling) in [
+            (X86Register::AX, "ax"),
+            (X86Register::AL, "al"),
+            (X86Register::AH, "ah"),
+        ] {
+            check_x86_32(
+                X86Instruction::MovImm { rd: reg, imm: 1 },
+                "mov",
+                &[spelling, "1"],
+            );
+        }
+    }
+
+    #[test]
+    fn x86_64_rejects_high_byte_when_rex_is_required() {
+        let mut asm = X86Assembler::new_64();
+        let err = asm
+            .assemble_instructions(&[X86Instruction::MovReg {
+                rd: X86Register::AH,
+                rs: X86Register::SPL,
+            }])
+            .expect_err("AH cannot be encoded in an instruction requiring REX");
+        assert!(err.contains("high-byte"), "unexpected error: {err}");
     }
 
     #[test]
@@ -1531,6 +2041,104 @@ mod tests {
             "cmp",
             &["eax", "0xffffffff"],
         );
+    }
+
+    #[test]
+    fn imul_32_bit_operands_accept_canonical_imm32_bitpatterns() {
+        let can_assemble =
+            |mode, instruction: &X86Instruction| match mode {
+                X86Mode::Mode64 => <crate::isa::x86::X86_64 as crate::isa::Assembler<
+                    X86Instruction,
+                >>::can_assemble(
+                    &crate::isa::x86::X86_64, instruction
+                ),
+                X86Mode::Mode32 => <crate::isa::x86::X86_32 as crate::isa::Assembler<
+                    X86Instruction,
+                >>::can_assemble(
+                    &crate::isa::x86::X86_32, instruction
+                ),
+            };
+        let assemble = |mode, instruction| {
+            match mode {
+                X86Mode::Mode64 => X86Assembler::new_64(),
+                X86Mode::Mode32 => X86Assembler::new_32(),
+            }
+            .assemble_instructions(&[instruction])
+        };
+
+        let canonical_u32_max = i64::from(u32::MAX);
+        let accepted = [
+            (
+                "x86-64 dword",
+                X86Mode::Mode64,
+                X86Register::EAX,
+                X86Register::EBX,
+            ),
+            (
+                "x86-32 native",
+                X86Mode::Mode32,
+                X86Register::RAX,
+                X86Register::RBX,
+            ),
+        ];
+        for (description, mode, rd, rs) in accepted {
+            let unsigned = X86Instruction::ImulRegImm {
+                rd,
+                rs,
+                imm: canonical_u32_max,
+            };
+            assert!(
+                can_assemble(mode, &unsigned),
+                "{description}: prefilter rejected a canonical imm32 bit pattern"
+            );
+            let unsigned_bytes = assemble(mode, unsigned)
+                .unwrap_or_else(|error| panic!("{description}: encoding failed: {error}"));
+            let signed_bytes = assemble(mode, X86Instruction::ImulRegImm { rd, rs, imm: -1 })
+                .unwrap_or_else(|error| panic!("{description}: signed encoding failed: {error}"));
+            assert_eq!(
+                unsigned_bytes, signed_bytes,
+                "{description}: equivalent imm32 spellings encoded differently"
+            );
+        }
+
+        let above_u32_max = canonical_u32_max + 1;
+        let rejected = [
+            (
+                "x86-64 native IMUL cannot encode positive u32::MAX",
+                X86Mode::Mode64,
+                X86Instruction::ImulRegImm {
+                    rd: X86Register::RAX,
+                    rs: X86Register::RBX,
+                    imm: canonical_u32_max,
+                },
+            ),
+            (
+                "x86-64 dword IMUL rejects values above u32::MAX",
+                X86Mode::Mode64,
+                X86Instruction::ImulRegImm {
+                    rd: X86Register::EAX,
+                    rs: X86Register::EBX,
+                    imm: above_u32_max,
+                },
+            ),
+            (
+                "x86-32 native IMUL rejects values above u32::MAX",
+                X86Mode::Mode32,
+                X86Instruction::ImulRegImm {
+                    rd: X86Register::RAX,
+                    rs: X86Register::RBX,
+                    imm: above_u32_max,
+                },
+            ),
+        ];
+        for (description, mode, instruction) in rejected {
+            assert!(
+                !can_assemble(mode, &instruction),
+                "{description}: prefilter accepted it"
+            );
+            let encoded = assemble(mode, instruction);
+            assert!(encoded.is_err(), "{description}: encoder accepted it");
+        }
     }
 
     #[test]

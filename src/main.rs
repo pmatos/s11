@@ -660,13 +660,13 @@ trait ElfOptimizationBackend {
         optimization_context_for_backend(self.arch(), patcher, section, end_addr, cs)
     }
 
-    /// Run the selected search. `capstone_instructions` preserves source
-    /// operand spelling for backends whose IR collapses aliases; backends
-    /// that do not need that syntax metadata can ignore it.
+    /// Run the selected search. `capstone_instructions` preserves the original
+    /// instruction bytes for backends that need encoding metadata; backends
+    /// that do not need it can ignore the argument.
     fn run_search(
         &self,
         ir: &[Self::Instruction],
-        capstone_instructions: &capstone::Instructions,
+        _capstone_instructions: &capstone::Instructions,
         options: &OptimizationOptions,
         context: OptimizationContext,
     ) -> Result<Option<Vec<Self::Instruction>>, Box<dyn std::error::Error>>;
@@ -934,9 +934,6 @@ impl ElfOptimizationBackend for X86OptimizationBackend {
         // the linear fall-through successor, so a held-fixed terminator (the
         // trailing Jcc, with its unscanned branch-taken target) vetoes
         // narrowing. We leave `downstream_live_regs` Unknown in that case.
-        // x86 narrowing is additionally inert today (#75 — no operand width),
-        // but the gate is applied for consistency and future-safety once #75
-        // turns the kill rule on.
         let has_terminator = ir.last().is_some_and(|i| i.is_terminator());
         let downstream_live_regs = if has_terminator {
             DownstreamLiveRegs::Unknown
@@ -968,7 +965,7 @@ impl ElfOptimizationBackend for X86OptimizationBackend {
     fn run_search(
         &self,
         ir: &[Self::Instruction],
-        capstone_instructions: &capstone::Instructions,
+        _capstone_instructions: &capstone::Instructions,
         options: &OptimizationOptions,
         context: OptimizationContext,
     ) -> Result<Option<Vec<Self::Instruction>>, Box<dyn std::error::Error>> {
@@ -998,10 +995,7 @@ impl ElfOptimizationBackend for X86OptimizationBackend {
                 options,
                 context.downstream_flags_live,
                 downstream_live.as_ref(),
-                x86_capstone_window_uses_only_full_width_register_operands(
-                    capstone_instructions,
-                    width,
-                ),
+                true,
             ),
             Algorithm::Hybrid | Algorithm::Llm => {
                 // Rejected upstream at the CLI layer; defensive check here
@@ -1631,9 +1625,9 @@ fn build_x86_stochastic_search_config(
 fn build_x86_symbolic_search_config(
     target: &[isa::x86::X86Instruction],
     options: &OptimizationOptions,
-    // Binary-patching guard: direct IR callers can allow same-count CodeSize
-    // search, but the ELF frontend disables it when Capstone exposed
-    // partial-register operands that the x86 IR cannot model.
+    // Kept as a search-policy input for callers that intentionally disable
+    // same-count rewrites. The ELF frontend passes true because register views
+    // are represented precisely throughout the x86 pipeline.
     same_count_code_size_allowed: bool,
 ) -> SearchConfig {
     let symbolic_config = SymbolicConfig::default().with_search_mode(options.search_mode);
@@ -2367,19 +2361,13 @@ fn x86_downstream_flags_live_from_section(
 /// Compute the subset of `candidates` (registers an x86 window writes) that are
 /// provably *live* downstream, given the fall-through bytes that follow.
 ///
-/// Structurally identical to the AArch64 register scan, but the kill rule is
-/// intentionally weaker to stay sound under issue #75 (the x86 IR has no
-/// operand width). `x86_reg_downstream_liveness` therefore *never* reports a
-/// write as a full overwrite, so the only way a candidate leaves the live set
-/// is — there is no such way today. In practice every candidate stays live:
-/// either an instruction reads it (`Read`), or the scan reaches an
-/// uncertainty (unsupported instruction — which includes `call`/`ret`, since
-/// neither is modelled in the x86 IR and `x86_ir_from_mnemonic` returns
-/// `Ok(None)` for them — a terminator, a disasm failure, or the end of the
-/// in-region suffix), all of which pin the remaining candidates live. This is
-/// the vacuously-safe behaviour the issue calls for; when #75 lands and
-/// `x86_destination_fully_kills` learns real widths, the narrowing turns on
-/// without weakening the contract.
+/// Structurally identical to the AArch64 register scan. The x86 kill rule
+/// distinguishes full architectural writes (native or dword) from word and
+/// byte writes that preserve surrounding bits. An instruction that reads a
+/// candidate first keeps it live; an unsupported instruction — including
+/// `call`/`ret`, since neither is modelled in the x86 IR — a terminator, a
+/// disassembly failure, or the end of the in-region suffix conservatively
+/// pins every unresolved candidate live.
 ///
 /// Unlike the flags scan, this needs no ISA-marker type parameter: register
 /// reads/kills are width-independent in the shared x86 IR, and the `cs`
@@ -2490,10 +2478,7 @@ fn validate_basic_block(ir: &[Instruction]) -> Result<(), String> {
 // (`convert_to_x86_ir`) and the length-1 enumerator used by the
 // enumerative x86 pipeline.
 
-use parser::x86::{
-    X86ParseMode, parse_x86_register_with_width, x86_ir_from_mnemonic,
-    x86_ir_from_mnemonic_for_mode,
-};
+use parser::x86::{X86ParseMode, x86_ir_from_mnemonic, x86_ir_from_mnemonic_for_mode};
 
 /// Reject any non-terminal Jcc in an x86 optimization window. The
 /// optimizer only special-cases a trailing Jcc (peeled by
@@ -2516,29 +2501,6 @@ fn validate_x86_window_terminator_placement(ir: &[isa::x86::X86Instruction]) -> 
         }
     }
     Ok(())
-}
-
-fn x86_capstone_window_uses_only_full_width_register_operands(
-    instructions: &capstone::Instructions,
-    width: u32,
-) -> bool {
-    instructions.iter().all(|instruction| {
-        instruction
-            .op_str()
-            .unwrap_or("")
-            .split(',')
-            .all(
-                |operand| match parse_x86_register_with_width(operand.trim()) {
-                    Ok((_reg, alias_width)) => alias_width == width,
-                    // Non-register syntax (immediates, memory operands,
-                    // unsupported forms) does not participate in this direct
-                    // register-width guard. Supported instructions naming an
-                    // unknown register such as `ah` are rejected by
-                    // `convert_to_x86_ir` before this helper is used.
-                    Err(_) => true,
-                },
-            )
-    })
 }
 
 fn convert_to_x86_ir(
@@ -2598,9 +2560,14 @@ fn convert_x86_capstone_op_for_optimization(
 /// introduce unrelated writable registers.
 fn x86_registers_from_target(target: &[isa::x86::X86Instruction]) -> Vec<isa::x86::X86Register> {
     let mut pool: Vec<isa::x86::X86Register> = Vec::new();
-    let referenced = target.iter().filter_map(|instr| instr.destination());
+    let referenced = target
+        .iter()
+        .filter_map(|instr| instr.destination_operand());
     for reg in referenced {
-        if matches!(reg, isa::x86::X86Register::RSP | isa::x86::X86Register::RBP) {
+        if matches!(
+            reg.canonical(),
+            isa::x86::X86Register::RSP | isa::x86::X86Register::RBP
+        ) {
             continue;
         }
         if !pool.contains(&reg) {
@@ -2644,11 +2611,6 @@ fn x86_enumerative_immediates_from_target(target: &[isa::x86::X86Instruction]) -
 /// registers (issue #621): when `downstream_live` is `Some(set)`, the
 /// window-written live-out set is narrowed to that proven-live subset;
 /// when `None` every written register stays live (the pre-#621 default).
-///
-/// Because the x86 register kill rule is intentionally inert under #75 (no
-/// operand width — see `validation::live_out::x86_reg_downstream_liveness`),
-/// the proven-live subset is, today, always the full window-written set. The
-/// narrowing wiring is in place so that #75 enables it with no further change.
 ///
 /// **Conditional/branch soundness gate (defense in depth).** Like the AArch64
 /// builder, register narrowing applies only when the window has no terminator:
@@ -4640,10 +4602,8 @@ mod cli_helper_tests {
 
     #[test]
     fn downstream_regs_live_scan_marks_dead_when_later_full_overwrite_precedes_any_read() {
-        // Window wrote RAX. Suffix `mov rax, rbx` fully overwrites rax before
-        // any read — RAX is dead/optimizable. (Driven via AArch64 because the
-        // x86 IR cannot prove a full overwrite under #75; see the x86 partial
-        // test below.)
+        // Window wrote X0. Suffix `mov x0, x1` fully overwrites x0 before any
+        // read, so X0 is dead/optimizable.
         let bytes = assemble_aarch64_test_bytes(&[Instruction::MovReg {
             rd: Register::X0,
             rn: Register::X1,
@@ -4729,15 +4689,11 @@ mod cli_helper_tests {
 
     #[test]
     fn x86_partial_write_does_not_kill() {
-        // Window wrote RAX. Suffix `mov rax, rbx` *looks* like a full
-        // overwrite, but the x86 IR carries no operand width (#75): it could be
-        // `mov eax/al, ...`, a partial write that leaves RAX's upper bits live.
-        // The scan must therefore NOT treat it as a kill — RAX stays live.
-        // This guard keeps the path sound when #75 lands and the kill rule is
-        // turned on for genuinely full-width forms.
-        let bytes = assemble_x86_64_test_bytes(&[X86Instruction::MovReg {
-            rd: X86Register::RAX,
-            rs: X86Register::RBX,
+        // Window wrote RAX. Suffix `mov al, 0` leaves the rest of RAX intact,
+        // so the downstream scan must not treat it as a full-register kill.
+        let bytes = assemble_x86_64_test_bytes(&[X86Instruction::MovImm {
+            rd: X86Register::AL,
+            imm: 0,
         }]);
         let cs = x86_64_test_capstone();
         let live = x86_downstream_regs_live_from_bytes(
@@ -4748,7 +4704,7 @@ mod cli_helper_tests {
         );
         assert!(
             live.contains(X86Register::RAX),
-            "x86 write must not be trusted as a full overwrite (#75) — RAX stays live"
+            "an AL write preserves upper RAX bits, so RAX stays live"
         );
     }
 
@@ -4883,60 +4839,21 @@ mod cli_helper_tests {
         ];
         for (aliases, reg) in cases {
             for alias in aliases {
-                assert_eq!(parse_x86_register(alias).unwrap(), reg);
+                assert_eq!(parse_x86_register(alias).unwrap().canonical(), reg);
             }
+        }
+        for (alias, expected) in [
+            ("ah", X86Register::AH),
+            ("ch", X86Register::CH),
+            ("dh", X86Register::DH),
+            ("bh", X86Register::BH),
+        ] {
+            assert_eq!(parse_x86_register(alias).unwrap(), expected);
         }
     }
 
-    fn x86_disassembled_operands_are_full_width_for_test(
-        bytes: &[u8],
-        mode: capstone::arch::x86::ArchMode,
-        width: u32,
-    ) -> bool {
-        let cs = Capstone::new()
-            .x86()
-            .mode(mode)
-            .syntax(capstone::arch::x86::ArchSyntax::Intel)
-            .build()
-            .unwrap();
-        let instructions = cs.disasm_all(bytes, 0x1000).unwrap();
-        x86_capstone_window_uses_only_full_width_register_operands(&instructions, width)
-    }
-
     #[test]
-    fn x86_full_width_operand_detector() {
-        let mode64 = capstone::arch::x86::ArchMode::Mode64;
-        let mode32 = capstone::arch::x86::ArchMode::Mode32;
-
-        assert!(!x86_disassembled_operands_are_full_width_for_test(
-            &[0x66, 0xb8, 0x00, 0x00],
-            mode64,
-            64
-        ));
-        assert!(!x86_disassembled_operands_are_full_width_for_test(
-            &[0xb0, 0x00],
-            mode64,
-            64
-        ));
-        assert!(!x86_disassembled_operands_are_full_width_for_test(
-            &[0xb8, 0x00, 0x00, 0x00, 0x00],
-            mode64,
-            64
-        ));
-        assert!(x86_disassembled_operands_are_full_width_for_test(
-            &[0x48, 0xc7, 0xc0, 0x00, 0x00, 0x00, 0x00],
-            mode64,
-            64
-        ));
-        assert!(x86_disassembled_operands_are_full_width_for_test(
-            &[0xb8, 0x00, 0x00, 0x00, 0x00],
-            mode32,
-            32
-        ));
-    }
-
-    #[test]
-    fn x86_64_capstone_bridge_rejects_non_mode_width_register_aliases() {
+    fn x86_64_capstone_bridge_retains_sub_register_aliases() {
         let cs = capstone::Capstone::new()
             .x86()
             .mode(capstone::arch::x86::ArchMode::Mode64)
@@ -4950,11 +4867,12 @@ mod cli_helper_tests {
         let insn = add_eax.iter().next().expect("one instruction");
         assert_eq!(insn.mnemonic(), Some("add"));
         assert_eq!(insn.op_str(), Some("eax, 0"));
-        let err = convert_to_x86_ir(&add_eax, parser::x86::X86ParseMode::Mode64)
-            .expect_err("x86-64 add eax, 0 must be rejected until width is modeled");
-        assert!(
-            err.contains("unsupported x86-64 register alias width"),
-            "unexpected error: {err}"
+        assert_eq!(
+            convert_to_x86_ir(&add_eax, parser::x86::X86ParseMode::Mode64).unwrap(),
+            vec![X86Instruction::AddImm {
+                rd: X86Register::EAX,
+                imm: 0,
+            }]
         );
 
         let mov_al = cs
@@ -4963,11 +4881,12 @@ mod cli_helper_tests {
         let insn = mov_al.iter().next().expect("one instruction");
         assert_eq!(insn.mnemonic(), Some("mov"));
         assert_eq!(insn.op_str(), Some("al, 0x7f"));
-        let err = convert_to_x86_ir(&mov_al, parser::x86::X86ParseMode::Mode64)
-            .expect_err("x86-64 mov al, imm must be rejected until width is modeled");
-        assert!(
-            err.contains("unsupported x86-64 register alias width"),
-            "unexpected error: {err}"
+        assert_eq!(
+            convert_to_x86_ir(&mov_al, parser::x86::X86ParseMode::Mode64).unwrap(),
+            vec![X86Instruction::MovImm {
+                rd: X86Register::AL,
+                imm: 0x7f,
+            }]
         );
     }
 
@@ -5008,10 +4927,30 @@ mod cli_helper_tests {
         assert_eq!(
             convert_to_x86_ir(&add_eax, parser::x86::X86ParseMode::Mode32).unwrap(),
             vec![X86Instruction::AddImm {
-                rd: X86Register::RAX,
+                rd: X86Register::EAX,
                 imm: 0,
             }]
         );
+    }
+
+    #[test]
+    fn x86_64_optimizer_accepts_narrow_register_aliases() {
+        let elf_bytes = build_minimal_elf64(
+            // Use the five-byte accumulator form so the two-instruction
+            // window has room for any cheaper one-instruction dword-immediate
+            // encoding that dynasm may choose.
+            &[0x05, 0x00, 0x00, 0x00, 0x00, 0x05, 0x00, 0x00, 0x00, 0x00],
+            0x1000,
+            elf::abi::EM_X86_64,
+        );
+        let input = TempFile::new_bytes("s11-x86-64-eax-alias", "elf", &elf_bytes);
+        let patcher = ElfPatcher::new(input.path()).expect("read synthetic ELF");
+        let mut opts = options_for(Algorithm::Enumerative);
+        opts.timeout = Some(Duration::from_secs(5));
+        opts.cost_metric = CostMetric::CodeSize;
+
+        optimize_elf_binary(&patcher, input.path(), 0x1000, 0x100a, &opts)
+            .expect("narrow register aliases should reach search");
     }
 
     #[test]
@@ -5032,6 +4971,24 @@ mod cli_helper_tests {
                 rs: X86Register::RBX,
                 src_width: 8,
             }]
+        );
+        let movzx_eax = cs64
+            .disasm_all(&[0x0f, 0xb6, 0xc3], 0x1000)
+            .expect("disassemble movzx eax, bl");
+        assert_eq!(
+            convert_to_x86_ir(&movzx_eax, parser::x86::X86ParseMode::Mode64).unwrap(),
+            vec![X86Instruction::Movzx {
+                rd: X86Register::RAX,
+                rs: X86Register::RBX,
+                src_width: 8,
+            }]
+        );
+        let movsx_eax = cs64
+            .disasm_all(&[0x0f, 0xbe, 0xc3], 0x1000)
+            .expect("disassemble movsx eax, bl");
+        assert!(
+            convert_to_x86_ir(&movsx_eax, parser::x86::X86ParseMode::Mode64).is_err(),
+            "MOVSX through EAX is not representable by the native-width extension IR"
         );
 
         let cs32 = capstone::Capstone::new()
@@ -5113,37 +5070,17 @@ mod cli_helper_tests {
     }
 
     #[test]
-    fn x86_64_optimizer_rejects_narrow_register_alias_before_search() {
-        let elf_bytes = build_minimal_elf64(
-            &[0x83, 0xc0, 0x00, 0x83, 0xc0, 0x00],
-            0x1000,
-            elf::abi::EM_X86_64,
-        );
-        let input = TempFile::new_bytes("s11-x86-64-eax-alias", "elf", &elf_bytes);
-        let patcher = ElfPatcher::new(input.path()).expect("read synthetic ELF");
-        let mut opts = options_for(Algorithm::Enumerative);
-        opts.timeout = Some(Duration::from_secs(5));
-        opts.cost_metric = CostMetric::CodeSize;
-
-        let err = optimize_elf_binary(&patcher, input.path(), 0x1000, 0x1006, &opts)
-            .expect_err("narrow register aliases should be rejected before search");
-        let msg = err.to_string();
-        assert!(
-            msg.contains("failed to parse x86 instruction 'add eax, 0'"),
-            "unexpected error: {msg}"
-        );
-        assert!(
-            msg.contains("unsupported x86-64 register alias width"),
-            "unexpected error: {msg}"
-        );
-    }
-
-    #[test]
     fn x86_helpers_cover_error_and_optimization_paths() {
         assert!(parse_x86_operand("not-an-operand").is_err());
         assert!(x86_ir_from_mnemonic("add", "rax").unwrap().is_none());
         assert!(x86_ir_from_mnemonic("add", "rax, nope").is_err());
-        assert!(x86_ir_from_mnemonic("mov", "ah, 0").is_err());
+        assert_eq!(
+            x86_ir_from_mnemonic("mov", "ah, 0").unwrap(),
+            Some(X86Instruction::MovImm {
+                rd: X86Register::AH,
+                imm: 0,
+            })
+        );
 
         let mut opts = options_for(Algorithm::Enumerative);
         opts.timeout = Some(Duration::from_secs(5));
@@ -5310,10 +5247,9 @@ mod cli_helper_tests {
         );
     }
 
-    /// x86 sibling of the conditional-terminator soundness gate. The x86 path
-    /// is inert under #75 today, but the gate must still hold so it stays sound
-    /// when #75 turns the kill rule on: a target ending in a Jcc must NOT narrow
-    /// even if the (future) proven-live set excludes a written register.
+    /// x86 sibling of the conditional-terminator soundness gate: a target
+    /// ending in a Jcc must not narrow even if the proven-live set excludes a
+    /// written register.
     #[test]
     fn x86_live_out_for_optimization_does_not_narrow_with_trailing_jcc() {
         use isa::x86::X86Condition;
@@ -5380,7 +5316,7 @@ mod cli_helper_tests {
 
         assert!(
             run_x86_symbolic(&target, 64, &opts, false, None, false).is_none(),
-            "the ELF frontend can disable same-count symbolic code-size rewrites when source operand widths are unsafe"
+            "a caller can explicitly disable same-count symbolic code-size rewrites"
         );
 
         assert!(
@@ -5390,7 +5326,7 @@ mod cli_helper_tests {
     }
 
     #[test]
-    fn x86_symbolic_backend_gates_same_count_code_size_from_capstone_operands() {
+    fn x86_symbolic_backend_preserves_capstone_register_views() {
         let backend = X86OptimizationBackend::new(X86Arch::X86_64);
         let cs = backend.disassembler().unwrap();
         let mut opts = options_for(Algorithm::Symbolic);
@@ -5402,25 +5338,32 @@ mod cli_helper_tests {
             downstream_live_regs: DownstreamLiveRegs::Unknown,
         };
 
-        // 66 b8 00 00 = mov ax, 0. The Capstone bridge now rejects
-        // partial-width register aliases outright, so a window whose
-        // source operands are not mode-width never reaches search and the
-        // binary-patching hazard the same-count gate guards against cannot
-        // occur through the ELF frontend.
+        // 66 b8 00 00 = mov ax, 0. The register view survives conversion.
         let partial_instructions = cs.disasm_all(&[0x66, 0xb8, 0x00, 0x00], 0x1000).unwrap();
-        assert!(
-            backend.convert_ir(&partial_instructions).is_err(),
-            "x86-64 conversion must reject a partial-width source operand"
+        assert_eq!(
+            backend.convert_ir(&partial_instructions).unwrap(),
+            vec![X86Instruction::MovImm {
+                rd: X86Register::AX,
+                imm: 0,
+            }]
         );
 
         // 66 83 e0 00 = and ax, 0; 74 00 = je +0. The partial-width AND in
-        // the rewritable prefix is likewise rejected before search.
+        // the rewritable prefix also remains precise before a pinned Jcc.
         let partial_with_jcc_instructions = cs
             .disasm_all(&[0x66, 0x83, 0xe0, 0x00, 0x74, 0x00], 0x1000)
             .unwrap();
-        assert!(
-            backend.convert_ir(&partial_with_jcc_instructions).is_err(),
-            "x86-64 conversion must reject a partial-width prefix before a pinned Jcc"
+        assert_eq!(
+            backend.convert_ir(&partial_with_jcc_instructions).unwrap(),
+            vec![
+                X86Instruction::AndImm {
+                    rd: X86Register::AX,
+                    imm: 0,
+                },
+                X86Instruction::Jcc {
+                    cond: isa::x86::X86Condition::E,
+                },
+            ]
         );
 
         // 48 c7 c0 00 00 00 00 = mov rax, 0
