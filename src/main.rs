@@ -4607,6 +4607,36 @@ mod cli_helper_tests {
     }
 
     #[test]
+    fn candidate_windows_split_at_every_interior_direct_branch_target() {
+        // Two interior targets in one straight-line run must produce three
+        // windows, each beginning at a target and none holding one in its
+        // interior — the split composes across every collected target.
+        let text = [
+            0x48, 0x83, 0xc0, 0x01, // add rax, 1   @0x1000
+            0x48, 0x83, 0xc0, 0x01, // add rax, 1   @0x1004  <- jne target
+            0x48, 0x83, 0xc0, 0x01, // add rax, 1   @0x1008  <- jne target
+            0x48, 0x83, 0xc0, 0x01, // add rax, 1   @0x100c
+            0x75, 0xf2, // jne 0x1004               @0x1010
+            0x75, 0xf4, // jne 0x1008               @0x1012
+        ];
+        let elf_bytes = build_minimal_elf64(&text, 0x1000, elf::abi::EM_X86_64);
+        let input = TempFile::new_bytes("s11-candidate-two-targets", "elf", &elf_bytes);
+        let patcher = ElfPatcher::new(input.path()).expect("x86-64 ELF should parse");
+
+        let sections =
+            find_candidate_windows(&patcher).expect("candidate discovery should succeed");
+
+        assert_eq!(sections.len(), 1);
+        assert_eq!(sections[0].candidates.len(), 3);
+        assert_eq!(sections[0].candidates[0].start, 0x1000);
+        assert_eq!(sections[0].candidates[0].end, 0x1004);
+        assert_eq!(sections[0].candidates[1].start, 0x1004);
+        assert_eq!(sections[0].candidates[1].end, 0x1008);
+        assert_eq!(sections[0].candidates[2].start, 0x1008);
+        assert_eq!(sections[0].candidates[2].end, 0x1012);
+    }
+
+    #[test]
     fn candidate_windows_admit_window_that_begins_at_direct_branch_target() {
         // jmp 0x1002 (0x1000); add rax,1 (0x1002); add rax,1 (0x1006). The jump
         // target 0x1002 is fixed under rewrite, so a window may *begin* there —
