@@ -62,7 +62,7 @@
 
 #![allow(dead_code)]
 
-use crate::isa::x86::{X86Instruction, X86Register, x86_reads_flags};
+use crate::isa::x86::{X86Instruction, X86Register, X86RegisterView, x86_reads_flags};
 use crate::semantics::cost::CostMetric;
 
 /// Cost of a single x86 instruction at the given operand width.
@@ -85,14 +85,20 @@ pub fn instruction_cost(instr: &X86Instruction, metric: &CostMetric, width: u32)
 /// Isolated per-opcode latency in cycles, sourced from Agner Fog's Skylake
 /// instruction tables (see the module doc-comment).
 ///
-/// - Register-to-register `mov` is **0**: Skylake eliminates it at rename, so it
-///   never extends a dependency chain.
+/// - A full-width (native/dword) register-to-register `mov` is **0**: Skylake
+///   eliminates it at rename, so it never extends a dependency chain. A narrower
+///   `mov` (word or byte) is NOT move-eliminated — it needs an executed merge —
+///   so it costs **1** cycle like any ALU op.
 /// - Simple integer ALU ops (everything except multiply) are **1** cycle.
 /// - `IMUL` (two- and three-operand) is **3** cycles on Skylake.
 fn instruction_latency(instr: &X86Instruction) -> u64 {
     match instr {
-        // Register-rename move elimination: zero-latency on the critical path.
-        X86Instruction::MovReg { .. } => 0,
+        // Register-rename move elimination applies only to full-width copies;
+        // word/byte moves need an executed merge µop and cost a cycle.
+        X86Instruction::MovReg { rd, .. } => match rd.view() {
+            X86RegisterView::Native | X86RegisterView::Dword => 0,
+            X86RegisterView::Word | X86RegisterView::LowByte | X86RegisterView::HighByte => 1,
+        },
         // Full-width SETcc lowers to a byte SETcc followed by a dependent MOVZX.
         X86Instruction::Setcc { .. } => 2,
         // Two-/three-operand signed multiply: 3-cycle latency on Skylake.
@@ -494,6 +500,27 @@ mod tests {
             },
         ];
         assert_eq!(sequence_cost(&seq, &CostMetric::Latency, 64), 1);
+    }
+
+    #[test]
+    fn partial_register_moves_are_not_move_eliminated() {
+        // Skylake move elimination only applies to full-width (native/dword)
+        // reg-reg moves; word and byte MovReg forms need an executed merge and
+        // cost a cycle, so the latency model must not report them as free.
+        for (rd, rs, expected, label) in [
+            (X86Register::RAX, X86Register::RCX, 0u64, "native"),
+            (X86Register::EAX, X86Register::ECX, 0, "dword"),
+            (X86Register::AX, X86Register::CX, 1, "word"),
+            (X86Register::AL, X86Register::CL, 1, "low byte"),
+            (X86Register::AH, X86Register::CH, 1, "high byte"),
+        ] {
+            let seq = [X86Instruction::MovReg { rd, rs }];
+            assert_eq!(
+                sequence_cost(&seq, &CostMetric::Latency, 64),
+                expected,
+                "{label} MovReg latency"
+            );
+        }
     }
 
     #[test]
