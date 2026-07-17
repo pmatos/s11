@@ -107,7 +107,9 @@ fn instruction_latency(instr: &X86Instruction) -> u64 {
 
 /// Approximate encoded length in bytes. Conservative upper bounds.
 ///
-/// - REX prefix adds 1 byte to x86-64 ops touching r0..r15 with REX.W.
+/// - REX prefix adds 1 byte to every x86-64 register op except one naming a
+///   legacy high-byte register (dynasm emits REX.W for native operands and a
+///   bare 0x40 for dword/word/low-byte operands via its dynamic-register path).
 /// - Register-register: opcode + ModR/M = 2 bytes, plus REX for x86-64
 ///   = 3 bytes.
 /// - Register-immediate (32-bit imm): opcode + ModR/M + 4-byte imm
@@ -123,16 +125,14 @@ fn encoding_prefix_bytes(registers: &[X86Register], machine_width: u32) -> u64 {
     };
     let operand_width = first.effective_width(machine_width);
     let operand_size_prefix = u64::from(operand_width == 16);
-    let rex = u64::from(
-        machine_width == 64
-            && (operand_width == 64
-                || registers
-                    .iter()
-                    .any(|reg| reg.index().is_some_and(|index| index >= 8))
-                || registers
-                    .iter()
-                    .any(|reg| reg.is_byte() && !reg.is_high_byte() && reg.index() >= Some(4))),
-    );
+    // In 64-bit mode the assembler encodes register operands through dynasm's
+    // dynamic-register path, which always emits a REX byte — REX.W for a native
+    // operand, otherwise a bare 0x40 for a dword/word/low-byte operand (with the
+    // REX.R/REX.B extension bits added for r8..r15 / spl..dil). The sole
+    // exception is a legacy high-byte register (AH/BH/CH/DH), which is
+    // REX-incompatible and forces a REX-free legacy encoding. So an x86-64
+    // instruction carries a REX byte unless it names a high-byte register.
+    let rex = u64::from(machine_width == 64 && !registers.iter().any(|reg| reg.is_high_byte()));
     operand_size_prefix + rex
 }
 
@@ -591,21 +591,21 @@ mod tests {
                     rd: X86Register::EAX,
                     imm: 1,
                 },
-                5,
+                6,
             ),
             (
                 X86Instruction::MovImm {
                     rd: X86Register::AX,
                     imm: 1,
                 },
-                4,
+                5,
             ),
             (
                 X86Instruction::MovImm {
                     rd: X86Register::AL,
                     imm: 1,
                 },
-                2,
+                3,
             ),
             (
                 X86Instruction::MovImm {
@@ -619,14 +619,14 @@ mod tests {
                     rd: X86Register::EAX,
                     rs: X86Register::EAX,
                 },
-                2,
+                3,
             ),
             (
                 X86Instruction::XorReg {
                     rd: X86Register::AX,
                     rs: X86Register::AX,
                 },
-                3,
+                4,
             ),
         ];
 
