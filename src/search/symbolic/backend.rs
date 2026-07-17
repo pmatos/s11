@@ -210,7 +210,7 @@ impl SymbolicBackend<crate::isa::X86_32> for crate::isa::X86_32 {
             .x86_available_registers
             .iter()
             .copied()
-            .filter(|r| matches!(r.index(), Some(i) if i < 8))
+            .filter(|r| r.is_available_in(crate::assembler::x86::X86Mode::Mode32))
             .collect()
     }
 
