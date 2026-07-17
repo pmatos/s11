@@ -276,6 +276,19 @@ impl X86Register {
             _ => return None,
         })
     }
+
+    /// True when this GPR can be named as an operand while assembling in
+    /// `mode`. The extended registers R8..R15 require a REX prefix that does
+    /// not exist in 32-bit mode, so only the eight legacy GPRs are addressable
+    /// there; all sixteen are addressable in 64-bit mode. This is the single
+    /// source of truth for the x86-32 register-legality constraint that the
+    /// assembler prefilter and the search backends' register pools share.
+    pub fn is_available_in(self, mode: crate::assembler::x86::X86Mode) -> bool {
+        match mode {
+            crate::assembler::x86::X86Mode::Mode64 => true,
+            crate::assembler::x86::X86Mode::Mode32 => self.index().is_some_and(|i| i < 8),
+        }
+    }
 }
 
 impl fmt::Display for X86Register {
@@ -1136,10 +1149,10 @@ impl crate::isa::traits::Assembler<X86Instruction> for X86_32 {
 
     fn can_assemble(&self, instruction: &X86Instruction) -> bool {
         // In 32-bit mode, R8..R15 are illegal. The x86 assembler's reg_index_32
-        // rejects them; reproduce the same check here so trait dispatch can
-        // pre-filter sequences before invoking the heavier assemble path.
+        // rejects them; `is_available_in` is the shared source of truth so this
+        // prefilter cannot drift from the search backends' register pools.
         fn reg_ok_32(r: X86Register) -> bool {
-            r.index().is_some_and(|i| i < 8)
+            r.is_available_in(crate::assembler::x86::X86Mode::Mode32)
         }
         match instruction {
             X86Instruction::MovReg { rd, rs }
@@ -1248,10 +1261,7 @@ impl X86Mutator {
     ) -> Self {
         let registers = registers
             .into_iter()
-            .filter(|r| {
-                mode != crate::assembler::x86::X86Mode::Mode32
-                    || matches!(r.index(), Some(i) if i < 8)
-            })
+            .filter(|r| r.is_available_in(mode))
             .collect();
         let mov_immediates = immediates
             .iter()
@@ -3449,6 +3459,47 @@ mod tests {
         assert_eq!(X86Register::R13.index(), Some(13));
         assert_eq!(X86Register::R14.index(), Some(14));
         assert_eq!(X86Register::R15.index(), Some(15));
+    }
+
+    #[test]
+    fn x86_register_availability_by_mode() {
+        use crate::assembler::x86::X86Mode;
+
+        // 64-bit mode addresses all sixteen GPRs, including the extended file.
+        for r in [
+            X86Register::RAX,
+            X86Register::RDI,
+            X86Register::R8,
+            X86Register::R15,
+        ] {
+            assert!(
+                r.is_available_in(X86Mode::Mode64),
+                "{:?} must be available in 64-bit mode",
+                r
+            );
+        }
+
+        // 32-bit mode has no encoding for the extended registers R8..R15, but
+        // the eight legacy GPRs remain addressable.
+        for r in [X86Register::RAX, X86Register::RSP, X86Register::RDI] {
+            assert!(
+                r.is_available_in(X86Mode::Mode32),
+                "{:?} must be available in 32-bit mode",
+                r
+            );
+        }
+        for r in [
+            X86Register::R8,
+            X86Register::R9,
+            X86Register::R12,
+            X86Register::R15,
+        ] {
+            assert!(
+                !r.is_available_in(X86Mode::Mode32),
+                "{:?} must be unavailable in 32-bit mode",
+                r
+            );
+        }
     }
 
     #[test]

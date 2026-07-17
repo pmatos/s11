@@ -270,9 +270,7 @@ fn x86_random_sequence<R: RngExt>(
     let regs: Vec<_> = regs
         .iter()
         .copied()
-        .filter(|r| {
-            mode != crate::assembler::x86::X86Mode::Mode32 || matches!(r.index(), Some(i) if i < 8)
-        })
+        .filter(|r| r.is_available_in(mode))
         .collect();
     if regs.is_empty() {
         return Vec::new();
