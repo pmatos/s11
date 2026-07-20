@@ -8,7 +8,7 @@ TAG="v${VERSION}"
 TARGET="${TARGET:-x86_64-unknown-linux-gnu}"
 
 scripts/bump-version.sh "${VERSION}" >/dev/null
-cargo update --workspace
+cargo update -p s11
 
 cargo build --release --locked
 
