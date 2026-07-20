@@ -1,5 +1,7 @@
 # Enforces that PR titles follow the Conventional Commits spec.
-# https://www.conventionalcommits.org/  |  https://github.com/amannn/action-semantic-pull-request
+# Lints the title with commitlint itself (same ruleset as commitlint.yml) so PR-title
+# acceptance can't diverge from what the push-time commitlint job accepts on main.
+# https://www.conventionalcommits.org/
 name: Lint PR title
 
 on:
@@ -10,14 +12,19 @@ on:
       - reopened
       - synchronize
 
-permissions:
-  pull-requests: read
+permissions: {}
 
 jobs:
   validate:
     name: Validate PR title
     runs-on: ubuntu-latest
     steps:
-      - uses: amannn/action-semantic-pull-request@v6.1.1
+      - uses: actions/setup-node@v7.0.0
+        with:
+          node-version: lts/*
+      - name: Install commitlint
+        run: npm install --no-save @commitlint/cli@21 @commitlint/config-conventional@21
+      - name: Lint PR title
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_TITLE: ${{ github.event.pull_request.title }}
+        run: echo "$PR_TITLE" | npx commitlint --extends @commitlint/config-conventional --verbose
