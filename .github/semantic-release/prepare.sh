@@ -10,6 +10,12 @@ TARGET="${TARGET:-x86_64-unknown-linux-gnu}"
 scripts/bump-version.sh "${VERSION}" >/dev/null
 cargo update -p s11
 
+# Fast release-time gate: fmt + unit tests. test.yml already runs the full
+# suite (incl. AArch64 integration tests) on the same push independently;
+# this catches an unformatted/broken tree before a release is cut from it.
+cargo fmt -- --check
+cargo test --lib --bins
+
 cargo build --release --locked
 
 STAGE="s11-${TAG}-${TARGET}"
