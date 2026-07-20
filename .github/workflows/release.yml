@@ -54,3 +54,11 @@ jobs:
             @semantic-release/exec@7
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - name: Upload build artifacts (for debugging / reruns)
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: release-upload-${{ github.sha }}
+          path: release-upload/
+          if-no-files-found: warn
+          retention-days: 14
