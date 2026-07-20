@@ -1244,16 +1244,185 @@ mod tests {
 
     #[test]
     fn all_instruction_families_cover_traits_and_display() {
+        use RiscVRegister::{X1, X2, X3};
+
+        struct Expectation {
+            opcode_id: u8,
+            mnemonic: &'static str,
+            display: &'static str,
+            destination: Option<RiscVRegister>,
+            sources: &'static [RiscVRegister],
+            has_side_effects: bool,
+        }
+
+        let expected = [
+            Expectation {
+                opcode_id: 0,
+                mnemonic: "add",
+                display: "add x1, x2, x3",
+                destination: Some(X1),
+                sources: &[X2, X3],
+                has_side_effects: false,
+            },
+            Expectation {
+                opcode_id: 1,
+                mnemonic: "sub",
+                display: "sub x1, x2, x3",
+                destination: Some(X1),
+                sources: &[X2, X3],
+                has_side_effects: false,
+            },
+            Expectation {
+                opcode_id: 2,
+                mnemonic: "and",
+                display: "and x1, x2, x3",
+                destination: Some(X1),
+                sources: &[X2, X3],
+                has_side_effects: false,
+            },
+            Expectation {
+                opcode_id: 3,
+                mnemonic: "or",
+                display: "or x1, x2, x3",
+                destination: Some(X1),
+                sources: &[X2, X3],
+                has_side_effects: false,
+            },
+            Expectation {
+                opcode_id: 4,
+                mnemonic: "xor",
+                display: "xor x1, x2, x3",
+                destination: Some(X1),
+                sources: &[X2, X3],
+                has_side_effects: false,
+            },
+            Expectation {
+                opcode_id: 5,
+                mnemonic: "sll",
+                display: "sll x1, x2, x3",
+                destination: Some(X1),
+                sources: &[X2, X3],
+                has_side_effects: false,
+            },
+            Expectation {
+                opcode_id: 6,
+                mnemonic: "srl",
+                display: "srl x1, x2, x3",
+                destination: Some(X1),
+                sources: &[X2, X3],
+                has_side_effects: false,
+            },
+            Expectation {
+                opcode_id: 7,
+                mnemonic: "sra",
+                display: "sra x1, x2, x3",
+                destination: Some(X1),
+                sources: &[X2, X3],
+                has_side_effects: false,
+            },
+            Expectation {
+                opcode_id: 8,
+                mnemonic: "addi",
+                display: "addi x1, x2, 7",
+                destination: Some(X1),
+                sources: &[X2],
+                has_side_effects: false,
+            },
+            Expectation {
+                opcode_id: 9,
+                mnemonic: "andi",
+                display: "andi x1, x2, 7",
+                destination: Some(X1),
+                sources: &[X2],
+                has_side_effects: false,
+            },
+            Expectation {
+                opcode_id: 10,
+                mnemonic: "ori",
+                display: "ori x1, x2, 7",
+                destination: Some(X1),
+                sources: &[X2],
+                has_side_effects: false,
+            },
+            Expectation {
+                opcode_id: 11,
+                mnemonic: "xori",
+                display: "xori x1, x2, 7",
+                destination: Some(X1),
+                sources: &[X2],
+                has_side_effects: false,
+            },
+            Expectation {
+                opcode_id: 12,
+                mnemonic: "slli",
+                display: "slli x1, x2, 4",
+                destination: Some(X1),
+                sources: &[X2],
+                has_side_effects: false,
+            },
+            Expectation {
+                opcode_id: 13,
+                mnemonic: "srli",
+                display: "srli x1, x2, 4",
+                destination: Some(X1),
+                sources: &[X2],
+                has_side_effects: false,
+            },
+            Expectation {
+                opcode_id: 14,
+                mnemonic: "srai",
+                display: "srai x1, x2, 4",
+                destination: Some(X1),
+                sources: &[X2],
+                has_side_effects: false,
+            },
+            Expectation {
+                opcode_id: 15,
+                mnemonic: "lui",
+                display: "lui x1, 74565",
+                destination: Some(X1),
+                sources: &[],
+                has_side_effects: false,
+            },
+        ];
+
         let generator = RiscVInstructionGenerator::rv32();
-        let ids: BTreeSet<u8> = all_instruction_families()
+        let instructions = all_instruction_families();
+        assert_eq!(instructions.len(), expected.len());
+        assert_eq!(expected.len(), generator.opcode_count() as usize);
+
+        let ids: BTreeSet<u8> = instructions
             .iter()
-            .map(|instr| {
-                assert_eq!(instr.destination(), RiscVRegister::X1);
-                let _ = instr.source_registers();
-                assert!(!format!("{}", instr).is_empty());
-                assert!(!instr.mnemonic().is_empty());
-                assert!(!instr.has_side_effects());
-                instr.opcode_id()
+            .zip(expected.iter())
+            .map(|(instr, expected)| {
+                let context = format!("{instr:?}");
+                assert_eq!(
+                    InstructionType::opcode_id(instr),
+                    expected.opcode_id,
+                    "opcode id: {context}"
+                );
+                assert_eq!(
+                    InstructionType::mnemonic(instr),
+                    expected.mnemonic,
+                    "mnemonic: {context}"
+                );
+                assert_eq!(instr.to_string(), expected.display, "display: {context}");
+                assert_eq!(
+                    InstructionType::destination(instr),
+                    expected.destination,
+                    "destination: {context}"
+                );
+                assert_eq!(
+                    InstructionType::source_registers(instr),
+                    expected.sources,
+                    "source registers: {context}"
+                );
+                assert_eq!(
+                    InstructionType::has_side_effects(instr),
+                    expected.has_side_effects,
+                    "side effects: {context}"
+                );
+                InstructionType::opcode_id(instr)
             })
             .collect();
         assert_eq!(ids.len(), generator.opcode_count() as usize);

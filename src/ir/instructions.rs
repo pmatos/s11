@@ -4736,326 +4736,618 @@ mod tests {
     }
 
     #[test]
-    fn all_instruction_variants_cover_helpers_and_display() {
-        let cases = vec![
-            Instruction::MovReg {
-                rd: Register::X0,
-                rn: Register::X1,
+    fn representative_instruction_variants_match_helper_contracts() {
+        use Register::{X0, X1, X2, X3};
+
+        struct Expectation {
+            instruction: Instruction,
+            display: &'static str,
+            destination: Option<Register>,
+            destinations: &'static [Register],
+            sources: &'static [Register],
+            modifies_flags: bool,
+            reads_flags: bool,
+            encodable: bool,
+        }
+
+        let cases = [
+            Expectation {
+                instruction: Instruction::MovReg { rd: X0, rn: X1 },
+                display: "mov x0, x1",
+                destination: Some(X0),
+                destinations: &[X0],
+                sources: &[X1],
+                modifies_flags: false,
+                reads_flags: false,
+                encodable: true,
             },
-            Instruction::MovImm {
-                rd: Register::X0,
-                imm: 1,
+            Expectation {
+                instruction: Instruction::MovImm { rd: X0, imm: 1 },
+                display: "mov x0, #1",
+                destination: Some(X0),
+                destinations: &[X0],
+                sources: &[],
+                modifies_flags: false,
+                reads_flags: false,
+                encodable: true,
             },
-            Instruction::Add {
-                rd: Register::X0,
-                rn: Register::X1,
-                rm: Operand::Register(Register::X2),
+            Expectation {
+                instruction: Instruction::Add {
+                    rd: X0,
+                    rn: X1,
+                    rm: Operand::Register(X2),
+                },
+                display: "add x0, x1, x2",
+                destination: Some(X0),
+                destinations: &[X0],
+                sources: &[X1, X2],
+                modifies_flags: false,
+                reads_flags: false,
+                encodable: true,
             },
-            Instruction::Sub {
-                rd: Register::X0,
-                rn: Register::X1,
-                rm: Operand::Immediate(1),
+            Expectation {
+                instruction: Instruction::Sub {
+                    rd: X0,
+                    rn: X1,
+                    rm: Operand::Immediate(1),
+                },
+                display: "sub x0, x1, #1",
+                destination: Some(X0),
+                destinations: &[X0],
+                sources: &[X1],
+                modifies_flags: false,
+                reads_flags: false,
+                encodable: true,
             },
-            Instruction::And {
-                rd: Register::X0,
-                rn: Register::X1,
-                rm: Operand::Register(Register::X2),
-                width: crate::ir::RegisterWidth::X64,
+            Expectation {
+                instruction: Instruction::And {
+                    rd: X0,
+                    rn: X1,
+                    rm: Operand::Register(X2),
+                    width: crate::ir::RegisterWidth::X64,
+                },
+                display: "and x0, x1, x2",
+                destination: Some(X0),
+                destinations: &[X0],
+                sources: &[X1, X2],
+                modifies_flags: false,
+                reads_flags: false,
+                encodable: true,
             },
-            Instruction::Orr {
-                rd: Register::X0,
-                rn: Register::X1,
-                rm: Operand::Register(Register::X2),
-                width: crate::ir::RegisterWidth::X64,
+            Expectation {
+                instruction: Instruction::Orr {
+                    rd: X0,
+                    rn: X1,
+                    rm: Operand::Register(X2),
+                    width: crate::ir::RegisterWidth::X64,
+                },
+                display: "orr x0, x1, x2",
+                destination: Some(X0),
+                destinations: &[X0],
+                sources: &[X1, X2],
+                modifies_flags: false,
+                reads_flags: false,
+                encodable: true,
             },
-            Instruction::Eor {
-                rd: Register::X0,
-                rn: Register::X1,
-                rm: Operand::Register(Register::X2),
-                width: crate::ir::RegisterWidth::X64,
+            Expectation {
+                instruction: Instruction::Eor {
+                    rd: X0,
+                    rn: X1,
+                    rm: Operand::Register(X2),
+                    width: crate::ir::RegisterWidth::X64,
+                },
+                display: "eor x0, x1, x2",
+                destination: Some(X0),
+                destinations: &[X0],
+                sources: &[X1, X2],
+                modifies_flags: false,
+                reads_flags: false,
+                encodable: true,
             },
-            Instruction::Lsl {
-                rd: Register::X0,
-                rn: Register::X1,
-                shift: Operand::Register(Register::X2),
+            Expectation {
+                instruction: Instruction::Lsl {
+                    rd: X0,
+                    rn: X1,
+                    shift: Operand::Register(X2),
+                },
+                display: "lsl x0, x1, x2",
+                destination: Some(X0),
+                destinations: &[X0],
+                sources: &[X1, X2],
+                modifies_flags: false,
+                reads_flags: false,
+                encodable: true,
             },
-            Instruction::Lsr {
-                rd: Register::X0,
-                rn: Register::X1,
-                shift: Operand::Immediate(2),
+            Expectation {
+                instruction: Instruction::Lsr {
+                    rd: X0,
+                    rn: X1,
+                    shift: Operand::Immediate(2),
+                },
+                display: "lsr x0, x1, #2",
+                destination: Some(X0),
+                destinations: &[X0],
+                sources: &[X1],
+                modifies_flags: false,
+                reads_flags: false,
+                encodable: true,
             },
-            Instruction::Asr {
-                rd: Register::X0,
-                rn: Register::X1,
-                shift: Operand::Register(Register::X2),
+            Expectation {
+                instruction: Instruction::Asr {
+                    rd: X0,
+                    rn: X1,
+                    shift: Operand::Register(X2),
+                },
+                display: "asr x0, x1, x2",
+                destination: Some(X0),
+                destinations: &[X0],
+                sources: &[X1, X2],
+                modifies_flags: false,
+                reads_flags: false,
+                encodable: true,
             },
-            Instruction::Mul {
-                rd: Register::X0,
-                rn: Register::X1,
-                rm: Register::X2,
+            Expectation {
+                instruction: Instruction::Mul {
+                    rd: X0,
+                    rn: X1,
+                    rm: X2,
+                },
+                display: "mul x0, x1, x2",
+                destination: Some(X0),
+                destinations: &[X0],
+                sources: &[X1, X2],
+                modifies_flags: false,
+                reads_flags: false,
+                encodable: true,
             },
-            Instruction::Sdiv {
-                rd: Register::X0,
-                rn: Register::X1,
-                rm: Register::X2,
+            Expectation {
+                instruction: Instruction::Sdiv {
+                    rd: X0,
+                    rn: X1,
+                    rm: X2,
+                },
+                display: "sdiv x0, x1, x2",
+                destination: Some(X0),
+                destinations: &[X0],
+                sources: &[X1, X2],
+                modifies_flags: false,
+                reads_flags: false,
+                encodable: true,
             },
-            Instruction::Udiv {
-                rd: Register::X0,
-                rn: Register::X1,
-                rm: Register::X2,
+            Expectation {
+                instruction: Instruction::Udiv {
+                    rd: X0,
+                    rn: X1,
+                    rm: X2,
+                },
+                display: "udiv x0, x1, x2",
+                destination: Some(X0),
+                destinations: &[X0],
+                sources: &[X1, X2],
+                modifies_flags: false,
+                reads_flags: false,
+                encodable: true,
             },
-            Instruction::Madd {
-                rd: Register::X0,
-                rn: Register::X1,
-                rm: Register::X2,
-                ra: Register::X3,
+            Expectation {
+                instruction: Instruction::Madd {
+                    rd: X0,
+                    rn: X1,
+                    rm: X2,
+                    ra: X3,
+                },
+                display: "madd x0, x1, x2, x3",
+                destination: Some(X0),
+                destinations: &[X0],
+                sources: &[X1, X2, X3],
+                modifies_flags: false,
+                reads_flags: false,
+                encodable: true,
             },
-            Instruction::Msub {
-                rd: Register::X0,
-                rn: Register::X1,
-                rm: Register::X2,
-                ra: Register::X3,
+            Expectation {
+                instruction: Instruction::Msub {
+                    rd: X0,
+                    rn: X1,
+                    rm: X2,
+                    ra: X3,
+                },
+                display: "msub x0, x1, x2, x3",
+                destination: Some(X0),
+                destinations: &[X0],
+                sources: &[X1, X2, X3],
+                modifies_flags: false,
+                reads_flags: false,
+                encodable: true,
             },
-            Instruction::Mneg {
-                rd: Register::X0,
-                rn: Register::X1,
-                rm: Register::X2,
+            Expectation {
+                instruction: Instruction::Mneg {
+                    rd: X0,
+                    rn: X1,
+                    rm: X2,
+                },
+                display: "mneg x0, x1, x2",
+                destination: Some(X0),
+                destinations: &[X0],
+                sources: &[X1, X2],
+                modifies_flags: false,
+                reads_flags: false,
+                encodable: true,
             },
-            Instruction::Smulh {
-                rd: Register::X0,
-                rn: Register::X1,
-                rm: Register::X2,
+            Expectation {
+                instruction: Instruction::Smulh {
+                    rd: X0,
+                    rn: X1,
+                    rm: X2,
+                },
+                display: "smulh x0, x1, x2",
+                destination: Some(X0),
+                destinations: &[X0],
+                sources: &[X1, X2],
+                modifies_flags: false,
+                reads_flags: false,
+                encodable: true,
             },
-            Instruction::Umulh {
-                rd: Register::X0,
-                rn: Register::X1,
-                rm: Register::X2,
+            Expectation {
+                instruction: Instruction::Umulh {
+                    rd: X0,
+                    rn: X1,
+                    rm: X2,
+                },
+                display: "umulh x0, x1, x2",
+                destination: Some(X0),
+                destinations: &[X0],
+                sources: &[X1, X2],
+                modifies_flags: false,
+                reads_flags: false,
+                encodable: true,
             },
-            Instruction::Cmp {
-                rn: Register::X1,
-                rm: Operand::Immediate(1),
+            Expectation {
+                instruction: Instruction::Cmp {
+                    rn: X1,
+                    rm: Operand::Immediate(1),
+                },
+                display: "cmp x1, #1",
+                destination: None,
+                destinations: &[],
+                sources: &[X1],
+                modifies_flags: true,
+                reads_flags: false,
+                encodable: true,
             },
-            Instruction::Cmn {
-                rn: Register::X1,
-                rm: Operand::Register(Register::X2),
+            Expectation {
+                instruction: Instruction::Cmn {
+                    rn: X1,
+                    rm: Operand::Register(X2),
+                },
+                display: "cmn x1, x2",
+                destination: None,
+                destinations: &[],
+                sources: &[X1, X2],
+                modifies_flags: true,
+                reads_flags: false,
+                encodable: true,
             },
-            Instruction::Tst {
-                rn: Register::X1,
-                rm: Operand::Register(Register::X2),
-                width: crate::ir::RegisterWidth::X64,
+            Expectation {
+                instruction: Instruction::Tst {
+                    rn: X1,
+                    rm: Operand::Register(X2),
+                    width: crate::ir::RegisterWidth::X64,
+                },
+                display: "tst x1, x2",
+                destination: None,
+                destinations: &[],
+                sources: &[X1, X2],
+                modifies_flags: true,
+                reads_flags: false,
+                encodable: true,
             },
-            Instruction::Csel {
-                rd: Register::X0,
-                rn: Register::X1,
-                rm: Register::X2,
-                cond: Condition::EQ,
+            Expectation {
+                instruction: Instruction::Csel {
+                    rd: X0,
+                    rn: X1,
+                    rm: X2,
+                    cond: Condition::EQ,
+                },
+                display: "csel x0, x1, x2, eq",
+                destination: Some(X0),
+                destinations: &[X0],
+                sources: &[X1, X2],
+                modifies_flags: false,
+                reads_flags: true,
+                encodable: true,
             },
-            Instruction::Csinc {
-                rd: Register::X0,
-                rn: Register::X1,
-                rm: Register::X2,
-                cond: Condition::NE,
+            Expectation {
+                instruction: Instruction::Csinc {
+                    rd: X0,
+                    rn: X1,
+                    rm: X2,
+                    cond: Condition::NE,
+                },
+                display: "csinc x0, x1, x2, ne",
+                destination: Some(X0),
+                destinations: &[X0],
+                sources: &[X1, X2],
+                modifies_flags: false,
+                reads_flags: true,
+                encodable: true,
             },
-            Instruction::Csinv {
-                rd: Register::X0,
-                rn: Register::X1,
-                rm: Register::X2,
-                cond: Condition::LT,
+            Expectation {
+                instruction: Instruction::Csinv {
+                    rd: X0,
+                    rn: X1,
+                    rm: X2,
+                    cond: Condition::LT,
+                },
+                display: "csinv x0, x1, x2, lt",
+                destination: Some(X0),
+                destinations: &[X0],
+                sources: &[X1, X2],
+                modifies_flags: false,
+                reads_flags: true,
+                encodable: true,
             },
-            Instruction::Csneg {
-                rd: Register::X0,
-                rn: Register::X1,
-                rm: Register::X2,
-                cond: Condition::GT,
+            Expectation {
+                instruction: Instruction::Csneg {
+                    rd: X0,
+                    rn: X1,
+                    rm: X2,
+                    cond: Condition::GT,
+                },
+                display: "csneg x0, x1, x2, gt",
+                destination: Some(X0),
+                destinations: &[X0],
+                sources: &[X1, X2],
+                modifies_flags: false,
+                reads_flags: true,
+                encodable: true,
             },
-            Instruction::Mvn {
-                rd: Register::X0,
-                rm: Register::X1,
+            Expectation {
+                instruction: Instruction::Mvn { rd: X0, rm: X1 },
+                display: "mvn x0, x1",
+                destination: Some(X0),
+                destinations: &[X0],
+                sources: &[X1],
+                modifies_flags: false,
+                reads_flags: false,
+                encodable: true,
             },
-            Instruction::Neg {
-                rd: Register::X0,
-                rm: Register::X1,
+            Expectation {
+                instruction: Instruction::Neg { rd: X0, rm: X1 },
+                display: "neg x0, x1",
+                destination: Some(X0),
+                destinations: &[X0],
+                sources: &[X1],
+                modifies_flags: false,
+                reads_flags: false,
+                encodable: true,
             },
-            Instruction::Negs {
-                rd: Register::X0,
-                rm: Register::X1,
+            Expectation {
+                instruction: Instruction::Negs { rd: X0, rm: X1 },
+                display: "negs x0, x1",
+                destination: Some(X0),
+                destinations: &[X0],
+                sources: &[X1],
+                modifies_flags: true,
+                reads_flags: false,
+                encodable: true,
             },
-            Instruction::MovN {
-                rd: Register::X0,
-                imm: 1,
-                shift: 16,
+            Expectation {
+                instruction: Instruction::MovN {
+                    rd: X0,
+                    imm: 1,
+                    shift: 16,
+                },
+                display: "movn x0, #1, lsl #16",
+                destination: Some(X0),
+                destinations: &[X0],
+                sources: &[],
+                modifies_flags: false,
+                reads_flags: false,
+                encodable: true,
             },
-            Instruction::MovZ {
-                rd: Register::X0,
-                imm: 1,
-                shift: 32,
+            Expectation {
+                instruction: Instruction::MovZ {
+                    rd: X0,
+                    imm: 1,
+                    shift: 32,
+                },
+                display: "movz x0, #1, lsl #32",
+                destination: Some(X0),
+                destinations: &[X0],
+                sources: &[],
+                modifies_flags: false,
+                reads_flags: false,
+                encodable: true,
             },
-            Instruction::MovK {
-                rd: Register::X0,
-                imm: 1,
-                shift: 48,
+            Expectation {
+                instruction: Instruction::MovK {
+                    rd: X0,
+                    imm: 1,
+                    shift: 48,
+                },
+                display: "movk x0, #1, lsl #48",
+                destination: Some(X0),
+                destinations: &[X0],
+                sources: &[X0],
+                modifies_flags: false,
+                reads_flags: false,
+                encodable: true,
             },
-            Instruction::Bic {
-                rd: Register::X0,
-                rn: Register::X1,
-                rm: Operand::Register(Register::X2),
+            Expectation {
+                instruction: Instruction::Bic {
+                    rd: X0,
+                    rn: X1,
+                    rm: Operand::Register(X2),
+                },
+                display: "bic x0, x1, x2",
+                destination: Some(X0),
+                destinations: &[X0],
+                sources: &[X1, X2],
+                modifies_flags: false,
+                reads_flags: false,
+                encodable: true,
             },
-            Instruction::Bics {
-                rd: Register::X0,
-                rn: Register::X1,
-                rm: Operand::Register(Register::X2),
+            Expectation {
+                instruction: Instruction::Bics {
+                    rd: X0,
+                    rn: X1,
+                    rm: Operand::Register(X2),
+                },
+                display: "bics x0, x1, x2",
+                destination: Some(X0),
+                destinations: &[X0],
+                sources: &[X1, X2],
+                modifies_flags: true,
+                reads_flags: false,
+                encodable: true,
             },
-            Instruction::Orn {
-                rd: Register::X0,
-                rn: Register::X1,
-                rm: Operand::Register(Register::X2),
+            Expectation {
+                instruction: Instruction::Orn {
+                    rd: X0,
+                    rn: X1,
+                    rm: Operand::Register(X2),
+                },
+                display: "orn x0, x1, x2",
+                destination: Some(X0),
+                destinations: &[X0],
+                sources: &[X1, X2],
+                modifies_flags: false,
+                reads_flags: false,
+                encodable: true,
             },
-            Instruction::Eon {
-                rd: Register::X0,
-                rn: Register::X1,
-                rm: Operand::Register(Register::X2),
+            Expectation {
+                instruction: Instruction::Eon {
+                    rd: X0,
+                    rn: X1,
+                    rm: Operand::Register(X2),
+                },
+                display: "eon x0, x1, x2",
+                destination: Some(X0),
+                destinations: &[X0],
+                sources: &[X1, X2],
+                modifies_flags: false,
+                reads_flags: false,
+                encodable: true,
             },
-            Instruction::Adds {
-                rd: Register::X0,
-                rn: Register::X1,
-                rm: Operand::Immediate(1),
+            Expectation {
+                instruction: Instruction::Adds {
+                    rd: X0,
+                    rn: X1,
+                    rm: Operand::Immediate(1),
+                },
+                display: "adds x0, x1, #1",
+                destination: Some(X0),
+                destinations: &[X0],
+                sources: &[X1],
+                modifies_flags: true,
+                reads_flags: false,
+                encodable: true,
             },
-            Instruction::Subs {
-                rd: Register::X0,
-                rn: Register::X1,
-                rm: Operand::Register(Register::X2),
+            Expectation {
+                instruction: Instruction::Subs {
+                    rd: X0,
+                    rn: X1,
+                    rm: Operand::Register(X2),
+                },
+                display: "subs x0, x1, x2",
+                destination: Some(X0),
+                destinations: &[X0],
+                sources: &[X1, X2],
+                modifies_flags: true,
+                reads_flags: false,
+                encodable: true,
             },
-            Instruction::Ands {
-                rd: Register::X0,
-                rn: Register::X1,
-                rm: Operand::Register(Register::X2),
-                width: crate::ir::RegisterWidth::X64,
+            Expectation {
+                instruction: Instruction::Ands {
+                    rd: X0,
+                    rn: X1,
+                    rm: Operand::Register(X2),
+                    width: crate::ir::RegisterWidth::X64,
+                },
+                display: "ands x0, x1, x2",
+                destination: Some(X0),
+                destinations: &[X0],
+                sources: &[X1, X2],
+                modifies_flags: true,
+                reads_flags: false,
+                encodable: true,
             },
-            Instruction::Cset {
-                rd: Register::X0,
-                cond: Condition::GE,
+            Expectation {
+                instruction: Instruction::Cset {
+                    rd: X0,
+                    cond: Condition::GE,
+                },
+                display: "cset x0, ge",
+                destination: Some(X0),
+                destinations: &[X0],
+                sources: &[],
+                modifies_flags: false,
+                reads_flags: true,
+                encodable: true,
             },
-            Instruction::Csetm {
-                rd: Register::X0,
-                cond: Condition::LE,
+            Expectation {
+                instruction: Instruction::Csetm {
+                    rd: X0,
+                    cond: Condition::LE,
+                },
+                display: "csetm x0, le",
+                destination: Some(X0),
+                destinations: &[X0],
+                sources: &[],
+                modifies_flags: false,
+                reads_flags: true,
+                encodable: true,
             },
-            Instruction::Ror {
-                rd: Register::X0,
-                rn: Register::X1,
-                shift: Operand::Immediate(4),
+            Expectation {
+                instruction: Instruction::Ror {
+                    rd: X0,
+                    rn: X1,
+                    shift: Operand::Immediate(4),
+                },
+                display: "ror x0, x1, #4",
+                destination: Some(X0),
+                destinations: &[X0],
+                sources: &[X1],
+                modifies_flags: false,
+                reads_flags: false,
+                encodable: true,
             },
         ];
 
-        for instr in cases {
-            let rendered = format!("{}", instr);
-            assert!(!rendered.is_empty());
-            let _ = instr.destination();
-            let _ = instr.source_registers();
-            let _ = instr.modifies_flags();
-            let _ = instr.reads_flags();
-            let _ = instr.is_encodable_aarch64();
+        for case in cases {
+            let instruction = &case.instruction;
+            let context = format!("{instruction:?}");
+            assert_eq!(instruction.to_string(), case.display, "display: {context}");
+            assert_eq!(
+                instruction.destination(),
+                case.destination,
+                "destination: {context}"
+            );
+            assert_eq!(
+                instruction.destinations(),
+                case.destinations,
+                "destinations: {context}"
+            );
+            assert_eq!(
+                instruction.source_registers(),
+                case.sources,
+                "source registers: {context}"
+            );
+            assert_eq!(
+                instruction.modifies_flags(),
+                case.modifies_flags,
+                "flag writes: {context}"
+            );
+            assert_eq!(
+                instruction.reads_flags(),
+                case.reads_flags,
+                "flag reads: {context}"
+            );
+            assert_eq!(
+                instruction.is_encodable_aarch64(),
+                case.encodable,
+                "encodability: {context}"
+            );
         }
-
-        let cmp = Instruction::Cmp {
-            rn: Register::X1,
-            rm: Operand::Immediate(1),
-        };
-        assert_eq!(cmp.to_string(), "cmp x1, #1");
-        assert_eq!(cmp.destination(), None);
-        assert_eq!(cmp.source_registers(), vec![Register::X1]);
-        assert!(cmp.modifies_flags());
-        assert!(!cmp.reads_flags());
-
-        let csel = Instruction::Csel {
-            rd: Register::X0,
-            rn: Register::X1,
-            rm: Register::X2,
-            cond: Condition::EQ,
-        };
-        assert_eq!(csel.to_string(), "csel x0, x1, x2, eq");
-        assert_eq!(csel.destination(), Some(Register::X0));
-        assert_eq!(csel.source_registers(), vec![Register::X1, Register::X2]);
-        assert!(!csel.modifies_flags());
-        assert!(csel.reads_flags());
-
-        let adds = Instruction::Adds {
-            rd: Register::X0,
-            rn: Register::X1,
-            rm: Operand::Register(Register::X2),
-        };
-        assert_eq!(adds.to_string(), "adds x0, x1, x2");
-        assert_eq!(adds.destination(), Some(Register::X0));
-        assert_eq!(adds.source_registers(), vec![Register::X1, Register::X2]);
-        assert!(adds.modifies_flags());
-        assert!(!adds.reads_flags());
-
-        let madd = Instruction::Madd {
-            rd: Register::X0,
-            rn: Register::X1,
-            rm: Register::X2,
-            ra: Register::X3,
-        };
-        assert_eq!(madd.to_string(), "madd x0, x1, x2, x3");
-        assert_eq!(madd.destination(), Some(Register::X0));
-        assert_eq!(
-            madd.source_registers(),
-            vec![Register::X1, Register::X2, Register::X3]
-        );
-        assert!(!madd.modifies_flags());
-        assert!(!madd.reads_flags());
-        assert!(madd.is_encodable_aarch64());
-
-        let msub = Instruction::Msub {
-            rd: Register::X0,
-            rn: Register::X1,
-            rm: Register::X2,
-            ra: Register::X3,
-        };
-        assert_eq!(msub.to_string(), "msub x0, x1, x2, x3");
-        assert_eq!(msub.destination(), Some(Register::X0));
-        assert_eq!(
-            msub.source_registers(),
-            vec![Register::X1, Register::X2, Register::X3]
-        );
-        assert!(!msub.modifies_flags());
-        assert!(!msub.reads_flags());
-        assert!(msub.is_encodable_aarch64());
-
-        let mneg = Instruction::Mneg {
-            rd: Register::X0,
-            rn: Register::X1,
-            rm: Register::X2,
-        };
-        assert_eq!(mneg.to_string(), "mneg x0, x1, x2");
-        assert_eq!(mneg.destination(), Some(Register::X0));
-        assert_eq!(mneg.source_registers(), vec![Register::X1, Register::X2]);
-        assert!(!mneg.modifies_flags());
-        assert!(!mneg.reads_flags());
-        assert!(mneg.is_encodable_aarch64());
-
-        let smulh = Instruction::Smulh {
-            rd: Register::X0,
-            rn: Register::X1,
-            rm: Register::X2,
-        };
-        assert_eq!(smulh.to_string(), "smulh x0, x1, x2");
-        assert_eq!(smulh.destination(), Some(Register::X0));
-        assert_eq!(smulh.source_registers(), vec![Register::X1, Register::X2]);
-        assert!(!smulh.modifies_flags());
-        assert!(!smulh.reads_flags());
-        assert!(smulh.is_encodable_aarch64());
-
-        let umulh = Instruction::Umulh {
-            rd: Register::X0,
-            rn: Register::X1,
-            rm: Register::X2,
-        };
-        assert_eq!(umulh.to_string(), "umulh x0, x1, x2");
-        assert_eq!(umulh.destination(), Some(Register::X0));
-        assert_eq!(umulh.source_registers(), vec![Register::X1, Register::X2]);
-        assert!(!umulh.modifies_flags());
-        assert!(!umulh.reads_flags());
-        assert!(umulh.is_encodable_aarch64());
     }
 
     #[test]

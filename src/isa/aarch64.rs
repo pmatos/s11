@@ -2731,34 +2731,194 @@ mod tests {
 
     #[test]
     fn all_instruction_families_cover_trait_methods() {
+        use Register::{X0, X1, X2, X3};
+
+        struct Expectation {
+            opcode_id: u8,
+            mnemonic: &'static str,
+            display: &'static str,
+            destination: Option<Register>,
+            sources: &'static [Register],
+            has_side_effects: bool,
+        }
+
+        impl Expectation {
+            const fn new(
+                opcode_id: u8,
+                mnemonic: &'static str,
+                display: &'static str,
+                destination: Option<Register>,
+                sources: &'static [Register],
+                has_side_effects: bool,
+            ) -> Self {
+                Self {
+                    opcode_id,
+                    mnemonic,
+                    display,
+                    destination,
+                    sources,
+                    has_side_effects,
+                }
+            }
+        }
+
         let generator = AArch64InstructionGenerator;
-        let seen: BTreeSet<u8> = all_instruction_families()
+        let instructions = all_instruction_families();
+        let expected = [
+            Expectation::new(0, "mov", "mov x0, x1", Some(X0), &[X1], false),
+            Expectation::new(1, "mov", "mov x0, #7", Some(X0), &[], false),
+            Expectation::new(2, "add", "add x0, x1, x2", Some(X0), &[X1, X2], false),
+            Expectation::new(3, "sub", "sub x0, x1, #3", Some(X0), &[X1], false),
+            Expectation::new(4, "and", "and x0, x1, x2", Some(X0), &[X1, X2], false),
+            Expectation::new(5, "orr", "orr x0, x1, x2", Some(X0), &[X1, X2], false),
+            Expectation::new(6, "eor", "eor x0, x1, x2", Some(X0), &[X1, X2], false),
+            Expectation::new(7, "lsl", "lsl x0, x1, x2", Some(X0), &[X1, X2], false),
+            Expectation::new(8, "lsr", "lsr x0, x1, #4", Some(X0), &[X1], false),
+            Expectation::new(9, "asr", "asr x0, x1, x2", Some(X0), &[X1, X2], false),
+            Expectation::new(10, "mul", "mul x0, x1, x2", Some(X0), &[X1, X2], false),
+            Expectation::new(11, "sdiv", "sdiv x0, x1, x2", Some(X0), &[X1, X2], false),
+            Expectation::new(12, "udiv", "udiv x0, x1, x2", Some(X0), &[X1, X2], false),
+            Expectation::new(13, "cmp", "cmp x1, x2", None, &[X1, X2], true),
+            Expectation::new(14, "cmn", "cmn x1, #9", None, &[X1], true),
+            Expectation::new(15, "tst", "tst x1, x2", None, &[X1, X2], true),
+            Expectation::new(
+                16,
+                "csel",
+                "csel x0, x1, x2, eq",
+                Some(X0),
+                &[X1, X2],
+                false,
+            ),
+            Expectation::new(
+                17,
+                "csinc",
+                "csinc x0, x1, x2, ne",
+                Some(X0),
+                &[X1, X2],
+                false,
+            ),
+            Expectation::new(
+                18,
+                "csinv",
+                "csinv x0, x1, x2, lt",
+                Some(X0),
+                &[X1, X2],
+                false,
+            ),
+            Expectation::new(
+                19,
+                "csneg",
+                "csneg x0, x1, x2, gt",
+                Some(X0),
+                &[X1, X2],
+                false,
+            ),
+            Expectation::new(20, "mvn", "mvn x0, x1", Some(X0), &[X1], false),
+            Expectation::new(21, "neg", "neg x0, x1", Some(X0), &[X1], false),
+            Expectation::new(22, "negs", "negs x0, x1", Some(X0), &[X1], true),
+            Expectation::new(23, "movn", "movn x0, #21930, lsl #16", Some(X0), &[], false),
+            Expectation::new(34, "movz", "movz x0, #21930, lsl #32", Some(X0), &[], false),
+            Expectation::new(
+                35,
+                "movk",
+                "movk x0, #21930, lsl #48",
+                Some(X0),
+                &[X0],
+                false,
+            ),
+            Expectation::new(24, "bic", "bic x0, x1, x2", Some(X0), &[X1, X2], false),
+            Expectation::new(25, "bics", "bics x0, x1, x2", Some(X0), &[X1, X2], true),
+            Expectation::new(26, "orn", "orn x0, x1, x2", Some(X0), &[X1, X2], false),
+            Expectation::new(27, "eon", "eon x0, x1, x2", Some(X0), &[X1, X2], false),
+            Expectation::new(28, "adds", "adds x0, x1, #1", Some(X0), &[X1], true),
+            Expectation::new(29, "subs", "subs x0, x1, x2", Some(X0), &[X1, X2], true),
+            Expectation::new(30, "ands", "ands x0, x1, x2", Some(X0), &[X1, X2], true),
+            Expectation::new(31, "cset", "cset x0, ge", Some(X0), &[], false),
+            Expectation::new(32, "csetm", "csetm x0, le", Some(X0), &[], false),
+            Expectation::new(33, "ror", "ror x0, x1, #8", Some(X0), &[X1], false),
+            Expectation::new(36, "clz", "clz x0, x1", Some(X0), &[X1], false),
+            Expectation::new(37, "cls", "cls x0, x1", Some(X0), &[X1], false),
+            Expectation::new(38, "rbit", "rbit x0, x1", Some(X0), &[X1], false),
+            Expectation::new(39, "rev", "rev x0, x1", Some(X0), &[X1], false),
+            Expectation::new(40, "rev32", "rev32 x0, x1", Some(X0), &[X1], false),
+            Expectation::new(41, "rev16", "rev16 x0, x1", Some(X0), &[X1], false),
+            Expectation::new(
+                42,
+                "madd",
+                "madd x0, x1, x2, x3",
+                Some(X0),
+                &[X1, X2, X3],
+                false,
+            ),
+            Expectation::new(
+                43,
+                "msub",
+                "msub x0, x1, x2, x3",
+                Some(X0),
+                &[X1, X2, X3],
+                false,
+            ),
+            Expectation::new(44, "mneg", "mneg x0, x1, x2", Some(X0), &[X1, X2], false),
+            Expectation::new(45, "smulh", "smulh x0, x1, x2", Some(X0), &[X1, X2], false),
+            Expectation::new(46, "umulh", "umulh x0, x1, x2", Some(X0), &[X1, X2], false),
+            Expectation::new(47, "ccmp", "ccmp x1, x2, #0, eq", None, &[X1, X2], true),
+            Expectation::new(48, "ccmn", "ccmn x1, #5, #0, eq", None, &[X1], true),
+            Expectation::new(49, "sxtb", "sxtb x0, w1", Some(X0), &[X1], false),
+            Expectation::new(50, "sxth", "sxth x0, w1", Some(X0), &[X1], false),
+            Expectation::new(51, "sxtw", "sxtw x0, w1", Some(X0), &[X1], false),
+            Expectation::new(52, "uxtb", "uxtb w0, w1", Some(X0), &[X1], false),
+            Expectation::new(53, "uxth", "uxth w0, w1", Some(X0), &[X1], false),
+            Expectation::new(54, "ubfx", "ubfx x0, x1, #8, #16", Some(X0), &[X1], false),
+            Expectation::new(55, "sbfx", "sbfx x0, x1, #8, #16", Some(X0), &[X1], false),
+            Expectation::new(56, "bfi", "bfi x0, x1, #4, #8", Some(X0), &[X0, X1], false),
+            Expectation::new(
+                57,
+                "bfxil",
+                "bfxil x0, x1, #4, #8",
+                Some(X0),
+                &[X0, X1],
+                false,
+            ),
+            Expectation::new(58, "ubfiz", "ubfiz x0, x1, #4, #8", Some(X0), &[X1], false),
+            Expectation::new(59, "sbfiz", "sbfiz x0, x1, #4, #8", Some(X0), &[X1], false),
+        ];
+
+        assert_eq!(instructions.len(), expected.len());
+        assert_eq!(expected.len(), generator.opcode_count() as usize);
+
+        let seen: BTreeSet<u8> = instructions
             .iter()
-            .map(|instr| {
-                let id = instr.opcode_id();
+            .zip(expected.iter())
+            .map(|(instr, expected)| {
+                let context = format!("{instr:?}");
+                let id = InstructionType::opcode_id(instr);
                 assert!(id < generator.opcode_count());
-                assert!(!instr.mnemonic().is_empty());
-                assert!(!format!("{}", instr).is_empty());
-                let _ = instr.destination();
-                let _ = instr.source_registers();
-                let should_update_flags = matches!(
-                    instr,
-                    Instruction::Cmp { .. }
-                        | Instruction::Cmn { .. }
-                        | Instruction::Tst { .. }
-                        | Instruction::Negs { .. }
-                        | Instruction::Bics { .. }
-                        | Instruction::Adds { .. }
-                        | Instruction::Subs { .. }
-                        | Instruction::Ands { .. }
-                        | Instruction::Ccmp { .. }
-                        | Instruction::Ccmn { .. }
+                assert_eq!(id, expected.opcode_id, "opcode id: {context}");
+                assert_eq!(
+                    InstructionType::mnemonic(instr),
+                    expected.mnemonic,
+                    "mnemonic: {context}"
                 );
-                assert_eq!(instr.has_side_effects(), should_update_flags);
+                assert_eq!(instr.to_string(), expected.display, "display: {context}");
+                assert_eq!(
+                    InstructionType::destination(instr),
+                    expected.destination,
+                    "destination: {context}"
+                );
+                assert_eq!(
+                    InstructionType::source_registers(instr),
+                    expected.sources,
+                    "source registers: {context}"
+                );
+                assert_eq!(
+                    InstructionType::has_side_effects(instr),
+                    expected.has_side_effects,
+                    "side effects: {context}"
+                );
                 id
             })
             .collect();
-        assert_eq!(seen.len(), all_instruction_families().len());
+        assert_eq!(seen.len(), instructions.len());
         assert_eq!(seen.len(), generator.opcode_count() as usize);
     }
 
