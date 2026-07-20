@@ -3097,6 +3097,104 @@ fn run_llm_opt(
     Ok(())
 }
 
+/// The presentation-and-policy outcome of an `equiv` run: the lines the CLI
+/// should print and the process exit code it should return.
+///
+/// Produced by [`build_equiv_report`] with no stdout writes and no
+/// `std::process::exit` of its own. Keeping policy (exit codes) and formatting
+/// out of `run_equiv` is what makes the not-equivalent / counterexample /
+/// unknown paths unit-testable — each previously called `std::process::exit`
+/// inline and could only be exercised by running the whole binary.
+#[derive(Debug, PartialEq, Eq)]
+struct EquivReport {
+    lines: Vec<String>,
+    exit_code: i32,
+}
+
+/// Append `state`'s live-out registers to `lines`, one `    <reg> = 0x…` entry
+/// each, sorted by register index for deterministic output. Shared by the
+/// input / output-1 / output-2 sections of a counterexample so the three
+/// previously-duplicated print loops live in one place.
+fn push_live_out_registers(
+    lines: &mut Vec<String>,
+    state: &semantics::ConcreteMachineState,
+    live_out: &LiveOut,
+) {
+    let mut regs: Vec<(Register, u64)> = state
+        .registers()
+        .iter()
+        .filter(|(reg, _)| live_out.contains_register(**reg))
+        .map(|(reg, val)| (*reg, val.as_u64()))
+        .collect();
+    regs.sort_by_key(|(reg, _)| reg.index().unwrap_or(u8::MAX));
+    for (reg, val) in regs {
+        lines.push(format!("    {} = 0x{:016x}", reg, val));
+    }
+}
+
+/// Turn an [`EquivalenceResult`] into the lines to print and the exit code to
+/// return. Pure: no I/O, no process exit. `run_equiv` prints the lines and the
+/// `equiv` CLI arm maps the code (Equivalent → 0, NotEquivalent[Fast] → 1,
+/// Unknown → 2).
+///
+/// [`EquivalenceResult`]: semantics::EquivalenceResult
+fn build_equiv_report(
+    result: &semantics::EquivalenceResult,
+    seq1: &[Instruction],
+    seq2: &[Instruction],
+    live_out: &LiveOut,
+) -> EquivReport {
+    use semantics::EquivalenceResult;
+
+    match result {
+        EquivalenceResult::Equivalent => EquivReport {
+            lines: vec!["EQUIVALENT: The two sequences are semantically equivalent.".to_string()],
+            exit_code: 0,
+        },
+        EquivalenceResult::NotEquivalent => EquivReport {
+            lines: vec![
+                "NOT EQUIVALENT: The two sequences produce different results (verified by SMT)."
+                    .to_string(),
+            ],
+            exit_code: 1,
+        },
+        EquivalenceResult::NotEquivalentFast(input_state) => {
+            // Issue #69: strip terminators before re-running on the
+            // counterexample. The B1/B2 stubs panic if a branch reaches the
+            // concrete interpreter; the equivalence layer already excluded the
+            // terminator from its comparison via the precheck.
+            let (prefix1, _) = split_terminator(seq1);
+            let (prefix2, _) = split_terminator(seq2);
+
+            let output1 = semantics::apply_sequence_concrete(input_state.clone(), prefix1);
+            let output2 = semantics::apply_sequence_concrete(input_state.clone(), prefix2);
+
+            let mut lines = vec![
+                "NOT EQUIVALENT: The two sequences produce different results.".to_string(),
+                "\nCounterexample found:".to_string(),
+                "  Input state:".to_string(),
+            ];
+            push_live_out_registers(&mut lines, input_state, live_out);
+            lines.push("  Output from sequence 1:".to_string());
+            push_live_out_registers(&mut lines, &output1, live_out);
+            lines.push("  Output from sequence 2:".to_string());
+            push_live_out_registers(&mut lines, &output2, live_out);
+
+            EquivReport {
+                lines,
+                exit_code: 1,
+            }
+        }
+        EquivalenceResult::Unknown(reason) => EquivReport {
+            lines: vec![
+                "UNKNOWN: Could not determine equivalence.".to_string(),
+                format!("  Reason: {}", reason),
+            ],
+            exit_code: 2,
+        },
+    }
+}
+
 fn run_equiv(
     file1: &Path,
     file2: &Path,
@@ -3104,8 +3202,8 @@ fn run_equiv(
     timeout: u64,
     fast_only: bool,
     verbose: bool,
-) -> Result<(), Box<dyn std::error::Error>> {
-    use semantics::{EquivalenceConfig, EquivalenceResult, check_equivalence_with_config};
+) -> Result<i32, Box<dyn std::error::Error>> {
+    use semantics::{EquivalenceConfig, check_equivalence_with_config};
 
     // Parse assembly files
     if verbose {
@@ -3158,61 +3256,14 @@ fn run_equiv(
         }
     }
 
-    // Check equivalence
+    // Check equivalence, then let the pure report builder decide what to print
+    // and which exit code to surface. `main` performs the actual `process::exit`.
     let result = check_equivalence_with_config(&seq1, &seq2, &config);
-
-    match result {
-        EquivalenceResult::Equivalent => {
-            println!("EQUIVALENT: The two sequences are semantically equivalent.");
-            Ok(())
-        }
-        EquivalenceResult::NotEquivalent => {
-            println!(
-                "NOT EQUIVALENT: The two sequences produce different results (verified by SMT)."
-            );
-            std::process::exit(1);
-        }
-        EquivalenceResult::NotEquivalentFast(input_state) => {
-            println!("NOT EQUIVALENT: The two sequences produce different results.");
-            println!("\nCounterexample found:");
-
-            // Issue #69: strip terminators before re-running on the counterexample.
-            // The B1/B2 stubs panic if a branch reaches the concrete interpreter;
-            // the equivalence layer already excluded the terminator from its
-            // comparison via the precheck.
-            let (prefix1, _) = split_terminator(&seq1);
-            let (prefix2, _) = split_terminator(&seq2);
-
-            // Run both sequences on the counterexample input
-            let output1 = semantics::apply_sequence_concrete(input_state.clone(), prefix1);
-            let output2 = semantics::apply_sequence_concrete(input_state.clone(), prefix2);
-
-            println!("  Input state:");
-            for (reg, val) in input_state.registers() {
-                if config.live_out.contains_register(*reg) {
-                    println!("    {} = 0x{:016x}", reg, val.as_u64());
-                }
-            }
-            println!("  Output from sequence 1:");
-            for (reg, val) in output1.registers() {
-                if config.live_out.contains_register(*reg) {
-                    println!("    {} = 0x{:016x}", reg, val.as_u64());
-                }
-            }
-            println!("  Output from sequence 2:");
-            for (reg, val) in output2.registers() {
-                if config.live_out.contains_register(*reg) {
-                    println!("    {} = 0x{:016x}", reg, val.as_u64());
-                }
-            }
-            std::process::exit(1);
-        }
-        EquivalenceResult::Unknown(reason) => {
-            println!("UNKNOWN: Could not determine equivalence.");
-            println!("  Reason: {}", reason);
-            std::process::exit(2);
-        }
+    let report = build_equiv_report(&result, &seq1, &seq2, &config.live_out);
+    for line in &report.lines {
+        println!("{}", line);
     }
+    Ok(report.exit_code)
 }
 
 // --- Main Function ---
@@ -3377,7 +3428,11 @@ fn main() {
             fast_only,
             verbose,
         } => match run_equiv(&file1, &file2, &live_out, timeout, fast_only, verbose) {
-            Ok(()) => {}
+            Ok(code) => {
+                if code != 0 {
+                    std::process::exit(code);
+                }
+            }
             Err(e) => {
                 eprintln!("Error: {}", e);
                 std::process::exit(1);
@@ -6970,10 +7025,120 @@ mod cli_helper_tests {
     fn run_equiv_and_llm_opt_accept_equivalent_tiny_files() {
         let asm1 = TempFile::new("s11-equiv-a", "s", "mov x0, x1\n");
         let asm2 = TempFile::new("s11-equiv-b", "s", "mov x0, x1\n");
-        run_equiv(asm1.path(), asm2.path(), "x0", 1, true, true).unwrap();
+        assert_eq!(
+            run_equiv(asm1.path(), asm2.path(), "x0", 1, true, true).unwrap(),
+            0,
+            "equivalent sequences must map to exit code 0"
+        );
 
         let llm_asm = TempFile::new("s11-llm", "s", "mov x0, x1\n");
         run_llm_opt(llm_asm.path(), "x0", 0, "test-model", 0, true).unwrap();
+    }
+
+    // ===== `equiv` report builder (extracted seam) =====
+    //
+    // Before this refactor these outcomes were only reachable through the CLI:
+    // the NotEquivalent/NotEquivalentFast/Unknown arms of `run_equiv` called
+    // `std::process::exit` inline, so no test could observe their formatting or
+    // exit codes. `build_equiv_report` is the pure seam that made them testable.
+
+    #[test]
+    fn equiv_report_equivalent_maps_to_exit_zero() {
+        let report = build_equiv_report(
+            &semantics::EquivalenceResult::Equivalent,
+            &[],
+            &[],
+            &LiveOut::from_registers(vec![]),
+        );
+        assert_eq!(report.exit_code, 0);
+        assert_eq!(
+            report.lines,
+            vec!["EQUIVALENT: The two sequences are semantically equivalent.".to_string()]
+        );
+    }
+
+    #[test]
+    fn equiv_report_not_equivalent_smt_maps_to_exit_one() {
+        let report = build_equiv_report(
+            &semantics::EquivalenceResult::NotEquivalent,
+            &[],
+            &[],
+            &LiveOut::from_registers(vec![]),
+        );
+        assert_eq!(report.exit_code, 1);
+        assert_eq!(
+            report.lines,
+            vec![
+                "NOT EQUIVALENT: The two sequences produce different results (verified by SMT)."
+                    .to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn equiv_report_unknown_maps_to_exit_two_with_reason() {
+        let report = build_equiv_report(
+            &semantics::EquivalenceResult::Unknown("solver timeout".to_string()),
+            &[],
+            &[],
+            &LiveOut::from_registers(vec![]),
+        );
+        assert_eq!(report.exit_code, 2);
+        assert_eq!(
+            report.lines,
+            vec![
+                "UNKNOWN: Could not determine equivalence.".to_string(),
+                "  Reason: solver timeout".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn equiv_report_counterexample_reruns_sequences_and_formats_live_registers() {
+        // seq1 computes x0 = x1 + 1; seq2 computes x0 = x1 + 2. With x1 = 5 in
+        // the counterexample input the two diverge on x0 (6 vs 7). The expected
+        // hex values below are worked out by hand, independent of the concrete
+        // interpreter the builder calls — so the assertion can actually disagree
+        // with the code.
+        let seq1 = vec![Instruction::Add {
+            rd: Register::X0,
+            rn: Register::X1,
+            rm: Operand::Immediate(1),
+        }];
+        let seq2 = vec![Instruction::Add {
+            rd: Register::X0,
+            rn: Register::X1,
+            rm: Operand::Immediate(2),
+        }];
+
+        let mut input = semantics::ConcreteMachineState::new_zeroed();
+        input.set_register(Register::X1, semantics::ConcreteValue::new(5));
+        let live_out = LiveOut::from_registers(vec![Register::X0, Register::X1]);
+
+        let report = build_equiv_report(
+            &semantics::EquivalenceResult::NotEquivalentFast(input),
+            &seq1,
+            &seq2,
+            &live_out,
+        );
+
+        assert_eq!(report.exit_code, 1);
+        assert_eq!(
+            report.lines,
+            vec![
+                "NOT EQUIVALENT: The two sequences produce different results.".to_string(),
+                "\nCounterexample found:".to_string(),
+                "  Input state:".to_string(),
+                "    x0 = 0x0000000000000000".to_string(),
+                "    x1 = 0x0000000000000005".to_string(),
+                "  Output from sequence 1:".to_string(),
+                "    x0 = 0x0000000000000006".to_string(),
+                "    x1 = 0x0000000000000005".to_string(),
+                "  Output from sequence 2:".to_string(),
+                "    x0 = 0x0000000000000007".to_string(),
+                "    x1 = 0x0000000000000005".to_string(),
+            ]
+        );
     }
 
     // ===== Issue #69: validate_basic_block =====
