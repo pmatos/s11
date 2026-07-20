@@ -10,11 +10,12 @@ TARGET="${TARGET:-x86_64-unknown-linux-gnu}"
 scripts/bump-version.sh "${VERSION}" >/dev/null
 cargo update -p s11
 
-# Fast release-time gate: fmt + unit tests. test.yml already runs the full
-# suite (incl. AArch64 integration tests) on the same push independently;
-# this catches an unformatted/broken tree before a release is cut from it.
-cargo fmt -- --check
-cargo test --lib --bins
+# Full synchronous gate before cutting a release: fmt, build, AArch64
+# integration-test binaries, and the full test suite. test.yml runs the
+# same checks independently on the same push, but release.yml has no
+# ordering dependency on it, so this is the only thing that actually
+# stops a broken tree from being tagged and published.
+./ci_check.sh
 
 cargo build --release --locked
 

@@ -37,7 +37,9 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
-            libcapstone-dev z3 libz3-dev
+            libcapstone-dev gcc-aarch64-linux-gnu z3 libz3-dev
+          curl --proto '=https' --tlsv1.2 -sSf https://just.systems/install.sh \
+            | sudo bash -s -- --to /usr/local/bin
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt
