@@ -27,4 +27,6 @@ jobs:
       - name: Lint PR title
         env:
           PR_TITLE: ${{ github.event.pull_request.title }}
+        # Keep --extends in sync with commitlint.config.cjs; this job has no checkout
+        # step (avoids pulling untrusted fork code) so it can't read that file directly.
         run: echo "$PR_TITLE" | npx commitlint --extends @commitlint/config-conventional --verbose
