@@ -1,12 +1,11 @@
 //! Shared harness for the criterion benchmark suite (issue #70).
 //!
-//! Each bench file under `benches/` brings these helpers in via
-//! `use s11::bench_support::*;`. The module lives in the library —
-//! not under `benches/common/` — because `harness = false` benchmarks
-//! cannot run `#[test]` blocks; we need a regular lib-test path to
-//! exercise the helpers under TDD.
+//! Criterion-specific driver code lives under `benches/`, but these
+//! parser/search/JSON helpers live in the library because `harness = false`
+//! benchmarks cannot run `#[test]` blocks; we need a regular lib-test path
+//! to exercise the helpers under TDD.
 
-use crate::ir::Instruction;
+use crate::ir::{Instruction, Register};
 use crate::parser::{LineResult, parse_line};
 use crate::search::SearchAlgorithm;
 use crate::search::config::{Algorithm, SearchConfig};
@@ -16,6 +15,30 @@ use crate::validation::live_out::parse_live_out_contract;
 use serde::Serialize;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
+
+fn duration_micros_u64(duration: Duration) -> u64 {
+    duration.as_micros().min(u128::from(u64::MAX)) as u64
+}
+
+fn register_pool_for_target(target: &[Instruction], default: &[Register]) -> Vec<Register> {
+    let mut registers = default.to_vec();
+    for reg in target.iter().flat_map(|instr| {
+        instr
+            .source_registers()
+            .into_iter()
+            .chain(instr.destinations())
+    }) {
+        if reg != Register::XZR && !registers.contains(&reg) {
+            registers.push(reg);
+        }
+    }
+    registers.sort_by_key(register_sort_key);
+    registers
+}
+
+fn register_sort_key(reg: &Register) -> u8 {
+    reg.index().unwrap_or(32)
+}
 
 /// Short git SHA + a unix-epoch-seconds timestamp, captured once per
 /// process and stamped onto every `BenchRecord` emitted in this run.
@@ -130,11 +153,10 @@ pub fn load_sequence(path: &Path) -> (Vec<Instruction>, LiveOut) {
 
 /// One canonical record per `(benchmark_id, cargo bench invocation)`.
 ///
-/// JSON emission is gated to a single call site outside criterion's
-/// `iter_custom`, so the JSONL accumulator contains exactly one row
-/// per fixture per `cargo bench` run. Criterion's HTML report owns the
-/// per-sample variance; this record is the snapshot downstream tooling
-/// diffs across commits.
+/// JSON emission is gated by the Criterion driver, so the JSONL accumulator
+/// contains exactly one row per fixture per `cargo bench` run. Criterion's
+/// HTML report owns the per-sample variance; this record is the snapshot
+/// downstream tooling diffs across commits.
 #[derive(Debug, Clone, Serialize)]
 pub struct BenchRecord {
     pub benchmark_id: String,
@@ -147,19 +169,27 @@ pub struct BenchRecord {
     pub original_cost: u64,
     pub best_cost: u64,
     /// Truncated to milliseconds for the JSON-Lines record so the file
-    /// is easy to skim. Bench files MUST use [`BenchRecord::search_elapsed`]
+    /// is easy to skim. Bench files MUST use [`BenchRecord::criterion_elapsed`]
     /// (precise `Duration`) when feeding criterion's `iter_custom`, or
     /// sub-millisecond samples round to zero — see PR #269 review.
     pub search_elapsed_ms: u64,
+    /// Same wall time as `search_elapsed_ms`, truncated to microseconds.
+    /// This keeps the JSON record useful for fast fixtures while preserving
+    /// the existing millisecond field for schema compatibility.
+    pub search_elapsed_us: u64,
     /// Full-precision wall time of the search. Excluded from the JSON
     /// serialization because `search_elapsed_ms` is the documented
     /// schema field; this is the value criterion's timing model needs.
     #[serde(skip)]
-    pub search_elapsed: Duration,
+    search_elapsed: Duration,
     pub smt_elapsed_ms: u64,
+    /// Whether SMT timing/counter metrics are populated by this bench
+    /// adapter. `false` is reserved for future uninstrumented backends.
+    pub smt_measured: bool,
     pub smt_queries: u64,
     pub smt_equivalent: u64,
     pub candidates_evaluated: u64,
+    pub candidates_pruned_by_cost: u64,
     /// `true` if the search returned a strictly cheaper sequence than
     /// the target. Note: this does NOT mean "search ran without error" —
     /// a timeout that finds no improvement also reports `improved: false`.
@@ -169,6 +199,13 @@ pub struct BenchRecord {
     pub timeout: bool,
     pub git_sha: Option<String>,
     pub timestamp_utc: Option<String>,
+}
+
+impl BenchRecord {
+    /// Precise elapsed time for Criterion's `iter_custom` timing model.
+    pub fn criterion_elapsed(&self) -> Duration {
+        self.search_elapsed
+    }
 }
 
 /// Append one `BenchRecord` as a JSON line to `path`, creating the
@@ -216,30 +253,22 @@ pub struct BenchSpec {
 
 /// Run the optimizer against one fixture and synthesise a `BenchRecord`.
 ///
-/// Deterministic given `spec.seed`. Bench drivers call this **once per
-/// `cargo bench` invocation** outside criterion's `iter_custom` so the
-/// JSON-Lines accumulator stays exactly one record per fixture —
-/// criterion's warmup phase would otherwise emit unmeasured records
-/// (PR #269 review). Inside `iter_custom`, drivers re-call `run_bench`
-/// just to read `search_elapsed` for criterion's timing model.
+/// Deterministic given `spec.seed`. Bench drivers call this from a
+/// de-duplicated Criterion loop so the JSON-Lines accumulator stays exactly
+/// one record per fixture per `cargo bench` invocation — criterion's warmup
+/// phase would otherwise emit unmeasured records (PR #269 review).
 pub fn run_bench(spec: &BenchSpec) -> BenchRecord {
-    // NOTE: The AArch64 backends invoked below hardcode `.with_flags(true)`
-    // (`src/search/enumerative/search.rs`, `src/search/stochastic/backend.rs`,
-    // `src/search/symbolic/backend.rs`). The fixture's `flags_live` bit
-    // (carried on the returned `LiveOut`) is therefore not consulted here:
-    // every benched candidate is verified under "NZCV is observable"
-    // semantics regardless of the header. This is conservative
-    // (pessimises rewrites that drop flag-setters when the fixture
-    // declares NZCV dead) but never unsound. Tracked for proper plumbing
-    // in #287.
     let (target, live_out) = load_sequence(&spec.fixture);
     let original_length = target.len();
     let original_cost = sequence_cost(&target, &spec.cost_metric);
 
-    let mut config = SearchConfig::default()
+    let default_config = SearchConfig::default();
+    let register_pool = register_pool_for_target(&target, &default_config.available_registers);
+    let mut config = default_config
         .with_algorithm(spec.algorithm)
         .with_cost_metric(spec.cost_metric)
-        .with_timeout(spec.timeout);
+        .with_timeout(spec.timeout)
+        .with_registers(register_pool);
     config.stochastic.seed = Some(spec.seed);
 
     let (statistics, optimized) = match spec.algorithm {
@@ -282,11 +311,14 @@ pub fn run_bench(spec: &BenchSpec) -> BenchRecord {
         original_cost,
         best_cost,
         search_elapsed_ms: statistics.elapsed_time.as_millis() as u64,
+        search_elapsed_us: duration_micros_u64(statistics.elapsed_time),
         search_elapsed: statistics.elapsed_time,
         smt_elapsed_ms: statistics.smt_elapsed.as_millis() as u64,
+        smt_measured: true,
         smt_queries: statistics.smt_queries,
         smt_equivalent: statistics.smt_equivalent,
         candidates_evaluated: statistics.candidates_evaluated,
+        candidates_pruned_by_cost: statistics.candidates_pruned_by_cost,
         improved,
         timeout: timed_out,
         git_sha: None,
@@ -361,11 +393,14 @@ mod tests {
             original_cost: 2,
             best_cost: 1,
             search_elapsed_ms: 5,
-            search_elapsed: Duration::from_millis(5),
+            search_elapsed_us: 5_123,
+            search_elapsed: Duration::from_micros(5_123),
             smt_elapsed_ms: 1,
+            smt_measured: true,
             smt_queries: 3,
             smt_equivalent: 1,
             candidates_evaluated: 20,
+            candidates_pruned_by_cost: 4,
             improved: true,
             timeout: false,
             git_sha: None,
@@ -384,7 +419,15 @@ mod tests {
             .map(|l| serde_json::from_str(l).expect("each line must be valid JSON"))
             .collect();
         assert_eq!(parsed[0]["benchmark_id"], "demo");
+        assert_eq!(parsed[0]["candidates_pruned_by_cost"], 4);
         assert_eq!(parsed[1]["benchmark_id"], "demo-2");
+        assert_eq!(parsed[0]["search_elapsed_ms"], 5);
+        assert_eq!(parsed[0]["search_elapsed_us"], 5_123);
+        assert_eq!(parsed[0]["smt_measured"], true);
+        assert!(
+            parsed[0].get("search_elapsed").is_none(),
+            "precise Duration must stay internal to the bench driver"
+        );
     }
 
     /// Smoke-test every shipped fixture (Phase 1 + Phase 3): each
@@ -459,6 +502,97 @@ mod tests {
         assert_eq!(record.best_cost, 1);
         assert!(record.smt_queries > 0, "enumerative search must hit SMT");
         assert!(record.candidates_evaluated > 0);
+        assert!(record.candidates_pruned_by_cost <= record.candidates_evaluated);
         assert!(!record.timeout);
+    }
+
+    #[test]
+    fn run_bench_honours_fixture_flags_dead_header() {
+        let f = write_fixture(
+            "// Live-out: x0\n\
+             cmp x1, x2\n\
+             add x0, x3, #1\n",
+        );
+        let spec = BenchSpec {
+            id: "dead_cmp".to_string(),
+            fixture: f.path().to_path_buf(),
+            phase: 3,
+            algorithm: Algorithm::Enumerative,
+            cost_metric: CostMetric::InstructionCount,
+            seed: 42,
+            timeout: Duration::from_secs(120),
+        };
+
+        let record = run_bench(&spec);
+
+        assert!(
+            record.improved,
+            "fixture omits ;nzcv, so a dead compare may be dropped"
+        );
+        assert_eq!(record.original_length, 2);
+        assert_eq!(record.found_length, Some(1));
+        assert_eq!(record.best_cost, 1);
+    }
+
+    #[test]
+    fn register_pool_for_target_unions_default_with_fixture_operands() {
+        let f = write_fixture(
+            "// Live-out: x8\n\
+             add x8, x9, #1\n\
+             eor x9, x9, xzr\n",
+        );
+        let (target, _) = load_sequence(f.path());
+        let pool = register_pool_for_target(
+            &target,
+            &[
+                crate::ir::Register::X0,
+                crate::ir::Register::X1,
+                crate::ir::Register::X2,
+                crate::ir::Register::X3,
+                crate::ir::Register::X4,
+                crate::ir::Register::X5,
+            ],
+        );
+
+        assert_eq!(
+            pool,
+            vec![
+                crate::ir::Register::X0,
+                crate::ir::Register::X1,
+                crate::ir::Register::X2,
+                crate::ir::Register::X3,
+                crate::ir::Register::X4,
+                crate::ir::Register::X5,
+                crate::ir::Register::X8,
+                crate::ir::Register::X9,
+            ]
+        );
+    }
+
+    #[test]
+    fn run_bench_register_pool_includes_nondefault_fixture_operands() {
+        let f = write_fixture(
+            "// Live-out: x8\n\
+             mov x8, x9\n\
+             add x8, x8, #1\n",
+        );
+        let spec = BenchSpec {
+            id: "x8_mov_add_fuse".to_string(),
+            fixture: f.path().to_path_buf(),
+            phase: 2,
+            algorithm: Algorithm::Enumerative,
+            cost_metric: CostMetric::InstructionCount,
+            seed: 42,
+            timeout: Duration::from_secs(120),
+        };
+
+        let record = run_bench(&spec);
+
+        assert!(
+            record.improved,
+            "bench register pool must include x8/x9 from the fixture"
+        );
+        assert_eq!(record.found_length, Some(1));
+        assert_eq!(record.best_cost, 1);
     }
 }

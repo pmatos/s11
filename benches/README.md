@@ -37,6 +37,7 @@ benches/
 ├── llvm_codegen/          # Phase 2 fixtures — populated by the harvester
 ├── algebraic_fusion.rs    # Phase 3 driver
 ├── algebraic_fusion/*.s   # Phase 3 fixtures (~15, textbook identities)
+├── common.rs              # Shared Criterion phase driver
 ├── smt_clz.rs             # Direct CLZ/CLS SMT formula timing
 ├── results/results.jsonl  # JSONL accumulator (gitignored)
 └── README.md              # you are here
@@ -47,6 +48,8 @@ The shared harness (`load_sequence`, `run_bench`, `append_json`,
 lives in `src/bench_support.rs` because criterion's `harness = false`
 mode prevents `#[test]` blocks under `benches/` from running — putting
 the helpers in the library gives them a normal unit-test path.
+Criterion-specific phase plumbing lives in `benches/common.rs` because
+`criterion` is a dev-dependency.
 
 ## Adding a fixture
 
@@ -67,12 +70,16 @@ the helpers in the library gives them a normal unit-test path.
    automatically.
 
 A missing `// Live-out:` header panics with a pointer to this file.
+The AArch64 bench harness derives its candidate register pool from the
+fixture's source and destination operands, unioned with the default
+`x0..x5` pool, so Phase 2 fixtures using registers such as `x8`/`x9`
+remain expressible by the search.
 
 ## JSON record schema
 
 One record per fixture per `cargo bench` run. Bench drivers emit the
-JSON before driving criterion's `iter_custom`, so warm-up iterations
-never appear in the file. Criterion's HTML report under
+JSON from a de-duplicated `iter_custom` loop, so Criterion warm-up and
+measurement repeats never create extra lines. Criterion's HTML report under
 `target/criterion/<group>/<fixture>/` owns the per-sample variance; the
 JSON record below is the canonical snapshot downstream tooling diffs
 across commits.
@@ -89,10 +96,13 @@ across commits.
   "original_cost": 2,
   "best_cost": 1,
   "search_elapsed_ms": 22,
+  "search_elapsed_us": 22134,
   "smt_elapsed_ms": 0,
+  "smt_measured": true,
   "smt_queries": 73000,
   "smt_equivalent": 1,
   "candidates_evaluated": 85000,
+  "candidates_pruned_by_cost": 12000,
   "improved": true,
   "timeout": false,
   "git_sha": "9576937",
@@ -110,9 +120,12 @@ across commits.
 | `original_length` / `found_length` | Target length and optimized length (or `null` if no optimization). |
 | `original_cost` / `best_cost` | Cost under the chosen metric. |
 | `search_elapsed_ms` | Wall time of the search itself, truncated to milliseconds for legibility. Sub-millisecond runs serialise as `0`; the bench driver uses the precise `Duration` internally so criterion's timing analysis sees real values. |
-| `smt_elapsed_ms` | Cumulative Z3 `solver.check()` time. Often zero — the pre-SMT guard rejects most flag-divergent candidates before reaching the solver. |
+| `search_elapsed_us` | Same wall time truncated to microseconds for downstream tools that diff fast fixtures. |
+| `smt_elapsed_ms` | Cumulative Z3 `solver.check()` time. Often zero — the pre-SMT guard rejects most flag-divergent candidates before reaching the solver, and very fast measured calls can still round to `0`. |
+| `smt_measured` | Whether the current bench backend populates SMT metrics. `true` plus `smt_elapsed_ms = 0` means metrics were available but rounded/truly zero or no solver call occurred; `false` is reserved for future uninstrumented backends. |
 | `smt_queries` / `smt_equivalent` | SMT call count (net of fast-path rollbacks) and how many proved equivalence. |
-| `candidates_evaluated` | Total candidates considered. |
+| `candidates_evaluated` | Candidates constructed and considered, including candidates later rejected by a cost/best-bound gate. |
+| `candidates_pruned_by_cost` | Evaluated candidates rejected before verification because they were not cheaper than the current best solution. |
 | `improved` / `timeout` | `improved`: whether the search returned a strictly cheaper sequence than the target — **not** "search completed without error" (a clean timeout that finds nothing also reports `improved: false`). Combine with `timeout` to distinguish "explored fully, no win" from "ran out of time." |
 | `git_sha` / `timestamp_utc` | Run provenance, stamped once per `cargo bench` invocation. |
 
@@ -126,11 +139,16 @@ The script shallow-clones `llvm-project`, samples `.ll` files
 deterministically, drives them through `llc -mtriple=aarch64-linux-gnu
 -O2`, filters output blocks to s11-supported mnemonics, and writes
 each survivor as `benches/llvm_codegen/<basename>.s` with `// Source:`
-provenance.
+provenance. `// Live-out:` headers are inferred from destination
+operands, with 32-bit register names normalized to their 64-bit
+counterparts (`w9` -> `x9`) and `fp`/`lr` normalized to `x29`/`x30`.
+Blocks with no destination registers are skipped instead of falling
+back to `x0`.
 
 Maintainer-run only. Review `git status -- benches/llvm_codegen` and
-commit fixtures you want to keep. Re-run with the same `SEED` for a
-deterministic refresh.
+commit fixtures you want to keep. Generated live-outs are conservative
+operand-derived headers, not a substitute for human review. Re-run with
+the same `SEED` for a deterministic refresh.
 
 ## Caveats
 
@@ -140,6 +158,7 @@ deterministic refresh.
 - **`smt_elapsed_ms = 0` is normal**. For most Phase 1 targets the
   pre-SMT guard catches flag-divergence early and the solver never
   fires. Use `smt_queries` to see how many candidates reached the
-  solver (net of fast-path rollbacks).
+  solver (net of fast-path rollbacks), and `smt_measured` to distinguish
+  measured-zero from a future uninstrumented backend.
 - **Phase 2 emptiness is normal**. The harvester is opt-in; the bench
   driver skips the group when the fixture directory is empty.

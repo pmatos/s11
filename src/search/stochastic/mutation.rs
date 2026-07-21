@@ -14,7 +14,7 @@
 
 #![allow(dead_code)]
 
-use crate::ir::instructions::MOVW_LEGAL_SHIFTS;
+use crate::ir::instructions::{AARCH64_RANDOM_SHIFT_IMMEDIATES, MOVW_LEGAL_SHIFTS};
 use crate::ir::types::Condition;
 use crate::ir::{ExtendKind, Instruction, Operand, Register, RegisterWidth};
 use crate::search::candidate::generate_random_instruction;
@@ -49,6 +49,13 @@ const LOGICAL_IMM64_POOL: &[i64] = &[
     -256, // i64 -256 = 0xFFFF_FFFF_FFFF_FF00 as X64: a 56-bit high run, a valid logical bitmask immediate
 ];
 const SHIFTED_REGISTER_OPERAND_PROBABILITY: f64 = 0.30;
+/// Shift amounts proposed for X-form (64-bit) shifted-register operands.
+const SHIFTED_REGISTER_AMOUNTS_X64: [u8; 7] = [1, 2, 3, 4, 8, 16, 32];
+/// Shift amounts for W-form (32-bit) shifted-register operands. Caps at 31
+/// because AArch64 limits `Wd` shifted-register immediates to `0..=31`
+/// (ARM ARM C3.5.2); amount 32 is valid only for the X-form.
+const SHIFTED_REGISTER_AMOUNTS_W32: [u8; 7] = [1, 2, 3, 4, 8, 16, 31];
+
 /// Additional probability budget reserved for extended-register proposals,
 /// stacked on top of `SHIFTED_REGISTER_OPERAND_PROBABILITY` in
 /// `random_operand_3op` (issue #151). Kept as a separate constant so retuning
@@ -89,6 +96,23 @@ fn single_source_opcode_peer<R: RngExt>(rng: &mut R, rd: Register, rn: Register)
     }
 }
 
+fn normalized_immediate_pool(immediates: &[i64], modulus: i64) -> Vec<i64> {
+    debug_assert!(modulus > 0, "immediate modulus must be positive");
+
+    if immediates.is_empty() {
+        return vec![0];
+    }
+
+    let mut normalized = Vec::new();
+    for imm in immediates {
+        let residue = imm.rem_euclid(modulus);
+        if !normalized.contains(&residue) {
+            normalized.push(residue);
+        }
+    }
+    normalized
+}
+
 /// Mutation operator types
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MutationType {
@@ -107,31 +131,37 @@ pub enum MutationType {
 pub struct Mutator {
     registers: Vec<Register>,
     immediates: Vec<i64>,
+    imm12_immediates: Vec<i64>,
+    imm5_immediates: Vec<i64>,
     weights: MutationWeights,
 }
 
 impl Mutator {
     pub fn new(registers: Vec<Register>, immediates: Vec<i64>, weights: MutationWeights) -> Self {
+        // Keep the raw table for unrestricted immediates (MOV, move-wide,
+        // instruction replacement) but precompute per-opcode-class pools for
+        // bounded forms. The pools deduplicate after normalization so
+        // congruent configured values do not get extra proposal weight.
+        let imm12_immediates = normalized_immediate_pool(&immediates, 0x1000);
+        let imm5_immediates = normalized_immediate_pool(&immediates, 32);
+
         Self {
             registers,
             immediates,
+            imm12_immediates,
+            imm5_immediates,
             weights,
         }
     }
 
     /// Select a mutation type based on weights
     pub fn select_mutation_type<R: RngExt>(&self, rng: &mut R) -> MutationType {
-        let thresholds = self.weights.cumulative_thresholds();
         let r: f64 = rng.random();
-
-        if r < thresholds[0] {
-            MutationType::Operand
-        } else if r < thresholds[1] {
-            MutationType::Opcode
-        } else if r < thresholds[2] {
-            MutationType::Swap
-        } else {
-            MutationType::Instruction
+        match self.weights.select_index(r) {
+            0 => MutationType::Operand,
+            1 => MutationType::Opcode,
+            2 => MutationType::Swap,
+            _ => MutationType::Instruction,
         }
     }
 
@@ -182,18 +212,41 @@ impl Mutator {
                     *imm = self.random_immediate(rng);
                 }
             }
-            Instruction::Add { rd, rn, rm }
-            | Instruction::AddW { rd, rn, rm }
-            | Instruction::Sub { rd, rn, rm }
-            | Instruction::SubW { rd, rn, rm } => {
+            Instruction::Add { rd, rn, rm } | Instruction::Sub { rd, rn, rm } => {
                 let choice = rng.random_range(0..3);
                 match choice {
                     0 => *rd = self.random_register(rng),
                     1 => *rn = self.random_register(rng),
                     // Add/Sub do not allow ROR in the shifted-register form.
-                    // Immediates must fit `is_encodable_aarch64`'s 12-bit
-                    // range (issue #87).
-                    _ => *rm = Self::clamp_imm12(self.random_operand_3op(rng, false)),
+                    // Immediate proposals draw from the deduplicated imm12
+                    // pool so congruent configured immediates do not carry
+                    // extra proposal weight.
+                    _ => {
+                        *rm = self.random_operand_3op_from_pool(
+                            rng,
+                            false,
+                            RegisterWidth::X64,
+                            &self.imm12_immediates,
+                        );
+                    }
+                }
+            }
+            Instruction::AddW { rd, rn, rm } | Instruction::SubW { rd, rn, rm } => {
+                let choice = rng.random_range(0..3);
+                match choice {
+                    0 => *rd = self.random_register(rng),
+                    1 => *rn = self.random_register(rng),
+                    // W-form shifted-register amounts are limited to 0..=31.
+                    // Keep the same proposal heat as X-form Add/Sub while
+                    // using a W-safe amount pool.
+                    _ => {
+                        *rm = self.random_operand_3op_from_pool(
+                            rng,
+                            false,
+                            RegisterWidth::W32,
+                            &self.imm12_immediates,
+                        );
+                    }
                 }
             }
             Instruction::And { rd, rn, rm, width }
@@ -203,7 +256,7 @@ impl Mutator {
                 match choice {
                     0 => *rd = self.random_register(rng),
                     1 => *rn = self.random_register(rng),
-                    _ => *rm = self.random_logical_operand(rng, *width, true),
+                    _ => *rm = self.random_logical_operand(rng, *width, true, true),
                 }
             }
             Instruction::Lsl { rd, rn, shift }
@@ -253,31 +306,32 @@ impl Mutator {
                 if rng.random_bool(0.5) {
                     *rn = self.random_register(rng);
                 } else {
-                    // Same 12-bit clamp as Add/Sub (issue #87).
-                    *rm = Self::clamp_imm12(self.random_operand_3op(rng, false));
+                    *rm = self.random_operand_3op_from_pool(
+                        rng,
+                        false,
+                        RegisterWidth::X64,
+                        &self.imm12_immediates,
+                    );
                 }
             }
             Instruction::Tst { rn, rm, width } => {
                 if rng.random_bool(0.5) {
                     *rn = self.random_register(rng);
                 } else {
-                    *rm = self.random_logical_operand(rng, *width, true);
+                    *rm = self.random_logical_operand(rng, *width, true, false);
                 }
             }
             // CCMP / CCMN: rn (register), rm (operand), nzcv (0..=15), cond.
             // Uniform pick among the four mutable fields. Immediate `rm`
-            // operands are clamped to imm5 via rem_euclid(32) to match the
-            // candidate generator (candidate.rs::generate_random_instruction)
-            // and avoid avoidable is_encodable_aarch64 rejection churn.
-            // (See `clamp_imm12` for the 12-bit analogue used by
-            // ADD/SUB/ADDS/SUBS/CMP/CMN, issue #87.)
+            // operands draw from a deduplicated imm5 pool so configured
+            // immediates congruent modulo 32 do not become overweighted.
             Instruction::Ccmp { rn, rm, nzcv, cond } | Instruction::Ccmn { rn, rm, nzcv, cond } => {
                 match rng.random_range(0..4) {
                     0 => *rn = self.random_register(rng),
                     1 => {
-                        *rm = match self.random_operand(rng) {
+                        *rm = match self.random_operand_from_pool(rng, &self.imm5_immediates) {
                             Operand::Register(r) => Operand::Register(r),
-                            Operand::Immediate(v) => Operand::Immediate(v.rem_euclid(32)),
+                            Operand::Immediate(v) => Operand::Immediate(v),
                             // CCMP/CCMN reject shifted-register or extended-
                             // register operands; collapse to a plain register
                             // (consistent with candidate::generate_random_-
@@ -363,16 +417,35 @@ impl Mutator {
                 match choice {
                     0 => *rd = self.random_register(rng),
                     1 => *rn = self.random_register(rng),
-                    // Same 12-bit clamp as Add/Sub (issue #87).
-                    _ => *rm = Self::clamp_imm12(self.random_operand(rng)),
+                    // Same non-ROR shifted-register coverage and deduplicated
+                    // imm12 immediate pool as Add/Sub, but without the
+                    // extended-register branch: ADDS/SUBS do not encode an
+                    // extended-register form (issue #279).
+                    _ => {
+                        *rm = self.random_arith_operand_no_extended(
+                            rng,
+                            false,
+                            RegisterWidth::X64,
+                            &self.imm12_immediates,
+                        );
+                    }
                 }
             }
+            // ADC/ADCS/SBC/SBCS are register-only (rd, rn, rm all registers).
+            Instruction::Adc { rd, rn, rm }
+            | Instruction::Adcs { rd, rn, rm }
+            | Instruction::Sbc { rd, rn, rm }
+            | Instruction::Sbcs { rd, rn, rm } => match rng.random_range(0..3) {
+                0 => *rd = self.random_register(rng),
+                1 => *rn = self.random_register(rng),
+                _ => *rm = self.random_register(rng),
+            },
             Instruction::Ands { rd, rn, rm, width } => {
                 let choice = rng.random_range(0..3);
                 match choice {
                     0 => *rd = self.random_register(rng),
                     1 => *rn = self.random_register(rng),
-                    _ => *rm = self.random_logical_operand(rng, *width, false),
+                    _ => *rm = self.random_logical_operand(rng, *width, false, false),
                 }
             }
             // CSET / CSETM: only rd and cond can change; cond from the 14
@@ -394,28 +467,67 @@ impl Mutator {
                 }
             }
             // Bit-field manipulation: 4-way operand mutation (rd, rn, lsb, width)
-            // with 2D clamping so the (lsb + width <= 64) constraint is always
-            // preserved. When mutating lsb, clamp width if necessary.
-            Instruction::Ubfx { rd, rn, lsb, width }
-            | Instruction::Sbfx { rd, rn, lsb, width }
-            | Instruction::Bfi { rd, rn, lsb, width }
-            | Instruction::Bfxil { rd, rn, lsb, width }
-            | Instruction::Ubfiz { rd, rn, lsb, width }
-            | Instruction::Sbfiz { rd, rn, lsb, width } => {
+            // with 2D clamping so the (lsb + width <= bound) constraint is always
+            // preserved, where `bound` is 32 for the W form and 64 for X. The
+            // register width form itself is never changed here (that would be a
+            // cross-width opcode bridge, which we deliberately avoid).
+            Instruction::Ubfx {
+                rd,
+                rn,
+                lsb,
+                width,
+                reg_width,
+            }
+            | Instruction::Sbfx {
+                rd,
+                rn,
+                lsb,
+                width,
+                reg_width,
+            }
+            | Instruction::Bfi {
+                rd,
+                rn,
+                lsb,
+                width,
+                reg_width,
+            }
+            | Instruction::Bfxil {
+                rd,
+                rn,
+                lsb,
+                width,
+                reg_width,
+            }
+            | Instruction::Ubfiz {
+                rd,
+                rn,
+                lsb,
+                width,
+                reg_width,
+            }
+            | Instruction::Sbfiz {
+                rd,
+                rn,
+                lsb,
+                width,
+                reg_width,
+            } => {
+                let bound = reg_width.bit_width() as u32;
                 match rng.random_range(0..4) {
                     0 => *rd = self.random_register(rng),
                     1 => *rn = self.random_register(rng),
                     2 => {
                         // Mutate width: bound by current lsb so the pair stays valid.
-                        let max_w = (64 - *lsb).max(1);
-                        *width = ((rng.random::<u32>() % max_w as u32) + 1) as u8;
+                        let max_w = (bound - *lsb as u32).max(1);
+                        *width = ((rng.random::<u32>() % max_w) + 1) as u8;
                     }
                     _ => {
                         // Mutate lsb; clamp width down if the new lsb would
-                        // overflow the (lsb + width <= 64) constraint.
-                        *lsb = (rng.random::<u32>() & 0x3F) as u8;
-                        if (*lsb as u16 + *width as u16) > 64 {
-                            *width = 64 - *lsb;
+                        // overflow the (lsb + width <= bound) constraint.
+                        *lsb = (rng.random::<u32>() % bound) as u8;
+                        if (*lsb as u16 + *width as u16) > bound as u16 {
+                            *width = bound as u8 - *lsb;
                         }
                     }
                 }
@@ -498,7 +610,12 @@ impl Mutator {
                     Instruction::AddW {
                         rd,
                         rn,
-                        rm: Self::clamp_imm12(self.random_operand_3op(rng, false)),
+                        rm: self.random_operand_3op_from_pool(
+                            rng,
+                            false,
+                            RegisterWidth::W32,
+                            &self.imm12_immediates,
+                        ),
                     }
                 } else {
                     Instruction::MovRegW { rd, rn }
@@ -896,6 +1013,23 @@ impl Mutator {
                 },
                 _ => Instruction::Subs { rd, rn, rm },
             },
+            // ADC/ADCS/SBC/SBCS toggle within the carry family (register-only).
+            Instruction::Adc { rd, rn, rm } => match rng.random_range(0..2) {
+                0 => Instruction::Adcs { rd, rn, rm },
+                _ => Instruction::Adc { rd, rn, rm },
+            },
+            Instruction::Adcs { rd, rn, rm } => match rng.random_range(0..2) {
+                0 => Instruction::Adc { rd, rn, rm },
+                _ => Instruction::Adcs { rd, rn, rm },
+            },
+            Instruction::Sbc { rd, rn, rm } => match rng.random_range(0..2) {
+                0 => Instruction::Sbcs { rd, rn, rm },
+                _ => Instruction::Sbc { rd, rn, rm },
+            },
+            Instruction::Sbcs { rd, rn, rm } => match rng.random_range(0..2) {
+                0 => Instruction::Sbc { rd, rn, rm },
+                _ => Instruction::Sbcs { rd, rn, rm },
+            },
             Instruction::Ands { rd, rn, rm, width } => match rng.random_range(0..4) {
                 0 => Instruction::And { rd, rn, rm, width },
                 1 => Instruction::Adds {
@@ -970,53 +1104,305 @@ impl Mutator {
             // and insert (BFI/BFXIL/UBFIZ/SBFIZ) variants changes whether rd
             // is read; MCMC tolerates this because invalid proposals fail
             // equivalence checking and are rejected by the acceptance step.
-            Instruction::Ubfx { rd, rn, lsb, width } => match rng.random_range(0..6) {
-                0 => Instruction::Sbfx { rd, rn, lsb, width },
-                1 => Instruction::Bfi { rd, rn, lsb, width },
-                2 => Instruction::Bfxil { rd, rn, lsb, width },
-                3 => Instruction::Ubfiz { rd, rn, lsb, width },
-                4 => Instruction::Sbfiz { rd, rn, lsb, width },
-                _ => Instruction::Ubfx { rd, rn, lsb, width },
+            Instruction::Ubfx {
+                rd,
+                rn,
+                lsb,
+                width,
+                reg_width,
+            } => match rng.random_range(0..6) {
+                0 => Instruction::Sbfx {
+                    rd,
+                    rn,
+                    lsb,
+                    width,
+                    reg_width,
+                },
+                1 => Instruction::Bfi {
+                    rd,
+                    rn,
+                    lsb,
+                    width,
+                    reg_width,
+                },
+                2 => Instruction::Bfxil {
+                    rd,
+                    rn,
+                    lsb,
+                    width,
+                    reg_width,
+                },
+                3 => Instruction::Ubfiz {
+                    rd,
+                    rn,
+                    lsb,
+                    width,
+                    reg_width,
+                },
+                4 => Instruction::Sbfiz {
+                    rd,
+                    rn,
+                    lsb,
+                    width,
+                    reg_width,
+                },
+                _ => Instruction::Ubfx {
+                    rd,
+                    rn,
+                    lsb,
+                    width,
+                    reg_width,
+                },
             },
-            Instruction::Sbfx { rd, rn, lsb, width } => match rng.random_range(0..6) {
-                0 => Instruction::Ubfx { rd, rn, lsb, width },
-                1 => Instruction::Bfi { rd, rn, lsb, width },
-                2 => Instruction::Bfxil { rd, rn, lsb, width },
-                3 => Instruction::Ubfiz { rd, rn, lsb, width },
-                4 => Instruction::Sbfiz { rd, rn, lsb, width },
-                _ => Instruction::Sbfx { rd, rn, lsb, width },
+            Instruction::Sbfx {
+                rd,
+                rn,
+                lsb,
+                width,
+                reg_width,
+            } => match rng.random_range(0..6) {
+                0 => Instruction::Ubfx {
+                    rd,
+                    rn,
+                    lsb,
+                    width,
+                    reg_width,
+                },
+                1 => Instruction::Bfi {
+                    rd,
+                    rn,
+                    lsb,
+                    width,
+                    reg_width,
+                },
+                2 => Instruction::Bfxil {
+                    rd,
+                    rn,
+                    lsb,
+                    width,
+                    reg_width,
+                },
+                3 => Instruction::Ubfiz {
+                    rd,
+                    rn,
+                    lsb,
+                    width,
+                    reg_width,
+                },
+                4 => Instruction::Sbfiz {
+                    rd,
+                    rn,
+                    lsb,
+                    width,
+                    reg_width,
+                },
+                _ => Instruction::Sbfx {
+                    rd,
+                    rn,
+                    lsb,
+                    width,
+                    reg_width,
+                },
             },
-            Instruction::Bfi { rd, rn, lsb, width } => match rng.random_range(0..6) {
-                0 => Instruction::Ubfx { rd, rn, lsb, width },
-                1 => Instruction::Sbfx { rd, rn, lsb, width },
-                2 => Instruction::Bfxil { rd, rn, lsb, width },
-                3 => Instruction::Ubfiz { rd, rn, lsb, width },
-                4 => Instruction::Sbfiz { rd, rn, lsb, width },
-                _ => Instruction::Bfi { rd, rn, lsb, width },
+            Instruction::Bfi {
+                rd,
+                rn,
+                lsb,
+                width,
+                reg_width,
+            } => match rng.random_range(0..6) {
+                0 => Instruction::Ubfx {
+                    rd,
+                    rn,
+                    lsb,
+                    width,
+                    reg_width,
+                },
+                1 => Instruction::Sbfx {
+                    rd,
+                    rn,
+                    lsb,
+                    width,
+                    reg_width,
+                },
+                2 => Instruction::Bfxil {
+                    rd,
+                    rn,
+                    lsb,
+                    width,
+                    reg_width,
+                },
+                3 => Instruction::Ubfiz {
+                    rd,
+                    rn,
+                    lsb,
+                    width,
+                    reg_width,
+                },
+                4 => Instruction::Sbfiz {
+                    rd,
+                    rn,
+                    lsb,
+                    width,
+                    reg_width,
+                },
+                _ => Instruction::Bfi {
+                    rd,
+                    rn,
+                    lsb,
+                    width,
+                    reg_width,
+                },
             },
-            Instruction::Bfxil { rd, rn, lsb, width } => match rng.random_range(0..6) {
-                0 => Instruction::Ubfx { rd, rn, lsb, width },
-                1 => Instruction::Sbfx { rd, rn, lsb, width },
-                2 => Instruction::Bfi { rd, rn, lsb, width },
-                3 => Instruction::Ubfiz { rd, rn, lsb, width },
-                4 => Instruction::Sbfiz { rd, rn, lsb, width },
-                _ => Instruction::Bfxil { rd, rn, lsb, width },
+            Instruction::Bfxil {
+                rd,
+                rn,
+                lsb,
+                width,
+                reg_width,
+            } => match rng.random_range(0..6) {
+                0 => Instruction::Ubfx {
+                    rd,
+                    rn,
+                    lsb,
+                    width,
+                    reg_width,
+                },
+                1 => Instruction::Sbfx {
+                    rd,
+                    rn,
+                    lsb,
+                    width,
+                    reg_width,
+                },
+                2 => Instruction::Bfi {
+                    rd,
+                    rn,
+                    lsb,
+                    width,
+                    reg_width,
+                },
+                3 => Instruction::Ubfiz {
+                    rd,
+                    rn,
+                    lsb,
+                    width,
+                    reg_width,
+                },
+                4 => Instruction::Sbfiz {
+                    rd,
+                    rn,
+                    lsb,
+                    width,
+                    reg_width,
+                },
+                _ => Instruction::Bfxil {
+                    rd,
+                    rn,
+                    lsb,
+                    width,
+                    reg_width,
+                },
             },
-            Instruction::Ubfiz { rd, rn, lsb, width } => match rng.random_range(0..6) {
-                0 => Instruction::Ubfx { rd, rn, lsb, width },
-                1 => Instruction::Sbfx { rd, rn, lsb, width },
-                2 => Instruction::Bfi { rd, rn, lsb, width },
-                3 => Instruction::Bfxil { rd, rn, lsb, width },
-                4 => Instruction::Sbfiz { rd, rn, lsb, width },
-                _ => Instruction::Ubfiz { rd, rn, lsb, width },
+            Instruction::Ubfiz {
+                rd,
+                rn,
+                lsb,
+                width,
+                reg_width,
+            } => match rng.random_range(0..6) {
+                0 => Instruction::Ubfx {
+                    rd,
+                    rn,
+                    lsb,
+                    width,
+                    reg_width,
+                },
+                1 => Instruction::Sbfx {
+                    rd,
+                    rn,
+                    lsb,
+                    width,
+                    reg_width,
+                },
+                2 => Instruction::Bfi {
+                    rd,
+                    rn,
+                    lsb,
+                    width,
+                    reg_width,
+                },
+                3 => Instruction::Bfxil {
+                    rd,
+                    rn,
+                    lsb,
+                    width,
+                    reg_width,
+                },
+                4 => Instruction::Sbfiz {
+                    rd,
+                    rn,
+                    lsb,
+                    width,
+                    reg_width,
+                },
+                _ => Instruction::Ubfiz {
+                    rd,
+                    rn,
+                    lsb,
+                    width,
+                    reg_width,
+                },
             },
-            Instruction::Sbfiz { rd, rn, lsb, width } => match rng.random_range(0..6) {
-                0 => Instruction::Ubfx { rd, rn, lsb, width },
-                1 => Instruction::Sbfx { rd, rn, lsb, width },
-                2 => Instruction::Bfi { rd, rn, lsb, width },
-                3 => Instruction::Bfxil { rd, rn, lsb, width },
-                4 => Instruction::Ubfiz { rd, rn, lsb, width },
-                _ => Instruction::Sbfiz { rd, rn, lsb, width },
+            Instruction::Sbfiz {
+                rd,
+                rn,
+                lsb,
+                width,
+                reg_width,
+            } => match rng.random_range(0..6) {
+                0 => Instruction::Ubfx {
+                    rd,
+                    rn,
+                    lsb,
+                    width,
+                    reg_width,
+                },
+                1 => Instruction::Sbfx {
+                    rd,
+                    rn,
+                    lsb,
+                    width,
+                    reg_width,
+                },
+                2 => Instruction::Bfi {
+                    rd,
+                    rn,
+                    lsb,
+                    width,
+                    reg_width,
+                },
+                3 => Instruction::Bfxil {
+                    rd,
+                    rn,
+                    lsb,
+                    width,
+                    reg_width,
+                },
+                4 => Instruction::Ubfiz {
+                    rd,
+                    rn,
+                    lsb,
+                    width,
+                    reg_width,
+                },
+                _ => Instruction::Sbfiz {
+                    rd,
+                    rn,
+                    lsb,
+                    width,
+                    reg_width,
+                },
             },
             // Branches / terminators: never opcode-mutated. rewritable_len()
             // excludes the terminator slot before this fires; identity is
@@ -1127,11 +1513,11 @@ impl Mutator {
         rng: &mut R,
         width: RegisterWidth,
         allow_shifted: bool,
+        allow_w32_register_or_shifted: bool,
     ) -> Operand {
-        // W32-always-immediate policy: W32 logical operands are sampled as
-        // bitmask immediates only (no register/shifted operands), unlike the
-        // X64 path below which also samples registers and shifted registers.
-        if width == RegisterWidth::W32 {
+        // W32 flag-setting logical forms still sample bitmask immediates only.
+        // Non-flag-setting AND/ORR/EOR opt into the W32 register/shifted space.
+        if width == RegisterWidth::W32 && !allow_w32_register_or_shifted {
             return Operand::Immediate(self.random_logical_immediate(rng, width));
         }
 
@@ -1139,7 +1525,7 @@ impl Mutator {
             && rng.random_bool(SHIFTED_REGISTER_OPERAND_PROBABILITY)
             && !self.registers.is_empty()
         {
-            self.random_shifted_register(rng, true)
+            self.random_shifted_register(rng, true, width)
         } else if rng.random_bool(0.5) {
             Operand::Register(self.random_register(rng))
         } else {
@@ -1168,10 +1554,9 @@ impl Mutator {
             Operand::ExtendedRegister { reg, .. } if width == RegisterWidth::X64 => {
                 Operand::Register(reg)
             }
-            // W32-always-immediate policy (see `random_logical_operand`): the
-            // X64 arms above preserve register/shifted/extended forms, so this
-            // catch-all only ever sees W32 operands. They are deliberately
-            // resampled as bitmask immediates rather than kept as registers.
+            // Opcode bridges keep W32 logical operands in the historical
+            // immediate-only space; W32 register/shifted sampling is limited
+            // to direct AND/ORR/EOR operand mutation.
             Operand::Register(_)
             | Operand::ShiftedRegister { .. }
             | Operand::ExtendedRegister { .. } => {
@@ -1188,11 +1573,24 @@ impl Mutator {
         }
     }
 
+    fn random_immediate_from_pool<R: RngExt>(&self, rng: &mut R, pool: &[i64]) -> i64 {
+        debug_assert!(!pool.is_empty(), "immediate pool must be non-empty");
+        pool[rng.random_range(0..pool.len())]
+    }
+
+    fn random_operand_from_pool<R: RngExt>(&self, rng: &mut R, pool: &[i64]) -> Operand {
+        if rng.random_bool(0.5) && !self.registers.is_empty() {
+            Operand::Register(self.random_register(rng))
+        } else {
+            Operand::Immediate(self.random_immediate_from_pool(rng, pool))
+        }
+    }
+
     /// Issue #87. ADD/SUB/ADDS/SUBS/CMP/CMN immediates must fit the 12-bit
     /// unsigned range `0..=0xFFF` (see `Instruction::is_encodable_aarch64`).
-    /// Mirrors the CCMP/CCMN clamp at L240-258 — the operand is only
-    /// rewritten when it's an `Immediate`; register/shifted forms pass
-    /// through unchanged.
+    /// This wraps an existing operand when bridging opcode families; fresh
+    /// arithmetic-immediate proposals use `imm12_immediates` instead so raw
+    /// configured immediates that share a residue do not become overweighted.
     fn clamp_imm12(operand: Operand) -> Operand {
         match operand {
             Operand::Immediate(v) => Operand::Immediate(v.rem_euclid(0x1000)),
@@ -1206,10 +1604,18 @@ impl Mutator {
     /// returns an `ExtendedRegister`; otherwise falls back to the plain
     /// register/immediate distribution. `allow_ror` toggles whether ROR is in
     /// the shifted kind pool — callers in arith bridges must pass false.
-    fn random_operand_3op<R: RngExt>(&self, rng: &mut R, allow_ror: bool) -> Operand {
+    /// `width` selects the shift-amount pool (`RegisterWidth::W32` caps amounts
+    /// at 31, `RegisterWidth::X64` allows 32) and is forwarded to
+    /// `random_shifted_register`.
+    fn random_operand_3op<R: RngExt>(
+        &self,
+        rng: &mut R,
+        allow_ror: bool,
+        width: RegisterWidth,
+    ) -> Operand {
         let choice: f64 = rng.random();
         if choice < SHIFTED_REGISTER_OPERAND_PROBABILITY && !self.registers.is_empty() {
-            self.random_shifted_register(rng, allow_ror)
+            self.random_shifted_register(rng, allow_ror, width)
         } else if choice < SHIFTED_REGISTER_OPERAND_PROBABILITY + EXTENDED_REGISTER_OPERAND_DELTA
             && self.has_extended_register_source()
         {
@@ -1219,7 +1625,51 @@ impl Mutator {
         }
     }
 
-    fn random_shifted_register<R: RngExt>(&self, rng: &mut R, allow_ror: bool) -> Operand {
+    fn random_operand_3op_from_pool<R: RngExt>(
+        &self,
+        rng: &mut R,
+        allow_ror: bool,
+        width: RegisterWidth,
+        immediate_pool: &[i64],
+    ) -> Operand {
+        let choice: f64 = rng.random();
+        if choice < SHIFTED_REGISTER_OPERAND_PROBABILITY && !self.registers.is_empty() {
+            self.random_shifted_register(rng, allow_ror, width)
+        } else if choice < SHIFTED_REGISTER_OPERAND_PROBABILITY + EXTENDED_REGISTER_OPERAND_DELTA
+            && self.has_extended_register_source()
+        {
+            self.random_extended_register(rng)
+        } else {
+            self.random_operand_from_pool(rng, immediate_pool)
+        }
+    }
+
+    /// Random rm operand for flag-setting arithmetic (ADDS/SUBS). Mirrors
+    /// `random_operand_3op_from_pool` — tuned non-ROR shifted-register coverage
+    /// plus the deduplicated immediate pool — but intentionally omits the
+    /// extended-register branch: ADDS/SUBS do not encode an extended-register
+    /// form (issue #279, see `Instruction::is_encodable_aarch64`).
+    fn random_arith_operand_no_extended<R: RngExt>(
+        &self,
+        rng: &mut R,
+        allow_ror: bool,
+        width: RegisterWidth,
+        immediate_pool: &[i64],
+    ) -> Operand {
+        let choice: f64 = rng.random();
+        if choice < SHIFTED_REGISTER_OPERAND_PROBABILITY && !self.registers.is_empty() {
+            self.random_shifted_register(rng, allow_ror, width)
+        } else {
+            self.random_operand_from_pool(rng, immediate_pool)
+        }
+    }
+
+    fn random_shifted_register<R: RngExt>(
+        &self,
+        rng: &mut R,
+        allow_ror: bool,
+        width: RegisterWidth,
+    ) -> Operand {
         let reg = self.random_register(rng);
         let kinds: &[crate::ir::ShiftKind] = if allow_ror {
             &[
@@ -1236,7 +1686,10 @@ impl Mutator {
             ]
         };
         let kind = kinds[rng.random_range(0..kinds.len())];
-        let amounts = [1u8, 2, 3, 4, 8, 16, 32];
+        let amounts = match width {
+            RegisterWidth::W32 => &SHIFTED_REGISTER_AMOUNTS_W32,
+            RegisterWidth::X64 => &SHIFTED_REGISTER_AMOUNTS_X64,
+        };
         let amount = amounts[rng.random_range(0..amounts.len())];
         Operand::ShiftedRegister { reg, kind, amount }
     }
@@ -1280,7 +1733,7 @@ impl Mutator {
 
     fn random_shift_operand<R: RngExt>(&self, rng: &mut R) -> Operand {
         if rng.random_bool(0.7) {
-            let shifts = [0, 1, 2, 4, 8, 16, 32];
+            let shifts = AARCH64_RANDOM_SHIFT_IMMEDIATES;
             Operand::Immediate(shifts[rng.random_range(0..shifts.len())])
         } else if !self.registers.is_empty() {
             Operand::Register(self.random_register(rng))
@@ -1398,6 +1851,7 @@ pub fn mutate_opcode_in_place<R: RngExt>(rng: &mut R, instr: &mut Instruction) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::search::config::SearchConfig;
     use proptest::prelude::*;
     use rand::SeedableRng;
     use rand::rngs::StdRng;
@@ -1410,6 +1864,32 @@ mod tests {
             vec![-1, 0, 1, 2],
             MutationWeights::default(),
         )
+    }
+
+    #[test]
+    fn normalized_immediate_pool_keeps_unique_residues_in_first_seen_order() {
+        assert_eq!(
+            normalized_immediate_pool(&[0x1000, 0x2000, 0x3000, 5, 0x1005], 0x1000),
+            vec![0, 5]
+        );
+        assert_eq!(normalized_immediate_pool(&[], 32), vec![0]);
+    }
+
+    #[test]
+    fn mutator_stores_per_opcode_class_immediate_pools() {
+        let config = SearchConfig::default();
+        let mutator = Mutator::new(
+            config.available_registers,
+            config.available_immediates,
+            MutationWeights::default(),
+        );
+
+        assert_eq!(mutator.immediates.len(), 20);
+        assert_eq!(mutator.imm12_immediates, mutator.immediates);
+        assert_eq!(
+            mutator.imm5_immediates,
+            vec![0, 1, 2, 3, 4, 5, 7, 8, 10, 15, 16, 31]
+        );
     }
 
     fn logical_immediate_instrs(imm: i64, width: RegisterWidth) -> [Instruction; 5] {
@@ -1502,6 +1982,26 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn random_shift_operand_never_samples_zero_immediate() {
+        let mutator = default_mutator();
+        let mut rng = ChaCha8Rng::seed_from_u64(0x263);
+        let mut saw_immediate = false;
+
+        for _ in 0..2_000 {
+            let operand = mutator.random_shift_operand(&mut rng);
+            if let Operand::Immediate(amount) = operand {
+                assert_ne!(amount, 0, "random_shift_operand sampled shift #0");
+                saw_immediate = true;
+            }
+        }
+
+        assert!(
+            saw_immediate,
+            "random_shift_operand never returned an immediate"
+        );
     }
 
     #[test]
@@ -1631,6 +2131,81 @@ mod tests {
             assert!(
                 saw_immediate,
                 "{name} operand mutation never sampled a logical immediate"
+            );
+        }
+    }
+
+    #[test]
+    fn mutate_operand_can_produce_w32_logical_shifted_registers() {
+        let mutator = default_mutator();
+        let starts = [
+            (
+                "AND W32",
+                Instruction::And {
+                    rd: Register::X0,
+                    rn: Register::X1,
+                    rm: Operand::Immediate(0xff),
+                    width: RegisterWidth::W32,
+                },
+            ),
+            (
+                "ORR W32",
+                Instruction::Orr {
+                    rd: Register::X0,
+                    rn: Register::X1,
+                    rm: Operand::Immediate(0xff),
+                    width: RegisterWidth::W32,
+                },
+            ),
+            (
+                "EOR W32",
+                Instruction::Eor {
+                    rd: Register::X0,
+                    rn: Register::X1,
+                    rm: Operand::Immediate(0xff),
+                    width: RegisterWidth::W32,
+                },
+            ),
+        ];
+
+        for (idx, (name, start)) in starts.into_iter().enumerate() {
+            let mut rng = StdRng::seed_from_u64(0x4730 + idx as u64);
+            let mut saw_shifted = false;
+            let mut saw_ror = false;
+
+            for _ in 0..20_000 {
+                let mut seq = vec![start];
+                mutator.mutate_operand(&mut rng, &mut seq);
+                assert!(
+                    seq[0].is_encodable_aarch64(),
+                    "{name} operand mutation produced non-encodable {}",
+                    seq[0]
+                );
+
+                let rm = match seq[0] {
+                    Instruction::And { rm, .. }
+                    | Instruction::Orr { rm, .. }
+                    | Instruction::Eor { rm, .. } => rm,
+                    other => panic!("mutate_operand changed {name} opcode: {other:?}"),
+                };
+
+                if let Operand::ShiftedRegister { kind, amount, .. } = rm {
+                    saw_shifted = true;
+                    saw_ror |= kind == crate::ir::ShiftKind::Ror;
+                    assert!(
+                        amount <= 31,
+                        "{name} W32 shifted-register proposal used amount {amount}"
+                    );
+                }
+            }
+
+            assert!(
+                saw_shifted,
+                "{name} operand mutation never sampled a shifted-register rm"
+            );
+            assert!(
+                saw_ror,
+                "{name} operand mutation never sampled a ROR shifted-register rm"
             );
         }
     }
@@ -2028,26 +2603,125 @@ mod tests {
     }
 
     #[test]
+    fn test_mutate_operand_can_produce_shifted_register_for_flag_setting_arith() {
+        let mutator = default_mutator();
+        let starts = [
+            (
+                "ADDS",
+                Instruction::Adds {
+                    rd: Register::X0,
+                    rn: Register::X1,
+                    rm: Operand::Register(Register::X2),
+                },
+            ),
+            (
+                "SUBS",
+                Instruction::Subs {
+                    rd: Register::X0,
+                    rn: Register::X1,
+                    rm: Operand::Register(Register::X2),
+                },
+            ),
+        ];
+
+        for (idx, (name, start)) in starts.into_iter().enumerate() {
+            let mut rng = ChaCha8Rng::seed_from_u64(0x2790 + idx as u64);
+            let mut saw_shifted = false;
+
+            for _ in 0..5000 {
+                let mut seq = vec![start];
+                mutator.mutate_operand(&mut rng, &mut seq);
+
+                let rm = match seq[0] {
+                    Instruction::Adds { rm, .. } | Instruction::Subs { rm, .. } => rm,
+                    other => panic!("mutate_operand changed {name} opcode: {other:?}"),
+                };
+
+                match rm {
+                    Operand::ShiftedRegister { kind, .. } => {
+                        assert_ne!(
+                            kind,
+                            crate::ir::ShiftKind::Ror,
+                            "{name} shifted-register rm must not use ROR"
+                        );
+                        assert!(
+                            seq[0].is_encodable_aarch64(),
+                            "mutated {name} must remain encodable: {}",
+                            seq[0]
+                        );
+                        saw_shifted = true;
+                        break;
+                    }
+                    Operand::ExtendedRegister { .. } => {
+                        panic!(
+                            "mutate_operand on {name} must not emit unsupported ExtendedRegister rm"
+                        )
+                    }
+                    _ => {}
+                }
+            }
+
+            assert!(
+                saw_shifted,
+                "mutate_operand on {name} did not produce ShiftedRegister rm"
+            );
+        }
+    }
+
+    #[test]
     fn random_operand_3op_uses_tuned_shifted_register_probability() {
         let mutator = default_mutator();
         let mut rng = StdRng::seed_from_u64(134);
         let trials = 10_000;
-        let mut shifted = 0;
+        let mut x64_shifted = 0;
+        let mut x64_saw_amount_32 = false;
 
         for _ in 0..trials {
-            match mutator.random_operand_3op(&mut rng, false) {
+            match mutator.random_operand_3op(&mut rng, false, RegisterWidth::X64) {
                 Operand::ShiftedRegister {
                     kind: crate::ir::ShiftKind::Ror,
                     ..
                 } => panic!("arithmetic shifted-register operands must not use ROR"),
-                Operand::ShiftedRegister { .. } => shifted += 1,
+                Operand::ShiftedRegister { amount, .. } => {
+                    x64_shifted += 1;
+                    x64_saw_amount_32 |= amount == 32;
+                }
                 _ => {}
             }
         }
 
         assert!(
-            (2_500..=3_500).contains(&shifted),
-            "expected shifted-register proposals in the 25%-35% band, got {shifted}/{trials}"
+            (2_500..=3_500).contains(&x64_shifted),
+            "expected X64 shifted-register proposals in the 25%-35% band, got {x64_shifted}/{trials}"
+        );
+        assert!(
+            x64_saw_amount_32,
+            "X64 shifted-register mutations should still explore amount 32"
+        );
+
+        let mut rng = StdRng::seed_from_u64(13432);
+        let mut w32_shifted = 0;
+
+        for _ in 0..trials {
+            match mutator.random_operand_3op(&mut rng, false, RegisterWidth::W32) {
+                Operand::ShiftedRegister {
+                    kind: crate::ir::ShiftKind::Ror,
+                    ..
+                } => panic!("W32 arithmetic shifted-register operands must not use ROR"),
+                Operand::ShiftedRegister { amount, .. } => {
+                    w32_shifted += 1;
+                    assert!(
+                        amount <= 31,
+                        "W32 shifted-register mutations must not emit amount {amount}"
+                    );
+                }
+                _ => {}
+            }
+        }
+
+        assert!(
+            (2_500..=3_500).contains(&w32_shifted),
+            "expected W32 shifted-register proposals in the 25%-35% band, got {w32_shifted}/{trials}"
         );
     }
 
@@ -2098,12 +2772,46 @@ mod tests {
     }
 
     #[test]
+    fn mutate_operand_keeps_w32_flag_logicals_immediate_only() {
+        let mutator = default_mutator();
+        let starts = [
+            Instruction::Tst {
+                rn: Register::X1,
+                rm: Operand::Immediate(0xff),
+                width: RegisterWidth::W32,
+            },
+            Instruction::Ands {
+                rd: Register::X0,
+                rn: Register::X1,
+                rm: Operand::Immediate(0xff),
+                width: RegisterWidth::W32,
+            },
+        ];
+
+        for (idx, start) in starts.into_iter().enumerate() {
+            let mut rng = StdRng::seed_from_u64(0x4735 + idx as u64);
+            for _ in 0..5_000 {
+                let mut seq = vec![start];
+                mutator.mutate_operand(&mut rng, &mut seq);
+                let rm = match seq[0] {
+                    Instruction::Tst { rm, .. } | Instruction::Ands { rm, .. } => rm,
+                    other => panic!("mutate_operand changed W32 flag logical opcode: {other:?}"),
+                };
+                assert!(
+                    matches!(rm, Operand::Immediate(_)),
+                    "W32 flag logical mutation must stay immediate-only, got {seq:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
     fn shifted_register_operands_respect_arith_and_logical_ror_policy() {
         let mutator = default_mutator();
         let mut rng = StdRng::seed_from_u64(137);
 
         for _ in 0..1_000 {
-            let operand = mutator.random_shifted_register(&mut rng, false);
+            let operand = mutator.random_shifted_register(&mut rng, false, RegisterWidth::X64);
             if let Operand::ShiftedRegister {
                 kind: crate::ir::ShiftKind::Ror,
                 ..
@@ -2141,7 +2849,7 @@ mod tests {
 
         let mut saw_ror = false;
         for _ in 0..1_000 {
-            let operand = mutator.random_shifted_register(&mut rng, true);
+            let operand = mutator.random_shifted_register(&mut rng, true, RegisterWidth::X64);
             if let Operand::ShiftedRegister {
                 kind: crate::ir::ShiftKind::Ror,
                 ..
@@ -2185,6 +2893,136 @@ mod tests {
         assert!(
             saw_ror,
             "logical shifted-register operand generator should still explore ROR"
+        );
+    }
+
+    #[test]
+    fn w32_arithmetic_shifted_register_operands_use_encodable_amounts() {
+        let mutator = default_mutator();
+        let mut rng = StdRng::seed_from_u64(138);
+
+        for _ in 0..1_000 {
+            let operand = mutator.random_shifted_register(&mut rng, false, RegisterWidth::W32);
+            let Operand::ShiftedRegister { amount, .. } = operand else {
+                panic!("shifted-register helper must produce a ShiftedRegister");
+            };
+            assert!(
+                amount <= 31,
+                "W-form shifted-register mutation must not emit amount {amount}"
+            );
+
+            for instr in [
+                Instruction::AddW {
+                    rd: Register::X0,
+                    rn: Register::X1,
+                    rm: operand,
+                },
+                Instruction::SubW {
+                    rd: Register::X0,
+                    rn: Register::X1,
+                    rm: operand,
+                },
+            ] {
+                assert!(
+                    instr.is_encodable_aarch64(),
+                    "W-form shifted-register mutation must remain encodable: {instr:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn w32_arithmetic_mutation_call_sites_use_w32_shift_amounts() {
+        let mutator = default_mutator();
+        let mut rng = StdRng::seed_from_u64(139);
+        let mut saw_operand_shifted = false;
+        let mut saw_subw_operand_shifted = false;
+        let mut saw_opcode_shifted = false;
+
+        for _ in 0..20_000 {
+            let mut seq = vec![Instruction::AddW {
+                rd: Register::X0,
+                rn: Register::X1,
+                rm: Operand::Register(Register::X2),
+            }];
+            mutator.mutate_operand(&mut rng, &mut seq);
+            if let Instruction::AddW {
+                rm: Operand::ShiftedRegister { amount, .. },
+                ..
+            } = seq[0]
+            {
+                saw_operand_shifted = true;
+                assert!(
+                    amount <= 31,
+                    "AddW operand mutation must not emit shifted amount {amount}"
+                );
+                assert!(
+                    seq[0].is_encodable_aarch64(),
+                    "AddW operand mutation must remain encodable: {:?}",
+                    seq[0]
+                );
+            }
+
+            // SubW shares the AddW match arm, so it must observe the same
+            // W-safe amount pool. Probe it explicitly so the coverage is
+            // self-documenting and survives a future arm split.
+            let mut seq = vec![Instruction::SubW {
+                rd: Register::X0,
+                rn: Register::X1,
+                rm: Operand::Register(Register::X2),
+            }];
+            mutator.mutate_operand(&mut rng, &mut seq);
+            if let Instruction::SubW {
+                rm: Operand::ShiftedRegister { amount, .. },
+                ..
+            } = seq[0]
+            {
+                saw_subw_operand_shifted = true;
+                assert!(
+                    amount <= 31,
+                    "SubW operand mutation must not emit shifted amount {amount}"
+                );
+                assert!(
+                    seq[0].is_encodable_aarch64(),
+                    "SubW operand mutation must remain encodable: {:?}",
+                    seq[0]
+                );
+            }
+
+            let mut seq = vec![Instruction::MovRegW {
+                rd: Register::X0,
+                rn: Register::X1,
+            }];
+            mutator.mutate_opcode(&mut rng, &mut seq);
+            if let Instruction::AddW {
+                rm: Operand::ShiftedRegister { amount, .. },
+                ..
+            } = seq[0]
+            {
+                saw_opcode_shifted = true;
+                assert!(
+                    amount <= 31,
+                    "MovRegW -> AddW opcode mutation must not emit shifted amount {amount}"
+                );
+                assert!(
+                    seq[0].is_encodable_aarch64(),
+                    "MovRegW -> AddW opcode mutation must remain encodable: {:?}",
+                    seq[0]
+                );
+            }
+        }
+
+        assert!(
+            saw_operand_shifted,
+            "AddW operand mutation should still explore shifted-register operands"
+        );
+        assert!(
+            saw_subw_operand_shifted,
+            "SubW operand mutation should still explore shifted-register operands"
+        );
+        assert!(
+            saw_opcode_shifted,
+            "MovRegW -> AddW opcode mutation should still explore shifted-register operands"
         );
     }
 
@@ -2656,6 +3494,58 @@ mod tests {
     }
 
     #[test]
+    fn select_mutation_type_maps_each_weight_bucket_to_its_variant() {
+        // Concentrating all weight on one category forces `select_index` to
+        // that bucket for every draw, which pins the bucket-index -> variant
+        // mapping regardless of the RNG stream.
+        let cases = [
+            (
+                MutationWeights {
+                    operand: 1.0,
+                    opcode: 0.0,
+                    swap: 0.0,
+                    instruction: 0.0,
+                },
+                MutationType::Operand,
+            ),
+            (
+                MutationWeights {
+                    operand: 0.0,
+                    opcode: 1.0,
+                    swap: 0.0,
+                    instruction: 0.0,
+                },
+                MutationType::Opcode,
+            ),
+            (
+                MutationWeights {
+                    operand: 0.0,
+                    opcode: 0.0,
+                    swap: 1.0,
+                    instruction: 0.0,
+                },
+                MutationType::Swap,
+            ),
+            (
+                MutationWeights {
+                    operand: 0.0,
+                    opcode: 0.0,
+                    swap: 0.0,
+                    instruction: 1.0,
+                },
+                MutationType::Instruction,
+            ),
+        ];
+        let mut rng = rand::rng();
+        for (weights, expected) in cases {
+            let mutator = Mutator::new(vec![Register::X0], vec![0], weights);
+            for _ in 0..64 {
+                assert_eq!(mutator.select_mutation_type(&mut rng), expected);
+            }
+        }
+    }
+
+    #[test]
     fn test_mutate_produces_different_sequence() {
         let mutator = default_mutator();
         let mut rng = rand::rng();
@@ -2822,6 +3712,75 @@ mod tests {
     }
 
     #[test]
+    fn w_bitfield_operand_mutation_stays_encodable_and_keeps_width() {
+        let mutator = default_mutator();
+        let mut rng = rand::rng();
+
+        let original = Instruction::Sbfx {
+            rd: Register::X0,
+            rn: Register::X1,
+            lsb: 4,
+            width: 8,
+            reg_width: crate::ir::RegisterWidth::W32,
+        };
+        for _ in 0..400 {
+            let mut seq = vec![original];
+            mutator.mutate_operand(&mut rng, &mut seq);
+            assert!(
+                seq[0].is_encodable_aarch64(),
+                "W operand mutation must stay encodable (lsb<=31, lsb+width<=32): {}",
+                seq[0]
+            );
+            // Operand mutation must not change the register width form.
+            assert!(
+                matches!(
+                    seq[0],
+                    Instruction::Sbfx {
+                        reg_width: crate::ir::RegisterWidth::W32,
+                        ..
+                    }
+                ),
+                "operand mutation changed the W form: {}",
+                seq[0]
+            );
+        }
+    }
+
+    #[test]
+    fn w_bitfield_opcode_mutation_preserves_width() {
+        let mutator = default_mutator();
+        let mut rng = rand::rng();
+
+        let original = Instruction::Ubfx {
+            rd: Register::X0,
+            rn: Register::X1,
+            lsb: 4,
+            width: 8,
+            reg_width: crate::ir::RegisterWidth::W32,
+        };
+        for _ in 0..200 {
+            let mut seq = vec![original];
+            mutator.mutate_opcode(&mut rng, &mut seq);
+            let reg_width = match seq[0] {
+                Instruction::Ubfx { reg_width, .. }
+                | Instruction::Sbfx { reg_width, .. }
+                | Instruction::Bfi { reg_width, .. }
+                | Instruction::Bfxil { reg_width, .. }
+                | Instruction::Ubfiz { reg_width, .. }
+                | Instruction::Sbfiz { reg_width, .. } => Some(reg_width),
+                _ => None,
+            };
+            assert_eq!(
+                reg_width,
+                Some(crate::ir::RegisterWidth::W32),
+                "opcode mutation must keep the W width (no X<->W bridging): {}",
+                seq[0]
+            );
+            assert!(seq[0].is_encodable_aarch64());
+        }
+    }
+
+    #[test]
     fn test_bitfield_operand_mutation_changes_fields_and_stays_encodable() {
         let mutator = default_mutator();
         let mut rng = rand::rng();
@@ -2831,6 +3790,7 @@ mod tests {
             rn: Register::X1,
             lsb: 8,
             width: 16,
+            reg_width: crate::ir::RegisterWidth::X64,
         };
         let mut changed = false;
         for _ in 0..200 {
@@ -2861,6 +3821,7 @@ mod tests {
             rn: Register::X1,
             lsb: 8,
             width: 16,
+            reg_width: crate::ir::RegisterWidth::X64,
         };
         let mut swapped_to_peer = false;
         for _ in 0..200 {
@@ -2955,6 +3916,95 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn arithmetic_operand_mutation_samples_unique_imm12_residues() {
+        let regs = vec![Register::X0, Register::X1, Register::X2];
+        let imms = vec![0x1000, 0x2000, 0x3000, 5];
+        let mutator = Mutator::new(regs, imms, MutationWeights::default());
+        let mut rng = StdRng::seed_from_u64(0x2760);
+        let mut counts = BTreeMap::new();
+
+        for _ in 0..50_000 {
+            let mut seq = vec![Instruction::Add {
+                rd: Register::X0,
+                rn: Register::X1,
+                rm: Operand::Register(Register::X2),
+            }];
+            mutator.mutate_operand(&mut rng, &mut seq);
+            assert!(seq[0].is_encodable_aarch64());
+
+            if let Instruction::Add {
+                rm: Operand::Immediate(imm),
+                ..
+            } = seq[0]
+            {
+                *counts.entry(imm).or_insert(0usize) += 1;
+            }
+        }
+
+        assert_eq!(
+            counts.keys().copied().collect::<Vec<_>>(),
+            vec![0, 5],
+            "ADD should only sample unique imm12 residues"
+        );
+        let zero = counts[&0];
+        let five = counts[&5];
+        let samples = zero + five;
+        assert!(
+            samples > 1_000,
+            "seeded run should observe enough immediate proposals, saw {samples}"
+        );
+        assert!(
+            zero.abs_diff(five) * 5 <= samples,
+            "deduplicated residues should be sampled with similar probability: {counts:?}"
+        );
+    }
+
+    #[test]
+    fn conditional_compare_operand_mutation_samples_unique_imm5_residues() {
+        let regs = vec![Register::X0, Register::X1, Register::X2];
+        let imms = vec![0, 32, 64, 31];
+        let mutator = Mutator::new(regs, imms, MutationWeights::default());
+        let mut rng = StdRng::seed_from_u64(0x2761);
+        let mut counts = BTreeMap::new();
+
+        for _ in 0..50_000 {
+            let mut seq = vec![Instruction::Ccmp {
+                rn: Register::X1,
+                rm: Operand::Register(Register::X2),
+                nzcv: 0,
+                cond: Condition::EQ,
+            }];
+            mutator.mutate_operand(&mut rng, &mut seq);
+            assert!(seq[0].is_encodable_aarch64());
+
+            if let Instruction::Ccmp {
+                rm: Operand::Immediate(imm),
+                ..
+            } = seq[0]
+            {
+                *counts.entry(imm).or_insert(0usize) += 1;
+            }
+        }
+
+        assert_eq!(
+            counts.keys().copied().collect::<Vec<_>>(),
+            vec![0, 31],
+            "CCMP should only sample unique imm5 residues"
+        );
+        let zero = counts[&0];
+        let thirty_one = counts[&31];
+        let samples = zero + thirty_one;
+        assert!(
+            samples > 1_000,
+            "seeded run should observe enough immediate proposals, saw {samples}"
+        );
+        assert!(
+            zero.abs_diff(thirty_one) * 5 <= samples,
+            "deduplicated residues should be sampled with similar probability: {counts:?}"
+        );
     }
 
     #[test]

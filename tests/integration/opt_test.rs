@@ -2,6 +2,9 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+use capstone::prelude::*;
+use s11::parser::{LineResult, parse_line};
+
 fn check_test_binary(path: &PathBuf) {
     if !path.exists() {
         panic!(
@@ -72,7 +75,12 @@ fn find_encoding_masked(elf_path: &Path, expected: &[u8; 4], mask: &[u8; 4], lab
         if size < expected.len() {
             continue;
         }
-        let bytes = &data[file_start..file_start + size];
+        let file_end = file_start
+            .checked_add(size)
+            .expect("executable section range should not overflow usize");
+        let bytes = data
+            .get(file_start..file_end)
+            .expect("executable section range should be present in ELF data");
         for off in (0..size - expected.len() + 1).step_by(4) {
             if (0..4).all(|i| bytes[off + i] & mask[i] == expected[i] & mask[i]) {
                 return section.sh_addr + off as u64;
@@ -82,6 +90,75 @@ fn find_encoding_masked(elf_path: &Path, expected: &[u8; 4], mask: &[u8; 4], lab
     panic!(
         "encoding matching {:02x?} (mask {:02x?}, {}) not found in any executable section of {:?}",
         expected, mask, label, elf_path
+    );
+}
+
+fn find_supported_aarch64_instruction_window(
+    elf_path: &Path,
+    instruction_count: usize,
+) -> (u64, u64) {
+    assert!(
+        instruction_count > 0,
+        "instruction window must contain at least one instruction"
+    );
+
+    let data = std::fs::read(elf_path).expect("read ELF for supported-window scan");
+    let elf = elf::ElfBytes::<elf::endian::AnyEndian>::minimal_parse(&data)
+        .expect("parse ELF for supported-window scan");
+    let section_headers = elf.section_headers().expect("ELF section headers");
+    let cs = Capstone::new()
+        .arm64()
+        .mode(capstone::arch::arm64::ArchMode::Arm)
+        .build()
+        .expect("create AArch64 Capstone disassembler");
+
+    for section in section_headers.iter() {
+        if section.sh_flags & elf::abi::SHF_EXECINSTR as u64 == 0 {
+            continue;
+        }
+
+        let file_start = section.sh_offset as usize;
+        let size = section.sh_size as usize;
+        if size < instruction_count * 4 {
+            continue;
+        }
+        let bytes = &data[file_start..file_start + size];
+        let instructions = cs
+            .disasm_all(bytes, section.sh_addr)
+            .expect("disassemble executable section for supported-window scan");
+        let instructions: Vec<_> = instructions.iter().collect();
+
+        for window in instructions.windows(instruction_count) {
+            let first = window[0].address();
+            let mut next_address = first;
+            let supported_straight_line = window.iter().all(|instruction| {
+                if instruction.address() != next_address || instruction.bytes().len() != 4 {
+                    return false;
+                }
+                next_address += 4;
+
+                let mnemonic = instruction.mnemonic().unwrap_or("");
+                let op_str = instruction.op_str().unwrap_or("");
+                let line = if op_str.trim().is_empty() {
+                    mnemonic.to_string()
+                } else {
+                    format!("{mnemonic} {}", op_str.trim())
+                };
+
+                match parse_line(&line) {
+                    Ok(LineResult::Instruction(instruction)) => !instruction.is_terminator(),
+                    Ok(LineResult::Skip) | Err(_) => false,
+                }
+            });
+
+            if supported_straight_line {
+                return (first, first + instruction_count as u64 * 4);
+            }
+        }
+    }
+
+    panic!(
+        "no supported {instruction_count}-instruction AArch64 window found in any executable section of {elf_path:?}"
     );
 }
 
@@ -106,7 +183,39 @@ fn executable_window(path: &Path, width: u64) -> (u64, u64) {
     panic!("no executable window of {width} bytes found in {path:?}");
 }
 
-fn assert_opt_arch_mismatch_rejected(test_elf: &Path, arch: &str) {
+fn file_offset_for_executable_addr(path: &Path, addr: u64) -> usize {
+    let data = std::fs::read(path).expect("read test ELF");
+    let elf =
+        elf::ElfBytes::<elf::endian::AnyEndian>::minimal_parse(&data).expect("parse test ELF");
+    let section_headers = elf.section_headers().expect("read section headers");
+
+    for section in section_headers.iter() {
+        if section.sh_flags & elf::abi::SHF_EXECINSTR as u64 == 0 {
+            continue;
+        }
+
+        let section_end = section
+            .sh_addr
+            .checked_add(section.sh_size)
+            .expect("executable section address range should not overflow");
+        if !(section.sh_addr..section_end).contains(&addr) {
+            continue;
+        }
+
+        let file_offset = section
+            .sh_offset
+            .checked_add(addr - section.sh_addr)
+            .expect("executable section file range should not overflow")
+            as usize;
+        data.get(file_offset..file_offset + 4)
+            .expect("executable address should map to bytes in ELF data");
+        return file_offset;
+    }
+
+    panic!("executable address 0x{addr:x} not found in {path:?}");
+}
+
+fn assert_opt_arch_mismatch_rejected(test_elf: &Path, arch: &str, detected_arch: &str) {
     let output = Command::new(get_binary_path())
         .arg("opt")
         .arg(test_elf)
@@ -125,9 +234,31 @@ fn assert_opt_arch_mismatch_rejected(test_elf: &Path, arch: &str) {
     );
 
     let stderr = String::from_utf8_lossy(&output.stderr);
+    let expected_message =
+        format!("Architecture mismatch: --arch {arch} but ELF reports {detected_arch}");
     assert!(
-        stderr.contains("Architecture mismatch"),
-        "Should reject before optimization, stderr: {}",
+        stderr.trim_start().starts_with(&expected_message),
+        "Should reject before optimization with CLI architecture names, stderr: {}",
+        stderr
+    );
+    assert!(
+        !stderr.contains("Aarch64") && !stderr.contains("X86_64") && !stderr.contains("X86_32"),
+        "Should not report Rust architecture variant names, stderr: {}",
+        stderr
+    );
+    assert!(
+        stderr.contains(&format!("--arch {arch}")),
+        "Should print requested CLI arch spelling, stderr: {}",
+        stderr
+    );
+    assert!(
+        stderr.contains(&format!("ELF reports {detected_arch}")),
+        "Should print detected CLI arch spelling, stderr: {}",
+        stderr
+    );
+    assert!(
+        !stderr.contains("Aarch64") && !stderr.contains("X86_64") && !stderr.contains("X86_32"),
+        "Should not print Rust variant names, stderr: {}",
         stderr
     );
 
@@ -148,23 +279,21 @@ fn test_opt_basic_functionality() {
 
     check_test_binary(&test_elf);
 
-    // executable_window starts at the first executable section, which is .init
-    // and begins with `paciasp` (an unsupported HINT); the AArch64 optimization
-    // path now correctly rejects that window. Scan instead for any PLT
-    // trampoline slot `add x16, x16, #N` — encoding constraints sf=1, sh=0,
-    // Rd=Rn=16, immediate N free. Mask leaves the 12 imm bits as wildcards
-    // so we match every build's GOT-offset variation.
-    let start_addr = find_encoding_masked(
-        &test_elf,
-        &[0x10, 0x02, 0x00, 0x91],
-        &[0xff, 0x03, 0xc0, 0xff],
-        "add x16, x16, #N (PLT trampoline)",
-    );
-    let end_addr = start_addr + 4;
+    // Avoid the unsupported .init PAC instruction while still exercising a
+    // parser-supported, straight-line multi-instruction optimization window.
+    let (start_addr, end_addr) = find_supported_aarch64_instruction_window(&test_elf, 4);
 
     let output = Command::new(binary)
         .arg("opt")
         .arg(&test_elf)
+        .arg("--algorithm")
+        .arg("stochastic")
+        .arg("--iterations")
+        .arg("64")
+        .arg("--seed")
+        .arg("0")
+        .arg("--timeout")
+        .arg("5")
         .arg("--start-addr")
         .arg(format!("0x{start_addr:x}"))
         .arg("--end-addr")
@@ -213,7 +342,19 @@ fn test_opt_basic_functionality() {
         stdout.contains("Disassembled"),
         "Should disassemble instructions"
     );
+    assert!(
+        stdout.contains("Disassembled 4 instructions"),
+        "Should disassemble a multi-instruction window; stdout: {stdout}"
+    );
     assert!(stdout.contains("Converted"), "Should convert to IR");
+    assert!(
+        stdout.contains("Converted 4 instructions"),
+        "Should convert a multi-instruction window to IR; stdout: {stdout}"
+    );
+    assert!(
+        stdout.contains("Running stochastic (MCMC) search"),
+        "Should run the bounded stochastic search path; stdout: {stdout}"
+    );
     assert!(
         stdout.contains("Reassembled"),
         "Should reassemble instructions"
@@ -337,15 +478,15 @@ fn test_opt_rejects_arch_mismatch_before_optimization() {
         .join("simple_debug");
 
     check_test_binary(&aarch64_elf);
-    assert_opt_arch_mismatch_rejected(&aarch64_elf, "x86-64");
-    assert_opt_arch_mismatch_rejected(&aarch64_elf, "x86-32");
+    assert_opt_arch_mismatch_rejected(&aarch64_elf, "x86-64", "aarch64");
+    assert_opt_arch_mismatch_rejected(&aarch64_elf, "x86-32", "aarch64");
 
     let x86_elf = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("binaries")
         .join("x86_64")
         .join("simple_debug");
     if x86_elf.exists() {
-        assert_opt_arch_mismatch_rejected(&x86_elf, "aarch64");
+        assert_opt_arch_mismatch_rejected(&x86_elf, "aarch64", "x86-64");
     } else {
         eprintln!(
             "Skipping x86-64 opt mismatch case: {:?} not present (run build_tests.sh)",
@@ -459,6 +600,60 @@ fn test_opt_address_alignment() {
 }
 
 #[test]
+fn test_opt_rejects_partially_decoded_window_with_first_bad_address() {
+    let binary = get_binary_path();
+    let source_elf = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("binaries")
+        .join("loops_debug");
+    check_test_binary(&source_elf);
+
+    let (start_addr, end_addr) = executable_window(&source_elf, 8);
+    let first_bad_addr = start_addr + 4;
+
+    let tmp_dir = tempfile::tempdir().expect("create temp fixture dir");
+    let test_elf = tmp_dir.path().join("loops_debug");
+    fs::copy(&source_elf, &test_elf).expect("copy ELF fixture to tmp");
+
+    let bad_offset = file_offset_for_executable_addr(&test_elf, first_bad_addr);
+    let mut data = fs::read(&test_elf).expect("read temp ELF");
+    data[bad_offset..bad_offset + 4].copy_from_slice(&[0xff, 0xff, 0xff, 0xff]);
+    fs::write(&test_elf, data).expect("write corrupted temp ELF");
+
+    let optimized_path = tmp_dir.path().join("loops_debug_optimized");
+    let output = Command::new(binary)
+        .arg("opt")
+        .arg(&test_elf)
+        .arg("--start-addr")
+        .arg(format!("0x{start_addr:x}"))
+        .arg("--end-addr")
+        .arg(format!("0x{end_addr:x}"))
+        .output()
+        .expect("Failed to execute s11");
+
+    assert!(
+        !output.status.success(),
+        "opt must reject an AArch64 window Capstone only partially decoded.\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr),
+    );
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("not fully decoded"),
+        "stderr should report the byte-coverage failure; got: {stderr}",
+    );
+    assert!(
+        stderr.contains(&format!("0x{first_bad_addr:x}")),
+        "stderr should report the first undecoded address 0x{first_bad_addr:x}; got: {stderr}",
+    );
+    assert!(
+        !optimized_path.exists(),
+        "no optimized binary should be written when decode coverage fails: {:?}",
+        optimized_path,
+    );
+}
+
+#[test]
 fn test_opt_rejects_unsupported_instruction_window() {
     let binary = get_binary_path();
     let test_elf = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -510,6 +705,10 @@ fn test_opt_rejects_unsupported_instruction_window() {
         stderr.contains(&format!("0x{start_addr:x}")),
         "stderr should report the offending address 0x{start_addr:x}; got: {stderr}",
     );
+    assert!(
+        !stderr.contains("cannot optimize"),
+        "stderr should avoid redundant optimization framing; got: {stderr}",
+    );
 
     assert!(
         !optimized_path.exists(),
@@ -521,21 +720,18 @@ fn test_opt_rejects_unsupported_instruction_window() {
 /// Helper for memory-op integration tests: assert that `s11 opt` on the
 /// given single-instruction window succeeds.
 ///
-/// Each test copies the source ELF to a unique tmp path
-/// (`std::env::temp_dir` joined with the supplied `fixture_tag`) so
-/// concurrent `cargo test` runs don't collide on the
-/// `<input>_optimized` artifact the binary always writes alongside its
-/// input. The artifact is cleaned up before the test returns.
-fn assert_opt_succeeds_on_window(source_elf: &Path, fixture_tag: &str, start_addr: u64) {
+/// Each test copies the source ELF to a unique tempdir so concurrent
+/// `cargo test` runs don't collide on the `<input>_optimized` artifact
+/// the binary always writes alongside its input. The tempdir is cleaned
+/// up automatically when the helper returns or panics.
+fn assert_opt_succeeds_on_window(source_elf: &Path, start_addr: u64) {
     let binary = get_binary_path();
     let end_addr = start_addr + 4;
 
-    let tmp_dir = std::env::temp_dir().join(format!("s11_opt_{fixture_tag}"));
-    let _ = fs::remove_dir_all(&tmp_dir);
-    fs::create_dir_all(&tmp_dir).expect("create temp fixture dir");
-    let test_elf = tmp_dir.join("loops_debug");
+    let tmp_dir = tempfile::tempdir().expect("create temp fixture dir");
+    let test_elf = tmp_dir.path().join("loops_debug");
     fs::copy(source_elf, &test_elf).expect("copy ELF fixture to tmp");
-    let optimized_path = tmp_dir.join("loops_debug_optimized");
+    let optimized_path = tmp_dir.path().join("loops_debug_optimized");
 
     let output = Command::new(&binary)
         .arg("opt")
@@ -548,7 +744,6 @@ fn assert_opt_succeeds_on_window(source_elf: &Path, fixture_tag: &str, start_add
         .expect("Failed to execute s11");
 
     if !output.status.success() {
-        let _ = fs::remove_dir_all(&tmp_dir);
         panic!(
             "opt failed on memory-op window 0x{start_addr:x}.\nstdout: {}\nstderr: {}",
             String::from_utf8_lossy(&output.stdout),
@@ -559,7 +754,6 @@ fn assert_opt_succeeds_on_window(source_elf: &Path, fixture_tag: &str, start_add
     let stdout = String::from_utf8_lossy(&output.stdout);
     let ok = stdout.contains("Optimization completed successfully");
     let optimized_exists = optimized_path.exists();
-    let _ = fs::remove_dir_all(&tmp_dir);
 
     assert!(
         ok,
@@ -587,7 +781,7 @@ fn test_opt_accepts_stp_writeback_window() {
         &[0xff, 0xff, 0xff, 0xff],
         "stp x29, x30, [sp, #-16]!",
     );
-    assert_opt_succeeds_on_window(&source_elf, "stp_writeback", start_addr);
+    assert_opt_succeeds_on_window(&source_elf, start_addr);
 }
 
 #[test]
@@ -605,7 +799,7 @@ fn test_opt_accepts_ldp_postindex_window() {
         &[0xff, 0xff, 0xff, 0xff],
         "ldp x29, x30, [sp], #16",
     );
-    assert_opt_succeeds_on_window(&source_elf, "ldp_postindex", start_addr);
+    assert_opt_succeeds_on_window(&source_elf, start_addr);
 }
 
 #[test]
@@ -627,7 +821,7 @@ fn test_opt_accepts_ldr_positive_offset_window() {
         &[0x00, 0x00, 0xc0, 0xff],
         "ldr xN, [xM{, #imm}]",
     );
-    assert_opt_succeeds_on_window(&source_elf, "ldr_offset", start_addr);
+    assert_opt_succeeds_on_window(&source_elf, start_addr);
 }
 
 #[test]
@@ -813,6 +1007,130 @@ fn test_opt_x86_stochastic_is_no_longer_rejected_at_cli() {
         .join("x86_64")
         .join("simple_debug_optimized");
     let _ = fs::remove_file(optimized_path);
+}
+
+/// Scan every executable section of `path` for the first occurrence of the
+/// raw byte sequence `needle`, returning its virtual address. Used by the x86
+/// end-to-end opt test to locate a known instruction window by its exact
+/// encoding so the test survives toolchain layout drift.
+fn x86_find_byte_sequence(path: &Path, needle: &[u8]) -> u64 {
+    let data = std::fs::read(path).expect("read test ELF");
+    let elf =
+        elf::ElfBytes::<elf::endian::AnyEndian>::minimal_parse(&data).expect("parse test ELF");
+    let section_headers = elf.section_headers().expect("read section headers");
+
+    for section in section_headers.iter() {
+        if section.sh_flags & elf::abi::SHF_EXECINSTR as u64 == 0 {
+            continue;
+        }
+        let start = section.sh_offset as usize;
+        let size = section.sh_size as usize;
+        if size < needle.len() {
+            continue;
+        }
+        let bytes = &data[start..start + size];
+        if let Some(off) = bytes.windows(needle.len()).position(|w| w == needle) {
+            return section.sh_addr + off as u64;
+        }
+    }
+
+    panic!("byte sequence {needle:02x?} not found in any executable section of {path:?}");
+}
+
+/// End-to-end x86-64 opt test (issue #91): run the `s11 opt` CLI on a real
+/// x86-64 ELF and assert a *known* one-instruction shortening is found and
+/// reported.
+///
+/// The `binaries/x86_64/dup_mov_imm` fixture (assembled from
+/// `tests/x86_asm/dup_mov_imm.s` by `build_tests.sh`) contains two identical
+/// `mov rax, 5` instructions. Only RAX is live-out and neither MOV touches
+/// EFLAGS, so the enumerative (deterministic) search collapses the redundant
+/// pair to a single `mov rax, 5`. The window is located by its exact encoding
+/// (`48 c7 c0 05 00 00 00` twice) so the assertion is stable across rebuilds.
+///
+/// Mirrors `test_opt_basic_functionality` (AArch64) but pins the *result*: the
+/// opt path must report "Optimized to 1 instructions" and complete, not merely
+/// run. If the fixture is absent (e.g. no host x86-64 gcc), the test skips
+/// rather than failing, matching the other x86 opt tests here.
+#[test]
+fn test_opt_x86_64_known_shortening() {
+    let binary = get_binary_path();
+    let source_elf = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("binaries")
+        .join("x86_64")
+        .join("dup_mov_imm");
+    if !source_elf.exists() {
+        eprintln!(
+            "Skipping x86-64 known-shortening opt test: {:?} not present (run build_tests.sh)",
+            source_elf
+        );
+        return;
+    }
+
+    // `mov rax, 5` == 48 c7 c0 05 00 00 00; find the first of the redundant
+    // pair and take a 14-byte (two-instruction) window over both.
+    let mov_rax_5: [u8; 7] = [0x48, 0xc7, 0xc0, 0x05, 0x00, 0x00, 0x00];
+    let pair: Vec<u8> = mov_rax_5.iter().chain(mov_rax_5.iter()).copied().collect();
+    let start_addr = x86_find_byte_sequence(&source_elf, &pair);
+    let end_addr = start_addr + pair.len() as u64;
+
+    // Copy to a unique tempdir so concurrent `cargo test` runs don't collide
+    // on the `<input>_optimized` artifact the binary always writes.
+    let tmp_dir = tempfile::tempdir().expect("create temp fixture dir");
+    let test_elf = tmp_dir.path().join("dup_mov_imm");
+    fs::copy(&source_elf, &test_elf).expect("copy x86-64 fixture to tmp");
+    let optimized_path = tmp_dir.path().join("dup_mov_imm_optimized");
+
+    let output = Command::new(&binary)
+        .arg("opt")
+        .arg(&test_elf)
+        .arg("--arch")
+        .arg("x86-64")
+        .arg("--algorithm")
+        .arg("enumerative")
+        .arg("--timeout")
+        .arg("30")
+        .arg("--start-addr")
+        .arg(format!("0x{start_addr:x}"))
+        .arg("--end-addr")
+        .arg(format!("0x{end_addr:x}"))
+        .output()
+        .expect("Failed to execute s11");
+
+    assert!(
+        output.status.success(),
+        "x86-64 opt should succeed.\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr),
+    );
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("Detected: X86_64"),
+        "should run the x86-64 opt path; stdout: {stdout}"
+    );
+    assert!(
+        stdout.contains("Disassembled 2 instructions"),
+        "should disassemble the two-instruction window; stdout: {stdout}"
+    );
+    // The known shortening: 2 instructions collapse to 1.
+    assert!(
+        stdout.contains("Optimized to 1 instructions"),
+        "x86-64 opt must find the one-instruction shortening; stdout: {stdout}"
+    );
+    assert!(
+        stdout.contains("Created optimized binary"),
+        "should write the optimized binary; stdout: {stdout}"
+    );
+    assert!(
+        stdout.contains("Optimization completed successfully"),
+        "should complete the optimization; stdout: {stdout}"
+    );
+    assert!(
+        optimized_path.exists(),
+        "optimized binary should be created at {:?}",
+        optimized_path,
+    );
 }
 
 #[test]

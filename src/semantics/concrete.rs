@@ -49,6 +49,21 @@ fn set_w_register(state: &mut ConcreteMachineState, reg: Register, value: u64) {
     state.set_register(reg, ConcreteValue::new(value & u32::MAX as u64));
 }
 
+// Store a bit-field op's 64-bit result into `rd`, honouring the register width.
+// For the W form, the upper 32 bits of the destination are zeroed (ARM ARM:
+// writing a W register clears bits [63:32]); the X form stores all 64 bits.
+fn store_bitfield_result(
+    state: &mut ConcreteMachineState,
+    rd: Register,
+    result: u64,
+    reg_width: crate::ir::RegisterWidth,
+) {
+    match reg_width {
+        crate::ir::RegisterWidth::W32 => set_w_register(state, rd, result),
+        crate::ir::RegisterWidth::X64 => state.set_register(rd, ConcreteValue::new(result)),
+    }
+}
+
 fn eval_w_operand(state: &ConcreteMachineState, operand: &Operand) -> u64 {
     match operand {
         Operand::Register(reg) => state.get_register(*reg).as_u64() & u32::MAX as u64,
@@ -71,7 +86,10 @@ fn eval_logical_operand(
     operand: &Operand,
     width: RegisterWidth,
 ) -> u64 {
-    eval_operand(state, operand).as_u64() & mask_for_register_width(width)
+    match width {
+        RegisterWidth::W32 => eval_w_operand(state, operand),
+        RegisterWidth::X64 => eval_operand(state, operand).as_u64(),
+    }
 }
 
 fn logical_flags(result: u64, width: RegisterWidth) -> ConditionFlags {
@@ -385,6 +403,40 @@ pub fn apply_instruction_concrete(
             state.set_register(*rd, ConcreteValue::new(result));
             state.set_flags(ConditionFlags::from_sub(lhs, rhs, result));
         }
+        // Add with carry: rd = rn + rm + C. Adc leaves flags untouched;
+        // Adcs writes NZCV.
+        Instruction::Adc { rd, rn, rm } => {
+            let lhs = state.get_register(*rn).as_u64();
+            let rhs = state.get_register(*rm).as_u64();
+            let carry = state.get_flags().c as u64;
+            let result = lhs.wrapping_add(rhs).wrapping_add(carry);
+            state.set_register(*rd, ConcreteValue::new(result));
+        }
+        Instruction::Adcs { rd, rn, rm } => {
+            let lhs = state.get_register(*rn).as_u64();
+            let rhs = state.get_register(*rm).as_u64();
+            let carry = state.get_flags().c as u64;
+            let result = lhs.wrapping_add(rhs).wrapping_add(carry);
+            state.set_register(*rd, ConcreteValue::new(result));
+            state.set_flags(ConditionFlags::from_adc(lhs, rhs, carry));
+        }
+        // Subtract with carry: rd = rn + NOT(rm) + C = rn - rm - (1 - C).
+        // Sbc leaves flags untouched; Sbcs writes NZCV.
+        Instruction::Sbc { rd, rn, rm } => {
+            let lhs = state.get_register(*rn).as_u64();
+            let rhs = state.get_register(*rm).as_u64();
+            let carry = state.get_flags().c as u64;
+            let result = lhs.wrapping_add(!rhs).wrapping_add(carry);
+            state.set_register(*rd, ConcreteValue::new(result));
+        }
+        Instruction::Sbcs { rd, rn, rm } => {
+            let lhs = state.get_register(*rn).as_u64();
+            let rhs = state.get_register(*rm).as_u64();
+            let carry = state.get_flags().c as u64;
+            let result = lhs.wrapping_add(!rhs).wrapping_add(carry);
+            state.set_register(*rd, ConcreteValue::new(result));
+            state.set_flags(ConditionFlags::from_sbc(lhs, rhs, carry));
+        }
         Instruction::Ands { rd, rn, rm, width } => {
             let lhs = state.get_register(*rn).as_u64() & mask_for_register_width(*width);
             let rhs = eval_logical_operand(&state, rm, *width);
@@ -490,7 +542,13 @@ pub fn apply_instruction_concrete(
         // UBFX rd, rn, #lsb, #width: extract bits [lsb+width-1:lsb] of rn,
         // zero-extend the result into rd. width=64 must use u64::MAX as the
         // low-bits mask to avoid the `1u64 << 64` UB.
-        Instruction::Ubfx { rd, rn, lsb, width } => {
+        Instruction::Ubfx {
+            rd,
+            rn,
+            lsb,
+            width,
+            reg_width,
+        } => {
             let value = state.get_register(*rn).as_u64();
             let low_mask = if *width == 64 {
                 u64::MAX
@@ -498,11 +556,17 @@ pub fn apply_instruction_concrete(
                 (1u64 << *width) - 1
             };
             let extracted = (value >> *lsb) & low_mask;
-            state.set_register(*rd, ConcreteValue::new(extracted));
+            store_bitfield_result(&mut state, *rd, extracted, *reg_width);
         }
         // SBFX rd, rn, #lsb, #width: extract bits [lsb+width-1:lsb] of rn,
         // sign-extend the result into rd. width=64 is the no-op identity.
-        Instruction::Sbfx { rd, rn, lsb, width } => {
+        Instruction::Sbfx {
+            rd,
+            rn,
+            lsb,
+            width,
+            reg_width,
+        } => {
             let value = state.get_register(*rn).as_u64();
             // Shift left then arithmetic-right by the same amount, computed on
             // i64, to sign-extend the field MSB across the upper bits.
@@ -512,12 +576,20 @@ pub fn apply_instruction_concrete(
             let shift_left = 64 - ((*lsb as u32) + (*width as u32));
             let intermediate = (value << shift_left) as i64;
             // Right shift by (64 - width) sign-extends from bit (width-1).
+            // For the W form the low 32 bits hold the 32-bit sign-extended value;
+            // store_bitfield_result then zeroes bits [63:32].
             let result = (intermediate >> (64 - *width as u32)) as u64;
-            state.set_register(*rd, ConcreteValue::new(result));
+            store_bitfield_result(&mut state, *rd, result, *reg_width);
         }
         // BFI rd, rn, #lsb, #width: insert low `width` bits of rn at position
         // lsb of rd, preserving the other bits of rd.
-        Instruction::Bfi { rd, rn, lsb, width } => {
+        Instruction::Bfi {
+            rd,
+            rn,
+            lsb,
+            width,
+            reg_width,
+        } => {
             let dest = state.get_register(*rd).as_u64();
             let src = state.get_register(*rn).as_u64();
             let low_mask = if *width == 64 {
@@ -528,11 +600,17 @@ pub fn apply_instruction_concrete(
             let shifted_mask = low_mask << *lsb;
             let inserted = (src & low_mask) << *lsb;
             let result = (dest & !shifted_mask) | inserted;
-            state.set_register(*rd, ConcreteValue::new(result));
+            store_bitfield_result(&mut state, *rd, result, *reg_width);
         }
         // BFXIL rd, rn, #lsb, #width: extract bits [lsb+width-1:lsb] of rn,
         // place at [width-1:0] of rd, preserve rd[63:width].
-        Instruction::Bfxil { rd, rn, lsb, width } => {
+        Instruction::Bfxil {
+            rd,
+            rn,
+            lsb,
+            width,
+            reg_width,
+        } => {
             let dest = state.get_register(*rd).as_u64();
             let src = state.get_register(*rn).as_u64();
             let low_mask = if *width == 64 {
@@ -542,11 +620,17 @@ pub fn apply_instruction_concrete(
             };
             let extracted = (src >> *lsb) & low_mask;
             let result = (dest & !low_mask) | extracted;
-            state.set_register(*rd, ConcreteValue::new(result));
+            store_bitfield_result(&mut state, *rd, result, *reg_width);
         }
         // UBFIZ rd, rn, #lsb, #width: take low `width` bits of rn, zero-extend
         // to 64, shift left by lsb → rd (other bits zero).
-        Instruction::Ubfiz { rd, rn, lsb, width } => {
+        Instruction::Ubfiz {
+            rd,
+            rn,
+            lsb,
+            width,
+            reg_width,
+        } => {
             let value = state.get_register(*rn).as_u64();
             let low_mask = if *width == 64 {
                 u64::MAX
@@ -554,18 +638,24 @@ pub fn apply_instruction_concrete(
                 (1u64 << *width) - 1
             };
             let inserted = (value & low_mask) << *lsb;
-            state.set_register(*rd, ConcreteValue::new(inserted));
+            store_bitfield_result(&mut state, *rd, inserted, *reg_width);
         }
         // SBFIZ rd, rn, #lsb, #width: low `width` bits of rn, sign-extended
         // across bits [63:width], then shifted left by lsb → rd.
-        Instruction::Sbfiz { rd, rn, lsb, width } => {
+        Instruction::Sbfiz {
+            rd,
+            rn,
+            lsb,
+            width,
+            reg_width,
+        } => {
             let value = state.get_register(*rn).as_u64();
             // Sign-extend the low `width` bits to 64.
             let shift_left = 64 - *width as u32;
             let sign_extended = ((value << shift_left) as i64 >> shift_left) as u64;
             // Then shift left by lsb.
             let result = sign_extended << *lsb;
-            state.set_register(*rd, ConcreteValue::new(result));
+            store_bitfield_result(&mut state, *rd, result, *reg_width);
         }
         // Branches / terminators: callers must strip terminators before
         // apply_sequence_concrete. The equivalence layer handles them via
@@ -620,18 +710,19 @@ pub fn apply_instruction_concrete(
             signed,
         } => {
             let (effective, writeback) = compute_address(&state, addr);
+            let access_width = (*width).as_access_width();
             let bytes = width.bytes() as u64;
-            let raw1 = state.read_bytes(effective, *width);
-            let raw2 = state.read_bytes(effective.wrapping_add(bytes), *width);
+            let raw1 = state.read_bytes(effective, access_width);
+            let raw2 = state.read_bytes(effective.wrapping_add(bytes), access_width);
             let (v1, v2) = if *signed {
                 (
-                    sign_extend_load(raw1, *width),
-                    sign_extend_load(raw2, *width),
+                    sign_extend_load(raw1, access_width),
+                    sign_extend_load(raw2, access_width),
                 )
             } else {
                 (
-                    zero_extend_load(raw1, *width),
-                    zero_extend_load(raw2, *width),
+                    zero_extend_load(raw1, access_width),
+                    zero_extend_load(raw2, access_width),
                 )
             };
             state.set_register(*rt1, ConcreteValue::new(v1));
@@ -647,11 +738,12 @@ pub fn apply_instruction_concrete(
             width,
         } => {
             let (effective, writeback) = compute_address(&state, addr);
+            let access_width = (*width).as_access_width();
             let bytes = width.bytes() as u64;
             let v1 = state.get_register(*rt1).as_u64();
             let v2 = state.get_register(*rt2).as_u64();
-            state.write_bytes(effective, v1, *width);
-            state.write_bytes(effective.wrapping_add(bytes), v2, *width);
+            state.write_bytes(effective, v1, access_width);
+            state.write_bytes(effective.wrapping_add(bytes), v2, access_width);
             if let Some((base, new_base)) = writeback {
                 state.set_register(base, ConcreteValue::new(new_base));
             }
@@ -775,23 +867,19 @@ pub fn apply_sequence_concrete(
     state
 }
 
-/// Check if two concrete states are equal for the specified live-out registers,
-/// optionally including the NZCV condition flags and the whole memory map.
+/// Check if two concrete states are equal for the specified live-out contract,
+/// including the NZCV condition flags when `live_out.flags_live()` is set and
+/// the whole memory map when `memory_live` is set.
 ///
 /// `memory_live` is derived automatically by callers from whether either
 /// sequence touches memory (see ADR-0007). When set, every memory cell
 /// must agree between the two states — equivalently, the two `BTreeMap`s
 /// must be structurally equal (prune-on-write guarantees structural ==
 /// semantic equality).
-///
-/// TODO(#282): The explicit `flags_live` parameter is now redundant with
-/// `live_out.flags_live()` for every caller except the stochastic backend
-/// (which deliberately passes `false`). Tracked for cleanup in issue #282.
 pub fn states_equal_for_live_out(
     state1: &ConcreteMachineState,
     state2: &ConcreteMachineState,
     live_out: &RegisterSet<Register>,
-    flags_live: bool,
     memory_live: bool,
 ) -> bool {
     for reg in live_out.iter() {
@@ -799,7 +887,7 @@ pub fn states_equal_for_live_out(
             return false;
         }
     }
-    if flags_live && state1.get_flags() != state2.get_flags() {
+    if live_out.flags_live() && state1.get_flags() != state2.get_flags() {
         return false;
     }
     if memory_live && state1.memory() != state2.memory() {
@@ -811,14 +899,10 @@ pub fn states_equal_for_live_out(
 /// Find the first differing register between two states for live-out registers.
 /// Flag divergence (when `flags_live` is set) is reported via the `XZR`
 /// sentinel since the function signature is register-typed.
-///
-/// TODO(#282): see `states_equal_for_live_out` — the same `flags_live`
-/// redundancy applies here. Tracked for follow-up cleanup.
 pub fn find_first_difference(
     state1: &ConcreteMachineState,
     state2: &ConcreteMachineState,
     live_out: &RegisterSet<Register>,
-    flags_live: bool,
 ) -> Option<(Register, ConcreteValue, ConcreteValue)> {
     for reg in live_out.iter() {
         let v1 = state1.get_register(*reg);
@@ -827,7 +911,7 @@ pub fn find_first_difference(
             return Some((*reg, v1, v2));
         }
     }
-    if flags_live {
+    if live_out.flags_live() {
         let f1 = state1.get_flags();
         let f2 = state2.get_flags();
         if f1 != f2 {
@@ -848,6 +932,7 @@ pub fn find_first_difference(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ir::types::PairAccessWidth;
     use std::collections::HashMap;
 
     fn state_with(values: Vec<(Register, u64)>) -> ConcreteMachineState {
@@ -1131,6 +1216,65 @@ mod tests {
     }
 
     #[test]
+    fn test_w32_logical_shifted_registers_use_low_32_bits_before_shifting() {
+        for (instr, pre_values, expected) in [
+            (
+                Instruction::And {
+                    rd: Register::X0,
+                    rn: Register::X1,
+                    rm: Operand::ShiftedRegister {
+                        reg: Register::X2,
+                        kind: ShiftKind::Lsr,
+                        amount: 1,
+                    },
+                    width: RegisterWidth::W32,
+                },
+                vec![
+                    (Register::X1, 0xFFFF_FFFF),
+                    (Register::X2, 0x0000_0001_0000_0000),
+                ],
+                0,
+            ),
+            (
+                Instruction::Orr {
+                    rd: Register::X0,
+                    rn: Register::X1,
+                    rm: Operand::ShiftedRegister {
+                        reg: Register::X2,
+                        kind: ShiftKind::Asr,
+                        amount: 31,
+                    },
+                    width: RegisterWidth::W32,
+                },
+                vec![(Register::X1, 0), (Register::X2, 0x0000_0001_8000_0000)],
+                0xFFFF_FFFF,
+            ),
+            (
+                Instruction::Eor {
+                    rd: Register::X0,
+                    rn: Register::X1,
+                    rm: Operand::ShiftedRegister {
+                        reg: Register::X2,
+                        kind: ShiftKind::Ror,
+                        amount: 1,
+                    },
+                    width: RegisterWidth::W32,
+                },
+                vec![(Register::X1, 0), (Register::X2, 0x0000_0001_0000_0000)],
+                0,
+            ),
+        ] {
+            let state = state_with(pre_values);
+            let new_state = apply_instruction_concrete(state, &instr);
+            assert_eq!(
+                new_state.get_register(Register::X0).as_u64(),
+                expected,
+                "{instr} must use W-register source semantics"
+            );
+        }
+    }
+
+    #[test]
     fn test_w32_tst_uses_32_bit_flags() {
         let instr = Instruction::Tst {
             rn: Register::X1,
@@ -1289,7 +1433,7 @@ mod tests {
 
         let live_out = RegisterSet::<Register>::from_registers(vec![Register::X0]);
         assert!(states_equal_for_live_out(
-            &state1, &state2, &live_out, false, false
+            &state1, &state2, &live_out, false
         ));
     }
 
@@ -1300,7 +1444,39 @@ mod tests {
 
         let live_out = RegisterSet::<Register>::from_registers(vec![Register::X0]);
         assert!(!states_equal_for_live_out(
-            &state1, &state2, &live_out, false, false
+            &state1, &state2, &live_out, false
+        ));
+    }
+
+    #[test]
+    fn test_states_equal_for_live_out_reads_flags_from_mask() {
+        let mut state1 = state_with(vec![(Register::X0, 42)]);
+        let mut state2 = state_with(vec![(Register::X0, 42)]);
+        state1.set_flags(ConditionFlags {
+            n: true,
+            z: false,
+            c: false,
+            v: false,
+        });
+        state2.set_flags(ConditionFlags {
+            n: false,
+            z: true,
+            c: false,
+            v: false,
+        });
+
+        let live_out = RegisterSet::<Register>::from_registers(vec![Register::X0]);
+        assert!(states_equal_for_live_out(
+            &state1,
+            &state2,
+            &live_out.clone().with_flags(false),
+            false
+        ));
+        assert!(!states_equal_for_live_out(
+            &state1,
+            &state2,
+            &live_out.with_flags(true),
+            false
         ));
     }
 
@@ -1310,7 +1486,7 @@ mod tests {
         let state2 = state_with(vec![(Register::X0, 42), (Register::X1, 200)]);
 
         let live_out = RegisterSet::<Register>::from_registers(vec![Register::X0, Register::X1]);
-        let diff = find_first_difference(&state1, &state2, &live_out, false);
+        let diff = find_first_difference(&state1, &state2, &live_out);
         assert!(diff.is_some());
         let (reg, v1, v2) = diff.unwrap();
         assert_eq!(reg, Register::X1);
@@ -1324,7 +1500,7 @@ mod tests {
         let state2 = state_with(vec![(Register::X0, 42)]);
 
         let live_out = RegisterSet::<Register>::from_registers(vec![Register::X0]);
-        let diff = find_first_difference(&state1, &state2, &live_out, false);
+        let diff = find_first_difference(&state1, &state2, &live_out);
         assert!(diff.is_none());
     }
 
@@ -1347,13 +1523,10 @@ mod tests {
 
         let live_out = RegisterSet::<Register>::from_registers(vec![Register::X0]);
         assert_eq!(
-            find_first_difference(&state1, &state2, &live_out, true),
+            find_first_difference(&state1, &state2, &live_out.clone().with_flags(true)),
             Some((Register::XZR, ConcreteValue(8), ConcreteValue(4)))
         );
-        assert_eq!(
-            find_first_difference(&state1, &state2, &live_out, false),
-            None
-        );
+        assert_eq!(find_first_difference(&state1, &state2, &live_out), None);
     }
 
     #[test]
@@ -1376,7 +1549,7 @@ mod tests {
 
         let live_out = RegisterSet::<Register>::from_registers(vec![Register::X0]);
         assert!(states_equal_for_live_out(
-            &state1, &state2, &live_out, false, false
+            &state1, &state2, &live_out, false
         ));
     }
 
@@ -1745,6 +1918,113 @@ mod tests {
         let new_state = apply_instruction_concrete(state, &instr);
         let f = new_state.get_flags();
         assert!(!f.c, "SUBS(3, 5): C=0 (borrow)");
+    }
+
+    #[test]
+    fn test_adc_threads_carry_in() {
+        // ADC: rd = rn + rm + C. With C=1: 5 + 7 + 1 = 13.
+        let mut state = state_with(vec![(Register::X1, 5), (Register::X2, 7)]);
+        state.set_flags(ConditionFlags {
+            n: false,
+            z: false,
+            c: true,
+            v: false,
+        });
+        let instr = Instruction::Adc {
+            rd: Register::X0,
+            rn: Register::X1,
+            rm: Register::X2,
+        };
+        let new_state = apply_instruction_concrete(state, &instr);
+        assert_eq!(new_state.get_register(Register::X0).as_u64(), 13);
+        // ADC must NOT modify flags.
+        assert!(new_state.get_flags().c, "ADC leaves C untouched");
+
+        // With C=0: 5 + 7 + 0 = 12.
+        let state = state_with(vec![(Register::X1, 5), (Register::X2, 7)]);
+        let new_state = apply_instruction_concrete(state, &instr);
+        assert_eq!(new_state.get_register(Register::X0).as_u64(), 12);
+    }
+
+    #[test]
+    fn test_adcs_sets_carry_out_flag() {
+        // ADCS(u64::MAX, 0) with C=1 → wraps to 0, carry-out C=1, Z=1.
+        let mut state = state_with(vec![(Register::X1, u64::MAX), (Register::X2, 0)]);
+        state.set_flags(ConditionFlags {
+            c: true,
+            ..Default::default()
+        });
+        let instr = Instruction::Adcs {
+            rd: Register::X0,
+            rn: Register::X1,
+            rm: Register::X2,
+        };
+        let new_state = apply_instruction_concrete(state, &instr);
+        assert_eq!(new_state.get_register(Register::X0).as_u64(), 0);
+        let f = new_state.get_flags();
+        assert_eq!((f.n, f.z, f.c, f.v), (false, true, true, false));
+    }
+
+    #[test]
+    fn test_sbc_threads_borrow() {
+        // SBC = rn - rm - (1 - C). With C=1 (no borrow): 10 - 3 = 7.
+        let mut state = state_with(vec![(Register::X1, 10), (Register::X2, 3)]);
+        state.set_flags(ConditionFlags {
+            c: true,
+            ..Default::default()
+        });
+        let instr = Instruction::Sbc {
+            rd: Register::X0,
+            rn: Register::X1,
+            rm: Register::X2,
+        };
+        let new_state = apply_instruction_concrete(state, &instr);
+        assert_eq!(new_state.get_register(Register::X0).as_u64(), 7);
+
+        // With C=0 (borrow asserted): 10 - 3 - 1 = 6.
+        let state = state_with(vec![(Register::X1, 10), (Register::X2, 3)]);
+        let new_state = apply_instruction_concrete(state, &instr);
+        assert_eq!(new_state.get_register(Register::X0).as_u64(), 6);
+    }
+
+    #[test]
+    fn test_sbcs_carry_is_no_borrow() {
+        // SBCS(10, 3) with C=1 → 7, C=1 (no borrow).
+        let mut state = state_with(vec![(Register::X1, 10), (Register::X2, 3)]);
+        state.set_flags(ConditionFlags {
+            c: true,
+            ..Default::default()
+        });
+        let s = apply_instruction_concrete(
+            state,
+            &Instruction::Sbcs {
+                rd: Register::X0,
+                rn: Register::X1,
+                rm: Register::X2,
+            },
+        );
+        assert_eq!(s.get_register(Register::X0).as_u64(), 7);
+        let f = s.get_flags();
+        assert!(f.c, "SBCS(10,3): no borrow → C=1");
+        assert!(!f.z && !f.n);
+
+        // SBCS(3, 10) with C=1 → -7, C=0 (borrow), N=1.
+        let mut state = state_with(vec![(Register::X1, 3), (Register::X2, 10)]);
+        state.set_flags(ConditionFlags {
+            c: true,
+            ..Default::default()
+        });
+        let s = apply_instruction_concrete(
+            state,
+            &Instruction::Sbcs {
+                rd: Register::X0,
+                rn: Register::X1,
+                rm: Register::X2,
+            },
+        );
+        let f = s.get_flags();
+        assert!(!f.c, "SBCS(3,10): borrow → C=0");
+        assert!(f.n, "negative result → N=1");
     }
 
     #[test]
@@ -2479,6 +2759,7 @@ mod tests {
             rn: Register::X1,
             lsb: 8,
             width: 16,
+            reg_width: crate::ir::RegisterWidth::X64,
         };
         let after = apply_instruction_concrete(state, &instr);
         // bits [23:8] of 0xDEAD_BEEF_CAFE_0123 = 0xFE01
@@ -2495,6 +2776,7 @@ mod tests {
             rn: Register::X1,
             lsb: 0,
             width: 64,
+            reg_width: crate::ir::RegisterWidth::X64,
         };
         let after = apply_instruction_concrete(state, &instr);
         assert_eq!(
@@ -2514,6 +2796,7 @@ mod tests {
             rn: Register::X1,
             lsb: 4,
             width: 8,
+            reg_width: crate::ir::RegisterWidth::X64,
         };
         let after = apply_instruction_concrete(state, &instr);
         // 0xF0 sign-extended from 8 bits = 0xFFFF_FFFF_FFFF_FFF0
@@ -2532,9 +2815,122 @@ mod tests {
             rn: Register::X1,
             lsb: 8,
             width: 8,
+            reg_width: crate::ir::RegisterWidth::X64,
         };
         let after = apply_instruction_concrete(state, &instr);
         assert_eq!(after.get_register(Register::X0).as_u64(), 0x7F);
+    }
+
+    #[test]
+    fn test_sbfx_w_form_zeroes_upper_32_bits() {
+        // SBFX W0, W1, #4, #8: extract bits [11:4] = 0xF0 of W1, sign-extend
+        // within 32 bits, then zero bits [63:32] of the destination X register
+        // (ARM ARM: writing a W register zeroes the upper half). The X form would
+        // instead fill [63:32] with the sign bit.
+        let state = state_with(vec![(Register::X1, 0xF00)]);
+        let instr = Instruction::Sbfx {
+            rd: Register::X0,
+            rn: Register::X1,
+            lsb: 4,
+            width: 8,
+            reg_width: crate::ir::RegisterWidth::W32,
+        };
+        let after = apply_instruction_concrete(state, &instr);
+        // 0xF0 sign-extended from 8 bits within 32 = 0xFFFF_FFF0; upper 32 zeroed.
+        assert_eq!(
+            after.get_register(Register::X0).as_u64(),
+            0x0000_0000_FFFF_FFF0
+        );
+    }
+
+    #[test]
+    fn test_bfi_w_form_zeroes_upper_32_bits() {
+        // BFI W0, W1, #4, #8: insert low 8 bits of W1 (0x00) at position 4 of W0,
+        // preserving the other low-32 bits of W0, and zero bits [63:32].
+        let state = state_with(vec![(Register::X0, u64::MAX), (Register::X1, 0x00)]);
+        let instr = Instruction::Bfi {
+            rd: Register::X0,
+            rn: Register::X1,
+            lsb: 4,
+            width: 8,
+            reg_width: crate::ir::RegisterWidth::W32,
+        };
+        let after = apply_instruction_concrete(state, &instr);
+        // low 32 of rd = 0xFFFF_FFFF, clear [11:4], insert 0 -> 0xFFFF_F00F; upper 32 zeroed.
+        assert_eq!(
+            after.get_register(Register::X0).as_u64(),
+            0x0000_0000_FFFF_F00F
+        );
+    }
+
+    #[test]
+    fn test_bfxil_w_form_zeroes_upper_32_bits() {
+        // BFXIL W0, W1, #4, #8: extract bits [11:4] of W1 (=0) into [7:0] of W0,
+        // preserve W0[31:8], and zero bits [63:32].
+        let state = state_with(vec![(Register::X0, u64::MAX), (Register::X1, 0x00)]);
+        let instr = Instruction::Bfxil {
+            rd: Register::X0,
+            rn: Register::X1,
+            lsb: 4,
+            width: 8,
+            reg_width: crate::ir::RegisterWidth::W32,
+        };
+        let after = apply_instruction_concrete(state, &instr);
+        // low 32 of rd keeps [31:8]=1, [7:0]=0 -> 0xFFFF_FF00; upper 32 zeroed.
+        assert_eq!(
+            after.get_register(Register::X0).as_u64(),
+            0x0000_0000_FFFF_FF00
+        );
+    }
+
+    #[test]
+    fn test_sbfiz_w_form_zeroes_upper_32_bits() {
+        // SBFIZ W0, W1, #4, #8: low 8 bits of W1 (0xAB, MSB set), sign-extend
+        // within 32 bits, shift left by 4, and zero bits [63:32].
+        let state = state_with(vec![(Register::X1, 0xAB)]);
+        let instr = Instruction::Sbfiz {
+            rd: Register::X0,
+            rn: Register::X1,
+            lsb: 4,
+            width: 8,
+            reg_width: crate::ir::RegisterWidth::W32,
+        };
+        let after = apply_instruction_concrete(state, &instr);
+        // 0xAB sign-extended within 32 = 0xFFFF_FFAB, <<4 = 0xFFFF_FAB0; upper 32 zeroed.
+        assert_eq!(
+            after.get_register(Register::X0).as_u64(),
+            0x0000_0000_FFFF_FAB0
+        );
+    }
+
+    #[test]
+    fn test_ubfx_w_form_matches_x_form_for_valid_field() {
+        // UBFX zero-extends, so for a W field (width<=32) the result already has
+        // zero upper bits: W and X agree. Guards against accidental divergence.
+        let state = state_with(vec![(Register::X1, 0xF00)]);
+        let instr = Instruction::Ubfx {
+            rd: Register::X0,
+            rn: Register::X1,
+            lsb: 4,
+            width: 8,
+            reg_width: crate::ir::RegisterWidth::W32,
+        };
+        let after = apply_instruction_concrete(state, &instr);
+        assert_eq!(after.get_register(Register::X0).as_u64(), 0xF0);
+    }
+
+    #[test]
+    fn test_ubfiz_w_form_matches_x_form_for_valid_field() {
+        let state = state_with(vec![(Register::X1, 0xAB)]);
+        let instr = Instruction::Ubfiz {
+            rd: Register::X0,
+            rn: Register::X1,
+            lsb: 4,
+            width: 8,
+            reg_width: crate::ir::RegisterWidth::W32,
+        };
+        let after = apply_instruction_concrete(state, &instr);
+        assert_eq!(after.get_register(Register::X0).as_u64(), 0xAB0);
     }
 
     #[test]
@@ -2547,6 +2943,7 @@ mod tests {
             rn: Register::X1,
             lsb: 4,
             width: 8,
+            reg_width: crate::ir::RegisterWidth::X64,
         };
         let after = apply_instruction_concrete(state, &instr);
         // 0xAB sign-extended from 8 bits → 0xFFFF_FFFF_FFFF_FFAB
@@ -2566,6 +2963,7 @@ mod tests {
             rn: Register::X1,
             lsb: 4,
             width: 8,
+            reg_width: crate::ir::RegisterWidth::X64,
         };
         let after = apply_instruction_concrete(state, &instr);
         // 0x7F << 4 = 0x7F0; no sign extension.
@@ -2585,6 +2983,7 @@ mod tests {
             rn: Register::X1,
             lsb: 4,
             width: 8,
+            reg_width: crate::ir::RegisterWidth::X64,
         };
         let after = apply_instruction_concrete(state, &instr);
         // 0xAB << 4 = 0xAB0; everything else zero.
@@ -2604,6 +3003,7 @@ mod tests {
             rn: Register::X1,
             lsb: 8,
             width: 8,
+            reg_width: crate::ir::RegisterWidth::X64,
         };
         let after = apply_instruction_concrete(state, &instr);
         // X0 upper 56 bits preserved (all ones), low 8 bits = 0xAB
@@ -2626,6 +3026,7 @@ mod tests {
             rn: Register::X1,
             lsb: 4,
             width: 8,
+            reg_width: crate::ir::RegisterWidth::X64,
         };
         let after = apply_instruction_concrete(state, &instr);
         // Bits [11:4] become 0xAA (from rn low 8 bits); other bits of X0 preserved.
@@ -2648,6 +3049,7 @@ mod tests {
             rn: Register::X1,
             lsb: 63,
             width: 1,
+            reg_width: crate::ir::RegisterWidth::X64,
         };
         let after = apply_instruction_concrete(state, &instr);
         assert_eq!(after.get_register(Register::X0).as_u64(), 1);
@@ -2780,7 +3182,7 @@ mod tests {
                 offset: 0,
                 mode: IndexMode::Offset,
             },
-            width: AccessWidth::Extended,
+            width: PairAccessWidth::Extended,
             signed: false,
         };
         let after = apply_instruction_concrete(state, &instr);
@@ -2804,7 +3206,7 @@ mod tests {
                 offset: 0,
                 mode: IndexMode::Offset,
             },
-            width: AccessWidth::Extended,
+            width: PairAccessWidth::Extended,
         };
         let after = apply_instruction_concrete(state, &instr);
         assert_eq!(after.read_bytes(0x1000, AccessWidth::Extended), 0xAAAA);

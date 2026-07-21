@@ -6,6 +6,15 @@ on:
   pull_request:
     branches: [ main ]
 
+# Least-privilege default token: this workflow only needs to read the repo.
+permissions:
+  contents: read
+
+# Cancel superseded runs for the same branch/PR to save Actions minutes.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 env:
   CARGO_TERM_COLOR: always
   # Fail the build on any warning so unused imports / dead code can't slip in.
@@ -16,7 +25,7 @@ jobs:
     runs-on: ubuntu-24.04
 
     steps:
-    - uses: actions/checkout@v6
+    - uses: actions/checkout@v7
 
     - name: Install dependencies
       run: |
@@ -29,14 +38,17 @@ jobs:
         curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal --default-toolchain stable --component rustfmt
         echo "$HOME/.cargo/bin" >> $GITHUB_PATH
 
+    - name: Cache cargo registry and target
+      uses: Swatinem/rust-cache@v2
+
     - name: Check formatting
       run: cargo fmt -- --check
 
     - name: Build
       run: cargo build --verbose
 
-    - name: Run unit tests only
-      run: cargo test --bins --verbose
+    - name: Run unit tests (lib + bins)
+      run: cargo test --lib --bins --verbose
       
     - name: Check s11 binary exists
       run: |
@@ -60,7 +72,7 @@ jobs:
     - name: Run integration tests with debug output
       run: |
         export RUST_BACKTRACE=1
-        cargo test --test integration_tests -- --nocapture || true
+        cargo test --test integration_tests -- --nocapture
         
     - name: Run all tests
       run: ./test_all.sh

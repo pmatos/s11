@@ -286,6 +286,22 @@ pub enum Operand {
 }
 
 impl Operand {
+    /// The register this operand reads, if any: the inner register for the
+    /// `Register`, `ShiftedRegister`, and `ExtendedRegister` forms, and `None`
+    /// for an `Immediate`. This is the single home for "which register does an
+    /// rm/shift operand contribute as a source" — read-set computations such as
+    /// `Instruction::source_registers` route through it so a shifted or extended
+    /// operand never silently drops its inner register from liveness tracking.
+    #[must_use]
+    pub fn source_register(&self) -> Option<Register> {
+        match self {
+            Operand::Register(reg)
+            | Operand::ShiftedRegister { reg, .. }
+            | Operand::ExtendedRegister { reg, .. } => Some(*reg),
+            Operand::Immediate(_) => None,
+        }
+    }
+
     pub fn display_with_width(&self, width: RegisterWidth) -> String {
         match self {
             Operand::Register(reg) => width.register_name(*reg).to_string(),
@@ -313,11 +329,14 @@ impl fmt::Display for Operand {
                 let inner = if kind.is_x_form() {
                     format!("{}", reg)
                 } else {
-                    match reg.index() {
-                        Some(idx) => format!("w{}", idx),
-                        // SP has no W-form; fall back to its canonical name
-                        // (encodability gates SP out before any caller sees it).
-                        None => format!("{}", reg),
+                    match reg {
+                        Register::XZR => "wzr".to_string(),
+                        reg => match reg.index() {
+                            Some(idx) => format!("w{}", idx),
+                            // SP has no W-form; fall back to its canonical name
+                            // (encodability gates SP out before any caller sees it).
+                            None => format!("{}", reg),
+                        },
                     }
                 };
                 write!(f, "{}, {} #{}", inner, kind, shift)
@@ -339,9 +358,9 @@ impl fmt::Display for LabelId {
     }
 }
 
-/// Access width for LDR/STR/LDP/STP families. Byte = 8 bits (LDRB/STRB),
-/// Half = 16 bits (LDRH/STRH), Word = 32 bits (LDR/STR W-form, LDRSW,
-/// LDPSW), Extended = 64 bits (LDR/STR X-form). See ADR-0007.
+/// Access width for single-register memory families. Byte = 8 bits
+/// (LDRB/STRB), Half = 16 bits (LDRH/STRH), Word = 32 bits (LDR/STR W-form,
+/// LDRSW), Extended = 64 bits (LDR/STR X-form). See ADR-0007.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[allow(dead_code)]
 pub enum AccessWidth {
@@ -361,6 +380,82 @@ impl AccessWidth {
             AccessWidth::Half => 2,
             AccessWidth::Word => 4,
             AccessWidth::Extended => 8,
+        }
+    }
+
+    /// Log2 of the access size in bytes, used by scaled memory operands.
+    #[must_use]
+    pub fn scale_shift(&self) -> u8 {
+        match self {
+            AccessWidth::Byte => 0,
+            AccessWidth::Half => 1,
+            AccessWidth::Word => 2,
+            AccessWidth::Extended => 3,
+        }
+    }
+}
+
+/// Access width for LDP/STP-family pair transfers. AArch64 pair forms only
+/// encode 32-bit and 64-bit per-register accesses.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum PairAccessWidth {
+    Word,
+    Extended,
+}
+
+impl PairAccessWidth {
+    /// Convert to the shared single-register access width representation.
+    #[must_use]
+    pub fn as_access_width(self) -> AccessWidth {
+        self.into()
+    }
+
+    /// Number of bytes each register in the pair reads or writes.
+    #[must_use]
+    pub fn bytes(self) -> u32 {
+        self.as_access_width().bytes()
+    }
+
+    /// Log2 of the per-register transfer size in bytes.
+    #[must_use]
+    pub fn scale_shift(self) -> u8 {
+        self.as_access_width().scale_shift()
+    }
+}
+
+impl From<PairAccessWidth> for AccessWidth {
+    fn from(width: PairAccessWidth) -> Self {
+        match width {
+            PairAccessWidth::Word => AccessWidth::Word,
+            PairAccessWidth::Extended => AccessWidth::Extended,
+        }
+    }
+}
+
+/// Error returned when a byte or half-word access is used for a pair form.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct InvalidPairAccessWidth(pub AccessWidth);
+
+impl fmt::Display for InvalidPairAccessWidth {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "pair access width {:?} is not supported (Word/Extended only)",
+            self.0
+        )
+    }
+}
+
+impl std::error::Error for InvalidPairAccessWidth {}
+
+impl TryFrom<AccessWidth> for PairAccessWidth {
+    type Error = InvalidPairAccessWidth;
+
+    fn try_from(width: AccessWidth) -> Result<Self, Self::Error> {
+        match width {
+            AccessWidth::Word => Ok(PairAccessWidth::Word),
+            AccessWidth::Extended => Ok(PairAccessWidth::Extended),
+            AccessWidth::Byte | AccessWidth::Half => Err(InvalidPairAccessWidth(width)),
         }
     }
 }
@@ -396,9 +491,9 @@ pub enum AddressOperand {
         shift: u8,
     },
     /// `[base, idx, kind{ #shift}]` where `kind` is one of UXTW/SXTW (idx
-    /// is W-form) or UXTX/SXTX (idx is X-form). UXTB/UXTH/SXTB/SXTH are
-    /// not valid AArch64 memory-extend kinds and are rejected by
-    /// `is_encodable_aarch64`.
+    /// is W-form) or UXTX/SXTX (idx is X-form), and `shift` is 0 or the
+    /// access-size scale shift. UXTB/UXTH/SXTB/SXTH and invalid shifts are
+    /// rejected by `is_encodable_aarch64`.
     Ext {
         base: Register,
         idx: Register,
@@ -651,6 +746,32 @@ mod tests {
     }
 
     #[test]
+    fn test_extended_register_display_w_form_xzr() {
+        assert_eq!(
+            Operand::ExtendedRegister {
+                reg: Register::XZR,
+                kind: ExtendKind::Uxtb,
+                shift: 0,
+            }
+            .to_string(),
+            "wzr, uxtb #0"
+        );
+    }
+
+    #[test]
+    fn test_extended_register_display_x_form_xzr() {
+        assert_eq!(
+            Operand::ExtendedRegister {
+                reg: Register::XZR,
+                kind: ExtendKind::Uxtx,
+                shift: 0,
+            }
+            .to_string(),
+            "xzr, uxtx #0"
+        );
+    }
+
+    #[test]
     fn test_condition_invert_pairs() {
         let pairs = [
             (Condition::EQ, Condition::NE),
@@ -848,5 +969,29 @@ mod tests {
         assert_eq!(AccessWidth::Half.bytes(), 2);
         assert_eq!(AccessWidth::Word.bytes(), 4);
         assert_eq!(AccessWidth::Extended.bytes(), 8);
+        assert_eq!(AccessWidth::Byte.scale_shift(), 0);
+        assert_eq!(AccessWidth::Half.scale_shift(), 1);
+        assert_eq!(AccessWidth::Word.scale_shift(), 2);
+        assert_eq!(AccessWidth::Extended.scale_shift(), 3);
+    }
+
+    #[test]
+    fn pair_access_width_only_accepts_word_and_extended() {
+        assert_eq!(
+            PairAccessWidth::try_from(AccessWidth::Word),
+            Ok(PairAccessWidth::Word)
+        );
+        assert_eq!(
+            PairAccessWidth::try_from(AccessWidth::Extended),
+            Ok(PairAccessWidth::Extended)
+        );
+        assert_eq!(
+            PairAccessWidth::try_from(AccessWidth::Byte),
+            Err(InvalidPairAccessWidth(AccessWidth::Byte))
+        );
+        assert_eq!(
+            PairAccessWidth::try_from(AccessWidth::Half),
+            Err(InvalidPairAccessWidth(AccessWidth::Half))
+        );
     }
 }
