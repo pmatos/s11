@@ -234,14 +234,19 @@ pub const DEFAULT_SYMBOLIC_SOLVER_TIMEOUT: Duration = Duration::from_secs(30);
 pub struct SymbolicConfig {
     /// Maximum number of synthesized non-terminator instructions to consider.
     ///
-    /// A value of 0 disables candidate search. If the target ends in a fixed
-    /// terminator, that terminator is appended after synthesis and does not
-    /// count against this window.
+    /// The default of 3 is actively enforced, so it caps candidate lengths for
+    /// targets with more than four rewritable instructions. A value of 0
+    /// disables candidate search. If the target ends in a fixed terminator,
+    /// that terminator is appended after synthesis and does not count against
+    /// this window.
     pub window_size: usize,
     /// Exclusive initial cost bound.
     ///
     /// Candidate sequences must be strictly cheaper than this bound and the
-    /// original target cost. `None` uses the original target cost.
+    /// original target cost. `None` leaves the original target cost as the
+    /// exclusive ceiling. `Some(0)` disables candidate verification because no
+    /// `u64` cost can be strictly below zero. Values above the original cost
+    /// have no further effect because the original cost remains the ceiling.
     pub cost_bound: Option<u64>,
     /// Search mode (linear or binary)
     pub search_mode: SearchMode,
@@ -268,6 +273,9 @@ impl SymbolicConfig {
         self
     }
 
+    /// Sets or clears the explicit initial cost bound.
+    ///
+    /// Passing `None` clears a previously configured bound.
     pub fn with_cost_bound_option(mut self, bound: Option<u64>) -> Self {
         self.cost_bound = bound;
         self
