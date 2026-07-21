@@ -3,7 +3,7 @@
 use crate::ir::aarch64_encoding::logical_imm64_encodable;
 use crate::ir::types::{
     AccessWidth, AddressOperand, Condition, ExtendKind, IndexMode, LabelId, Operand,
-    PairAccessWidth, Register, RegisterWidth, ShiftKind,
+    PairAccessWidth, Register, RegisterWidth, ShiftKind, VectorArrangement, VectorRegister,
 };
 use std::fmt;
 
@@ -35,15 +35,15 @@ pub(crate) fn logical_imm32_encodable(imm: i64) -> bool {
 }
 
 fn is_x_or_xzr(reg: Register) -> bool {
-    reg != Register::SP
+    reg.is_general_or_zero()
 }
 
 fn is_xsp(reg: Register) -> bool {
-    reg != Register::XZR
+    reg.is_general_or_sp()
 }
 
 fn is_plain_x(reg: Register) -> bool {
-    reg != Register::SP && reg != Register::XZR
+    reg.index().is_some() && reg != Register::XZR
 }
 
 /// Helper for `Instruction::destinations` on single-register memory ops: the
@@ -119,6 +119,19 @@ pub enum Instruction {
         rd: Register,
         imm: i64,
     },
+    /// Initialize every lane of a 128-bit NEON register from a modified
+    /// immediate. The first slice intentionally admits only immediate zero.
+    Movi {
+        vd: VectorRegister,
+        arrangement: VectorArrangement,
+        imm: u8,
+    },
+    /// Copy one 64-bit `.d` lane from a NEON register into an X register.
+    MovFromVectorLane {
+        rd: Register,
+        vn: VectorRegister,
+        lane: u8,
+    },
 
     // Arithmetic
     Add {
@@ -130,6 +143,13 @@ pub enum Instruction {
         rd: Register,
         rn: Register,
         rm: Operand,
+    },
+    /// Wrapping lane-wise integer addition over a 128-bit NEON register.
+    VectorAdd {
+        vd: VectorRegister,
+        vn: VectorRegister,
+        vm: VectorRegister,
+        arrangement: VectorArrangement,
     },
     Sub {
         rd: Register,
@@ -620,6 +640,7 @@ impl Instruction {
             Instruction::MovReg { rd, .. }
             | Instruction::MovRegW { rd, .. }
             | Instruction::MovImm { rd, .. }
+            | Instruction::MovFromVectorLane { rd, .. }
             | Instruction::Add { rd, .. }
             | Instruction::AddW { rd, .. }
             | Instruction::Sub { rd, .. }
@@ -679,6 +700,9 @@ impl Instruction {
             | Instruction::Bfxil { rd, .. }
             | Instruction::Ubfiz { rd, .. }
             | Instruction::Sbfiz { rd, .. } => Some(*rd),
+            Instruction::Movi { vd, .. } | Instruction::VectorAdd { vd, .. } => {
+                Some(Register::Vector(*vd))
+            }
             // Comparison instructions only set flags, no destination register
             Instruction::Cmp { .. }
             | Instruction::Cmn { .. }
@@ -805,7 +829,7 @@ impl Instruction {
     /// This validates immediate operand ranges against AArch64 encoding constraints:
     /// - MOV immediate: 0 to 0xFFFF (16-bit)
     /// - ADD/SUB immediate: 0 to 0xFFF (12-bit unsigned); rd/rn ≠ XZR (Xn|SP slot, SP allowed)
-    /// - CMP/CMN immediate: 0 to 0xFFF (12-bit unsigned)
+    /// - CMP/CMN immediate: 0 to 0xFFF (12-bit unsigned); rn ≠ XZR (Xn|SP slot, SP allowed)
     /// - LSL/LSR/ASR immediate: 0 to 63
     /// - AND/ORR/EOR immediate: register, or encodable bitmask immediate
     ///   (rd ≠ XZR for the imm form — Xn|SP slot rejects the zero register)
@@ -819,6 +843,9 @@ impl Instruction {
 
             // MOV immediate: 16-bit range
             Instruction::MovImm { rd, imm } => is_x_or_xzr(*rd) && *imm >= 0 && *imm <= 0xFFFF,
+            Instruction::Movi { imm, .. } => *imm == 0,
+            Instruction::MovFromVectorLane { rd, lane, .. } => is_x_or_xzr(*rd) && *lane < 2,
+            Instruction::VectorAdd { .. } => true,
 
             // ADD/SUB: register or immediate (12-bit unsigned), or shifted-register
             // (LSL/LSR/ASR only — ROR not encodable for arithmetic shifted-register form).
@@ -1197,7 +1224,11 @@ impl Instruction {
     pub fn source_registers(&self) -> Vec<Register> {
         match self {
             Instruction::MovReg { rn, .. } | Instruction::MovRegW { rn, .. } => vec![*rn],
-            Instruction::MovImm { .. } => vec![],
+            Instruction::MovImm { .. } | Instruction::Movi { .. } => vec![],
+            Instruction::MovFromVectorLane { vn, .. } => vec![Register::Vector(*vn)],
+            Instruction::VectorAdd { vn, vm, .. } => {
+                vec![Register::Vector(*vn), Register::Vector(*vm)]
+            }
             Instruction::Add { rn, rm, .. }
             | Instruction::AddW { rn, rm, .. }
             | Instruction::Sub { rn, rm, .. }
@@ -1531,6 +1562,14 @@ impl fmt::Display for Instruction {
                 RegisterWidth::W32.register_name(*rn)
             ),
             Instruction::MovImm { rd, imm } => write!(f, "mov {}, #{}", rd, imm),
+            Instruction::Movi {
+                vd,
+                arrangement,
+                imm,
+            } => write!(f, "movi {}.{}, #{}", vd, arrangement, imm),
+            Instruction::MovFromVectorLane { rd, vn, lane } => {
+                write!(f, "mov {}, {}.d[{}]", rd, vn, lane)
+            }
             Instruction::Add { rd, rn, rm } => write!(f, "add {}, {}, {}", rd, rn, rm),
             Instruction::AddW { rd, rn, rm } => write!(
                 f,
@@ -1538,6 +1577,16 @@ impl fmt::Display for Instruction {
                 RegisterWidth::W32.register_name(*rd),
                 RegisterWidth::W32.register_name(*rn),
                 rm.display_with_width(RegisterWidth::W32)
+            ),
+            Instruction::VectorAdd {
+                vd,
+                vn,
+                vm,
+                arrangement,
+            } => write!(
+                f,
+                "add {}.{}, {}.{}, {}.{}",
+                vd, arrangement, vn, arrangement, vm, arrangement
             ),
             Instruction::Sub { rd, rn, rm } => write!(f, "sub {}, {}, {}", rd, rn, rm),
             Instruction::SubW { rd, rn, rm } => write!(
@@ -1852,6 +1901,7 @@ fn str_mnemonic(width: AccessWidth) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_utils::instruction_fixtures::aarch64_instruction_families;
 
     #[test]
     fn test_instruction_display() {
@@ -4067,6 +4117,11 @@ mod tests {
 
         for instr in [
             Instruction::Mul {
+                rd: Register::X0,
+                rn: Register::XZR,
+                rm: Register::X1,
+            },
+            Instruction::Mul {
                 rd: Register::XZR,
                 rn: Register::XZR,
                 rm: Register::XZR,
@@ -4080,6 +4135,12 @@ mod tests {
                 rd: Register::XZR,
                 rn: Register::XZR,
                 rm: Register::XZR,
+            },
+            Instruction::Madd {
+                rd: Register::X0,
+                rn: Register::XZR,
+                rm: Register::X2,
+                ra: Register::XZR,
             },
             Instruction::Madd {
                 rd: Register::XZR,
@@ -4736,326 +4797,45 @@ mod tests {
     }
 
     #[test]
-    fn all_instruction_variants_cover_helpers_and_display() {
-        let cases = vec![
-            Instruction::MovReg {
-                rd: Register::X0,
-                rn: Register::X1,
-            },
-            Instruction::MovImm {
-                rd: Register::X0,
-                imm: 1,
-            },
-            Instruction::Add {
-                rd: Register::X0,
-                rn: Register::X1,
-                rm: Operand::Register(Register::X2),
-            },
-            Instruction::Sub {
-                rd: Register::X0,
-                rn: Register::X1,
-                rm: Operand::Immediate(1),
-            },
-            Instruction::And {
-                rd: Register::X0,
-                rn: Register::X1,
-                rm: Operand::Register(Register::X2),
-                width: crate::ir::RegisterWidth::X64,
-            },
-            Instruction::Orr {
-                rd: Register::X0,
-                rn: Register::X1,
-                rm: Operand::Register(Register::X2),
-                width: crate::ir::RegisterWidth::X64,
-            },
-            Instruction::Eor {
-                rd: Register::X0,
-                rn: Register::X1,
-                rm: Operand::Register(Register::X2),
-                width: crate::ir::RegisterWidth::X64,
-            },
-            Instruction::Lsl {
-                rd: Register::X0,
-                rn: Register::X1,
-                shift: Operand::Register(Register::X2),
-            },
-            Instruction::Lsr {
-                rd: Register::X0,
-                rn: Register::X1,
-                shift: Operand::Immediate(2),
-            },
-            Instruction::Asr {
-                rd: Register::X0,
-                rn: Register::X1,
-                shift: Operand::Register(Register::X2),
-            },
-            Instruction::Mul {
-                rd: Register::X0,
-                rn: Register::X1,
-                rm: Register::X2,
-            },
-            Instruction::Sdiv {
-                rd: Register::X0,
-                rn: Register::X1,
-                rm: Register::X2,
-            },
-            Instruction::Udiv {
-                rd: Register::X0,
-                rn: Register::X1,
-                rm: Register::X2,
-            },
-            Instruction::Madd {
-                rd: Register::X0,
-                rn: Register::X1,
-                rm: Register::X2,
-                ra: Register::X3,
-            },
-            Instruction::Msub {
-                rd: Register::X0,
-                rn: Register::X1,
-                rm: Register::X2,
-                ra: Register::X3,
-            },
-            Instruction::Mneg {
-                rd: Register::X0,
-                rn: Register::X1,
-                rm: Register::X2,
-            },
-            Instruction::Smulh {
-                rd: Register::X0,
-                rn: Register::X1,
-                rm: Register::X2,
-            },
-            Instruction::Umulh {
-                rd: Register::X0,
-                rn: Register::X1,
-                rm: Register::X2,
-            },
-            Instruction::Cmp {
-                rn: Register::X1,
-                rm: Operand::Immediate(1),
-            },
-            Instruction::Cmn {
-                rn: Register::X1,
-                rm: Operand::Register(Register::X2),
-            },
-            Instruction::Tst {
-                rn: Register::X1,
-                rm: Operand::Register(Register::X2),
-                width: crate::ir::RegisterWidth::X64,
-            },
-            Instruction::Csel {
-                rd: Register::X0,
-                rn: Register::X1,
-                rm: Register::X2,
-                cond: Condition::EQ,
-            },
-            Instruction::Csinc {
-                rd: Register::X0,
-                rn: Register::X1,
-                rm: Register::X2,
-                cond: Condition::NE,
-            },
-            Instruction::Csinv {
-                rd: Register::X0,
-                rn: Register::X1,
-                rm: Register::X2,
-                cond: Condition::LT,
-            },
-            Instruction::Csneg {
-                rd: Register::X0,
-                rn: Register::X1,
-                rm: Register::X2,
-                cond: Condition::GT,
-            },
-            Instruction::Mvn {
-                rd: Register::X0,
-                rm: Register::X1,
-            },
-            Instruction::Neg {
-                rd: Register::X0,
-                rm: Register::X1,
-            },
-            Instruction::Negs {
-                rd: Register::X0,
-                rm: Register::X1,
-            },
-            Instruction::MovN {
-                rd: Register::X0,
-                imm: 1,
-                shift: 16,
-            },
-            Instruction::MovZ {
-                rd: Register::X0,
-                imm: 1,
-                shift: 32,
-            },
-            Instruction::MovK {
-                rd: Register::X0,
-                imm: 1,
-                shift: 48,
-            },
-            Instruction::Bic {
-                rd: Register::X0,
-                rn: Register::X1,
-                rm: Operand::Register(Register::X2),
-            },
-            Instruction::Bics {
-                rd: Register::X0,
-                rn: Register::X1,
-                rm: Operand::Register(Register::X2),
-            },
-            Instruction::Orn {
-                rd: Register::X0,
-                rn: Register::X1,
-                rm: Operand::Register(Register::X2),
-            },
-            Instruction::Eon {
-                rd: Register::X0,
-                rn: Register::X1,
-                rm: Operand::Register(Register::X2),
-            },
-            Instruction::Adds {
-                rd: Register::X0,
-                rn: Register::X1,
-                rm: Operand::Immediate(1),
-            },
-            Instruction::Subs {
-                rd: Register::X0,
-                rn: Register::X1,
-                rm: Operand::Register(Register::X2),
-            },
-            Instruction::Ands {
-                rd: Register::X0,
-                rn: Register::X1,
-                rm: Operand::Register(Register::X2),
-                width: crate::ir::RegisterWidth::X64,
-            },
-            Instruction::Cset {
-                rd: Register::X0,
-                cond: Condition::GE,
-            },
-            Instruction::Csetm {
-                rd: Register::X0,
-                cond: Condition::LE,
-            },
-            Instruction::Ror {
-                rd: Register::X0,
-                rn: Register::X1,
-                shift: Operand::Immediate(4),
-            },
-        ];
-
-        for instr in cases {
-            let rendered = format!("{}", instr);
-            assert!(!rendered.is_empty());
-            let _ = instr.destination();
-            let _ = instr.source_registers();
-            let _ = instr.modifies_flags();
-            let _ = instr.reads_flags();
-            let _ = instr.is_encodable_aarch64();
+    fn representative_instruction_variants_match_helper_contracts() {
+        for fixture in aarch64_instruction_families() {
+            let instruction = &fixture.instruction;
+            let context = format!("{instruction:?}");
+            assert_eq!(
+                instruction.to_string(),
+                fixture.display,
+                "display: {context}"
+            );
+            assert_eq!(
+                instruction.destination(),
+                fixture.destination,
+                "destination: {context}"
+            );
+            assert_eq!(
+                instruction.destinations(),
+                fixture.destination.into_iter().collect::<Vec<_>>(),
+                "destinations: {context}"
+            );
+            assert_eq!(
+                instruction.source_registers(),
+                fixture.sources,
+                "source registers: {context}"
+            );
+            assert_eq!(
+                instruction.modifies_flags(),
+                fixture.modifies_flags,
+                "flag writes: {context}"
+            );
+            assert_eq!(
+                instruction.reads_flags(),
+                fixture.reads_flags,
+                "flag reads: {context}"
+            );
+            assert!(
+                instruction.is_encodable_aarch64(),
+                "encodability: {context}"
+            );
         }
-
-        let cmp = Instruction::Cmp {
-            rn: Register::X1,
-            rm: Operand::Immediate(1),
-        };
-        assert_eq!(cmp.to_string(), "cmp x1, #1");
-        assert_eq!(cmp.destination(), None);
-        assert_eq!(cmp.source_registers(), vec![Register::X1]);
-        assert!(cmp.modifies_flags());
-        assert!(!cmp.reads_flags());
-
-        let csel = Instruction::Csel {
-            rd: Register::X0,
-            rn: Register::X1,
-            rm: Register::X2,
-            cond: Condition::EQ,
-        };
-        assert_eq!(csel.to_string(), "csel x0, x1, x2, eq");
-        assert_eq!(csel.destination(), Some(Register::X0));
-        assert_eq!(csel.source_registers(), vec![Register::X1, Register::X2]);
-        assert!(!csel.modifies_flags());
-        assert!(csel.reads_flags());
-
-        let adds = Instruction::Adds {
-            rd: Register::X0,
-            rn: Register::X1,
-            rm: Operand::Register(Register::X2),
-        };
-        assert_eq!(adds.to_string(), "adds x0, x1, x2");
-        assert_eq!(adds.destination(), Some(Register::X0));
-        assert_eq!(adds.source_registers(), vec![Register::X1, Register::X2]);
-        assert!(adds.modifies_flags());
-        assert!(!adds.reads_flags());
-
-        let madd = Instruction::Madd {
-            rd: Register::X0,
-            rn: Register::X1,
-            rm: Register::X2,
-            ra: Register::X3,
-        };
-        assert_eq!(madd.to_string(), "madd x0, x1, x2, x3");
-        assert_eq!(madd.destination(), Some(Register::X0));
-        assert_eq!(
-            madd.source_registers(),
-            vec![Register::X1, Register::X2, Register::X3]
-        );
-        assert!(!madd.modifies_flags());
-        assert!(!madd.reads_flags());
-        assert!(madd.is_encodable_aarch64());
-
-        let msub = Instruction::Msub {
-            rd: Register::X0,
-            rn: Register::X1,
-            rm: Register::X2,
-            ra: Register::X3,
-        };
-        assert_eq!(msub.to_string(), "msub x0, x1, x2, x3");
-        assert_eq!(msub.destination(), Some(Register::X0));
-        assert_eq!(
-            msub.source_registers(),
-            vec![Register::X1, Register::X2, Register::X3]
-        );
-        assert!(!msub.modifies_flags());
-        assert!(!msub.reads_flags());
-        assert!(msub.is_encodable_aarch64());
-
-        let mneg = Instruction::Mneg {
-            rd: Register::X0,
-            rn: Register::X1,
-            rm: Register::X2,
-        };
-        assert_eq!(mneg.to_string(), "mneg x0, x1, x2");
-        assert_eq!(mneg.destination(), Some(Register::X0));
-        assert_eq!(mneg.source_registers(), vec![Register::X1, Register::X2]);
-        assert!(!mneg.modifies_flags());
-        assert!(!mneg.reads_flags());
-        assert!(mneg.is_encodable_aarch64());
-
-        let smulh = Instruction::Smulh {
-            rd: Register::X0,
-            rn: Register::X1,
-            rm: Register::X2,
-        };
-        assert_eq!(smulh.to_string(), "smulh x0, x1, x2");
-        assert_eq!(smulh.destination(), Some(Register::X0));
-        assert_eq!(smulh.source_registers(), vec![Register::X1, Register::X2]);
-        assert!(!smulh.modifies_flags());
-        assert!(!smulh.reads_flags());
-        assert!(smulh.is_encodable_aarch64());
-
-        let umulh = Instruction::Umulh {
-            rd: Register::X0,
-            rn: Register::X1,
-            rm: Register::X2,
-        };
-        assert_eq!(umulh.to_string(), "umulh x0, x1, x2");
-        assert_eq!(umulh.destination(), Some(Register::X0));
-        assert_eq!(umulh.source_registers(), vec![Register::X1, Register::X2]);
-        assert!(!umulh.modifies_flags());
-        assert!(!umulh.reads_flags());
-        assert!(umulh.is_encodable_aarch64());
     }
 
     #[test]

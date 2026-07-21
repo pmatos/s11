@@ -6,7 +6,7 @@
 
 use crate::ir::instructions::{AARCH64_RANDOM_SHIFT_IMMEDIATES, MOVW_LEGAL_SHIFTS};
 use crate::ir::types::Condition;
-use crate::ir::{Instruction, Operand, Register, RegisterWidth};
+use crate::ir::{Instruction, Operand, Register, RegisterWidth, VectorArrangement};
 use crate::isa::traits::{ISA, InstructionGenerator, InstructionType, OperandType, RegisterType};
 
 use rand::RngExt;
@@ -247,39 +247,42 @@ impl InstructionType for Instruction {
             Instruction::Bfxil { .. } => 57,
             Instruction::Ubfiz { .. } => 58,
             Instruction::Sbfiz { .. } => 59,
+            Instruction::Movi { .. } => 60,
+            Instruction::VectorAdd { .. } => 61,
+            Instruction::MovFromVectorLane { .. } => 62,
             // Branches / terminators (issue #69). Branches are not in the
             // random-generation pool, so these IDs fall above `opcode_count`;
             // the `id < opcode_count` invariant only applies to enumerated
             // families.
-            Instruction::B { .. } => 60,
-            Instruction::BCond { .. } => 61,
-            Instruction::Ret { .. } => 62,
-            Instruction::Cbz { .. } => 63,
-            Instruction::Cbnz { .. } => 64,
-            Instruction::Tbz { .. } => 65,
-            Instruction::Tbnz { .. } => 66,
-            Instruction::Bl { .. } => 67,
-            Instruction::Br { .. } => 68,
+            Instruction::B { .. } => 63,
+            Instruction::BCond { .. } => 64,
+            Instruction::Ret { .. } => 65,
+            Instruction::Cbz { .. } => 66,
+            Instruction::Cbnz { .. } => 67,
+            Instruction::Tbz { .. } => 68,
+            Instruction::Tbnz { .. } => 69,
+            Instruction::Bl { .. } => 70,
+            Instruction::Br { .. } => 71,
 
             // Memory ops (issue #68). LDR/LDRB/LDRH share id 69 — the
             // mnemonic table differentiates by `AccessWidth`; this id
             // bucket is used only for coarse equality checks.
-            Instruction::Ldr { .. } => 69,
+            Instruction::Ldr { .. } => 72,
             // Sign-extending loads (LDRSB / LDRSH / LDRSW).
-            Instruction::Ldrs { .. } => 70,
+            Instruction::Ldrs { .. } => 73,
             // Stores (STR / STRB / STRH).
-            Instruction::Str { .. } => 71,
+            Instruction::Str { .. } => 74,
             // Pair loads (LDP, LDPSW).
-            Instruction::Ldp { .. } => 72,
+            Instruction::Ldp { .. } => 75,
             // Pair store (STP).
-            Instruction::Stp { .. } => 73,
+            Instruction::Stp { .. } => 76,
             // Add/subtract with carry (issue #205). Not in the random-
             // generation pool, so these ids fall above `opcode_count`
             // (same as branches/memory).
-            Instruction::Adc { .. } => 74,
-            Instruction::Adcs { .. } => 75,
-            Instruction::Sbc { .. } => 76,
-            Instruction::Sbcs { .. } => 77,
+            Instruction::Adc { .. } => 77,
+            Instruction::Adcs { .. } => 78,
+            Instruction::Sbc { .. } => 79,
+            Instruction::Sbcs { .. } => 80,
         }
     }
 
@@ -288,6 +291,9 @@ impl InstructionType for Instruction {
             Instruction::MovReg { .. }
             | Instruction::MovRegW { .. }
             | Instruction::MovImm { .. } => "mov",
+            Instruction::Movi { .. } => "movi",
+            Instruction::MovFromVectorLane { .. } => "mov",
+            Instruction::VectorAdd { .. } => "add",
             Instruction::Add { .. } | Instruction::AddW { .. } => "add",
             Instruction::Sub { .. } | Instruction::SubW { .. } => "sub",
             Instruction::And { .. } => "and",
@@ -412,6 +418,16 @@ pub struct AArch64InstructionGenerator;
 impl InstructionGenerator<Instruction> for AArch64InstructionGenerator {
     fn generate_all(&self, registers: &[Register], immediates: &[i64]) -> Vec<Instruction> {
         let mut instructions = Vec::new();
+        let scalar_registers: Vec<_> = registers
+            .iter()
+            .copied()
+            .filter(|register| register.vector().is_none())
+            .collect();
+        let vector_registers: Vec<_> = registers
+            .iter()
+            .filter_map(|register| register.vector())
+            .collect();
+        let registers = scalar_registers.as_slice();
 
         // MovReg: rd <- rn
         for &rd in registers {
@@ -747,6 +763,36 @@ impl InstructionGenerator<Instruction> for AArch64InstructionGenerator {
             }
         }
 
+        for &vd in &vector_registers {
+            for arrangement in [VectorArrangement::TwoD, VectorArrangement::FourS] {
+                instructions.push(Instruction::Movi {
+                    vd,
+                    arrangement,
+                    imm: 0,
+                });
+                for &vn in &vector_registers {
+                    for &vm in &vector_registers {
+                        instructions.push(Instruction::VectorAdd {
+                            vd,
+                            vn,
+                            vm,
+                            arrangement,
+                        });
+                    }
+                }
+            }
+        }
+        for &rd in registers {
+            if !rd.is_general_or_zero() {
+                continue;
+            }
+            for &vn in &vector_registers {
+                for lane in 0..2 {
+                    instructions.push(Instruction::MovFromVectorLane { rd, vn, lane });
+                }
+            }
+        }
+
         instructions
     }
 
@@ -756,6 +802,56 @@ impl InstructionGenerator<Instruction> for AArch64InstructionGenerator {
         registers: &[Register],
         immediates: &[i64],
     ) -> Instruction {
+        let scalar_registers: Vec<_> = registers
+            .iter()
+            .copied()
+            .filter(|register| register.vector().is_none())
+            .collect();
+        let vector_registers: Vec<_> = registers
+            .iter()
+            .filter_map(|register| register.vector())
+            .collect();
+        if scalar_registers.is_empty() && vector_registers.is_empty() {
+            return Instruction::MovImm {
+                rd: Register::X0,
+                imm: 0,
+            };
+        }
+        let sample_neon = !vector_registers.is_empty()
+            && (scalar_registers.is_empty() || rng.random_range(0..51) >= 48);
+        if sample_neon {
+            let vd = vector_registers[rng.random_range(0..vector_registers.len())];
+            let arrangement = if rng.random_bool(0.5) {
+                VectorArrangement::TwoD
+            } else {
+                VectorArrangement::FourS
+            };
+            return match rng.random_range(0..3) {
+                0 => Instruction::Movi {
+                    vd,
+                    arrangement,
+                    imm: 0,
+                },
+                1 => Instruction::VectorAdd {
+                    vd,
+                    vn: vector_registers[rng.random_range(0..vector_registers.len())],
+                    vm: vector_registers[rng.random_range(0..vector_registers.len())],
+                    arrangement,
+                },
+                _ if !scalar_registers.is_empty() => Instruction::MovFromVectorLane {
+                    rd: scalar_registers[rng.random_range(0..scalar_registers.len())],
+                    vn: vector_registers[rng.random_range(0..vector_registers.len())],
+                    lane: rng.random_range(0..2),
+                },
+                _ => Instruction::Movi {
+                    vd,
+                    arrangement,
+                    imm: 0,
+                },
+            };
+        }
+        let registers = scalar_registers.as_slice();
+
         // 48 opcode slots: 0..=12 original, 13..=23 Tier 1, 24 = MOVZ,
         // 25 = MOVK, 26..=31 = CLZ/CLS/RBIT/REV/REV32/REV16, 32 =
         // MADD, 33 = CCMP, 34 = UBFX, 35 = CSET, 36 = CSETM, 37 = ROR,
@@ -1121,13 +1217,23 @@ impl InstructionGenerator<Instruction> for AArch64InstructionGenerator {
         registers: &[Register],
         immediates: &[i64],
     ) -> Instruction {
+        let all_registers = registers;
+        let scalar_registers: Vec<_> = registers
+            .iter()
+            .copied()
+            .filter(|register| register.vector().is_none())
+            .collect();
+        if scalar_registers.is_empty() {
+            return self.generate_random(rng, all_registers, immediates);
+        }
+        let registers = scalar_registers.as_slice();
         // Random mutation strategy: change opcode, change operand, or change register
         let strategy = rng.random_range(0..3);
 
         match strategy {
             0 => {
                 // Change opcode - generate a completely new instruction
-                self.generate_random(rng, registers, immediates)
+                self.generate_random(rng, all_registers, immediates)
             }
             1 => {
                 // Change destination register
@@ -1136,6 +1242,10 @@ impl InstructionGenerator<Instruction> for AArch64InstructionGenerator {
                     Instruction::MovReg { rn, .. } => Instruction::MovReg { rd: new_rd, rn },
                     Instruction::MovRegW { rn, .. } => Instruction::MovRegW { rd: new_rd, rn },
                     Instruction::MovImm { imm, .. } => Instruction::MovImm { rd: new_rd, imm },
+                    Instruction::Movi { .. } => *instruction,
+                    Instruction::MovFromVectorLane { .. } | Instruction::VectorAdd { .. } => {
+                        *instruction
+                    }
                     Instruction::Add { rn, rm, .. } => Instruction::Add { rd: new_rd, rn, rm },
                     Instruction::AddW { rn, rm, .. } => Instruction::AddW { rd: new_rd, rn, rm },
                     Instruction::Sub { rn, rm, .. } => Instruction::Sub { rd: new_rd, rn, rm },
@@ -1196,7 +1306,9 @@ impl InstructionGenerator<Instruction> for AArch64InstructionGenerator {
                     | Instruction::Cmn { .. }
                     | Instruction::Tst { .. }
                     | Instruction::Ccmp { .. }
-                    | Instruction::Ccmn { .. } => self.generate_random(rng, registers, immediates),
+                    | Instruction::Ccmn { .. } => {
+                        self.generate_random(rng, all_registers, immediates)
+                    }
                     // Conditional select instructions
                     Instruction::Csel { rn, rm, cond, .. } => Instruction::Csel {
                         rd: new_rd,
@@ -1879,7 +1991,10 @@ impl InstructionGenerator<Instruction> for AArch64InstructionGenerator {
                     | Instruction::Ldrs { .. }
                     | Instruction::Str { .. }
                     | Instruction::Ldp { .. }
-                    | Instruction::Stp { .. } => *instruction,
+                    | Instruction::Stp { .. }
+                    | Instruction::Movi { .. }
+                    | Instruction::MovFromVectorLane { .. }
+                    | Instruction::VectorAdd { .. } => *instruction,
                 }
             }
             _ => unreachable!(),
@@ -1893,14 +2008,14 @@ impl InstructionGenerator<Instruction> for AArch64InstructionGenerator {
     /// and standalone extend aliases still have canonical IDs without dedicated
     /// `AArch64InstructionGenerator::generate_random` slots.
     fn opcode_count(&self) -> u8 {
-        60 // 20 original + 14 Tier 1 (MVN, NEG, NEGS, MovN, BIC, BICS, ORN,
+        63 // 20 original + 14 Tier 1 (MVN, NEG, NEGS, MovN, BIC, BICS, ORN,
         //  EON, ADDS, SUBS, ANDS, CSET, CSETM, ROR) + 2 MOVK/MOVZ (issue
         //  #55) + 6 single-source bit-manipulation (CLZ, CLS, RBIT, REV,
         //  REV32, REV16) + 5 multiply-accumulate family (issue #56:
         //  MADD, MSUB, MNEG, SMULH, UMULH) + 2 conditional-compare family
         //  (issue #57: CCMP, CCMN) + 5 standalone extend aliases
         //  (SXTB, SXTH, SXTW, UXTB, UXTH) + 6 bit-field aliases (UBFX, SBFX,
-        //  BFI, BFXIL, UBFIZ, SBFIZ, issue #61).
+        //  BFI, BFXIL, UBFIZ, SBFIZ, issue #61) + 3 first-slice NEON ops.
     }
 }
 
@@ -1988,318 +2103,10 @@ fn mutate_shift_operand<R: RngExt>(
 mod tests {
     use super::*;
     use crate::ir::types::{AccessWidth, AddressOperand, IndexMode, LabelId, PairAccessWidth};
+    use crate::test_utils::instruction_fixtures::aarch64_instruction_families;
     use rand::SeedableRng;
     use rand_chacha::ChaCha8Rng;
     use std::collections::{BTreeMap, BTreeSet};
-
-    fn all_instruction_families() -> Vec<Instruction> {
-        vec![
-            Instruction::MovReg {
-                rd: Register::X0,
-                rn: Register::X1,
-            },
-            Instruction::MovImm {
-                rd: Register::X0,
-                imm: 7,
-            },
-            Instruction::Add {
-                rd: Register::X0,
-                rn: Register::X1,
-                rm: Operand::Register(Register::X2),
-            },
-            Instruction::Sub {
-                rd: Register::X0,
-                rn: Register::X1,
-                rm: Operand::Immediate(3),
-            },
-            Instruction::And {
-                rd: Register::X0,
-                rn: Register::X1,
-                rm: Operand::Register(Register::X2),
-                width: RegisterWidth::X64,
-            },
-            Instruction::Orr {
-                rd: Register::X0,
-                rn: Register::X1,
-                rm: Operand::Register(Register::X2),
-                width: RegisterWidth::X64,
-            },
-            Instruction::Eor {
-                rd: Register::X0,
-                rn: Register::X1,
-                rm: Operand::Register(Register::X2),
-                width: RegisterWidth::X64,
-            },
-            Instruction::Lsl {
-                rd: Register::X0,
-                rn: Register::X1,
-                shift: Operand::Register(Register::X2),
-            },
-            Instruction::Lsr {
-                rd: Register::X0,
-                rn: Register::X1,
-                shift: Operand::Immediate(4),
-            },
-            Instruction::Asr {
-                rd: Register::X0,
-                rn: Register::X1,
-                shift: Operand::Register(Register::X2),
-            },
-            Instruction::Mul {
-                rd: Register::X0,
-                rn: Register::X1,
-                rm: Register::X2,
-            },
-            Instruction::Sdiv {
-                rd: Register::X0,
-                rn: Register::X1,
-                rm: Register::X2,
-            },
-            Instruction::Udiv {
-                rd: Register::X0,
-                rn: Register::X1,
-                rm: Register::X2,
-            },
-            Instruction::Cmp {
-                rn: Register::X1,
-                rm: Operand::Register(Register::X2),
-            },
-            Instruction::Cmn {
-                rn: Register::X1,
-                rm: Operand::Immediate(9),
-            },
-            Instruction::Tst {
-                rn: Register::X1,
-                rm: Operand::Register(Register::X2),
-                width: RegisterWidth::X64,
-            },
-            Instruction::Csel {
-                rd: Register::X0,
-                rn: Register::X1,
-                rm: Register::X2,
-                cond: Condition::EQ,
-            },
-            Instruction::Csinc {
-                rd: Register::X0,
-                rn: Register::X1,
-                rm: Register::X2,
-                cond: Condition::NE,
-            },
-            Instruction::Csinv {
-                rd: Register::X0,
-                rn: Register::X1,
-                rm: Register::X2,
-                cond: Condition::LT,
-            },
-            Instruction::Csneg {
-                rd: Register::X0,
-                rn: Register::X1,
-                rm: Register::X2,
-                cond: Condition::GT,
-            },
-            Instruction::Mvn {
-                rd: Register::X0,
-                rm: Register::X1,
-            },
-            Instruction::Neg {
-                rd: Register::X0,
-                rm: Register::X1,
-            },
-            Instruction::Negs {
-                rd: Register::X0,
-                rm: Register::X1,
-            },
-            Instruction::MovN {
-                rd: Register::X0,
-                imm: 0x55aa,
-                shift: 16,
-            },
-            Instruction::MovZ {
-                rd: Register::X0,
-                imm: 0x55aa,
-                shift: 32,
-            },
-            Instruction::MovK {
-                rd: Register::X0,
-                imm: 0x55aa,
-                shift: 48,
-            },
-            Instruction::Bic {
-                rd: Register::X0,
-                rn: Register::X1,
-                rm: Operand::Register(Register::X2),
-            },
-            Instruction::Bics {
-                rd: Register::X0,
-                rn: Register::X1,
-                rm: Operand::Register(Register::X2),
-            },
-            Instruction::Orn {
-                rd: Register::X0,
-                rn: Register::X1,
-                rm: Operand::Register(Register::X2),
-            },
-            Instruction::Eon {
-                rd: Register::X0,
-                rn: Register::X1,
-                rm: Operand::Register(Register::X2),
-            },
-            Instruction::Adds {
-                rd: Register::X0,
-                rn: Register::X1,
-                rm: Operand::Immediate(1),
-            },
-            Instruction::Subs {
-                rd: Register::X0,
-                rn: Register::X1,
-                rm: Operand::Register(Register::X2),
-            },
-            Instruction::Ands {
-                rd: Register::X0,
-                rn: Register::X1,
-                rm: Operand::Register(Register::X2),
-                width: RegisterWidth::X64,
-            },
-            Instruction::Cset {
-                rd: Register::X0,
-                cond: Condition::GE,
-            },
-            Instruction::Csetm {
-                rd: Register::X0,
-                cond: Condition::LE,
-            },
-            Instruction::Ror {
-                rd: Register::X0,
-                rn: Register::X1,
-                shift: Operand::Immediate(8),
-            },
-            Instruction::Clz {
-                rd: Register::X0,
-                rn: Register::X1,
-            },
-            Instruction::Cls {
-                rd: Register::X0,
-                rn: Register::X1,
-            },
-            Instruction::Rbit {
-                rd: Register::X0,
-                rn: Register::X1,
-            },
-            Instruction::Rev {
-                rd: Register::X0,
-                rn: Register::X1,
-            },
-            Instruction::Rev32 {
-                rd: Register::X0,
-                rn: Register::X1,
-            },
-            Instruction::Rev16 {
-                rd: Register::X0,
-                rn: Register::X1,
-            },
-            Instruction::Madd {
-                rd: Register::X0,
-                rn: Register::X1,
-                rm: Register::X2,
-                ra: Register::X3,
-            },
-            Instruction::Msub {
-                rd: Register::X0,
-                rn: Register::X1,
-                rm: Register::X2,
-                ra: Register::X3,
-            },
-            Instruction::Mneg {
-                rd: Register::X0,
-                rn: Register::X1,
-                rm: Register::X2,
-            },
-            Instruction::Smulh {
-                rd: Register::X0,
-                rn: Register::X1,
-                rm: Register::X2,
-            },
-            Instruction::Umulh {
-                rd: Register::X0,
-                rn: Register::X1,
-                rm: Register::X2,
-            },
-            Instruction::Ccmp {
-                rn: Register::X1,
-                rm: Operand::Register(Register::X2),
-                nzcv: 0,
-                cond: Condition::EQ,
-            },
-            Instruction::Ccmn {
-                rn: Register::X1,
-                rm: Operand::Immediate(5),
-                nzcv: 0,
-                cond: Condition::EQ,
-            },
-            Instruction::Sxtb {
-                rd: Register::X0,
-                rn: Register::X1,
-            },
-            Instruction::Sxth {
-                rd: Register::X0,
-                rn: Register::X1,
-            },
-            Instruction::Sxtw {
-                rd: Register::X0,
-                rn: Register::X1,
-            },
-            Instruction::Uxtb {
-                rd: Register::X0,
-                rn: Register::X1,
-            },
-            Instruction::Uxth {
-                rd: Register::X0,
-                rn: Register::X1,
-            },
-            Instruction::Ubfx {
-                rd: Register::X0,
-                rn: Register::X1,
-                lsb: 8,
-                width: 16,
-                reg_width: crate::ir::RegisterWidth::X64,
-            },
-            Instruction::Sbfx {
-                rd: Register::X0,
-                rn: Register::X1,
-                lsb: 8,
-                width: 16,
-                reg_width: crate::ir::RegisterWidth::X64,
-            },
-            Instruction::Bfi {
-                rd: Register::X0,
-                rn: Register::X1,
-                lsb: 4,
-                width: 8,
-                reg_width: crate::ir::RegisterWidth::X64,
-            },
-            Instruction::Bfxil {
-                rd: Register::X0,
-                rn: Register::X1,
-                lsb: 4,
-                width: 8,
-                reg_width: crate::ir::RegisterWidth::X64,
-            },
-            Instruction::Ubfiz {
-                rd: Register::X0,
-                rn: Register::X1,
-                lsb: 4,
-                width: 8,
-                reg_width: crate::ir::RegisterWidth::X64,
-            },
-            Instruction::Sbfiz {
-                rd: Register::X0,
-                rn: Register::X1,
-                lsb: 4,
-                width: 8,
-                reg_width: crate::ir::RegisterWidth::X64,
-            },
-        ]
-    }
 
     fn non_enumerated_instruction_families() -> Vec<Instruction> {
         let target = LabelId(0x1000);
@@ -2732,34 +2539,42 @@ mod tests {
     #[test]
     fn all_instruction_families_cover_trait_methods() {
         let generator = AArch64InstructionGenerator;
-        let seen: BTreeSet<u8> = all_instruction_families()
+        let fixtures = aarch64_instruction_families();
+        assert_eq!(fixtures.len(), generator.opcode_count() as usize);
+
+        let seen: BTreeSet<u8> = fixtures
             .iter()
-            .map(|instr| {
-                let id = instr.opcode_id();
+            .map(|fixture| {
+                let instr = &fixture.instruction;
+                let context = format!("{instr:?}");
+                let id = InstructionType::opcode_id(instr);
                 assert!(id < generator.opcode_count());
-                assert!(!instr.mnemonic().is_empty());
-                assert!(!format!("{}", instr).is_empty());
-                let _ = instr.destination();
-                let _ = instr.source_registers();
-                let should_update_flags = matches!(
-                    instr,
-                    Instruction::Cmp { .. }
-                        | Instruction::Cmn { .. }
-                        | Instruction::Tst { .. }
-                        | Instruction::Negs { .. }
-                        | Instruction::Bics { .. }
-                        | Instruction::Adds { .. }
-                        | Instruction::Subs { .. }
-                        | Instruction::Ands { .. }
-                        | Instruction::Ccmp { .. }
-                        | Instruction::Ccmn { .. }
+                assert_eq!(id, fixture.opcode_id, "opcode id: {context}");
+                assert_eq!(
+                    InstructionType::mnemonic(instr),
+                    fixture.mnemonic,
+                    "mnemonic: {context}"
                 );
-                assert_eq!(instr.has_side_effects(), should_update_flags);
+                assert_eq!(instr.to_string(), fixture.display, "display: {context}");
+                assert_eq!(
+                    InstructionType::destination(instr),
+                    fixture.destination,
+                    "destination: {context}"
+                );
+                assert_eq!(
+                    InstructionType::source_registers(instr),
+                    fixture.sources,
+                    "source registers: {context}"
+                );
+                assert_eq!(
+                    InstructionType::has_side_effects(instr),
+                    fixture.has_side_effects,
+                    "side effects: {context}"
+                );
                 id
             })
             .collect();
-        assert_eq!(seen.len(), all_instruction_families().len());
-        assert_eq!(seen.len(), generator.opcode_count() as usize);
+        assert_eq!(seen.len(), fixtures.len());
     }
 
     #[test]
@@ -3391,7 +3206,8 @@ mod tests {
         let imms = vec![0, 1, 7, 16, 32];
         let mut rng = ChaCha8Rng::seed_from_u64(0xA640);
 
-        for original in all_instruction_families() {
+        for fixture in aarch64_instruction_families() {
+            let original = fixture.instruction;
             for _ in 0..200 {
                 let mutated = generator.mutate(&mut rng, &original, &regs, &imms);
                 assert!(mutated.opcode_id() < generator.opcode_count());

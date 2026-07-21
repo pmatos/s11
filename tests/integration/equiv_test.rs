@@ -87,6 +87,31 @@ fn equiv_memory_window_without_fast_only_does_not_warn() {
 }
 
 #[test]
+fn equiv_non_equivalent_exits_nonzero_and_prints_counterexample() {
+    // `mov x0, x1` vs `mov x0, x2` diverge on the live-out register x0 whenever
+    // x1 != x2, so the fast path returns a counterexample. This pins the CLI
+    // exit-code contract end-to-end: `main` must surface the report's non-zero
+    // code (previously an inline `std::process::exit(1)` inside `run_equiv`).
+    let output = run_equiv_fast_only("mov x0, x1\n", "mov x0, x2\n");
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(
+        output.status.code(),
+        Some(1),
+        "non-equivalent sequences must exit with code 1, status: {:?}\nstdout:\n{}\nstderr:\n{}",
+        output.status,
+        stdout,
+        stderr
+    );
+    assert!(
+        stdout.contains("NOT EQUIVALENT") && stdout.contains("Counterexample found:"),
+        "stdout should report the counterexample, stdout:\n{}",
+        stdout
+    );
+}
+
+#[test]
 fn equiv_fast_only_register_window_does_not_warn() {
     let output = run_equiv_fast_only("mov x0, x1\n", "mov x0, x1\n");
 

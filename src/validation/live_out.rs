@@ -2,7 +2,7 @@
 
 #![allow(dead_code)]
 
-use crate::ir::{Instruction, Register};
+use crate::ir::{Instruction, Register, VectorRegister};
 use crate::semantics::live_out::{LiveOut, RegisterSet};
 use std::str::FromStr;
 
@@ -55,6 +55,12 @@ fn parse_register(s: &str) -> Result<Register, ParseRegisterSetError> {
         && let Some(reg) = Register::from_index(num)
     {
         return Ok(reg);
+    }
+    if let Some(num_str) = s.strip_prefix('v')
+        && let Ok(num) = num_str.parse::<u8>()
+        && let Some(reg) = VectorRegister::from_index(num)
+    {
+        return Ok(Register::Vector(reg));
     }
 
     Err(ParseRegisterSetError::new(format!(
@@ -122,7 +128,7 @@ fn misplaced_flag_token_error(token: &str, input: &str) -> ParseRegisterSetError
 ///
 /// Grammar: `<regs>` or `<regs>;<flags>`. The register half follows
 /// `RegisterSet::<Register>::from_str` (comma- or space-separated, case-insensitive,
-/// accepts `x0..x30`, `sp`, `xzr`). The flag half currently accepts only the
+/// accepts `x0..x30`, `v0..v31`, `sp`, `xzr`). The flag half currently accepts only the
 /// group token `nzcv`; per-flag tokens `n`/`z`/`c`/`v` are reserved for a
 /// future per-flag liveness extension and rejected today. A bareword `nzcv`
 /// with no leading `;` is rejected to keep that reservation unambiguous.
@@ -135,14 +141,14 @@ pub fn parse_live_out_contract(s: &str) -> Result<LiveOut, ParseLiveOutError> {
     let trimmed = s.trim();
     let semicolon_count = trimmed.matches(';').count();
     if semicolon_count > 1 {
-        return Err(ParseRegisterSetError::new(format!(
+        return Err(ParseLiveOutError::new(format!(
             "--live-out accepts at most one ';' (got: '{}')",
             s
         )));
     }
     if semicolon_count == 0 {
         if trimmed.eq_ignore_ascii_case("nzcv") {
-            return Err(ParseRegisterSetError::new(format!(
+            return Err(ParseLiveOutError::new(format!(
                 "flag-only live-out requires a leading ';' (e.g. \";nzcv\"); got '{}'",
                 s
             )));
@@ -163,13 +169,13 @@ pub fn parse_live_out_contract(s: &str) -> Result<LiveOut, ParseLiveOutError> {
         "" => false,
         "nzcv" => true,
         "n" | "z" | "c" | "v" => {
-            return Err(ParseRegisterSetError::new(format!(
+            return Err(ParseLiveOutError::new(format!(
                 "per-flag token '{}' is reserved for a future extension; use 'nzcv' for all flags",
                 flags_tok
             )));
         }
         other => {
-            return Err(ParseRegisterSetError::new(format!(
+            return Err(ParseLiveOutError::new(format!(
                 "unknown flag token '{}'; expected 'nzcv'",
                 other
             )));
@@ -292,9 +298,8 @@ pub enum DownstreamRegLiveness {
 /// contains `reg` is a clean, full-register kill. AArch64 has no sub-register
 /// aliasing trap for the X/W GPRs the optimization IR models — a W-form write
 /// zero-extends the full 64-bit register, so every modelled destination write
-/// fully redefines the architectural register. (Contrast the x86 helper, which
-/// must refuse to trust writes because that IR carries no operand width — see
-/// `x86_reg_downstream_liveness`.)
+/// fully redefines the architectural register. The x86 helper below must
+/// additionally distinguish full-width and partial-width destination views.
 ///
 /// This helper does **not** itself decide terminators / unsupported
 /// instructions / region boundaries — the byte-level scan in `src/main.rs`
@@ -326,23 +331,10 @@ fn aarch64_destination_fully_kills(instr: &Instruction, reg: Register) -> bool {
 
 /// Scan an x86 suffix to classify the downstream liveness of `reg`.
 ///
-/// Same read-before-overwrite walk as the AArch64 helper, but with a
-/// deliberately weaker kill rule to stay sound under issue #75.
-///
-/// **#75 hazard / x86 kill rule:** the x86 IR does NOT model operand width.
-/// A `MovImm { rd: RAX, .. }` in this IR could, once #75 lands, actually be a
-/// 32-bit (`mov eax, imm`) or 8-bit (`mov al, imm`) write that leaves the
-/// upper bits of RAX intact — i.e. a *partial* write that does NOT kill the
-/// full register. Trusting `destination()` as a full kill would therefore be
-/// unsound (the #224 bug class). So this helper treats **no** x86 write as a
-/// proven full overwrite today: a downstream write to `reg` does not return
-/// `Dead`; it neither observes nor kills `reg` and the scan keeps walking. The
-/// only definitive answer it can produce is `Read`. Because of this, the x86
-/// path can never narrow a register to dead with the current IR — that is the
-/// intended, vacuously-safe behaviour. When #75 adds widths, replace the
-/// `false` in `x86_destination_fully_kills` with a real full-width check and
-/// the narrowing turns on automatically with no change to the soundness
-/// contract.
+/// Same read-before-overwrite walk as the AArch64 helper. Native mode-width
+/// writes and dword writes are full architectural kills (a dword write
+/// zero-extends in x86-64); word and byte writes preserve surrounding bits and
+/// therefore cannot prove the old full-register value dead.
 pub fn x86_reg_downstream_liveness(
     reg: crate::isa::x86::X86Register,
     suffix: &[crate::isa::x86::X86Instruction],
@@ -358,17 +350,15 @@ pub fn x86_reg_downstream_liveness(
     DownstreamRegLiveness::Uncertain
 }
 
-/// True iff `instr` *provably* fully overwrites `reg` on x86.
-///
-/// Always `false` today: the x86 IR carries no operand width (#75), so no
-/// write can be proven to overwrite the whole architectural register. Kept as
-/// a named guard so the conservative posture is explicit and so #75 has one
-/// obvious place to turn on width-aware kills. See `x86_reg_downstream_liveness`.
+/// True iff `instr` provably fully overwrites `reg` on x86.
 fn x86_destination_fully_kills(
-    _instr: &crate::isa::x86::X86Instruction,
-    _reg: crate::isa::x86::X86Register,
+    instr: &crate::isa::x86::X86Instruction,
+    reg: crate::isa::x86::X86Register,
 ) -> bool {
-    false
+    instr.destination_operand().is_some_and(|destination| {
+        destination.canonical() == reg.canonical()
+            && destination.fully_overwrites_architectural_register()
+    })
 }
 
 /// Compute the set of registers read before written by a sequence of instructions.
@@ -398,12 +388,12 @@ pub fn compute_live_in_registers(instructions: &[Instruction]) -> RegisterSet<Re
 /// Build an x86 `RegisterSet` from a target sequence by treating every
 /// written register as live-out and declaring EFLAGS live whenever the
 /// target contains any instruction with observable side effects (i.e.
-/// any non-MOV / non-CMOV / non-Jcc variant — see
+/// any non-MOV / non-SETcc / non-CMOV / non-Jcc variant — see
 /// `InstructionType::has_side_effects` for the contract).
 ///
-/// **Asymmetry:** CMOV and Jcc READ EFLAGS but report
-/// `has_side_effects=false` (they don't write flags), so a CMOV-only or
-/// Jcc-only target gets `flags_live=false` from this helper.
+/// **Asymmetry:** SETcc, CMOV, and Jcc READ EFLAGS but report
+/// `has_side_effects=false` (they don't write flags), so a target containing
+/// only these families gets `flags_live=false` from this helper.
 /// x86 equivalence compensates for a fixed trailing Jcc by forcing flags into
 /// the effective live-out contract before comparing prefixes. Direct callers
 /// that bypass the generic equivalence entry point must apply their own
@@ -429,6 +419,7 @@ mod tests {
     #[test]
     fn display_renders_message_without_type_prefix() {
         let err: ParseLiveOutError = parse_live_out_contract("x0;bogus").unwrap_err();
+        // Deliberately fragile: ADR-0006 diagnostic wording changes should require review.
         assert_eq!(
             err.to_string(),
             "unknown flag token 'bogus'; expected 'nzcv'"
@@ -870,6 +861,16 @@ mod tests {
     }
 
     #[test]
+    fn parse_live_out_contract_accepts_vector_registers() {
+        let live_out = parse_live_out_contract("x0,v0,V31;nzcv").unwrap();
+        assert!(live_out.contains(Register::X0));
+        assert!(live_out.contains(Register::Vector(crate::ir::VectorRegister::V0)));
+        assert!(live_out.contains(Register::Vector(crate::ir::VectorRegister::V31)));
+        assert!(live_out.flags_live());
+        assert!(parse_live_out_contract("v32").is_err());
+    }
+
+    #[test]
     fn test_parse_live_out_contract_space_separated_regs_and_flags() {
         let live_out = parse_live_out_contract("x0 x1;nzcv").unwrap();
         assert!(live_out.contains_register(Register::X0));
@@ -880,6 +881,14 @@ mod tests {
     #[test]
     fn test_parse_live_out_contract_regs_only_flags_off() {
         let live_out = parse_live_out_contract("x0,x1").unwrap();
+        assert!(live_out.contains_register(Register::X0));
+        assert!(live_out.contains_register(Register::X1));
+        assert!(!live_out.flags_live());
+    }
+
+    #[test]
+    fn test_parse_live_out_contract_space_separated_regs_only_flags_off() {
+        let live_out = parse_live_out_contract("x0 x1").unwrap();
         assert!(live_out.contains_register(Register::X0));
         assert!(live_out.contains_register(Register::X1));
         assert!(!live_out.flags_live());
@@ -1009,6 +1018,7 @@ mod tests {
     #[test]
     fn test_parse_live_out_contract_reversed_order_nzcv_x0_error() {
         let err = parse_live_out_contract("nzcv;x0").unwrap_err();
+        // Deliberately fragile: review the complete issue #181 diagnostic before changing it.
         assert_eq!(
             err.to_string(),
             "flag token 'nzcv' must follow the register list after ';' (for example ';nzcv'); got 'nzcv;x0'"
@@ -1194,20 +1204,52 @@ mod tests {
     }
 
     #[test]
-    fn x86_reg_downstream_liveness_write_is_never_a_full_kill_no_width() {
+    fn x86_reg_downstream_liveness_distinguishes_full_and_partial_writes() {
         use crate::isa::x86::{X86Instruction, X86Register};
-        // `mov rax, rbx` looks like a full overwrite, but the IR carries no
-        // operand width (#75): it could be `mov eax/al, ...`. The predicate
-        // must NOT report Dead — it walks past the write as Uncertain so the
-        // caller keeps rax live.
-        let suffix = vec![X86Instruction::MovReg {
+        let native = [X86Instruction::MovReg {
             rd: X86Register::RAX,
             rs: X86Register::RBX,
         }];
         assert_eq!(
-            x86_reg_downstream_liveness(X86Register::RAX, &suffix),
-            DownstreamRegLiveness::Uncertain,
-            "x86 write must not be trusted as a full overwrite (#75)"
+            x86_reg_downstream_liveness(X86Register::RAX, &native),
+            DownstreamRegLiveness::Dead
+        );
+
+        let dword = [X86Instruction::MovReg {
+            rd: X86Register::EAX,
+            rs: X86Register::EBX,
+        }];
+        assert_eq!(
+            x86_reg_downstream_liveness(X86Register::RAX, &dword),
+            DownstreamRegLiveness::Dead,
+            "EAX zero-extension fully defines RAX"
+        );
+
+        for partial in [X86Register::AX, X86Register::AL, X86Register::AH] {
+            let suffix = [X86Instruction::MovImm {
+                rd: partial,
+                imm: 0,
+            }];
+            assert_eq!(
+                x86_reg_downstream_liveness(X86Register::RAX, &suffix),
+                DownstreamRegLiveness::Read,
+                "{partial} reads the old RAX bits that its partial write preserves"
+            );
+        }
+    }
+
+    #[test]
+    fn x86_instruction_metadata_canonicalizes_register_views() {
+        use crate::isa::x86::{X86Instruction, X86Register};
+        let instruction = X86Instruction::AddReg {
+            rd: X86Register::AL,
+            rs: X86Register::BL,
+        };
+        assert_eq!(instruction.destination_operand(), Some(X86Register::AL));
+        assert_eq!(instruction.destination(), Some(X86Register::RAX));
+        assert_eq!(
+            instruction.source_registers(),
+            vec![X86Register::RAX, X86Register::RBX]
         );
     }
 

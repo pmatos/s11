@@ -31,6 +31,10 @@ You are the **planning** agent. Do not write code in this stage. Produce a writt
 
 Write a plan to `{{workspace.path}}/PLAN.md` covering:
 
+`PLAN.md` is an ignored, workspace-local handoff to the implementation stage.
+It is overwritten for each issue in its prepared workspace and is not durable
+project documentation.
+
 1. **Problem restated** in one paragraph.
 2. **Files to touch** — exact paths in both `crates/` and `compiler/` if the change is cross-cutting, plus any `docs/spec/*.md` updates required by the change.
 3. **TDD slices** — a numbered list of small red-green-refactor steps. Each slice names the test file/location, the behavior under test, and the production code that will make it pass. Prefer vertical slices over horizontal refactors.
@@ -45,8 +49,9 @@ Write a plan to `{{workspace.path}}/PLAN.md` covering:
 - **Many small changes beat one large change.** If the issue is broad, split the plan into the minimal first slice that closes the issue, plus a follow-up list. Do not bundle refactors into a bug fix.
 - **Do not run `sudo`.** If a step needs root, plan an alternative.
 - **Do not modify the `symphony/` submodule** (if present) or anything under `build/` (gitignored compiler binary).
+- **Do not stage, commit, or force-add `PLAN.md`.** Preserve durable rationale in the issue or pull request, an ADR, or a deliberately named document instead.
 - **Operator merges with a merge commit (`gh pr merge --merge`).** Plan accordingly — do not plan for squash or rebase merges.
 
 ## Exit
 
-Once `PLAN.md` is written and committed locally is not required at this stage — the implementation stage reads it from the workspace. Exit cleanly. If you cannot produce a coherent plan (issue is ambiguous, contradictory, or already resolved), post `gh issue comment {{issue.number}} --body "<what blocks planning>"`, write the same explanation to `{{workspace.path}}/EVIDENCE.md`, and exit without applying any handoff label.
+Once `PLAN.md` is written, leave the ignored file in the workspace for the implementation stage to read and exit cleanly. Do not add it to Git. If you cannot produce a coherent plan (issue is ambiguous, contradictory, or already resolved), post `gh issue comment {{issue.number}} --body "<what blocks planning>"`, write the same explanation to `{{workspace.path}}/EVIDENCE.md`, and exit without applying any handoff label.

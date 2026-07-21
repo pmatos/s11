@@ -1,7 +1,8 @@
 //! Cost model for the x86 backend.
 //!
 //! x86 is variable-length, so `CodeSize` is an approximation per variant.
-//! `InstructionCount` is a flat per-instruction sum.
+//! `InstructionCount` counts emitted machine instructions; the full-width
+//! SETcc pseudo-instruction counts as its SETcc + MOVZX lowering.
 //! Width-aware: x86-32 encodings save one byte per REX prefix.
 //!
 //! # Latency model (issue #622)
@@ -19,8 +20,10 @@
 //!    accessed 2026-06) for the Intel **Skylake** microarchitecture, cross-checked
 //!    against <https://uops.info/>. On Skylake the simple integer ALU ops
 //!    (MOV/ADD/SUB/AND/OR/XOR/INC/DEC/NEG/NOT/CMP/TEST/shift-by-imm/rotate-by-imm
-//!    and CMOV) have **1-cycle** latency, while two-operand/three-operand integer
-//!    multiply (`IMUL r,r` / `IMUL r,r,imm`) has **3-cycle** latency. A
+//!    including MOVZX/MOVSX and CMOV) have **1-cycle** latency, SETcc's
+//!    two-operation lowering has **2-cycle** dependent latency, and
+//!    two-operand/three-operand integer multiply
+//!    (`IMUL r,r` / `IMUL r,r,imm`) has **3-cycle** latency. A
 //!    register-to-register MOV is special-cased to **0** because Skylake (and all
 //!    Sandy-Bridge-and-later cores) eliminate it at rename — it never sits on a
 //!    dependency chain. `MovImm` is a real 1-cycle op (it is not move-elimination
@@ -59,7 +62,7 @@
 
 #![allow(dead_code)]
 
-use crate::isa::x86::{X86Instruction, X86Register, x86_reads_flags};
+use crate::isa::x86::{X86Instruction, X86Register, X86RegisterView, x86_reads_flags};
 use crate::semantics::cost::CostMetric;
 
 /// Cost of a single x86 instruction at the given operand width.
@@ -70,7 +73,10 @@ use crate::semantics::cost::CostMetric;
 /// critical path equals its own latency, so the two agree on length-1 inputs.
 pub fn instruction_cost(instr: &X86Instruction, metric: &CostMetric, width: u32) -> u64 {
     match metric {
-        CostMetric::InstructionCount => 1,
+        CostMetric::InstructionCount => match instr {
+            X86Instruction::Setcc { .. } => 2,
+            _ => 1,
+        },
         CostMetric::Latency => instruction_latency(instr),
         CostMetric::CodeSize => instruction_code_size(instr, width),
     }
@@ -79,27 +85,37 @@ pub fn instruction_cost(instr: &X86Instruction, metric: &CostMetric, width: u32)
 /// Isolated per-opcode latency in cycles, sourced from Agner Fog's Skylake
 /// instruction tables (see the module doc-comment).
 ///
-/// - Register-to-register `mov` is **0**: Skylake eliminates it at rename, so it
-///   never extends a dependency chain.
+/// - A full-width (native/dword) register-to-register `mov` is **0**: Skylake
+///   eliminates it at rename, so it never extends a dependency chain. A narrower
+///   `mov` (word or byte) is NOT move-eliminated — it needs an executed merge —
+///   so it costs **1** cycle like any ALU op.
 /// - Simple integer ALU ops (everything except multiply) are **1** cycle.
 /// - `IMUL` (two- and three-operand) is **3** cycles on Skylake.
 fn instruction_latency(instr: &X86Instruction) -> u64 {
     match instr {
-        // Register-rename move elimination: zero-latency on the critical path.
-        X86Instruction::MovReg { .. } => 0,
+        // Register-rename move elimination applies only to full-width copies;
+        // word/byte moves need an executed merge µop and cost a cycle.
+        X86Instruction::MovReg { rd, .. } => match rd.view() {
+            X86RegisterView::Native | X86RegisterView::Dword => 0,
+            X86RegisterView::Word | X86RegisterView::LowByte | X86RegisterView::HighByte => 1,
+        },
+        // Full-width SETcc lowers to a byte SETcc followed by a dependent MOVZX.
+        X86Instruction::Setcc { .. } => 2,
         // Two-/three-operand signed multiply: 3-cycle latency on Skylake.
         X86Instruction::ImulReg { .. } | X86Instruction::ImulRegImm { .. } => 3,
         // Everything else in the supported set is a 1-cycle integer ALU op:
-        // MovImm, ADD/SUB/AND/OR/XOR (reg and imm), CMP/TEST, NEG/NOT/INC/DEC,
-        // SHL/SHR/SAR/ROL/ROR by immediate, CMOV, and the Jcc terminator
-        // (taken-branch latency; misprediction is not modelled).
+        // MovImm, MOVZX/MOVSX, ADD/SUB/AND/OR/XOR (reg and imm), CMP/TEST,
+        // NEG/NOT/INC/DEC, SHL/SHR/SAR/ROL/ROR by immediate, CMOV, and the Jcc
+        // terminator (taken-branch latency; misprediction is not modelled).
         _ => 1,
     }
 }
 
 /// Approximate encoded length in bytes. Conservative upper bounds.
 ///
-/// - REX prefix adds 1 byte to x86-64 ops touching r0..r15 with REX.W.
+/// - REX prefix adds 1 byte to every x86-64 register op except one naming a
+///   legacy high-byte register (dynasm emits REX.W for native operands and a
+///   bare 0x40 for dword/word/low-byte operands via its dynamic-register path).
 /// - Register-register: opcode + ModR/M = 2 bytes, plus REX for x86-64
 ///   = 3 bytes.
 /// - Register-immediate (32-bit imm): opcode + ModR/M + 4-byte imm
@@ -109,17 +125,66 @@ fn instruction_latency(instr: &X86Instruction) -> u64 {
 ///   immediate fits in i32, else the 10-byte `REX.W B8+rd io` movabs. These
 ///   match the assembler exactly (a flat cost previously underestimated
 ///   movabs, which is unsound for length-based pruning).
+fn encoding_prefix_bytes(registers: &[X86Register], machine_width: u32) -> u64 {
+    let Some(first) = registers.first() else {
+        return 0;
+    };
+    let operand_width = first.effective_width(machine_width);
+    let operand_size_prefix = u64::from(operand_width == 16);
+    // In 64-bit mode the assembler encodes register operands through dynasm's
+    // dynamic-register path, which always emits a REX byte — REX.W for a native
+    // operand, otherwise a bare 0x40 for a dword/word/low-byte operand (with the
+    // REX.R/REX.B extension bits added for r8..r15 / spl..dil). The sole
+    // exception is a legacy high-byte register (AH/BH/CH/DH), which is
+    // REX-incompatible and forces a REX-free legacy encoding. So an x86-64
+    // instruction carries a REX byte unless it names a high-byte register.
+    let rex = u64::from(machine_width == 64 && !registers.iter().any(|reg| reg.is_high_byte()));
+    operand_size_prefix + rex
+}
+
 fn instruction_code_size(instr: &X86Instruction, width: u32) -> u64 {
-    let rex = if width == 64 { 1 } else { 0 };
+    let operand = instr.destination_operand().or(match instr {
+        X86Instruction::CmpReg { rn, .. }
+        | X86Instruction::CmpImm { rn, .. }
+        | X86Instruction::TestReg { rn, .. }
+        | X86Instruction::TestImm { rn, .. } => Some(*rn),
+        _ => None,
+    });
+    let operands: Vec<X86Register> = match instr {
+        X86Instruction::MovReg { rd, rs }
+        | X86Instruction::AddReg { rd, rs }
+        | X86Instruction::SubReg { rd, rs }
+        | X86Instruction::AndReg { rd, rs }
+        | X86Instruction::OrReg { rd, rs }
+        | X86Instruction::XorReg { rd, rs }
+        | X86Instruction::ImulReg { rd, rs }
+        | X86Instruction::Cmov { rd, rs, .. } => vec![*rd, *rs],
+        X86Instruction::CmpReg { rn, rs } | X86Instruction::TestReg { rn, rs } => {
+            vec![*rn, *rs]
+        }
+        X86Instruction::ImulRegImm { rd, rs, .. } => vec![*rd, *rs],
+        X86Instruction::Lea { rd, base, .. } => vec![*rd, *base],
+        _ => operand.into_iter().collect(),
+    };
+    let prefixes = encoding_prefix_bytes(&operands, width);
+    let operand_width = operand.map_or(width, |reg| reg.effective_width(width));
     match instr {
-        X86Instruction::MovReg { .. } => 2 + rex,
+        X86Instruction::MovReg { .. } => 2 + prefixes,
+        // `0F B6/B7 /r` or `0F BE/BF /r`: two-byte opcode plus ModR/M,
+        // with REX.W in native-width x86-64 mode.
+        X86Instruction::Movzx { .. } | X86Instruction::Movsx { .. } => 3 + prefixes,
         // See the module doc-comment: immediate-dependent to stay a valid
         // upper bound on the assembler's MovImm encoding (issue #225).
         X86Instruction::MovImm { imm, .. } => {
-            if width == 64 {
+            if operand_width == 64 {
                 if i32::try_from(*imm).is_ok() { 7 } else { 10 }
             } else {
-                5
+                match operand_width {
+                    32 => 5 + prefixes,
+                    16 => 3 + prefixes,
+                    8 => 2 + prefixes,
+                    _ => unreachable!("unsupported x86 operand width"),
+                }
             }
         }
         X86Instruction::AddReg { .. }
@@ -134,7 +199,7 @@ fn instruction_code_size(instr: &X86Instruction, width: u32) -> u64 {
         | X86Instruction::Not { .. }
         // INC / DEC are single-operand `FF /0` / `FF /1` = 2 bytes (+REX.W).
         | X86Instruction::Inc { .. }
-        | X86Instruction::Dec { .. } => 2 + rex,
+        | X86Instruction::Dec { .. } => 2 + prefixes,
         // SHL / SHR / SAR / ROL / ROR by imm8 are `C1 /n ib` = opcode + ModR/M
         // + imm8 = 3 bytes (+REX.W).
         X86Instruction::Shl { .. }
@@ -143,23 +208,41 @@ fn instruction_code_size(instr: &X86Instruction, width: u32) -> u64 {
         | X86Instruction::Rol { .. }
         // IMUL rd, rs is `0F AF /r` = opcode (2) + ModR/M = 3 bytes (+REX.W).
         | X86Instruction::ImulReg { .. }
-        | X86Instruction::Ror { .. } => 3 + rex,
+        | X86Instruction::Ror { .. } => 3 + prefixes,
         // IMUL rd, rs, imm is `69 /r id` = opcode + ModR/M + 4-byte imm
         // = 6 bytes (+REX.W), mirroring the reg-imm arithmetic sizing.
-        X86Instruction::ImulRegImm { .. } => 6 + rex,
+        X86Instruction::ImulRegImm { .. } => {
+            if operand_width == 16 {
+                4 + prefixes
+            } else {
+                6 + prefixes
+            }
+        }
         // LEA rd, [base + disp] is `8D /r` = opcode + ModR/M, plus a possible
         // SIB byte (when base is RSP/R12) and a 4-byte disp32 = up to 7 bytes
         // (+REX.W). A conservative upper bound for length-based pruning.
-        X86Instruction::Lea { .. } => 7 + rex,
+        X86Instruction::Lea { .. } => 7 + prefixes,
         X86Instruction::AddImm { .. }
         | X86Instruction::SubImm { .. }
         | X86Instruction::AndImm { .. }
         | X86Instruction::OrImm { .. }
         | X86Instruction::XorImm { .. }
         | X86Instruction::CmpImm { .. }
-        | X86Instruction::TestImm { .. } => 6 + rex,
+        | X86Instruction::TestImm { .. } => match operand_width {
+            64 | 32 => 6 + prefixes,
+            16 => 4 + prefixes,
+            8 => 3 + prefixes,
+            _ => unreachable!("unsupported x86 operand width"),
+        },
         // CMOV is `0F 4x ModR/M` = 3 bytes plus REX.W on 64-bit.
-        X86Instruction::Cmov { .. } => 3 + rex,
+        X86Instruction::Cmov { .. } => 3 + prefixes,
+        // Full-width SETcc lowers to `0F 9x ModR/M` plus
+        // `0F B6 ModR/M` (MOVZX), 6 bytes total. In x86-64, SPL..DIL and
+        // R8B..R15B (indices 4..15) need a REX prefix on both instructions.
+        // x86-32 only admits indices 0..3 for this family.
+        X86Instruction::Setcc { rd, .. } => {
+            6 + 2 * u64::from(width == 64 && rd.index().is_some_and(|index| index >= 4))
+        }
         // Short-form Jcc is `7x rel8` = 2 bytes (no REX). Long-form
         // `0F 8x rel32` = 6 bytes is used when the displacement doesn't
         // fit. The optimizer never emits Jcc bytes (terminators stay
@@ -379,6 +462,28 @@ mod tests {
         assert_eq!(sequence_cost(&seq, &CostMetric::Latency, 64), 2);
     }
 
+    /// SETcc's two-instruction lowering contributes its internal dependency:
+    /// CMP (1) -> SETcc+MOVZX (2) -> consumer (1) is a 4-cycle chain.
+    #[test]
+    fn critical_path_accounts_for_setcc_macro_lowering() {
+        use crate::isa::x86::X86Condition;
+        let seq = [
+            X86Instruction::CmpReg {
+                rn: X86Register::RAX,
+                rs: X86Register::RBX,
+            },
+            X86Instruction::Setcc {
+                rd: X86Register::RCX,
+                cond: X86Condition::NE,
+            },
+            X86Instruction::AddReg {
+                rd: X86Register::RDX,
+                rs: X86Register::RCX,
+            },
+        ];
+        assert_eq!(sequence_cost(&seq, &CostMetric::Latency, 64), 4);
+    }
+
     /// A register-to-register MOV is eliminated at rename, so it adds 0 to the
     /// critical path: `mov rax, rbx; add rax, rcx` costs the same as the lone
     /// `add` (1 cycle), not 2.
@@ -395,6 +500,62 @@ mod tests {
             },
         ];
         assert_eq!(sequence_cost(&seq, &CostMetric::Latency, 64), 1);
+    }
+
+    #[test]
+    fn partial_register_moves_are_not_move_eliminated() {
+        // Skylake move elimination only applies to full-width (native/dword)
+        // reg-reg moves; word and byte MovReg forms need an executed merge and
+        // cost a cycle, so the latency model must not report them as free.
+        for (rd, rs, expected, label) in [
+            (X86Register::RAX, X86Register::RCX, 0u64, "native"),
+            (X86Register::EAX, X86Register::ECX, 0, "dword"),
+            (X86Register::AX, X86Register::CX, 1, "word"),
+            (X86Register::AL, X86Register::CL, 1, "low byte"),
+            (X86Register::AH, X86Register::CH, 1, "high byte"),
+        ] {
+            let seq = [X86Instruction::MovReg { rd, rs }];
+            assert_eq!(
+                sequence_cost(&seq, &CostMetric::Latency, 64),
+                expected,
+                "{label} MovReg latency"
+            );
+        }
+    }
+
+    #[test]
+    fn partial_write_keeps_old_destination_on_the_critical_path() {
+        let producer = X86Instruction::AddReg {
+            rd: X86Register::RAX,
+            rs: X86Register::RCX,
+        };
+        let consumer = X86Instruction::AddReg {
+            rd: X86Register::RDX,
+            rs: X86Register::RAX,
+        };
+        let partial = [
+            producer,
+            X86Instruction::MovImm {
+                rd: X86Register::AL,
+                imm: 1,
+            },
+            consumer,
+        ];
+        let dword = [
+            producer,
+            X86Instruction::MovImm {
+                rd: X86Register::EAX,
+                imm: 1,
+            },
+            consumer,
+        ];
+
+        assert_eq!(sequence_cost(&partial, &CostMetric::Latency, 64), 3);
+        assert_eq!(
+            sequence_cost(&dword, &CostMetric::Latency, 64),
+            2,
+            "an EAX write replaces the old RAX value and breaks its dependency"
+        );
     }
 
     /// IMUL's 3-cycle latency shows up on the critical path: a single IMUL costs
@@ -447,6 +608,62 @@ mod tests {
         };
         assert_eq!(instruction_cost(&rr, &CostMetric::CodeSize, 32), 2);
         assert_eq!(instruction_cost(&ri, &CostMetric::CodeSize, 32), 6);
+    }
+
+    #[test]
+    fn code_size_tracks_sub_register_prefixes_and_immediates() {
+        let cases = [
+            (
+                X86Instruction::MovImm {
+                    rd: X86Register::EAX,
+                    imm: 1,
+                },
+                6,
+            ),
+            (
+                X86Instruction::MovImm {
+                    rd: X86Register::AX,
+                    imm: 1,
+                },
+                5,
+            ),
+            (
+                X86Instruction::MovImm {
+                    rd: X86Register::AL,
+                    imm: 1,
+                },
+                3,
+            ),
+            (
+                X86Instruction::MovImm {
+                    rd: X86Register::AH,
+                    imm: 1,
+                },
+                2,
+            ),
+            (
+                X86Instruction::XorReg {
+                    rd: X86Register::EAX,
+                    rs: X86Register::EAX,
+                },
+                3,
+            ),
+            (
+                X86Instruction::XorReg {
+                    rd: X86Register::AX,
+                    rs: X86Register::AX,
+                },
+                4,
+            ),
+        ];
+
+        for (instruction, expected) in cases {
+            assert_eq!(
+                instruction_cost(&instruction, &CostMetric::CodeSize, 64),
+                expected,
+                "{instruction}"
+            );
+        }
     }
 
     #[test]
@@ -512,7 +729,34 @@ mod tests {
         assert_eq!(instruction_cost(&small, &CostMetric::CodeSize, 32), 5);
     }
 
-    // --- CMOV / Jcc cost ---
+    // --- SETcc / CMOV / Jcc cost ---
+
+    #[test]
+    fn setcc_cost_accounts_for_two_instruction_lowering() {
+        use crate::isa::x86::X86Condition;
+
+        let setne_rax = X86Instruction::Setcc {
+            rd: X86Register::RAX,
+            cond: X86Condition::NE,
+        };
+        let setne_rsp = X86Instruction::Setcc {
+            rd: X86Register::RSP,
+            cond: X86Condition::NE,
+        };
+        let setne_r8 = X86Instruction::Setcc {
+            rd: X86Register::R8,
+            cond: X86Condition::NE,
+        };
+        assert_eq!(instruction_cost(&setne_rax, &CostMetric::CodeSize, 64), 6);
+        assert_eq!(instruction_cost(&setne_rsp, &CostMetric::CodeSize, 64), 8);
+        assert_eq!(instruction_cost(&setne_r8, &CostMetric::CodeSize, 64), 8);
+        assert_eq!(instruction_cost(&setne_rax, &CostMetric::CodeSize, 32), 6);
+        assert_eq!(
+            instruction_cost(&setne_rax, &CostMetric::InstructionCount, 64),
+            2
+        );
+        assert_eq!(instruction_cost(&setne_rax, &CostMetric::Latency, 64), 2);
+    }
 
     #[test]
     fn cmov_code_size_includes_rex_on_64_bit() {
@@ -525,6 +769,26 @@ mod tests {
         // CMOV is `0F 4x ModR/M` = 3 bytes, +1 for REX.W on x86-64.
         assert_eq!(instruction_cost(&cmov, &CostMetric::CodeSize, 64), 4);
         assert_eq!(instruction_cost(&cmov, &CostMetric::CodeSize, 32), 3);
+    }
+
+    #[test]
+    fn extension_moves_have_two_byte_opcode_plus_modrm_and_optional_rex() {
+        for instruction in [
+            X86Instruction::Movzx {
+                rd: X86Register::RAX,
+                rs: X86Register::RBX,
+                src_width: 8,
+            },
+            X86Instruction::Movsx {
+                rd: X86Register::RAX,
+                rs: X86Register::RBX,
+                src_width: 16,
+            },
+        ] {
+            assert_eq!(instruction_cost(&instruction, &CostMetric::CodeSize, 64), 4);
+            assert_eq!(instruction_cost(&instruction, &CostMetric::CodeSize, 32), 3);
+            assert_eq!(instruction_cost(&instruction, &CostMetric::Latency, 64), 1);
+        }
     }
 
     #[test]

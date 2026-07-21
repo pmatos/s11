@@ -1,12 +1,13 @@
 //! x86 ISA backend (x86-64 primary, x86-32 secondary).
 //!
-//! Mirrors the dual-variant pattern of `src/isa/riscv.rs`: a single set of
-//! `X86Register` / `X86Operand` / `X86Instruction` enums shared by the
-//! `X86_64` and `X86_32` ISA marker structs.
+//! Mirrors the dual-variant pattern of `src/isa/riscv.rs`: a single
+//! `X86Register` view type plus shared `X86Operand` / `X86Instruction` enums
+//! serve the `X86_64` and `X86_32` ISA marker structs.
 //!
-//! **Initial instruction set**: MOV, ADD, SUB, AND, OR, XOR, CMP — each with
-//! register and immediate forms — plus rewritable CMOVcc and fixed Jcc
-//! terminators.
+//! The shared instruction set includes data movement (including narrow-source
+//! MOVZX/MOVSX), integer arithmetic and logical operations, shifts/rotates,
+//! comparisons, conditional moves (CMOVcc), conditional byte-set (SETcc), and
+//! fixed Jcc terminators.
 
 // x86 register names are conventionally uppercase (RAX, RBX, ...) in every
 // Intel/AMD manual, Capstone disassembly output, GAS/Intel syntax, and gdb
@@ -19,7 +20,7 @@ use crate::isa::traits::{ISA, InstructionGenerator, InstructionType, OperandType
 use rand::{Rng, RngExt};
 use std::fmt;
 
-/// x86 condition codes consumed by CMOVcc / Jcc.
+/// x86 condition codes consumed by SETcc / CMOVcc / Jcc.
 ///
 /// The 16 canonical codes here cover every short-form jump / cmov GAS
 /// emits. Aliases (`NB` for `AE`, `Z` for `E`, etc.) are normalized to
@@ -111,6 +112,27 @@ impl X86Condition {
         }
     }
 
+    pub const fn set_mnemonic(self) -> &'static str {
+        match self {
+            X86Condition::E => "sete",
+            X86Condition::NE => "setne",
+            X86Condition::B => "setb",
+            X86Condition::AE => "setae",
+            X86Condition::BE => "setbe",
+            X86Condition::A => "seta",
+            X86Condition::L => "setl",
+            X86Condition::GE => "setge",
+            X86Condition::LE => "setle",
+            X86Condition::G => "setg",
+            X86Condition::S => "sets",
+            X86Condition::NS => "setns",
+            X86Condition::O => "seto",
+            X86Condition::NO => "setno",
+            X86Condition::P => "setp",
+            X86Condition::NP => "setnp",
+        }
+    }
+
     pub const fn jcc_mnemonic(self) -> &'static str {
         match self {
             X86Condition::E => "je",
@@ -139,89 +161,244 @@ impl fmt::Display for X86Condition {
     }
 }
 
+/// The bit slice selected by an x86 register operand.
+///
+/// `Native` preserves the historical programmatic IR convention: it means the
+/// machine mode's full GPR width (64 bits for [`X86_64`], 32 for [`X86_32`]).
+/// Parsed aliases retain an explicit narrower view. The high-byte view is the
+/// legacy AH/CH/DH/BH slice at bits 15:8, not the low byte.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub enum X86Register {
-    RAX,
-    RCX,
-    RDX,
-    RBX,
-    RSP,
-    RBP,
-    RSI,
-    RDI,
-    R8,
-    R9,
-    R10,
-    R11,
-    R12,
-    R13,
-    R14,
-    R15,
+pub enum X86RegisterView {
+    Native,
+    Dword,
+    Word,
+    LowByte,
+    HighByte,
+}
+
+impl X86RegisterView {
+    pub const fn bit_width(self, mode_width: u32) -> u32 {
+        match self {
+            X86RegisterView::Native => mode_width,
+            X86RegisterView::Dword => 32,
+            X86RegisterView::Word => 16,
+            X86RegisterView::LowByte | X86RegisterView::HighByte => 8,
+        }
+    }
+}
+
+/// An x86 GPR operand: canonical architectural register plus selected view.
+///
+/// Machine state and liveness key on [`Self::canonical`], while instruction
+/// operands retain the view so execution and assembly can distinguish RAX,
+/// EAX, AX, AL, and AH without multiplying instruction variants.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct X86Register {
+    index: u8,
+    view: X86RegisterView,
 }
 
 impl X86Register {
+    const fn new(index: u8, view: X86RegisterView) -> Self {
+        Self { index, view }
+    }
+
+    pub const RAX: Self = Self::new(0, X86RegisterView::Native);
+    pub const RCX: Self = Self::new(1, X86RegisterView::Native);
+    pub const RDX: Self = Self::new(2, X86RegisterView::Native);
+    pub const RBX: Self = Self::new(3, X86RegisterView::Native);
+    pub const RSP: Self = Self::new(4, X86RegisterView::Native);
+    pub const RBP: Self = Self::new(5, X86RegisterView::Native);
+    pub const RSI: Self = Self::new(6, X86RegisterView::Native);
+    pub const RDI: Self = Self::new(7, X86RegisterView::Native);
+    pub const R8: Self = Self::new(8, X86RegisterView::Native);
+    pub const R9: Self = Self::new(9, X86RegisterView::Native);
+    pub const R10: Self = Self::new(10, X86RegisterView::Native);
+    pub const R11: Self = Self::new(11, X86RegisterView::Native);
+    pub const R12: Self = Self::new(12, X86RegisterView::Native);
+    pub const R13: Self = Self::new(13, X86RegisterView::Native);
+    pub const R14: Self = Self::new(14, X86RegisterView::Native);
+    pub const R15: Self = Self::new(15, X86RegisterView::Native);
+
+    pub const EAX: Self = Self::new(0, X86RegisterView::Dword);
+    pub const ECX: Self = Self::new(1, X86RegisterView::Dword);
+    pub const EDX: Self = Self::new(2, X86RegisterView::Dword);
+    pub const EBX: Self = Self::new(3, X86RegisterView::Dword);
+    pub const ESP: Self = Self::new(4, X86RegisterView::Dword);
+    pub const EBP: Self = Self::new(5, X86RegisterView::Dword);
+    pub const ESI: Self = Self::new(6, X86RegisterView::Dword);
+    pub const EDI: Self = Self::new(7, X86RegisterView::Dword);
+    pub const R8D: Self = Self::new(8, X86RegisterView::Dword);
+    pub const R9D: Self = Self::new(9, X86RegisterView::Dword);
+    pub const R10D: Self = Self::new(10, X86RegisterView::Dword);
+    pub const R11D: Self = Self::new(11, X86RegisterView::Dword);
+    pub const R12D: Self = Self::new(12, X86RegisterView::Dword);
+    pub const R13D: Self = Self::new(13, X86RegisterView::Dword);
+    pub const R14D: Self = Self::new(14, X86RegisterView::Dword);
+    pub const R15D: Self = Self::new(15, X86RegisterView::Dword);
+
+    pub const AX: Self = Self::new(0, X86RegisterView::Word);
+    pub const CX: Self = Self::new(1, X86RegisterView::Word);
+    pub const DX: Self = Self::new(2, X86RegisterView::Word);
+    pub const BX: Self = Self::new(3, X86RegisterView::Word);
+    pub const SP: Self = Self::new(4, X86RegisterView::Word);
+    pub const BP: Self = Self::new(5, X86RegisterView::Word);
+    pub const SI: Self = Self::new(6, X86RegisterView::Word);
+    pub const DI: Self = Self::new(7, X86RegisterView::Word);
+    pub const R8W: Self = Self::new(8, X86RegisterView::Word);
+    pub const R9W: Self = Self::new(9, X86RegisterView::Word);
+    pub const R10W: Self = Self::new(10, X86RegisterView::Word);
+    pub const R11W: Self = Self::new(11, X86RegisterView::Word);
+    pub const R12W: Self = Self::new(12, X86RegisterView::Word);
+    pub const R13W: Self = Self::new(13, X86RegisterView::Word);
+    pub const R14W: Self = Self::new(14, X86RegisterView::Word);
+    pub const R15W: Self = Self::new(15, X86RegisterView::Word);
+
+    pub const AL: Self = Self::new(0, X86RegisterView::LowByte);
+    pub const CL: Self = Self::new(1, X86RegisterView::LowByte);
+    pub const DL: Self = Self::new(2, X86RegisterView::LowByte);
+    pub const BL: Self = Self::new(3, X86RegisterView::LowByte);
+    pub const SPL: Self = Self::new(4, X86RegisterView::LowByte);
+    pub const BPL: Self = Self::new(5, X86RegisterView::LowByte);
+    pub const SIL: Self = Self::new(6, X86RegisterView::LowByte);
+    pub const DIL: Self = Self::new(7, X86RegisterView::LowByte);
+    pub const R8B: Self = Self::new(8, X86RegisterView::LowByte);
+    pub const R9B: Self = Self::new(9, X86RegisterView::LowByte);
+    pub const R10B: Self = Self::new(10, X86RegisterView::LowByte);
+    pub const R11B: Self = Self::new(11, X86RegisterView::LowByte);
+    pub const R12B: Self = Self::new(12, X86RegisterView::LowByte);
+    pub const R13B: Self = Self::new(13, X86RegisterView::LowByte);
+    pub const R14B: Self = Self::new(14, X86RegisterView::LowByte);
+    pub const R15B: Self = Self::new(15, X86RegisterView::LowByte);
+
+    pub const AH: Self = Self::new(0, X86RegisterView::HighByte);
+    pub const CH: Self = Self::new(1, X86RegisterView::HighByte);
+    pub const DH: Self = Self::new(2, X86RegisterView::HighByte);
+    pub const BH: Self = Self::new(3, X86RegisterView::HighByte);
+
     pub fn index(&self) -> Option<u8> {
-        Some(match self {
-            X86Register::RAX => 0,
-            X86Register::RCX => 1,
-            X86Register::RDX => 2,
-            X86Register::RBX => 3,
-            X86Register::RSP => 4,
-            X86Register::RBP => 5,
-            X86Register::RSI => 6,
-            X86Register::RDI => 7,
-            X86Register::R8 => 8,
-            X86Register::R9 => 9,
-            X86Register::R10 => 10,
-            X86Register::R11 => 11,
-            X86Register::R12 => 12,
-            X86Register::R13 => 13,
-            X86Register::R14 => 14,
-            X86Register::R15 => 15,
-        })
+        Some(self.index)
     }
 
     pub fn mnemonic(&self) -> &'static str {
-        match self {
-            X86Register::RAX => "rax",
-            X86Register::RCX => "rcx",
-            X86Register::RDX => "rdx",
-            X86Register::RBX => "rbx",
-            X86Register::RSP => "rsp",
-            X86Register::RBP => "rbp",
-            X86Register::RSI => "rsi",
-            X86Register::RDI => "rdi",
-            X86Register::R8 => "r8",
-            X86Register::R9 => "r9",
-            X86Register::R10 => "r10",
-            X86Register::R11 => "r11",
-            X86Register::R12 => "r12",
-            X86Register::R13 => "r13",
-            X86Register::R14 => "r14",
-            X86Register::R15 => "r15",
+        const NATIVE: [&str; 16] = [
+            "rax", "rcx", "rdx", "rbx", "rsp", "rbp", "rsi", "rdi", "r8", "r9", "r10", "r11",
+            "r12", "r13", "r14", "r15",
+        ];
+        const DWORD: [&str; 16] = [
+            "eax", "ecx", "edx", "ebx", "esp", "ebp", "esi", "edi", "r8d", "r9d", "r10d", "r11d",
+            "r12d", "r13d", "r14d", "r15d",
+        ];
+        const WORD: [&str; 16] = [
+            "ax", "cx", "dx", "bx", "sp", "bp", "si", "di", "r8w", "r9w", "r10w", "r11w", "r12w",
+            "r13w", "r14w", "r15w",
+        ];
+        const LOW_BYTE: [&str; 16] = [
+            "al", "cl", "dl", "bl", "spl", "bpl", "sil", "dil", "r8b", "r9b", "r10b", "r11b",
+            "r12b", "r13b", "r14b", "r15b",
+        ];
+        const HIGH_BYTE: [&str; 4] = ["ah", "ch", "dh", "bh"];
+
+        match self.view {
+            X86RegisterView::Native => NATIVE[self.index as usize],
+            X86RegisterView::Dword => DWORD[self.index as usize],
+            X86RegisterView::Word => WORD[self.index as usize],
+            X86RegisterView::LowByte => LOW_BYTE[self.index as usize],
+            X86RegisterView::HighByte => HIGH_BYTE[self.index as usize],
+        }
+    }
+
+    /// Render this canonical GPR using its low sub-register spelling.
+    ///
+    /// The core x86 IR normally renders canonical full-width names. Width-
+    /// changing moves are the exception: their source spelling is semantic, so
+    /// `movzx rax, bl` must retain `bl` rather than render `rbx`.
+    pub fn mnemonic_for_width(&self, width: u32) -> Option<&'static str> {
+        let index = usize::from(self.index()?);
+        match width {
+            8 => Some(
+                [
+                    "al", "cl", "dl", "bl", "spl", "bpl", "sil", "dil", "r8b", "r9b", "r10b",
+                    "r11b", "r12b", "r13b", "r14b", "r15b",
+                ][index],
+            ),
+            16 => Some(
+                [
+                    "ax", "cx", "dx", "bx", "sp", "bp", "si", "di", "r8w", "r9w", "r10w", "r11w",
+                    "r12w", "r13w", "r14w", "r15w",
+                ][index],
+            ),
+            32 => Some(
+                [
+                    "eax", "ecx", "edx", "ebx", "esp", "ebp", "esi", "edi", "r8d", "r9d", "r10d",
+                    "r11d", "r12d", "r13d", "r14d", "r15d",
+                ][index],
+            ),
+            64 => Some(self.mnemonic()),
+            _ => None,
         }
     }
 
     pub fn from_index(i: u8) -> Option<Self> {
-        Some(match i {
-            0 => X86Register::RAX,
-            1 => X86Register::RCX,
-            2 => X86Register::RDX,
-            3 => X86Register::RBX,
-            4 => X86Register::RSP,
-            5 => X86Register::RBP,
-            6 => X86Register::RSI,
-            7 => X86Register::RDI,
-            8 => X86Register::R8,
-            9 => X86Register::R9,
-            10 => X86Register::R10,
-            11 => X86Register::R11,
-            12 => X86Register::R12,
-            13 => X86Register::R13,
-            14 => X86Register::R14,
-            15 => X86Register::R15,
-            _ => return None,
-        })
+        (i < 16).then_some(Self::new(i, X86RegisterView::Native))
+    }
+
+    pub const fn view(self) -> X86RegisterView {
+        self.view
+    }
+
+    pub fn canonical(self) -> Self {
+        Self::from_index(self.index).expect("x86 register index is always valid")
+    }
+
+    pub const fn effective_width(self, mode_width: u32) -> u32 {
+        self.view.bit_width(mode_width)
+    }
+
+    pub const fn is_high_byte(self) -> bool {
+        matches!(self.view, X86RegisterView::HighByte)
+    }
+
+    pub const fn is_byte(self) -> bool {
+        matches!(
+            self.view,
+            X86RegisterView::LowByte | X86RegisterView::HighByte
+        )
+    }
+
+    pub const fn is_native(self) -> bool {
+        matches!(self.view, X86RegisterView::Native)
+    }
+
+    pub const fn fully_overwrites_architectural_register(self) -> bool {
+        matches!(self.view, X86RegisterView::Native | X86RegisterView::Dword)
+    }
+
+    pub fn with_view(self, view: X86RegisterView) -> Option<Self> {
+        if view == X86RegisterView::HighByte && self.index >= 4 {
+            None
+        } else {
+            Some(Self::new(self.index, view))
+        }
+    }
+
+    pub fn with_base(self, base: X86Register) -> Option<Self> {
+        base.canonical().with_view(self.view)
+    }
+
+    /// True when this GPR can be named as an operand while assembling in
+    /// `mode`. The extended registers R8..R15 require a REX prefix that does
+    /// not exist in 32-bit mode, so only the eight legacy GPRs are addressable
+    /// there; all sixteen are addressable in 64-bit mode. This is the shared
+    /// source of truth for the x86-32 register-legality constraint that the
+    /// search backends' register pools filter through; the assembler
+    /// `can_assemble` prefilter enforces the same rule via the width-aware
+    /// `x86_register_ok`.
+    pub fn is_available_in(self, mode: crate::assembler::x86::X86Mode) -> bool {
+        match mode {
+            crate::assembler::x86::X86Mode::Mode64 => true,
+            crate::assembler::x86::X86Mode::Mode32 => self.index().is_some_and(|i| i < 8),
+        }
     }
 }
 
@@ -248,7 +425,7 @@ impl RegisterType for X86Register {
         // Only RSP. RBP is not special — modern x86-64 ABIs do not require
         // a frame pointer, so excluding it would bias the search away from
         // valid scratch-register uses.
-        matches!(self, X86Register::RSP)
+        self.canonical() == X86Register::RSP
     }
 }
 
@@ -278,10 +455,29 @@ impl fmt::Display for X86Operand {
 /// the destination) would silently regress liveness for x86.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum X86Instruction {
-    /// `mov rd, rs` — non-destructive register copy; no EFLAGS effect.
+    /// `mov rd, rs` — register copy; no EFLAGS effect. Word and byte
+    /// destinations implicitly read `rd` because their writes preserve the
+    /// surrounding bits of its canonical register.
     MovReg { rd: X86Register, rs: X86Register },
-    /// `mov rd, imm` — load immediate; no EFLAGS effect.
+    /// `mov rd, imm` — load immediate; no EFLAGS effect. Word and byte
+    /// destinations implicitly read `rd` to preserve surrounding bits.
     MovImm { rd: X86Register, imm: i64 },
+    /// `movzx rd, rs_sub` — zero-extend the low `src_width` bits of `rs`
+    /// into the mode-width destination. The supported source widths are 8 and
+    /// 16 bits. No EFLAGS effect.
+    Movzx {
+        rd: X86Register,
+        rs: X86Register,
+        src_width: u32,
+    },
+    /// `movsx rd, rs_sub` — sign-extend the low `src_width` bits of `rs`
+    /// into the mode-width destination. The supported source widths are 8 and
+    /// 16 bits. No EFLAGS effect.
+    Movsx {
+        rd: X86Register,
+        rs: X86Register,
+        src_width: u32,
+    },
     /// `add rd, rs` — `rd = rd + rs`; sets EFLAGS.
     AddReg { rd: X86Register, rs: X86Register },
     /// `add rd, imm` — `rd = rd + imm`; sets EFLAGS.
@@ -377,9 +573,10 @@ pub enum X86Instruction {
     ImulReg { rd: X86Register, rs: X86Register },
     /// `imul rd, rs, imm` — three-operand signed multiply: `rd = rs * imm`
     /// (low `width` bits). The project's FIRST 3-operand x86 variant. `rd` is
-    /// purely WRITTEN (not read), so `source_registers()` is just `[rs]`. Same
-    /// flag model as `ImulReg`: CF/OF on signed overflow, SF/ZF/PF
-    /// Intel-undefined and modelled deterministically.
+    /// purely WRITTEN at native/dword width, so `source_registers()` is just
+    /// `[rs]` there. A word destination also reads `rd` to preserve its
+    /// surrounding bits. Same flag model as `ImulReg`: CF/OF on signed
+    /// overflow, SF/ZF/PF Intel-undefined and modelled deterministically.
     ImulRegImm {
         rd: X86Register,
         rs: X86Register,
@@ -387,10 +584,11 @@ pub enum X86Instruction {
     },
     /// `lea rd, [base + disp]` — load effective address in its minimal
     /// register-base + displacement form: `rd = base + disp` (wrapping at
-    /// width). NON-destructive: `base` is read, `rd` is purely WRITTEN (not
-    /// read), exactly like `MovReg`. Affects NO flags. The `index*scale` and
-    /// RIP-relative addressing forms are deferred; the parser rejects them as
-    /// unsupported shapes.
+    /// width). NON-destructive at native/dword width: `base` is read and `rd`
+    /// is purely written. A word destination also reads `rd` to preserve its
+    /// surrounding bits. Affects NO flags. The `index*scale` and RIP-relative
+    /// addressing forms are deferred; the parser rejects them as unsupported
+    /// shapes.
     Lea {
         rd: X86Register,
         base: X86Register,
@@ -404,6 +602,14 @@ pub enum X86Instruction {
         rs: X86Register,
         cond: X86Condition,
     },
+    /// `setCC rd` — full-width pseudo-instruction that materializes an EFLAGS
+    /// condition as native-width 0 or 1.
+    ///
+    /// Architectural SETcc writes only the low byte, so binary input is rejected
+    /// until sub-register widths are represented by the x86 IR (#75). Candidate
+    /// assembly lowers this variant to byte SETcc followed by same-register
+    /// MOVZX. It reads but does not modify EFLAGS.
+    Setcc { rd: X86Register, cond: X86Condition },
     /// `jCC <target>` — conditional branch. Reads EFLAGS;
     /// modelled as an opaque terminator. The branch target is recovered
     /// from the surrounding ELF disassembly and is not carried in the IR
@@ -412,10 +618,21 @@ pub enum X86Instruction {
 }
 
 impl X86Instruction {
+    /// Canonical architectural destination used by liveness and machine-state
+    /// interfaces. The encoded operand view remains available through
+    /// [`Self::destination_operand`].
     pub fn destination(&self) -> Option<X86Register> {
+        self.destination_operand().map(X86Register::canonical)
+    }
+
+    /// Destination exactly as encoded by this instruction, including its
+    /// dword/word/byte view.
+    pub fn destination_operand(&self) -> Option<X86Register> {
         match self {
             X86Instruction::MovReg { rd, .. }
             | X86Instruction::MovImm { rd, .. }
+            | X86Instruction::Movzx { rd, .. }
+            | X86Instruction::Movsx { rd, .. }
             | X86Instruction::AddReg { rd, .. }
             | X86Instruction::AddImm { rd, .. }
             | X86Instruction::SubReg { rd, .. }
@@ -438,7 +655,8 @@ impl X86Instruction {
             | X86Instruction::ImulReg { rd, .. }
             | X86Instruction::ImulRegImm { rd, .. }
             | X86Instruction::Lea { rd, .. }
-            | X86Instruction::Cmov { rd, .. } => Some(*rd),
+            | X86Instruction::Cmov { rd, .. }
+            | X86Instruction::Setcc { rd, .. } => Some(*rd),
             // CMP and TEST discard their result; only EFLAGS is written.
             X86Instruction::CmpReg { .. }
             | X86Instruction::CmpImm { .. }
@@ -451,6 +669,8 @@ impl X86Instruction {
     pub fn mnemonic(&self) -> &'static str {
         match self {
             X86Instruction::MovReg { .. } | X86Instruction::MovImm { .. } => "mov",
+            X86Instruction::Movzx { .. } => "movzx",
+            X86Instruction::Movsx { .. } => "movsx",
             X86Instruction::AddReg { .. } | X86Instruction::AddImm { .. } => "add",
             X86Instruction::SubReg { .. } | X86Instruction::SubImm { .. } => "sub",
             X86Instruction::AndReg { .. } | X86Instruction::AndImm { .. } => "and",
@@ -470,6 +690,7 @@ impl X86Instruction {
             X86Instruction::ImulReg { .. } | X86Instruction::ImulRegImm { .. } => "imul",
             X86Instruction::Lea { .. } => "lea",
             X86Instruction::Cmov { cond, .. } => cond.cmov_mnemonic(),
+            X86Instruction::Setcc { cond, .. } => cond.set_mnemonic(),
             X86Instruction::Jcc { cond } => cond.jcc_mnemonic(),
         }
     }
@@ -478,12 +699,22 @@ impl X86Instruction {
     ///
     /// **x86 destructive-form divergence**: for `AddReg/SubReg/AndReg/OrReg/XorReg`
     /// and their immediate forms, `rd` is BOTH source and destination, so it
-    /// appears here. `MovReg`/`MovImm` are non-destructive (rd is purely
-    /// written), so rd is NOT in the source list. See the enum doc-comment.
+    /// appears here. Nominally pure writes also include `rd` when a word or
+    /// byte destination preserves surrounding bits of the canonical register.
+    /// Native and dword destinations fully overwrite it. See the enum
+    /// doc-comment.
     pub fn source_registers(&self) -> Vec<X86Register> {
-        match self {
-            X86Instruction::MovReg { rs, .. } => vec![*rs],
-            X86Instruction::MovImm { .. } => vec![],
+        let pure_write_sources = |rd: X86Register, sources: Vec<X86Register>| -> Vec<X86Register> {
+            if rd.fully_overwrites_architectural_register() {
+                sources
+            } else {
+                std::iter::once(rd).chain(sources).collect()
+            }
+        };
+        let operands = match self {
+            X86Instruction::MovReg { rd, rs } => pure_write_sources(*rd, vec![*rs]),
+            X86Instruction::MovImm { rd, .. } => pure_write_sources(*rd, vec![]),
+            X86Instruction::Movzx { rs, .. } | X86Instruction::Movsx { rs, .. } => vec![*rs],
             X86Instruction::AddReg { rd, rs }
             | X86Instruction::SubReg { rd, rs }
             | X86Instruction::AndReg { rd, rs }
@@ -491,11 +722,13 @@ impl X86Instruction {
             // IMUL rd, rs is destructive (`rd = rd * rs`), so rd is read too.
             | X86Instruction::ImulReg { rd, rs }
             | X86Instruction::XorReg { rd, rs } => vec![*rd, *rs],
-            // IMUL rd, rs, imm writes rd purely from `rs * imm`; rd is NOT read.
-            X86Instruction::ImulRegImm { rs, .. } => vec![*rs],
-            // LEA writes rd purely from `base + disp`; rd is NOT read (it is
-            // non-destructive, like MovReg). Only `base` is a source.
-            X86Instruction::Lea { base, .. } => vec![*base],
+            // At native/dword width these write rd purely from the explicit
+            // sources. A word destination also reads rd to preserve the
+            // surrounding canonical-register bits.
+            X86Instruction::ImulRegImm { rd, rs, .. } => {
+                pure_write_sources(*rd, vec![*rs])
+            }
+            X86Instruction::Lea { rd, base, .. } => pure_write_sources(*rd, vec![*base]),
             X86Instruction::AddImm { rd, .. }
             | X86Instruction::SubImm { rd, .. }
             | X86Instruction::AndImm { rd, .. }
@@ -522,8 +755,11 @@ impl X86Instruction {
             | X86Instruction::Dec { rd } => vec![*rd],
             // Cmov reads both rd (kept on false branch) and rs.
             X86Instruction::Cmov { rd, rs, .. } => vec![*rd, *rs],
+            // SETcc reads only EFLAGS and fully overwrites rd in the interim IR.
+            X86Instruction::Setcc { .. } => vec![],
             X86Instruction::Jcc { .. } => vec![],
-        }
+        };
+        operands.into_iter().map(X86Register::canonical).collect()
     }
 
     /// Whether this instruction transfers control out of the
@@ -576,11 +812,14 @@ impl InstructionType for X86Instruction {
             X86Instruction::ImulReg { .. } => 25,
             X86Instruction::ImulRegImm { .. } => 26,
             X86Instruction::Lea { .. } => 27,
-            // Cmov MUST stay the last rewritable opcode (COUNT - 1 == 28):
-            // the CMOV distinct-register draw at both generation sites is
-            // gated on `opcode == X86_REWRITABLE_OPCODE_COUNT - 1`.
-            X86Instruction::Cmov { .. } => 28,
-            X86Instruction::Jcc { .. } => 29,
+            X86Instruction::Movzx { .. } => 28,
+            X86Instruction::Movsx { .. } => 29,
+            // The CMOV distinct-register draw at both generation sites is gated
+            // on `opcode == X86_CMOV_OPCODE`, so CMOV need not be positioned
+            // last; SETcc follows it as the final rewritable opcode.
+            X86Instruction::Cmov { .. } => 30,
+            X86Instruction::Setcc { .. } => 31,
+            X86Instruction::Jcc { .. } => 32,
         }
     }
 
@@ -589,8 +828,9 @@ impl InstructionType for X86Instruction {
     }
 
     fn has_side_effects(&self) -> bool {
-        // MOV / NOT / LEA / CMOV / Jcc do not write EFLAGS (CMOV and Jcc read
-        // them, but reading is not a side effect on observable state; NOT
+        // MOV / NOT / LEA / SETcc / CMOV / Jcc do not write EFLAGS (the
+        // conditional families read them, but reading is not a side effect on
+        // observable state; NOT
         // is bitwise complement and leaves EFLAGS untouched, exactly like
         // MOV; LEA is pure address arithmetic that writes only its destination
         // register). Every other variant — including NEG — sets or clobbers
@@ -599,9 +839,12 @@ impl InstructionType for X86Instruction {
             self,
             X86Instruction::MovReg { .. }
                 | X86Instruction::MovImm { .. }
+                | X86Instruction::Movzx { .. }
+                | X86Instruction::Movsx { .. }
                 | X86Instruction::Not { .. }
                 | X86Instruction::Lea { .. }
                 | X86Instruction::Cmov { .. }
+                | X86Instruction::Setcc { .. }
                 | X86Instruction::Jcc { .. }
         )
     }
@@ -619,6 +862,19 @@ impl fmt::Display for X86Instruction {
             // IMUL rd, rs renders like the other two-register forms.
             | X86Instruction::ImulReg { rd, rs }
             | X86Instruction::XorReg { rd, rs } => write!(f, "{} {}, {}", mn, rd, rs),
+            X86Instruction::Movzx {
+                rd,
+                rs,
+                src_width,
+            }
+            | X86Instruction::Movsx {
+                rd,
+                rs,
+                src_width,
+            } => {
+                let source = rs.mnemonic_for_width(*src_width).ok_or(fmt::Error)?;
+                write!(f, "{} {}, {}", mn, rd, source)
+            }
             // The 3-operand IMUL renders `imul rd, rs, imm`.
             X86Instruction::ImulRegImm { rd, rs, imm } => write!(f, "{} {}, {}, {}", mn, rd, rs, imm),
             // LEA renders its memory operand in Intel bracket syntax. A zero
@@ -657,6 +913,7 @@ impl fmt::Display for X86Instruction {
             | X86Instruction::Inc { rd }
             | X86Instruction::Dec { rd } => write!(f, "{} {}", mn, rd),
             X86Instruction::Cmov { rd, rs, .. } => write!(f, "{} {}, {}", mn, rd, rs),
+            X86Instruction::Setcc { rd, .. } => write!(f, "{} {}", mn, rd),
             // Target is opaque to the IR; render with a placeholder.
             X86Instruction::Jcc { .. } => write!(f, "{} <target>", mn),
         }
@@ -736,10 +993,10 @@ impl ISA for X86_32 {
 }
 
 /// Helper used by both `FlagsAnalysis<X86Instruction> for X86_64` and
-/// `for X86_32`. MOV / NOT / LEA / CMOV / Jcc do not write EFLAGS — CMOV and
-/// Jcc read them via `x86_reads_flags` but do not modify any flag bit; LEA is
-/// pure address arithmetic. Every other variant in the current set writes
-/// EFLAGS.
+/// `for X86_32`. MOV / MOVZX / MOVSX / NOT / LEA / SETcc / CMOV / Jcc do not
+/// write EFLAGS — the conditional families (SETcc, CMOV, Jcc) read them via
+/// `x86_reads_flags` but do not modify any flag bit; LEA is pure address
+/// arithmetic. Every other variant in the current set writes EFLAGS.
 ///
 /// Crate-visible so the cost model's critical-path latency
 /// (`crate::semantics::cost_x86::critical_path_latency`) can route flag
@@ -750,21 +1007,23 @@ pub(crate) fn x86_modifies_flags(instr: &X86Instruction) -> bool {
         instr,
         X86Instruction::MovReg { .. }
             | X86Instruction::MovImm { .. }
+            | X86Instruction::Movzx { .. }
+            | X86Instruction::Movsx { .. }
             | X86Instruction::Not { .. }
             | X86Instruction::Lea { .. }
             | X86Instruction::Cmov { .. }
+            | X86Instruction::Setcc { .. }
             | X86Instruction::Jcc { .. }
     )
 }
 
-/// CMOV and Jcc read EFLAGS; every other variant in the current set
-/// is flag-agnostic on the read side. Crate-visible so search and
-/// equivalence callers can route through one authoritative match arm —
-/// adding a future flag-reader like SETcc then updates exactly one place.
+/// SETcc, CMOV, and Jcc read EFLAGS; every other variant in the current set
+/// is flag-agnostic on the read side. Public so search and equivalence callers
+/// can route through one authoritative match arm.
 pub fn x86_reads_flags(instr: &X86Instruction) -> bool {
     matches!(
         instr,
-        X86Instruction::Cmov { .. } | X86Instruction::Jcc { .. }
+        X86Instruction::Cmov { .. } | X86Instruction::Setcc { .. } | X86Instruction::Jcc { .. }
     )
 }
 
@@ -784,6 +1043,50 @@ fn x86_imm32_bitpattern_ok(imm: i64) -> bool {
     x86_signed_imm32_ok(imm) || u32::try_from(imm).is_ok()
 }
 
+fn x86_imm16_bitpattern_ok(imm: i64) -> bool {
+    i16::try_from(imm).is_ok() || u16::try_from(imm).is_ok()
+}
+
+fn x86_imm8_bitpattern_ok(imm: i64) -> bool {
+    i8::try_from(imm).is_ok() || u8::try_from(imm).is_ok()
+}
+
+fn x86_register_ok(reg: X86Register, mode_width: u32) -> bool {
+    reg.index().is_some_and(|index| {
+        index < if mode_width == 32 { 8 } else { 16 }
+            && !(mode_width == 32 && reg.view() == X86RegisterView::LowByte && index >= 4)
+    })
+}
+
+fn x86_register_pair_ok(lhs: X86Register, rhs: X86Register, mode_width: u32) -> bool {
+    x86_register_ok(lhs, mode_width)
+        && x86_register_ok(rhs, mode_width)
+        && lhs.effective_width(mode_width) == rhs.effective_width(mode_width)
+        && (!(lhs.is_high_byte() || rhs.is_high_byte())
+            || (lhs.index().is_some_and(|index| index < 4)
+                && rhs.index().is_some_and(|index| index < 4)))
+}
+
+fn x86_operand_immediate_ok(reg: X86Register, imm: i64, mode_width: u32) -> bool {
+    match reg.effective_width(mode_width) {
+        64 => x86_signed_imm32_ok(imm),
+        32 => x86_imm32_bitpattern_ok(imm),
+        16 => x86_imm16_bitpattern_ok(imm),
+        8 => x86_imm8_bitpattern_ok(imm),
+        _ => false,
+    }
+}
+
+fn x86_mov_operand_immediate_ok(reg: X86Register, imm: i64, mode_width: u32) -> bool {
+    match reg.effective_width(mode_width) {
+        64 => true,
+        32 => x86_imm32_bitpattern_ok(imm),
+        16 => x86_imm16_bitpattern_ok(imm),
+        8 => x86_imm8_bitpattern_ok(imm),
+        _ => false,
+    }
+}
+
 fn x86_mov_imm_ok(mode: crate::assembler::x86::X86Mode, imm: i64) -> bool {
     match mode {
         crate::assembler::x86::X86Mode::Mode64 => true,
@@ -795,6 +1098,23 @@ fn x86_non_mov_imm_ok(mode: crate::assembler::x86::X86Mode, imm: i64) -> bool {
     match mode {
         crate::assembler::x86::X86Mode::Mode64 => x86_signed_imm32_ok(imm),
         crate::assembler::x86::X86Mode::Mode32 => x86_imm32_bitpattern_ok(imm),
+    }
+}
+
+fn x86_extension_source_ok(
+    mode: crate::assembler::x86::X86Mode,
+    reg: X86Register,
+    src_width: u32,
+) -> bool {
+    if !reg.is_native() || !matches!(src_width, 8 | 16) {
+        return false;
+    }
+    let Some(index) = reg.index() else {
+        return false;
+    };
+    match mode {
+        crate::assembler::x86::X86Mode::Mode64 => true,
+        crate::assembler::x86::X86Mode::Mode32 => index < 8 && (src_width == 16 || index < 4),
     }
 }
 
@@ -951,50 +1271,88 @@ impl crate::isa::traits::CostModel<X86Instruction> for X86_32 {
     }
 }
 
+fn x86_can_assemble_instruction(instruction: &X86Instruction, mode_width: u32) -> bool {
+    match instruction {
+        X86Instruction::MovReg { rd, rs }
+        | X86Instruction::AddReg { rd, rs }
+        | X86Instruction::SubReg { rd, rs }
+        | X86Instruction::AndReg { rd, rs }
+        | X86Instruction::OrReg { rd, rs }
+        | X86Instruction::XorReg { rd, rs } => x86_register_pair_ok(*rd, *rs, mode_width),
+        X86Instruction::Movzx { rd, rs, src_width }
+        | X86Instruction::Movsx { rd, rs, src_width } => {
+            let mode = if mode_width == 64 {
+                crate::assembler::x86::X86Mode::Mode64
+            } else {
+                crate::assembler::x86::X86Mode::Mode32
+            };
+            rd.is_native()
+                && x86_register_ok(*rd, mode_width)
+                && x86_extension_source_ok(mode, *rs, *src_width)
+        }
+        X86Instruction::CmpReg { rn, rs } | X86Instruction::TestReg { rn, rs } => {
+            x86_register_pair_ok(*rn, *rs, mode_width)
+        }
+        X86Instruction::ImulReg { rd, rs } => {
+            x86_register_pair_ok(*rd, *rs, mode_width) && !rd.is_byte()
+        }
+        X86Instruction::ImulRegImm { rd, rs, imm } => {
+            x86_register_pair_ok(*rd, *rs, mode_width)
+                && !rd.is_byte()
+                && x86_operand_immediate_ok(*rd, *imm, mode_width)
+        }
+        X86Instruction::Lea { rd, base, disp } => {
+            x86_register_ok(*rd, mode_width)
+                && !rd.is_byte()
+                && x86_register_ok(*base, mode_width)
+                && base.effective_width(mode_width) == mode_width
+                && x86_signed_imm32_ok(*disp)
+        }
+        X86Instruction::MovImm { rd, imm } => {
+            x86_register_ok(*rd, mode_width) && x86_mov_operand_immediate_ok(*rd, *imm, mode_width)
+        }
+        X86Instruction::AddImm { rd, imm }
+        | X86Instruction::SubImm { rd, imm }
+        | X86Instruction::AndImm { rd, imm }
+        | X86Instruction::OrImm { rd, imm }
+        | X86Instruction::XorImm { rd, imm } => {
+            x86_register_ok(*rd, mode_width) && x86_operand_immediate_ok(*rd, *imm, mode_width)
+        }
+        X86Instruction::CmpImm { rn, imm } | X86Instruction::TestImm { rn, imm } => {
+            x86_register_ok(*rn, mode_width) && x86_operand_immediate_ok(*rn, *imm, mode_width)
+        }
+        X86Instruction::Shl { rd, imm }
+        | X86Instruction::Shr { rd, imm }
+        | X86Instruction::Sar { rd, imm }
+        | X86Instruction::Rol { rd, imm }
+        | X86Instruction::Ror { rd, imm } => {
+            x86_register_ok(*rd, mode_width) && x86_shift_count_imm8_ok(*imm)
+        }
+        X86Instruction::Neg { rd }
+        | X86Instruction::Not { rd }
+        | X86Instruction::Inc { rd }
+        | X86Instruction::Dec { rd } => x86_register_ok(*rd, mode_width),
+        X86Instruction::Cmov { rd, rs, .. } => {
+            x86_register_pair_ok(*rd, *rs, mode_width) && !rd.is_byte()
+        }
+        // SETcc is a full-width pseudo-op. In x86-32 only EAX..EBX
+        // (slots 0..=3) name a low byte without a REX prefix, so restrict the
+        // native destination there.
+        X86Instruction::Setcc { rd, .. } => {
+            rd.view() == X86RegisterView::Native
+                && (mode_width == 64 || rd.index().is_some_and(|index| index < 4))
+        }
+        X86Instruction::Jcc { .. } => true,
+    }
+}
+
 impl crate::isa::traits::Assembler<X86Instruction> for X86_64 {
     fn assemble(&mut self, instructions: &[X86Instruction]) -> Result<Vec<u8>, String> {
         crate::assembler::x86::X86Assembler::new_64().assemble_instructions(instructions)
     }
 
     fn can_assemble(&self, instruction: &X86Instruction) -> bool {
-        match instruction {
-            X86Instruction::AddImm { imm, .. }
-            | X86Instruction::SubImm { imm, .. }
-            | X86Instruction::AndImm { imm, .. }
-            | X86Instruction::OrImm { imm, .. }
-            | X86Instruction::XorImm { imm, .. }
-            | X86Instruction::CmpImm { imm, .. }
-            // The 3-operand IMUL immediate encodes as imm32 (`69 /r id`).
-            | X86Instruction::ImulRegImm { imm, .. }
-            // LEA's displacement encodes as a signed disp32 in the ModRM/SIB.
-            | X86Instruction::Lea { disp: imm, .. }
-            | X86Instruction::TestImm { imm, .. } => x86_signed_imm32_ok(*imm),
-            // SHL / SHR / SAR / ROL / ROR encode their count as imm8: reject any
-            // count that does not fit a single byte so the search never proposes
-            // an unencodable shift or rotate.
-            X86Instruction::Shl { imm, .. }
-            | X86Instruction::Shr { imm, .. }
-            | X86Instruction::Sar { imm, .. }
-            | X86Instruction::Rol { imm, .. }
-            | X86Instruction::Ror { imm, .. } => x86_shift_count_imm8_ok(*imm),
-            X86Instruction::MovReg { .. }
-            | X86Instruction::MovImm { .. }
-            | X86Instruction::AddReg { .. }
-            | X86Instruction::SubReg { .. }
-            | X86Instruction::AndReg { .. }
-            | X86Instruction::OrReg { .. }
-            | X86Instruction::XorReg { .. }
-            | X86Instruction::CmpReg { .. }
-            | X86Instruction::TestReg { .. }
-            | X86Instruction::Neg { .. }
-            | X86Instruction::Not { .. }
-            | X86Instruction::Inc { .. }
-            | X86Instruction::Dec { .. }
-            // IMUL rd, rs is `0F AF /r` — always encodable.
-            | X86Instruction::ImulReg { .. }
-            | X86Instruction::Cmov { .. }
-            | X86Instruction::Jcc { .. } => true,
-        }
+        x86_can_assemble_instruction(instruction, 64)
     }
 }
 
@@ -1004,55 +1362,7 @@ impl crate::isa::traits::Assembler<X86Instruction> for X86_32 {
     }
 
     fn can_assemble(&self, instruction: &X86Instruction) -> bool {
-        // In 32-bit mode, R8..R15 are illegal. The x86 assembler's reg_index_32
-        // rejects them; reproduce the same check here so trait dispatch can
-        // pre-filter sequences before invoking the heavier assemble path.
-        fn reg_ok_32(r: X86Register) -> bool {
-            r.index().is_some_and(|i| i < 8)
-        }
-        match instruction {
-            X86Instruction::MovReg { rd, rs }
-            | X86Instruction::AddReg { rd, rs }
-            | X86Instruction::SubReg { rd, rs }
-            | X86Instruction::AndReg { rd, rs }
-            | X86Instruction::OrReg { rd, rs }
-            // IMUL rd, rs: both registers must be low-8 in 32-bit mode.
-            | X86Instruction::ImulReg { rd, rs }
-            | X86Instruction::XorReg { rd, rs } => reg_ok_32(*rd) && reg_ok_32(*rs),
-            // IMUL rd, rs, imm: low-8 registers plus an imm32 immediate.
-            X86Instruction::ImulRegImm { rd, rs, imm } => {
-                reg_ok_32(*rd) && reg_ok_32(*rs) && x86_signed_imm32_ok(*imm)
-            }
-            // LEA rd, [base + disp]: low-8 registers plus a signed disp32.
-            X86Instruction::Lea { rd, base, disp } => {
-                reg_ok_32(*rd) && reg_ok_32(*base) && x86_signed_imm32_ok(*disp)
-            }
-            X86Instruction::MovImm { rd, imm }
-            | X86Instruction::AddImm { rd, imm }
-            | X86Instruction::SubImm { rd, imm }
-            | X86Instruction::AndImm { rd, imm }
-            | X86Instruction::OrImm { rd, imm }
-            | X86Instruction::XorImm { rd, imm } => reg_ok_32(*rd) && x86_imm32_bitpattern_ok(*imm),
-            X86Instruction::CmpReg { rn, rs } | X86Instruction::TestReg { rn, rs } => {
-                reg_ok_32(*rn) && reg_ok_32(*rs)
-            }
-            X86Instruction::CmpImm { rn, imm } | X86Instruction::TestImm { rn, imm } => {
-                reg_ok_32(*rn) && x86_imm32_bitpattern_ok(*imm)
-            }
-            // SHL / SHR / SAR / ROL / ROR: legal 32-bit register plus an imm8
-            // count.
-            X86Instruction::Shl { rd, imm }
-            | X86Instruction::Shr { rd, imm }
-            | X86Instruction::Sar { rd, imm }
-            | X86Instruction::Rol { rd, imm }
-            | X86Instruction::Ror { rd, imm } => reg_ok_32(*rd) && x86_shift_count_imm8_ok(*imm),
-            X86Instruction::Neg { rd }
-            | X86Instruction::Not { rd }
-            | X86Instruction::Inc { rd }
-            | X86Instruction::Dec { rd } => reg_ok_32(*rd),
-            X86Instruction::Cmov { rd, rs, .. } => reg_ok_32(*rd) && reg_ok_32(*rs),
-            X86Instruction::Jcc { .. } => true,
-        }
+        x86_can_assemble_instruction(instruction, 32)
     }
 }
 
@@ -1096,10 +1406,7 @@ impl X86Mutator {
     ) -> Self {
         let registers = registers
             .into_iter()
-            .filter(|r| {
-                mode != crate::assembler::x86::X86Mode::Mode32
-                    || matches!(r.index(), Some(i) if i < 8)
-            })
+            .filter(|r| r.is_available_in(mode))
             .collect();
         let mov_immediates = immediates
             .iter()
@@ -1188,32 +1495,54 @@ impl X86Mutator {
         X86Condition::ALL[rng.random_range(0..X86Condition::ALL.len())]
     }
 
+    fn pick_extension_width<R: rand::RngExt>(&self, rng: &mut R) -> u32 {
+        if rng.random_bool(0.5) { 8 } else { 16 }
+    }
+
+    fn pick_extension_source<R: rand::RngExt>(
+        &self,
+        rng: &mut R,
+        src_width: u32,
+    ) -> Option<X86Register> {
+        let available = self
+            .registers
+            .iter()
+            .copied()
+            .filter(|&reg| x86_extension_source_ok(self.mode, reg, src_width))
+            .collect::<Vec<_>>();
+        if available.is_empty() {
+            None
+        } else {
+            Some(available[rng.random_range(0..available.len())])
+        }
+    }
+
     fn random_instruction<R: rand::RngExt>(&self, rng: &mut R) -> Option<X86Instruction> {
         if self.registers.is_empty() {
             return None;
         }
-        // Rewritable variants only: 7 reg-reg + 7 reg-imm + CMOVcc.
+        // Rewritable variants only, including CMOVcc, SETcc, and the two
+        // width-changing move families (MOVZX/MOVSX). Source width is drawn
+        // unconditionally to keep the shared generator's RNG stream in
+        // lock-step.
         // The RNG draw order/count MUST stay in lock-step with the shared
         // free helper `generate_random_rewritable_x86_instruction`
-        // (opcode → rd → rs → imm → cond, all four drawn unconditionally)
+        // (opcode → rd → rs → imm → cond → src_width, all six drawn
+        // unconditionally)
         // so callers that interleave the two stay deterministic. Two
-        // helper behaviours must be mirrored exactly: (1) the trailing
-        // CMOV opcode slot is dropped unless the pool holds a distinct
+        // helper behaviours must be mirrored exactly: (1) the
+        // CMOV opcode slot is skipped unless the pool holds a distinct
         // register pair (a self-CMOV is a no-op), and (2) CMOV draws its
         // source via an extra `pick_register_except` so `rs != rd`. The
         // #593 behaviour change is *which* prefiltered pool the single imm
         // draw indexes: opcode 1 (MOV) uses the MOVABS-capable `mov`
         // pool, every other imm form uses the non-MOV pool.
-        // CMOV with rd == rs is a no-op, so the trailing CMOV opcode slot is
-        // only offered when the pool holds a distinct pair. This MUST mirror
+        // CMOV with rd == rs is a no-op, so its opcode slot is only offered
+        // when the pool holds a distinct pair. This MUST mirror
         // `generate_random_rewritable_x86_instruction` so the two stay in
         // lock-step (stream parity) while both filter self-CMOV.
-        let opcode_count = if has_distinct_register_pair(&self.registers) {
-            X86_REWRITABLE_OPCODE_COUNT
-        } else {
-            X86_REWRITABLE_OPCODE_COUNT - 1
-        };
-        let opcode = rng.random_range(0..u32::from(opcode_count));
+        let opcode =
+            pick_random_rewritable_opcode(rng, has_distinct_register_pair(&self.registers));
         let rd = self.pick_register(rng)?;
         let rs = self.pick_register(rng)?;
         let imm = if opcode == 1 {
@@ -1222,21 +1551,29 @@ impl X86Mutator {
             self.pick_non_mov_immediate(rng)
         };
         let cond = X86Condition::ALL[rng.random_range(0..X86Condition::ALL.len())];
+        let mut src_width = self.pick_extension_width(rng);
         // The CMOV slot resolves a distinct source register via an extra
         // `pick_register_except` draw; every other opcode reuses the `rs`
         // drawn above. This extra draw MUST stay conditional on the CMOV
         // opcode to preserve the RNG stream that the parity test
         // `x86_mutator_random_instruction_matches_shared_generator_stream`
         // pins against `generate_random_rewritable_x86_instruction`.
-        let opcode = u8::try_from(opcode).expect("opcode index fits in u8");
-        let final_rs = if opcode == X86_REWRITABLE_OPCODE_COUNT - 1 {
+        let mut final_rs = if opcode == X86_CMOV_OPCODE {
             pick_register_except(rng, &self.registers, rd)
                 .expect("CMOV opcode requires a distinct register pair")
         } else {
             rs
         };
+        if matches!(opcode, 28 | 29) && !x86_extension_source_ok(self.mode, final_rs, src_width) {
+            if let Some(encodable) = self.pick_extension_source(rng, src_width) {
+                final_rs = encodable;
+            } else {
+                src_width = 16;
+                final_rs = self.pick_extension_source(rng, src_width)?;
+            }
+        }
         Some(build_x86_instruction_by_opcode(
-            opcode, rd, final_rs, imm, cond,
+            opcode, rd, final_rs, imm, cond, src_width,
         ))
     }
 
@@ -1268,6 +1605,8 @@ impl X86Mutator {
                 | X86Instruction::Rol { imm, .. }
                 | X86Instruction::Ror { imm, .. } => *imm = self.pick_shift_count(rng),
                 X86Instruction::MovReg { .. }
+                | X86Instruction::Movzx { .. }
+                | X86Instruction::Movsx { .. }
                 | X86Instruction::AddReg { .. }
                 | X86Instruction::SubReg { .. }
                 | X86Instruction::AndReg { .. }
@@ -1282,7 +1621,8 @@ impl X86Mutator {
                 // IMUL rd, rs has no immediate, so it is a no-op with no pool.
                 | X86Instruction::ImulReg { .. }
                 | X86Instruction::Jcc { .. } => {}
-                X86Instruction::Cmov { cond, .. } => *cond = self.pick_condition(rng),
+                X86Instruction::Cmov { cond, .. }
+                | X86Instruction::Setcc { cond, .. } => *cond = self.pick_condition(rng),
             }
             return;
         }
@@ -1294,6 +1634,32 @@ impl X86Mutator {
                     *rs = self.pick_register(rng).expect("register pool is non-empty");
                 }
             }
+            X86Instruction::Movzx {
+                rd,
+                rs,
+                src_width,
+            }
+            | X86Instruction::Movsx {
+                rd,
+                rs,
+                src_width,
+            } => match rng.random_range(0..3u32) {
+                0 => *rd = self.pick_register(rng).expect("register pool is non-empty"),
+                1 => {
+                    if let Some(new_rs) = self.pick_extension_source(rng, *src_width) {
+                        *rs = new_rs;
+                    }
+                }
+                _ => {
+                    let new_width = self.pick_extension_width(rng);
+                    if x86_extension_source_ok(self.mode, *rs, new_width) {
+                        *src_width = new_width;
+                    } else if let Some(new_rs) = self.pick_extension_source(rng, new_width) {
+                        *src_width = new_width;
+                        *rs = new_rs;
+                    }
+                }
+            },
             X86Instruction::MovImm { rd, imm } => {
                 if rng.random_bool(0.5) {
                     *rd = self.pick_register(rng).expect("register pool is non-empty");
@@ -1384,6 +1750,13 @@ impl X86Mutator {
                     _ => *cond = self.pick_condition(rng),
                 }
             }
+            X86Instruction::Setcc { rd, cond } => {
+                if rng.random_bool(0.5) {
+                    *rd = self.pick_register(rng).expect("register pool is non-empty");
+                } else {
+                    *cond = self.pick_condition(rng);
+                }
+            }
             // Jcc is a terminator; mutation never reaches it because the
             // search pool excludes terminators. Keep the arm as a no-op
             // so an accidental call doesn't panic.
@@ -1470,6 +1843,14 @@ impl X86Mutator {
                 Some(rs) => X86Instruction::TestReg { rn, rs },
                 None => current,
             },
+            X86Instruction::Movzx { rd, rs, src_width }
+            | X86Instruction::Movsx { rd, rs, src_width } => {
+                if rng.random_bool(0.5) {
+                    X86Instruction::Movzx { rd, rs, src_width }
+                } else {
+                    X86Instruction::Movsx { rd, rs, src_width }
+                }
+            }
             // NEG / NOT / INC / DEC share the single-operand (rd-only) shape,
             // so the opcode-bridge mutation swaps among the four. Like the
             // reg-reg / reg-imm groups (and unlike the guaranteed-change
@@ -1526,6 +1907,8 @@ impl X86Mutator {
             // Cmov has a unique shape (rd, rs, cond) with no opcode-shape
             // siblings; keep it unchanged in the opcode-bridge mutator.
             X86Instruction::Cmov { .. } => current,
+            // Setcc has a unique (rd, cond) shape.
+            X86Instruction::Setcc { .. } => current,
             // Jcc is a terminator and should never reach mutation; preserve it.
             X86Instruction::Jcc { .. } => current,
         };
@@ -1595,19 +1978,17 @@ pub struct X86InstructionGenerator;
 
 // One entry per rewritable opcode family: 6 reg-reg + 6 reg-imm + CMP + TEST
 // (each reg/imm) + NEG + NOT + INC + DEC + SHL + SHR + SAR + ROL + ROR +
-// IMUL (2-op) + IMUL (3-op) + CMOVcc. CMOVcc counts as a single family here
-// even though `generate_all` expands it across all 16 `X86Condition::ALL`
-// variants per register pair.
+// IMUL (2-op) + IMUL (3-op) + LEA + MOVZX + MOVSX + CMOVcc + SETcc. MOVZX/MOVSX
+// each expand across their 8- and 16-bit source widths; the conditional
+// families (CMOVcc, SETcc) each count as one opcode here even though
+// `generate_all` expands all 16 `X86Condition::ALL` variants.
 //
-// CMOV MUST remain the LAST opcode (index COUNT - 1 == 28): both
-// `X86Mutator::random_instruction` and
-// `generate_random_rewritable_x86_instruction` gate the extra distinct-source
-// CMOV draw on `opcode == X86_REWRITABLE_OPCODE_COUNT - 1`. New flag-only
-// families (CMP, TEST), single-operand families (NEG, NOT, INC, DEC), the
-// immediate-count shift families (SHL, SHR, SAR), the immediate-count
-// rotate families (ROL, ROR), the two IMUL forms, and LEA are inserted before
-// CMOV in `build_x86_instruction_by_opcode` to preserve that invariant.
-const X86_REWRITABLE_OPCODE_COUNT: u8 = 29;
+// The extra distinct-source CMOV draw at both `X86Mutator::random_instruction`
+// and `generate_random_rewritable_x86_instruction` is gated on
+// `opcode == X86_CMOV_OPCODE`, so CMOV is position-independent and need not be
+// the last opcode; SETcc follows it as the final rewritable opcode.
+const X86_REWRITABLE_OPCODE_COUNT: u8 = 32;
+const X86_CMOV_OPCODE: u8 = 30;
 
 fn has_distinct_register_pair(registers: &[X86Register]) -> bool {
     let Some(first) = registers.first() else {
@@ -1616,15 +1997,28 @@ fn has_distinct_register_pair(registers: &[X86Register]) -> bool {
     registers.iter().any(|reg| reg != first)
 }
 
+/// Draw a rewritable opcode, omitting CMOV when no distinct register pair can
+/// represent its non-no-op shape. SETcc follows CMOV in the opcode table, so a
+/// degenerate pool skips the CMOV hole rather than dropping the final opcode.
+fn pick_random_rewritable_opcode<R: Rng + ?Sized>(rng: &mut R, cmov_available: bool) -> u8 {
+    if cmov_available {
+        return rng.random_range(0..X86_REWRITABLE_OPCODE_COUNT);
+    }
+    let mut opcode = rng.random_range(0..(X86_REWRITABLE_OPCODE_COUNT - 1));
+    if opcode >= X86_CMOV_OPCODE {
+        opcode += 1;
+    }
+    opcode
+}
+
 /// Maps a rewritable opcode index in `0..X86_REWRITABLE_OPCODE_COUNT` to the
 /// `X86Instruction` variant it denotes, using operands the caller has already
 /// drawn. This is the single source of truth for the opcode → variant table;
 /// `X86Mutator::random_instruction` and
 /// `generate_random_rewritable_x86_instruction` both delegate here so the two
 /// dispatch tables cannot drift (see issue #348). Operand drawing and RNG draw
-/// order stay at the call sites; the CMOV slot (the last index,
-/// `X86_REWRITABLE_OPCODE_COUNT - 1`) consumes the `rs` the caller resolved
-/// via `pick_register_except` so `rs != rd`.
+/// order stay at the call sites; the CMOV slot consumes the `rs` the caller
+/// resolved via `pick_register_except` so `rs != rd`.
 ///
 /// Keep this in lock-step with `X86_REWRITABLE_OPCODE_COUNT` and the
 /// `opcode_dispatch_is_consistent` test, which pins the full mapping.
@@ -1634,6 +2028,7 @@ pub(crate) fn build_x86_instruction_by_opcode(
     rs: X86Register,
     imm: i64,
     cond: X86Condition,
+    src_width: u32,
 ) -> X86Instruction {
     match opcode {
         0 => X86Instruction::MovReg { rd, rs },
@@ -1683,9 +2078,12 @@ pub(crate) fn build_x86_instruction_by_opcode(
             base: rs,
             disp: imm,
         },
-        // Cmov stays last (index 28 == X86_REWRITABLE_OPCODE_COUNT - 1) so the
-        // CMOV distinct-register draw at the two generation sites stays correct.
-        28 => X86Instruction::Cmov { rd, rs, cond },
+        28 => X86Instruction::Movzx { rd, rs, src_width },
+        29 => X86Instruction::Movsx { rd, rs, src_width },
+        // CMOV consumes the distinct `rs` the caller resolved via
+        // `pick_register_except` (gated on `opcode == X86_CMOV_OPCODE`).
+        30 => X86Instruction::Cmov { rd, rs, cond },
+        31 => X86Instruction::Setcc { rd, cond },
         _ => unreachable!("opcode out of range"),
     }
 }
@@ -1721,30 +2119,24 @@ fn generate_random_rewritable_x86_instruction<R: Rng + ?Sized>(
         "x86 random instruction generation requires an immediate pool"
     );
 
-    // CMOVcc with rd == rs is a no-op, so it is only a candidate when the
-    // register pool holds two distinct registers. Drop the trailing CMOV
-    // opcode slot when no distinct pair exists.
-    let opcode_count = if has_distinct_register_pair(registers) {
-        X86_REWRITABLE_OPCODE_COUNT
-    } else {
-        X86_REWRITABLE_OPCODE_COUNT - 1
-    };
-    let opcode = rng.random_range(0..u32::from(opcode_count));
+    // CMOVcc with rd == rs is a no-op, so its opcode is only a candidate when
+    // the register pool holds two distinct registers.
+    let opcode = pick_random_rewritable_opcode(rng, has_distinct_register_pair(registers));
     let rd = registers[rng.random_range(0..registers.len())];
     let rs = registers[rng.random_range(0..registers.len())];
     let imm = immediates[rng.random_range(0..immediates.len())];
     let cond = X86Condition::ALL[rng.random_range(0..X86Condition::ALL.len())];
+    let src_width = if rng.random_bool(0.5) { 8 } else { 16 };
     // Mirror `X86Mutator::random_instruction`: the CMOV slot draws a distinct
     // source register; every other opcode reuses `rs`. Keep this draw
     // conditional on the CMOV opcode so both paths share one RNG stream.
-    let opcode = u8::try_from(opcode).expect("opcode index fits in u8");
-    let final_rs = if opcode == X86_REWRITABLE_OPCODE_COUNT - 1 {
+    let final_rs = if opcode == X86_CMOV_OPCODE {
         pick_register_except(rng, registers, rd)
             .expect("CMOV opcode requires a distinct register pair")
     } else {
         rs
     };
-    build_x86_instruction_by_opcode(opcode, rd, final_rs, imm, cond)
+    build_x86_instruction_by_opcode(opcode, rd, final_rs, imm, cond, src_width)
 }
 
 /// Default register pool for x86 stochastic / symbolic search.
@@ -1778,6 +2170,9 @@ impl InstructionGenerator<X86Instruction> for X86InstructionGenerator {
         // Register-register variants (8 data mnemonics).
         for &rd in registers {
             for &rs in registers {
+                if !x86_register_pair_ok(rd, rs, 64) {
+                    continue;
+                }
                 out.push(X86Instruction::MovReg { rd, rs });
                 out.push(X86Instruction::AddReg { rd, rs });
                 out.push(X86Instruction::SubReg { rd, rs });
@@ -1786,19 +2181,27 @@ impl InstructionGenerator<X86Instruction> for X86InstructionGenerator {
                 out.push(X86Instruction::XorReg { rd, rs });
                 out.push(X86Instruction::CmpReg { rn: rd, rs });
                 out.push(X86Instruction::TestReg { rn: rd, rs });
+                for src_width in [8, 16] {
+                    out.push(X86Instruction::Movzx { rd, rs, src_width });
+                    out.push(X86Instruction::Movsx { rd, rs, src_width });
+                }
             }
         }
         // Register-immediate variants (8 data mnemonics).
         for &rd in registers {
             for &imm in immediates {
-                out.push(X86Instruction::MovImm { rd, imm });
-                out.push(X86Instruction::AddImm { rd, imm });
-                out.push(X86Instruction::SubImm { rd, imm });
-                out.push(X86Instruction::AndImm { rd, imm });
-                out.push(X86Instruction::OrImm { rd, imm });
-                out.push(X86Instruction::XorImm { rd, imm });
-                out.push(X86Instruction::CmpImm { rn: rd, imm });
-                out.push(X86Instruction::TestImm { rn: rd, imm });
+                if x86_mov_operand_immediate_ok(rd, imm, 64) {
+                    out.push(X86Instruction::MovImm { rd, imm });
+                }
+                if x86_operand_immediate_ok(rd, imm, 64) {
+                    out.push(X86Instruction::AddImm { rd, imm });
+                    out.push(X86Instruction::SubImm { rd, imm });
+                    out.push(X86Instruction::AndImm { rd, imm });
+                    out.push(X86Instruction::OrImm { rd, imm });
+                    out.push(X86Instruction::XorImm { rd, imm });
+                    out.push(X86Instruction::CmpImm { rn: rd, imm });
+                    out.push(X86Instruction::TestImm { rn: rd, imm });
+                }
             }
         }
         // Single-operand variants (NEG, NOT, INC, DEC): one per register.
@@ -1837,6 +2240,9 @@ impl InstructionGenerator<X86Instruction> for X86InstructionGenerator {
         // including rd == rs (self-multiply is meaningful, unlike self-CMOV).
         for &rd in registers {
             for &rs in registers {
+                if !x86_register_pair_ok(rd, rs, 64) || rd.is_byte() {
+                    continue;
+                }
                 out.push(X86Instruction::ImulReg { rd, rs });
             }
         }
@@ -1845,8 +2251,11 @@ impl InstructionGenerator<X86Instruction> for X86InstructionGenerator {
         // here rather than emitted and later rejected by `can_assemble`.
         for &rd in registers {
             for &rs in registers {
+                if !x86_register_pair_ok(rd, rs, 64) || rd.is_byte() {
+                    continue;
+                }
                 for &imm in immediates {
-                    if i32::try_from(imm).is_err() {
+                    if !x86_operand_immediate_ok(rd, imm, 64) {
                         continue;
                     }
                     out.push(X86Instruction::ImulRegImm { rd, rs, imm });
@@ -1860,6 +2269,15 @@ impl InstructionGenerator<X86Instruction> for X86InstructionGenerator {
         // `can_assemble`.
         for &rd in registers {
             for &base in registers {
+                if rd.is_byte()
+                    || !matches!(
+                        base.view(),
+                        X86RegisterView::Native | X86RegisterView::Dword
+                    )
+                    || !x86_register_ok(rd, 64)
+                {
+                    continue;
+                }
                 for &disp in immediates {
                     if i32::try_from(disp).is_err() {
                         continue;
@@ -1868,12 +2286,18 @@ impl InstructionGenerator<X86Instruction> for X86InstructionGenerator {
                 }
             }
         }
-        // CMOVcc is rewritable and reads flags, so enumerate every
-        // condition for each non-identical register pair. Jcc remains
-        // excluded.
+        // SETcc is rewritable and reads flags, so enumerate every condition
+        // for every destination register.
+        for &rd in registers {
+            for &cond in &X86Condition::ALL {
+                out.push(X86Instruction::Setcc { rd, cond });
+            }
+        }
+        // CMOVcc is rewritable and reads flags, so enumerate every condition
+        // for each non-identical register pair. Jcc remains excluded.
         for &rd in registers {
             for &rs in registers {
-                if rd == rs {
+                if rd == rs || !x86_register_pair_ok(rd, rs, 64) || rd.is_byte() {
                     continue;
                 }
                 for &cond in &X86Condition::ALL {
@@ -1942,6 +2366,16 @@ fn with_destination(instr: X86Instruction, new_rd: X86Register) -> X86Instructio
     match instr {
         X86Instruction::MovReg { rs, .. } => X86Instruction::MovReg { rd: new_rd, rs },
         X86Instruction::MovImm { imm, .. } => X86Instruction::MovImm { rd: new_rd, imm },
+        X86Instruction::Movzx { rs, src_width, .. } => X86Instruction::Movzx {
+            rd: new_rd,
+            rs,
+            src_width,
+        },
+        X86Instruction::Movsx { rs, src_width, .. } => X86Instruction::Movsx {
+            rd: new_rd,
+            rs,
+            src_width,
+        },
         X86Instruction::AddReg { rs, .. } => X86Instruction::AddReg { rd: new_rd, rs },
         X86Instruction::AddImm { imm, .. } => X86Instruction::AddImm { rd: new_rd, imm },
         X86Instruction::SubReg { rs, .. } => X86Instruction::SubReg { rd: new_rd, rs },
@@ -1987,6 +2421,7 @@ fn with_destination(instr: X86Instruction, new_rd: X86Register) -> X86Instructio
             rs,
             cond,
         },
+        X86Instruction::Setcc { cond, .. } => X86Instruction::Setcc { rd: new_rd, cond },
         // Jcc has no register operand; ignore the requested rd swap.
         X86Instruction::Jcc { cond } => X86Instruction::Jcc { cond },
     }
@@ -1996,6 +2431,16 @@ fn with_sources(instr: X86Instruction, new_rs: X86Register, new_imm: i64) -> X86
     match instr {
         X86Instruction::MovReg { rd, .. } => X86Instruction::MovReg { rd, rs: new_rs },
         X86Instruction::MovImm { rd, .. } => X86Instruction::MovImm { rd, imm: new_imm },
+        X86Instruction::Movzx { rd, src_width, .. } => X86Instruction::Movzx {
+            rd,
+            rs: new_rs,
+            src_width,
+        },
+        X86Instruction::Movsx { rd, src_width, .. } => X86Instruction::Movsx {
+            rd,
+            rs: new_rs,
+            src_width,
+        },
         X86Instruction::AddReg { rd, .. } => X86Instruction::AddReg { rd, rs: new_rs },
         X86Instruction::AddImm { rd, .. } => X86Instruction::AddImm { rd, imm: new_imm },
         X86Instruction::SubReg { rd, .. } => X86Instruction::SubReg { rd, rs: new_rs },
@@ -2081,6 +2526,7 @@ fn with_sources(instr: X86Instruction, new_rs: X86Register, new_imm: i64) -> X86
             rs: if new_rs == rd { rs } else { new_rs },
             cond,
         },
+        X86Instruction::Setcc { rd, cond } => X86Instruction::Setcc { rd, cond },
         X86Instruction::Jcc { cond } => X86Instruction::Jcc { cond },
     }
 }
@@ -2139,12 +2585,15 @@ mod tests {
             .filter(|&&imm| i32::try_from(imm).is_ok())
             .count();
         let lea_m = imul_m;
-        // 8 reg-reg families + 8 reg-imm families + 4 single-operand families
+        // 8 reg-reg families + 4 extension forms (MOVZX/MOVSX × 8/16-bit
+        // source) + 8 reg-imm families + 4 single-operand families
         // (NEG, NOT, INC, DEC) + 3 shift families (SHL, SHR, SAR over imm8
         // counts) + 2 rotate families (ROL, ROR over imm8 counts) + IMUL 2-op
         // (every register pair) + IMUL 3-op (every (rd, rs, imm32) triple) +
-        // LEA (every (rd, base, disp32) triple) + CMOVcc over distinct pairs.
+        // LEA (every (rd, base, disp32) triple) + SETcc per register and
+        // condition + CMOVcc over distinct pairs.
         let expected_len = 8 * n * n
+            + 4 * n * n
             + 8 * n * m
             + 4 * n
             + 3 * n * shift_m
@@ -2152,6 +2601,7 @@ mod tests {
             + n * n
             + n * n * imul_m
             + n * n * lea_m
+            + n * X86Condition::ALL.len()
             + n * (n - 1) * X86Condition::ALL.len();
         assert_eq!(
             all.len(),
@@ -2177,6 +2627,24 @@ mod tests {
             }
             for src in instr.source_registers() {
                 assert!(regs.contains(&src));
+            }
+        }
+    }
+
+    #[test]
+    fn x86_generator_enumerates_setcc_for_each_register_and_condition() {
+        use crate::isa::traits::InstructionGenerator;
+
+        let regs = [X86Register::RAX, X86Register::RBX];
+        let all = X86InstructionGenerator.generate_all(&regs, &[0]);
+        for rd in regs {
+            for cond in X86Condition::ALL {
+                assert!(
+                    all.contains(&X86Instruction::Setcc { rd, cond }),
+                    "generator omitted SET{} {}",
+                    cond.suffix(),
+                    rd
+                );
             }
         }
     }
@@ -2339,6 +2807,8 @@ mod tests {
                     assert!(imms.contains(&imm), "immediate {} outside pool", imm);
                 }
                 X86Instruction::MovReg { .. }
+                | X86Instruction::Movzx { .. }
+                | X86Instruction::Movsx { .. }
                 | X86Instruction::AddReg { .. }
                 | X86Instruction::SubReg { .. }
                 | X86Instruction::AndReg { .. }
@@ -2352,6 +2822,7 @@ mod tests {
                 | X86Instruction::Dec { .. }
                 | X86Instruction::ImulReg { .. }
                 | X86Instruction::Cmov { .. }
+                | X86Instruction::Setcc { .. }
                 | X86Instruction::Jcc { .. } => {}
             }
         }
@@ -2535,6 +3006,56 @@ mod tests {
                 "{name} should reject extended registers"
             );
         }
+    }
+
+    #[test]
+    fn x86_setcc_encodability_requires_native_view_and_available_low_byte_register() {
+        use crate::isa::traits::Assembler;
+
+        let setne = |rd| X86Instruction::Setcc {
+            rd,
+            cond: X86Condition::NE,
+        };
+        assert!(<X86_64 as Assembler<X86Instruction>>::can_assemble(
+            &X86_64,
+            &setne(X86Register::R15)
+        ));
+        for rd in [
+            X86Register::EAX,
+            X86Register::AX,
+            X86Register::AL,
+            X86Register::AH,
+            X86Register::R15D,
+            X86Register::R15B,
+        ] {
+            assert!(
+                !<X86_64 as Assembler<X86Instruction>>::can_assemble(&X86_64, &setne(rd)),
+                "x86-64 SETcc pseudo-op should reject non-native destination {rd}"
+            );
+        }
+        assert!(<X86_32 as Assembler<X86Instruction>>::can_assemble(
+            &X86_32,
+            &setne(X86Register::RAX)
+        ));
+        for rd in [
+            X86Register::EAX,
+            X86Register::AX,
+            X86Register::AL,
+            X86Register::AH,
+        ] {
+            assert!(
+                !<X86_32 as Assembler<X86Instruction>>::can_assemble(&X86_32, &setne(rd)),
+                "x86-32 SETcc pseudo-op should reject non-native destination {rd}"
+            );
+        }
+        assert!(!<X86_32 as Assembler<X86Instruction>>::can_assemble(
+            &X86_32,
+            &setne(X86Register::RSI)
+        ));
+        assert!(!<X86_32 as Assembler<X86Instruction>>::can_assemble(
+            &X86_32,
+            &setne(X86Register::R8)
+        ));
     }
 
     #[test]
@@ -2722,6 +3243,107 @@ mod tests {
     }
 
     #[test]
+    fn movzx_movsx_metadata_marks_a_pure_write_from_one_source() {
+        use crate::isa::traits::{FlagsAnalysis, InstructionType};
+
+        for (instruction, mnemonic, opcode) in [
+            (
+                X86Instruction::Movzx {
+                    rd: X86Register::RAX,
+                    rs: X86Register::RBX,
+                    src_width: 8,
+                },
+                "movzx",
+                28,
+            ),
+            (
+                X86Instruction::Movsx {
+                    rd: X86Register::RAX,
+                    rs: X86Register::RBX,
+                    src_width: 16,
+                },
+                "movsx",
+                29,
+            ),
+        ] {
+            assert_eq!(instruction.destination(), Some(X86Register::RAX));
+            assert_eq!(instruction.source_registers(), vec![X86Register::RBX]);
+            assert_eq!(instruction.mnemonic(), mnemonic);
+            assert_eq!(instruction.opcode_id(), opcode);
+            assert!(!instruction.is_terminator());
+            assert!(!instruction.has_side_effects());
+            assert!(!<X86_64 as FlagsAnalysis<X86Instruction>>::modifies_flags(
+                &instruction
+            ));
+            assert!(!<X86_64 as FlagsAnalysis<X86Instruction>>::reads_flags(
+                &instruction
+            ));
+        }
+    }
+
+    #[test]
+    fn x86_generator_enumerates_both_extension_families_and_source_widths() {
+        use crate::isa::traits::InstructionGenerator;
+
+        let generated =
+            X86InstructionGenerator.generate_all(&[X86Register::RAX, X86Register::RBX], &[0]);
+        for src_width in [8, 16] {
+            assert!(generated.contains(&X86Instruction::Movzx {
+                rd: X86Register::RAX,
+                rs: X86Register::RBX,
+                src_width,
+            }));
+            assert!(generated.contains(&X86Instruction::Movsx {
+                rd: X86Register::RAX,
+                rs: X86Register::RBX,
+                src_width,
+            }));
+        }
+    }
+
+    #[test]
+    fn extension_encodability_tracks_mode_specific_byte_register_rules() {
+        use crate::isa::traits::Assembler;
+
+        let low_byte = X86Instruction::Movzx {
+            rd: X86Register::RAX,
+            rs: X86Register::RBX,
+            src_width: 8,
+        };
+        let rex_byte = X86Instruction::Movsx {
+            rd: X86Register::RAX,
+            rs: X86Register::RSP,
+            src_width: 8,
+        };
+        let invalid_width = X86Instruction::Movzx {
+            rd: X86Register::RAX,
+            rs: X86Register::RBX,
+            src_width: 32,
+        };
+        let view_carrying_destination = X86Instruction::Movzx {
+            rd: X86Register::EAX,
+            rs: X86Register::RBX,
+            src_width: 8,
+        };
+        let view_carrying_source = X86Instruction::Movsx {
+            rd: X86Register::RAX,
+            rs: X86Register::BL,
+            src_width: 8,
+        };
+
+        assert!(X86_64.can_assemble(&low_byte));
+        assert!(X86_32.can_assemble(&low_byte));
+        assert!(X86_64.can_assemble(&rex_byte));
+        assert!(!X86_32.can_assemble(&rex_byte));
+        assert!(!X86_64.can_assemble(&invalid_width));
+        assert!(!X86_32.can_assemble(&invalid_width));
+        for instruction in [view_carrying_destination, view_carrying_source] {
+            assert!(!X86_64.can_assemble(&instruction));
+            assert!(!X86_32.can_assemble(&instruction));
+        }
+    }
+
+    #[test]
     fn x86_instruction_display_intel_syntax() {
         let rd = X86Register::RAX;
         let rs = X86Register::RBX;
@@ -2817,6 +3439,24 @@ mod tests {
     }
 
     #[test]
+    fn setcc_metadata_models_a_flag_reading_full_register_write() {
+        use crate::isa::traits::InstructionType;
+
+        let setne = X86Instruction::Setcc {
+            rd: X86Register::RAX,
+            cond: X86Condition::NE,
+        };
+        assert_eq!(setne.destination(), Some(X86Register::RAX));
+        assert!(setne.source_registers().is_empty());
+        assert_eq!(setne.mnemonic(), "setne");
+        assert_eq!(setne.to_string(), "setne rax");
+        assert!(!setne.is_terminator());
+        assert!(!setne.has_side_effects());
+        assert!(!x86_modifies_flags(&setne));
+        assert!(x86_reads_flags(&setne));
+    }
+
+    #[test]
     fn x86_instruction_source_registers_destructive_form() {
         let rd = X86Register::RAX;
         let rs = X86Register::RBX;
@@ -2882,6 +3522,59 @@ mod tests {
         // NEG / NOT are single-operand: each reads its own destination.
         assert_eq!(X86Instruction::Neg { rd }.source_registers(), vec![rd]);
         assert_eq!(X86Instruction::Not { rd }.source_registers(), vec![rd]);
+    }
+
+    #[test]
+    fn partial_pure_writes_read_the_preserved_canonical_destination() {
+        let cases = [
+            (
+                X86Instruction::MovReg {
+                    rd: X86Register::AL,
+                    rs: X86Register::BL,
+                },
+                vec![X86Register::RAX, X86Register::RBX],
+            ),
+            (
+                X86Instruction::MovImm {
+                    rd: X86Register::AH,
+                    imm: 1,
+                },
+                vec![X86Register::RAX],
+            ),
+            (
+                X86Instruction::ImulRegImm {
+                    rd: X86Register::AX,
+                    rs: X86Register::BX,
+                    imm: 3,
+                },
+                vec![X86Register::RAX, X86Register::RBX],
+            ),
+            (
+                X86Instruction::Lea {
+                    rd: X86Register::AX,
+                    base: X86Register::RBX,
+                    disp: 1,
+                },
+                vec![X86Register::RAX, X86Register::RBX],
+            ),
+        ];
+
+        for (instruction, expected) in cases {
+            assert_eq!(
+                instruction.source_registers(),
+                expected,
+                "{instruction} must read the canonical destination bits it preserves"
+            );
+        }
+
+        for rd in [X86Register::RAX, X86Register::EAX] {
+            assert!(
+                X86Instruction::MovImm { rd, imm: 1 }
+                    .source_registers()
+                    .is_empty(),
+                "{rd} fully overwrites the architectural register"
+            );
+        }
     }
 
     #[test]
@@ -3024,6 +3717,47 @@ mod tests {
         assert_eq!(X86Register::R13.index(), Some(13));
         assert_eq!(X86Register::R14.index(), Some(14));
         assert_eq!(X86Register::R15.index(), Some(15));
+    }
+
+    #[test]
+    fn x86_register_availability_by_mode() {
+        use crate::assembler::x86::X86Mode;
+
+        // 64-bit mode addresses all sixteen GPRs, including the extended file.
+        for r in [
+            X86Register::RAX,
+            X86Register::RDI,
+            X86Register::R8,
+            X86Register::R15,
+        ] {
+            assert!(
+                r.is_available_in(X86Mode::Mode64),
+                "{:?} must be available in 64-bit mode",
+                r
+            );
+        }
+
+        // 32-bit mode has no encoding for the extended registers R8..R15, but
+        // the eight legacy GPRs remain addressable.
+        for r in [X86Register::RAX, X86Register::RSP, X86Register::RDI] {
+            assert!(
+                r.is_available_in(X86Mode::Mode32),
+                "{:?} must be available in 32-bit mode",
+                r
+            );
+        }
+        for r in [
+            X86Register::R8,
+            X86Register::R9,
+            X86Register::R12,
+            X86Register::R15,
+        ] {
+            assert!(
+                !r.is_available_in(X86Mode::Mode32),
+                "{:?} must be unavailable in 32-bit mode",
+                r
+            );
+        }
     }
 
     #[test]
@@ -3247,6 +3981,7 @@ mod tests {
 
         let mutated = mutator.mutate(&mut rng, &target);
 
+        // rn (RAX) must survive the form change; only the right operand is replaced.
         assert_eq!(
             mutated,
             vec![X86Instruction::CmpImm {
@@ -3292,6 +4027,53 @@ mod tests {
                 rn: X86Register::RCX,
                 rs: X86Register::RBX,
             }]
+        );
+    }
+
+    #[test]
+    fn x86_mutator_opcode_mutates_cmp_at_selected_nonzero_index() {
+        use crate::search::config::MutationWeights;
+
+        let mutator = X86Mutator::new(
+            Vec::new(),
+            vec![7],
+            MutationWeights::default(),
+            crate::assembler::x86::X86Mode::Mode64,
+        );
+        let mut sequence = vec![
+            X86Instruction::MovImm {
+                rd: X86Register::RAX,
+                imm: 0,
+            },
+            X86Instruction::CmpReg {
+                rn: X86Register::RCX,
+                rs: X86Register::RBX,
+            },
+            X86Instruction::SubImm {
+                rd: X86Register::RDX,
+                imm: 1,
+            },
+        ];
+        let mut rng = BudgetedRng::new(vec![word_for_range(3, 1), word_for_range(1, 0)]);
+
+        mutator.mutate_opcode(&mut rng, &mut sequence);
+
+        assert_eq!(
+            sequence,
+            vec![
+                X86Instruction::MovImm {
+                    rd: X86Register::RAX,
+                    imm: 0,
+                },
+                X86Instruction::CmpImm {
+                    rn: X86Register::RCX,
+                    imm: 7,
+                },
+                X86Instruction::SubImm {
+                    rd: X86Register::RDX,
+                    imm: 1,
+                },
+            ]
         );
     }
 
@@ -3463,6 +4245,8 @@ mod tests {
                     assert_eq!(imm, 0);
                 }
                 X86Instruction::MovReg { .. }
+                | X86Instruction::Movzx { .. }
+                | X86Instruction::Movsx { .. }
                 | X86Instruction::AddReg { .. }
                 | X86Instruction::SubReg { .. }
                 | X86Instruction::AndReg { .. }
@@ -3476,6 +4260,7 @@ mod tests {
                 | X86Instruction::Dec { .. }
                 | X86Instruction::ImulReg { .. }
                 | X86Instruction::Cmov { .. }
+                | X86Instruction::Setcc { .. }
                 | X86Instruction::Jcc { .. } => {}
             }
         }
@@ -3567,13 +4352,29 @@ mod tests {
                     disp: imm,
                 },
             ),
-            // Cmov stays last at COUNT - 1 == 28.
-            (28, X86Instruction::Cmov { rd, rs, cond }),
+            (
+                28,
+                X86Instruction::Movzx {
+                    rd,
+                    rs,
+                    src_width: 8,
+                },
+            ),
+            (
+                29,
+                X86Instruction::Movsx {
+                    rd,
+                    rs,
+                    src_width: 8,
+                },
+            ),
+            (30, X86Instruction::Cmov { rd, rs, cond }),
+            (31, X86Instruction::Setcc { rd, cond }),
         ];
 
         for (opcode, want) in expected {
             assert_eq!(
-                build_x86_instruction_by_opcode(opcode, rd, rs, imm, cond),
+                build_x86_instruction_by_opcode(opcode, rd, rs, imm, cond, 8),
                 want,
                 "opcode {opcode} built the wrong instruction"
             );
@@ -3610,11 +4411,14 @@ mod tests {
             (25, "imul"),
             (26, "imul"),
             (27, "lea"),
-            (28, "cmove"),
+            (28, "movzx"),
+            (29, "movsx"),
+            (30, "cmove"),
+            (31, "sete"),
         ];
         for (opcode, mnem) in mnemonics {
             assert_eq!(
-                build_x86_instruction_by_opcode(opcode, rd, rs, imm, cond).mnemonic(),
+                build_x86_instruction_by_opcode(opcode, rd, rs, imm, cond, 8).mnemonic(),
                 mnem,
                 "opcode {opcode} mnemonic drifted"
             );
@@ -4072,6 +4876,8 @@ mod tests {
                         );
                     }
                     X86Instruction::MovReg { .. }
+                    | X86Instruction::Movzx { .. }
+                    | X86Instruction::Movsx { .. }
                     | X86Instruction::AddReg { .. }
                     | X86Instruction::SubReg { .. }
                     | X86Instruction::AndReg { .. }
@@ -4085,6 +4891,7 @@ mod tests {
                     | X86Instruction::Dec { .. }
                     | X86Instruction::ImulReg { .. }
                     | X86Instruction::Cmov { .. }
+                    | X86Instruction::Setcc { .. }
                     | X86Instruction::Jcc { .. } => {}
                 }
             }
@@ -4290,11 +5097,15 @@ mod tests {
         assert!(!jcc.has_side_effects());
     }
 
-    // --- FlagsAnalysis::reads_flags wired for Cmov / Jcc ---
+    // --- FlagsAnalysis::reads_flags wired for SETcc / Cmov / Jcc ---
 
     #[test]
-    fn x86_64_reads_flags_returns_true_for_cmov_and_jcc() {
+    fn x86_64_reads_flags_returns_true_for_setcc_cmov_and_jcc() {
         use crate::isa::traits::FlagsAnalysis;
+        let setcc = X86Instruction::Setcc {
+            rd: X86Register::RAX,
+            cond: X86Condition::E,
+        };
         let cmov = X86Instruction::Cmov {
             rd: X86Register::RAX,
             rs: X86Register::RBX,
@@ -4304,14 +5115,21 @@ mod tests {
             cond: X86Condition::NE,
         };
         assert!(<X86_64 as FlagsAnalysis<X86Instruction>>::reads_flags(
+            &setcc
+        ));
+        assert!(<X86_64 as FlagsAnalysis<X86Instruction>>::reads_flags(
             &cmov
         ));
         assert!(<X86_64 as FlagsAnalysis<X86Instruction>>::reads_flags(&jcc));
     }
 
     #[test]
-    fn x86_32_reads_flags_returns_true_for_cmov_and_jcc() {
+    fn x86_32_reads_flags_returns_true_for_setcc_cmov_and_jcc() {
         use crate::isa::traits::FlagsAnalysis;
+        let setcc = X86Instruction::Setcc {
+            rd: X86Register::RAX,
+            cond: X86Condition::E,
+        };
         let cmov = X86Instruction::Cmov {
             rd: X86Register::RAX,
             rs: X86Register::RBX,
@@ -4320,6 +5138,9 @@ mod tests {
         let jcc = X86Instruction::Jcc {
             cond: X86Condition::NE,
         };
+        assert!(<X86_32 as FlagsAnalysis<X86Instruction>>::reads_flags(
+            &setcc
+        ));
         assert!(<X86_32 as FlagsAnalysis<X86Instruction>>::reads_flags(
             &cmov
         ));

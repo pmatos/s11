@@ -27,10 +27,13 @@ Algorithms:
 - Enumerative, stochastic, symbolic, hybrid, and LLM-assisted search are
   available for AArch64.
 - Enumerative search scales with the generated instruction families in its
-  candidate pool. At the default AArch64 8-register CLI scope, `madd`/`msub`
-  contribute `2 * 8^4` and `mneg`/`smulh`/`umulh` contribute `3 * 8^3`, or
-  9,728 extra candidates per length bucket; use `--timeout` or smaller
-  optimization windows to bound runtime.
+  candidate pool. The source entry point is
+  [`generate_all_instructions`](../src/search/candidate.rs). At the default
+  AArch64 8-register CLI scope, `madd`/`msub` contribute `2 * 8^4` and
+  `mneg`/`smulh`/`umulh` contribute `3 * 8^3`, adding 9,728 additional
+  instructions to the candidate pool. The sequence space in each length bucket
+  therefore grows as `pool_size^L`; use `--timeout` or smaller optimization
+  windows to bound runtime.
 - Hybrid and LLM remain AArch64-only.
 
 Rewritable straight-line mnemonics accepted by the parser and Capstone bridge:
@@ -38,6 +41,13 @@ Rewritable straight-line mnemonics accepted by the parser and Capstone bridge:
 - Data movement and aliases: `mov`, `mvn`, `neg`, `negs`, `movn`, `movz`,
   `movk`
   - Register `mov` supports both 64-bit `X` and 32-bit `W` forms.
+- First NEON/SIMD vertical slice: `movi` with `Vn.2d|4s, #0`, lane-wise
+  wrapping `add Vd.2d|4s, Vn.2d|4s, Vm.2d|4s`, and
+  `mov Xd, Vn.d[0|1]`.
+  `V0..V31` are modelled as aliased 128-bit registers across arrangement
+  views and may be named in `--live-out`. Concrete and SMT equivalence compare
+  the full 128 bits. Other arrangements, modified immediates, vector loads,
+  reductions, shuffles, and scalar `q`/`d`/`s` spellings remain out of scope.
 - Arithmetic and flag-setting arithmetic: `add`, `sub`, `adds`, `subs`
 - Add/subtract with carry (X-only, register form): `adc`, `adcs`, `sbc`, `sbcs`
   - Non-flag-setting `add` and `sub` support both 64-bit `X` and 32-bit `W`
@@ -97,7 +107,7 @@ with width-parameterised SMT equivalence.
 
 Rewritable straight-line mnemonic families:
 
-- `mov`, `add`, `sub`, `and`, `or`, `xor`, `cmp`, `test`
+- `mov`, `movzx`, `movsx`, `add`, `sub`, `and`, `or`, `xor`, `cmp`, `test`
 - Single-operand: `neg`, `not`, `inc`, `dec`
 - Immediate-count shifts: `shl`/`sal`, `shr`, `sar`
 - Immediate-count rotates: `rol`, `ror`
@@ -105,8 +115,23 @@ Rewritable straight-line mnemonic families:
 - Load effective address: `lea` (register-base + displacement only)
 - Conditional moves: `cmov<cond>`
 
+Synthesizable-only pseudo-instruction families:
+
+- Conditional full-width sets: `set<cond>`
+
 The data-movement/arithmetic/logical/comparison families have register and
-immediate forms where the x86 IR models them. `cmp` and `test` are
+immediate forms where the x86 IR models them. `movzx` and `movsx` are
+register-only width-changing moves: they extract the low 8 or 16 bits named by
+the source alias and zero- or sign-extend them into the native-width destination
+(64 bits in x86-64, 32 bits in x86-32), without changing EFLAGS. Legacy
+high-byte sources (`ah`/`bh`/`ch`/`dh`) are not modelled. The 32-to-64 signed
+form is the distinct `movsxd` family and remains unsupported; x86 has no
+`movzx r64, r32` encoding because a 32-bit GPR write already provides that zero
+extension. For the same reason, the x86-64 parser normalizes a 32-bit
+destination spelling such as `movzx eax, bl` to the native-width zero-extension
+IR. It rejects `movsx eax, bl`, whose sign extension into EAX followed by
+architectural zero-extension is not equivalent to native-width sign extension.
+`cmp` and `test` are
 flag-setting: each discards its result and writes only EFLAGS (`cmp` from a
 subtraction, `test` from a bitwise AND that clears CF/OF). `neg` and `not`
 are single-operand: `neg` computes `rd = -rd` and sets EFLAGS as if from
@@ -145,15 +170,41 @@ register-base + displacement form, `lea rd, [base + disp]`, computing
 `rd = base + disp` (wrapping at width). It is non-destructive (`base` is read,
 `rd` is purely written, like `mov`) and affects NO flags. The index*scale
 (`[base + index*scale + disp]`) and RIP/EIP-relative addressing forms are
-deferred and rejected as unsupported shapes. `cmov<cond>` has register operands
-and reads EFLAGS without modifying them.
+deferred and rejected as unsupported shapes. `cmov<cond>` reads EFLAGS without
+modifying them and has two register operands. The synthesizable-only
+`set<cond>` pseudo-family also reads EFLAGS without modifying them and uses the
+interim native-width abstraction `rd = zext(condition)`: the IR, concrete
+interpreter, and SMT lowering fully overwrite `rd` with 0 or 1. Candidate
+assembly emits architectural byte `SETcc` followed by same-register `MOVZX`
+into the 32-bit destination; that destination write also clears bits 63:32 in
+x86-64, so the emitted pair matches the full-width IR semantics.
 
-The x86 IR does not yet carry operand width. To avoid rewriting partial-width
-operations as full-width operations, the binary optimization path currently
-accepts only mode-width register aliases: `rax`/`r8`-style 64-bit names for
-x86-64, and `eax`-style 32-bit i386 names for x86-32. x86-64 `eax`/`ax`/`al`
-forms, x86-32 `ax`/`al` forms, and x86-32 extended-register aliases such as
-`r8d` are rejected until operand width is represented end to end.
+The x86 IR retains each GPR operand's native, dword, word, low-byte, or
+legacy high-byte view. Reads select the corresponding slice of the canonical
+architectural register. Native writes replace the mode-width register, dword
+writes zero-extend into the full GPR on x86-64, and word/byte writes preserve
+the surrounding bits. Thus `rax`/`eax`/`ax`/`al`/`ah` (and their corresponding
+GPR aliases) are distinct operands throughout parsing, search, concrete and
+SMT execution, liveness, costing, and assembly. Legacy high-byte operands are
+limited to `ah`/`bh`/`ch`/`dh` and cannot be combined with an encoding that
+requires a REX prefix. x86-32 continues to reject the x86-64-only extended
+register family (`r8` through `r15` and their aliases).
+
+MOVZX/MOVSX carry an explicit 8- or 16-bit source width while keeping a
+native-width destination. This preserves the width-changing operation even
+though the source is stored as its canonical architectural register; display
+and assembly recover the corresponding byte or word spelling. Mode-aware
+x86-32 parsing accepts its 32-bit destination, while width-agnostic parsing
+keeps the canonical x86-64 destination spelling.
+
+The synthesis-only `set<cond>` pseudo-family is the exception to this
+precise-width model and keeps the interim full-width abstraction described
+above. Architectural byte SETcc from ELF input is rejected until #75 rather
+than lifted into the full-width pseudo-IR, and its width-agnostic text spelling
+is the pseudo-family's canonical full register (`setne rax`, not a
+byte/word/dword alias). In x86-32, synthesized SETcc remains limited to
+destinations backed by `al`/`cl`/`dl`/`bl`, because byte-register encoding
+slots 4–7 name the legacy high-byte registers without a REX prefix.
 
 Fixed control-flow terminators:
 

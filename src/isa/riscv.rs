@@ -930,6 +930,7 @@ impl InstructionGenerator<RiscVInstruction> for RiscVInstructionGenerator {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_utils::instruction_fixtures::riscv_instruction_families;
     use rand::SeedableRng;
     use rand_chacha::ChaCha8Rng;
     use std::collections::BTreeSet;
@@ -938,91 +939,6 @@ mod tests {
         (0..32)
             .map(|idx| RiscVRegister::from_index(idx).unwrap())
             .collect()
-    }
-
-    fn all_instruction_families() -> Vec<RiscVInstruction> {
-        use RiscVInstruction::*;
-        vec![
-            Add {
-                rd: RiscVRegister::X1,
-                rs1: RiscVRegister::X2,
-                rs2: RiscVRegister::X3,
-            },
-            Sub {
-                rd: RiscVRegister::X1,
-                rs1: RiscVRegister::X2,
-                rs2: RiscVRegister::X3,
-            },
-            And {
-                rd: RiscVRegister::X1,
-                rs1: RiscVRegister::X2,
-                rs2: RiscVRegister::X3,
-            },
-            Or {
-                rd: RiscVRegister::X1,
-                rs1: RiscVRegister::X2,
-                rs2: RiscVRegister::X3,
-            },
-            Xor {
-                rd: RiscVRegister::X1,
-                rs1: RiscVRegister::X2,
-                rs2: RiscVRegister::X3,
-            },
-            Sll {
-                rd: RiscVRegister::X1,
-                rs1: RiscVRegister::X2,
-                rs2: RiscVRegister::X3,
-            },
-            Srl {
-                rd: RiscVRegister::X1,
-                rs1: RiscVRegister::X2,
-                rs2: RiscVRegister::X3,
-            },
-            Sra {
-                rd: RiscVRegister::X1,
-                rs1: RiscVRegister::X2,
-                rs2: RiscVRegister::X3,
-            },
-            Addi {
-                rd: RiscVRegister::X1,
-                rs1: RiscVRegister::X2,
-                imm: 7,
-            },
-            Andi {
-                rd: RiscVRegister::X1,
-                rs1: RiscVRegister::X2,
-                imm: 7,
-            },
-            Ori {
-                rd: RiscVRegister::X1,
-                rs1: RiscVRegister::X2,
-                imm: 7,
-            },
-            Xori {
-                rd: RiscVRegister::X1,
-                rs1: RiscVRegister::X2,
-                imm: 7,
-            },
-            Slli {
-                rd: RiscVRegister::X1,
-                rs1: RiscVRegister::X2,
-                shamt: 4,
-            },
-            Srli {
-                rd: RiscVRegister::X1,
-                rs1: RiscVRegister::X2,
-                shamt: 4,
-            },
-            Srai {
-                rd: RiscVRegister::X1,
-                rs1: RiscVRegister::X2,
-                shamt: 4,
-            },
-            Lui {
-                rd: RiscVRegister::X1,
-                imm: 0x12345,
-            },
-        ]
     }
 
     fn shift_immediate_amount(instr: &RiscVInstruction) -> Option<u8> {
@@ -1245,18 +1161,44 @@ mod tests {
     #[test]
     fn all_instruction_families_cover_traits_and_display() {
         let generator = RiscVInstructionGenerator::rv32();
-        let ids: BTreeSet<u8> = all_instruction_families()
+        let fixtures = riscv_instruction_families();
+        assert_eq!(fixtures.len(), generator.opcode_count() as usize);
+
+        let ids: BTreeSet<u8> = fixtures
             .iter()
-            .map(|instr| {
-                assert_eq!(instr.destination(), RiscVRegister::X1);
-                let _ = instr.source_registers();
-                assert!(!format!("{}", instr).is_empty());
-                assert!(!instr.mnemonic().is_empty());
-                assert!(!instr.has_side_effects());
-                instr.opcode_id()
+            .map(|fixture| {
+                let instr = &fixture.instruction;
+                let context = format!("{instr:?}");
+                assert_eq!(
+                    InstructionType::opcode_id(instr),
+                    fixture.opcode_id,
+                    "opcode id: {context}"
+                );
+                assert_eq!(
+                    InstructionType::mnemonic(instr),
+                    fixture.mnemonic,
+                    "mnemonic: {context}"
+                );
+                assert_eq!(instr.to_string(), fixture.display, "display: {context}");
+                assert_eq!(
+                    InstructionType::destination(instr),
+                    fixture.destination,
+                    "destination: {context}"
+                );
+                assert_eq!(
+                    InstructionType::source_registers(instr),
+                    fixture.sources,
+                    "source registers: {context}"
+                );
+                assert_eq!(
+                    InstructionType::has_side_effects(instr),
+                    fixture.has_side_effects,
+                    "side effects: {context}"
+                );
+                InstructionType::opcode_id(instr)
             })
             .collect();
-        assert_eq!(ids.len(), generator.opcode_count() as usize);
+        assert_eq!(ids.len(), fixtures.len());
     }
 
     #[test]
@@ -1365,7 +1307,8 @@ mod tests {
         let imms = vec![-1, 0, 1, 7];
         let mut rng = ChaCha8Rng::seed_from_u64(0x515c_515c);
 
-        for original in all_instruction_families() {
+        for fixture in riscv_instruction_families() {
+            let original = fixture.instruction;
             for _ in 0..200 {
                 let mutated = generator.mutate(&mut rng, &original, &regs, &imms);
                 assert!(mutated.opcode_id() < generator.opcode_count());

@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 
 use s11::docs_support::{
     AARCH64_FIXED_TERMINATORS, AARCH64_REWRITABLE_MNEMONICS, X86_FIXED_TERMINATORS,
-    X86_REWRITABLE_MNEMONICS,
+    X86_REWRITABLE_MNEMONICS, X86_SYNTHESIZABLE_ONLY_MNEMONICS,
 };
 
 fn repo_file(relative: &str) -> PathBuf {
@@ -142,8 +142,24 @@ fn enumerative_candidate_growth_visible_in_public_docs() {
             "{doc} must document enumerative candidate-pool growth"
         );
         assert!(
-            body.contains("candidate pool") && body.contains("length bucket"),
-            "{doc} must use candidate-pool and length-bucket wording"
+            body.contains("candidate pool"),
+            "{doc} must use candidate-pool wording"
+        );
+        assert!(
+            body.contains("length bucket"),
+            "{doc} must use length-bucket wording"
+        );
+    }
+
+    for doc in ["README.md", "TUTORIAL.md"] {
+        let body = normalized_doc(doc);
+        assert!(
+            body.contains("add 9,728 additional instructions to the candidate pool"),
+            "{doc} must identify 9,728 as additional candidate-pool instructions"
+        );
+        assert!(
+            body.contains("pool_size^l"),
+            "{doc} must document length-L sequence-space growth from the pool"
         );
     }
 
@@ -151,6 +167,14 @@ fn enumerative_candidate_growth_visible_in_public_docs() {
     assert!(
         matrix.contains("9,728") && matrix.contains("8^4") && matrix.contains("8^3"),
         "docs/capability.md must keep the default AArch64 multiply-candidate budget visible"
+    );
+    assert!(
+        matrix.contains("generate_all_instructions"),
+        "docs/capability.md must name the candidate-generation source entry point"
+    );
+    assert!(
+        matrix.contains("(../src/search/candidate.rs)"),
+        "docs/capability.md must link the candidate-generation source file"
     );
 }
 
@@ -315,8 +339,14 @@ fn x86_support_is_visible_in_public_docs() {
             "docs/capability.md must list x86 fixed terminator `{terminator}`"
         );
     }
+    for pseudo in X86_SYNTHESIZABLE_ONLY_MNEMONICS {
+        assert!(
+            matrix.contains(&format!("`{pseudo}`")),
+            "docs/capability.md must list x86 synthesizable-only pseudo-family `{pseudo}`"
+        );
+    }
 
-    for family in ["cmov<cond>", "j<cond>"] {
+    for family in ["set<cond>", "cmov<cond>", "j<cond>"] {
         assert!(
             matrix.contains(&format!("`{family}`")),
             "docs/capability.md must list x86 family `{family}`"
@@ -325,6 +355,28 @@ fn x86_support_is_visible_in_public_docs() {
     assert!(
         matrix.contains("rewritable") && matrix.contains("`cmov<cond>`"),
         "docs/capability.md must describe CMOVcc as rewritable"
+    );
+    assert!(
+        !X86_REWRITABLE_MNEMONICS.contains(&"set<cond>"),
+        "architectural byte SETcc must not be classified as binary-rewritable"
+    );
+    assert!(
+        X86_SYNTHESIZABLE_ONLY_MNEMONICS.contains(&"set<cond>"),
+        "full-width SETcc must be classified as synthesizable-only"
+    );
+    assert!(
+        matrix.contains("synthesizable-only") && matrix.contains("`set<cond>`"),
+        "docs/capability.md must describe SETcc as a synthesizable-only pseudo-family"
+    );
+    assert!(
+        matrix.contains("architectural byte setcc")
+            && matrix.contains("elf")
+            && matrix.contains("rejected until #75"),
+        "docs/capability.md must document architectural byte SETcc ELF rejection"
+    );
+    assert!(
+        matrix.contains("setcc") && matrix.contains("followed by") && matrix.contains("movzx"),
+        "docs/capability.md must document the SETcc followed by MOVZX lowering"
     );
     assert!(
         matrix.contains("fixed") && matrix.contains("terminator") && matrix.contains("`j<cond>`"),

@@ -7,7 +7,7 @@ Date: 2026-05-16
 
 The x86 `Assembler::can_assemble` implementations in `src/isa/x86.rs` intentionally duplicate the assembler-side immediate constraints from `src/assembler/x86.rs`. The prefilter helpers `x86_signed_imm32_ok` and `x86_imm32_bitpattern_ok` keep generic search helpers such as `src/search/candidate.rs::is_sequence_encodable_for` from sending obviously unencodable candidates into the heavier dynasm path. The assembler helpers `signed_imm_i32` and `imm32_bitpattern_i32` remain the final encoding authority and own the emitted error text.
 
-This is an accepted cost of the trait/assembler boundary, not a request to collapse the helper pairs into shared code. Future x86 immediate-encoding changes must update both sides: the ISA prefilter should stay conservative, and the assembler should stay authoritative. In particular, x86-64 non-`MOV` immediate forms are limited to signed imm32 encodings, x86-64 `MovImm` may still use `movabs` for full-width immediates, and x86-32 immediate forms accept canonical 32-bit bit patterns while continuing to reject R8-R15 register operands.
+This is an accepted cost of the trait/assembler boundary, not a request to collapse the helper pairs into shared code. Future x86 immediate-encoding changes must update both sides: the ISA prefilter should stay conservative, and the assembler should stay authoritative. In particular, native 64-bit x86-64 non-`MOV` forms require a sign-extendable imm32, while dword x86-64 forms and effective-32-bit x86-32 forms accept either signed values or canonical unsigned imm32 bit patterns. Native x86-64 `MovImm` may still use `movabs` for full-width immediates, and x86-32 continues to reject R8-R15 register operands.
 
 ## Context
 
