@@ -43,3 +43,28 @@ fn assert_bump(current: &str, bump: &str, expected: &str) {
 fn patch_from_prerelease_finalizes_current_version() {
     assert_bump("0.1.1-dev", "patch", "0.1.1");
 }
+
+#[test]
+fn patch_from_stable_version_increments_patch() {
+    assert_bump("0.1.0", "patch", "0.1.1");
+}
+
+#[test]
+fn patch_from_other_prerelease_finalizes_current_version() {
+    assert_bump("1.2.3-rc.1", "patch", "1.2.3");
+}
+
+#[test]
+fn minor_from_prerelease_increments_minor() {
+    assert_bump("1.2.3-dev", "minor", "1.3.0");
+}
+
+#[test]
+fn major_from_prerelease_increments_major() {
+    assert_bump("1.2.3-dev", "major", "2.0.0");
+}
+
+#[test]
+fn explicit_version_from_prerelease_is_used_verbatim() {
+    assert_bump("1.2.3-dev", "2.0.0", "2.0.0");
+}
