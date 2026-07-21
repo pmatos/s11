@@ -536,7 +536,7 @@ fn fast_path_input_registers(
     // Sort by register index for deterministic input ordering (so test
     // failures and SMT-formula seeds are reproducible).
     let mut v: Vec<_> = regs.into_iter().collect();
-    v.sort_by_key(|r| r.index().unwrap_or(u8::MAX));
+    v.sort_by_key(|r| r.sort_key());
     v
 }
 
@@ -1114,7 +1114,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ir::{Operand, Register};
+    use crate::ir::{Operand, Register, VectorArrangement, VectorRegister};
     use crate::isa::x86::{X86Instruction, X86Register};
     use crate::semantics::live_out::X86LiveOut;
 
@@ -1127,6 +1127,70 @@ mod tests {
 
         let config = EquivalenceConfig::default().with_flags(false);
         assert!(!config.live_out.flags_live());
+    }
+
+    #[test]
+    fn neon_add_and_extract_proves_equivalent_to_scalar_lane_add() {
+        let scalar = [
+            Instruction::MovFromVectorLane {
+                rd: Register::X10,
+                vn: VectorRegister::V1,
+                lane: 0,
+            },
+            Instruction::MovFromVectorLane {
+                rd: Register::X11,
+                vn: VectorRegister::V2,
+                lane: 0,
+            },
+            Instruction::Add {
+                rd: Register::X0,
+                rn: Register::X10,
+                rm: Operand::Register(Register::X11),
+            },
+        ];
+        let vector = [
+            Instruction::VectorAdd {
+                vd: VectorRegister::V0,
+                vn: VectorRegister::V1,
+                vm: VectorRegister::V2,
+                arrangement: VectorArrangement::TwoD,
+            },
+            Instruction::MovFromVectorLane {
+                rd: Register::X0,
+                vn: VectorRegister::V0,
+                lane: 0,
+            },
+        ];
+        let config = EquivalenceConfig::with_live_out(LiveOut::from_registers(vec![Register::X0]));
+
+        assert_eq!(
+            check_equivalence_with_config(&scalar, &vector, &config),
+            EquivalenceResult::Equivalent
+        );
+    }
+
+    #[test]
+    fn vector_live_out_compares_all_128_bits() {
+        let zero = [Instruction::Movi {
+            vd: VectorRegister::V0,
+            arrangement: VectorArrangement::TwoD,
+            imm: 0,
+        }];
+        let input = [Instruction::VectorAdd {
+            vd: VectorRegister::V0,
+            vn: VectorRegister::V1,
+            vm: VectorRegister::V1,
+            arrangement: VectorArrangement::TwoD,
+        }];
+        let config =
+            EquivalenceConfig::with_live_out(LiveOut::from_registers(vec![Register::Vector(
+                VectorRegister::V0,
+            )]));
+
+        assert_ne!(
+            check_equivalence_with_config(&zero, &input, &config),
+            EquivalenceResult::Equivalent
+        );
     }
 
     #[test]
