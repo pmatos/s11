@@ -277,8 +277,9 @@ where
     I: ISA + EnumerativeBackend<I>,
 {
     let Some(smt_timeout) = config.solver_timeout_within_budget(start.elapsed()) else {
-        // No millisecond-granularity SMT budget remains for this candidate, so
-        // stop the whole parallel enumerative search rather than just this arm.
+        // SMT is disabled or no millisecond-granularity budget remains for
+        // this candidate. Stop the whole parallel enumerative search rather
+        // than just this arm.
         shared.stop.store(true, Ordering::Relaxed);
         return false;
     };
@@ -1778,6 +1779,32 @@ mod tests {
             &config,
             &shared,
             expired_start,
+        ));
+        assert!(shared.stop.load(Ordering::Relaxed));
+        assert_eq!(shared.smt_queries.load(Ordering::Relaxed), 0);
+        assert_eq!(shared.smt_elapsed_nanos.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn verify_candidate_stops_without_smt_when_solver_timeout_is_zero() {
+        let target = vec![Instruction::MovImm {
+            rd: Register::X0,
+            imm: 0,
+        }];
+        let candidate = target.clone();
+        let live_out = LiveOut::from_registers(vec![Register::X0]);
+        let config = SearchConfig::default()
+            .with_timeout_option(None)
+            .with_solver_timeout(std::time::Duration::ZERO);
+        let shared = SharedState::<AArch64>::new(u64::MAX);
+
+        assert!(!verify_candidate::<AArch64>(
+            &target,
+            &candidate,
+            &live_out,
+            &config,
+            &shared,
+            std::time::Instant::now(),
         ));
         assert!(shared.stop.load(Ordering::Relaxed));
         assert_eq!(shared.smt_queries.load(Ordering::Relaxed), 0);

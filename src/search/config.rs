@@ -337,6 +337,10 @@ pub struct SearchConfig {
     /// Overall timeout for the search
     pub timeout: Option<Duration>,
     /// Timeout for each SMT solver query used by verification/synthesis.
+    ///
+    /// A configured zero disables SMT queries. Search backends must resolve
+    /// this field through [`Self::solver_timeout_within_budget`] rather than
+    /// pass zero to Z3, where it would mean an unbounded query.
     pub solver_timeout: Option<Duration>,
     /// Number of worker threads (rayon) for algorithms that parallelise.
     /// `None` lets rayon pick its default (typically logical-core count).
@@ -420,6 +424,10 @@ impl SearchConfig {
         self
     }
 
+    /// Set the per-query SMT timeout.
+    ///
+    /// [`Duration::ZERO`] disables SMT queries; it never requests an
+    /// unbounded solver query.
     pub fn with_solver_timeout(mut self, timeout: Duration) -> Self {
         self.solver_timeout = Some(timeout);
         self
@@ -521,19 +529,41 @@ impl SearchConfig {
     /// `elapsed` is how long the overall search has been running. The result
     /// is [`solver_timeout`](Self::solver_timeout) capped at the time left
     /// before [`timeout`](Self::timeout) elapses (unbounded when `timeout` is
-    /// `None`). Returns `None` when the budget is exhausted: Z3 timeouts are
-    /// configured in whole milliseconds, so a sub-millisecond remainder cannot
-    /// be represented usefully and is treated as exhausted.
+    /// `None`). Returns `None` when SMT is disabled by a configured zero or
+    /// when the budget is exhausted. Z3 timeouts are configured in whole
+    /// milliseconds, so a positive sub-millisecond timeout cannot be
+    /// represented usefully and is also treated as exhausted.
     ///
     /// All SMT-driven backends resolve their per-query timeout here so the
     /// budget-clamping rule cannot drift between them.
     pub fn solver_timeout_within_budget(&self, elapsed: Duration) -> Option<Duration> {
-        let solver_timeout = self.solver_timeout();
-        let timeout = match self.timeout {
-            Some(search_timeout) => solver_timeout.min(search_timeout.checked_sub(elapsed)?),
-            None => solver_timeout,
-        };
-        (timeout.as_millis() > 0).then_some(timeout)
+        match self.timeout {
+            Some(search_timeout) => {
+                self.solver_timeout_with_remaining_budget(search_timeout.checked_sub(elapsed)?)
+            }
+            None => Self::solver_query_timeout(self.solver_timeout()),
+        }
+    }
+
+    /// Per-query SMT solver timeout capped by an already-computed remaining
+    /// search budget.
+    ///
+    /// The LLM backend computes its remaining budget around an external Codex
+    /// call, while the other SMT-driven backends provide total elapsed time to
+    /// [`Self::solver_timeout_within_budget`]. Both routes terminate here so
+    /// configured zero and sub-millisecond timeouts have one shared meaning.
+    pub(crate) fn solver_timeout_with_remaining_budget(
+        &self,
+        remaining: Duration,
+    ) -> Option<Duration> {
+        Self::solver_query_timeout(self.solver_timeout().min(remaining))
+    }
+
+    fn solver_query_timeout(timeout: Duration) -> Option<Duration> {
+        // Z3 interprets a zero timeout as unbounded. SearchConfig deliberately
+        // reserves zero for "skip SMT", and Z3 cannot represent positive
+        // sub-millisecond timeouts, so neither value may reach a backend.
+        (!timeout.is_zero() && timeout.as_millis() > 0).then_some(timeout)
     }
 }
 
@@ -788,6 +818,37 @@ mod tests {
         assert_eq!(
             unbounded_explicit.solver_timeout_within_budget(Duration::from_secs(999)),
             Some(Duration::from_secs(30))
+        );
+    }
+
+    #[test]
+    fn solver_timeout_with_remaining_budget_uses_the_shared_zero_policy() {
+        let disabled = SearchConfig::default().with_solver_timeout(Duration::ZERO);
+        assert_eq!(
+            disabled.solver_timeout_with_remaining_budget(Duration::from_secs(10)),
+            None
+        );
+        assert_eq!(disabled.solver_timeout_within_budget(Duration::ZERO), None);
+        assert_eq!(
+            disabled
+                .clone()
+                .with_timeout_option(None)
+                .solver_timeout_within_budget(Duration::from_secs(999)),
+            None
+        );
+
+        let configured = SearchConfig::default().with_solver_timeout(Duration::from_millis(25));
+        assert_eq!(
+            configured.solver_timeout_with_remaining_budget(Duration::from_secs(10)),
+            Some(Duration::from_millis(25))
+        );
+        assert_eq!(
+            configured.solver_timeout_with_remaining_budget(Duration::from_millis(7)),
+            Some(Duration::from_millis(7))
+        );
+        assert_eq!(
+            configured.solver_timeout_with_remaining_budget(Duration::from_micros(500)),
+            None
         );
     }
 

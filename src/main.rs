@@ -4143,6 +4143,25 @@ mod cli_helper_tests {
     }
 
     #[test]
+    fn opt_accepts_zero_solver_timeout_as_the_disable_sentinel() {
+        let Commands::Opt { solver_timeout, .. } = parse_opt(&[
+            "s11",
+            "opt",
+            "prog.elf",
+            "--start-addr",
+            "0x1000",
+            "--end-addr",
+            "0x1100",
+            "--solver-timeout",
+            "0",
+        ]) else {
+            panic!("expected the opt subcommand");
+        };
+
+        assert_eq!(solver_timeout, 0);
+    }
+
+    #[test]
     fn opt_help_mentions_auto_and_output() {
         use clap::CommandFactory;
 

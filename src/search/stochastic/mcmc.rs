@@ -242,10 +242,10 @@ where
             if proposal_cost < best_cost {
                 let Some(smt_timeout) = config.solver_timeout_within_budget(start_time.elapsed())
                 else {
-                    // No millisecond-granularity SMT budget remains, so the
-                    // overall search deadline is effectively reached; stop
-                    // rather than hand Z3 a timeout it cannot honour. Mirrors
-                    // the enumerative path.
+                    // SMT is disabled or no millisecond-granularity budget
+                    // remains. Stop rather than hand Z3 its unbounded zero
+                    // sentinel or a timeout it cannot honour. Mirrors the
+                    // enumerative path.
                     break;
                 };
                 let (verdict, metrics) = <I as StochasticBackend<I>>::check_equivalence(
@@ -775,6 +775,28 @@ mod tests {
             (1..=50).contains(&recorded),
             "solver timeout should be clamped to the ~50ms budget, got {recorded}ms",
         );
+    }
+
+    #[test]
+    fn stochastic_zero_solver_timeout_skips_smt() {
+        let (statistics, recorded_timeout) = run_timeout_probe_search_with(
+            SearchConfig::default()
+                .with_timeout_option(None)
+                .with_solver_timeout(Duration::ZERO)
+                .with_stochastic(
+                    StochasticConfig::default()
+                        .with_iterations(1)
+                        .with_test_count(0)
+                        .with_seed(1),
+                ),
+            TIMEOUT_PROBE_EQUIVALENT,
+            true,
+        );
+
+        assert_eq!(recorded_timeout, None);
+        assert_eq!(statistics.smt_queries, 0);
+        assert_eq!(statistics.smt_equivalent, 0);
+        assert_eq!(statistics.improvements_found, 0);
     }
 
     #[test]

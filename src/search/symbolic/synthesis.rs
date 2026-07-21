@@ -357,9 +357,9 @@ where
         start_time: Instant,
     ) -> bool {
         let Some(timeout) = config.solver_timeout_within_budget(start_time.elapsed()) else {
-            // No millisecond-granularity SMT budget remains: we cannot fund a
-            // query, so treat the candidate as unproven rather than hand Z3 a
-            // timeout it cannot honour.
+            // SMT is disabled or no millisecond-granularity budget remains,
+            // so treat the candidate as unproven rather than hand Z3 its
+            // unbounded zero sentinel or a timeout it cannot honour.
             return false;
         };
         let width = <I as SymbolicBackend<I>>::width();
@@ -1465,6 +1465,31 @@ mod tests {
             (1..=50).contains(&recorded),
             "solver timeout should be clamped to the ~50ms budget, got {recorded}ms",
         );
+    }
+
+    #[test]
+    fn symbolic_zero_solver_timeout_skips_smt() {
+        let _guard = SYMBOLIC_INNER_LOOP_TEST_LOCK
+            .lock()
+            .expect("symbolic inner-loop test lock poisoned");
+        reset_symbolic_inner_loop_test_state();
+
+        let mut search: SymbolicSearch<TestIsa> = SymbolicSearch::new();
+        let config = SearchConfig::default()
+            .with_timeout_option(None)
+            .with_solver_timeout(Duration::ZERO);
+        let target = [TestInstruction(1)];
+        let candidate = [TestInstruction(2)];
+
+        assert!(!search.verify_equivalence(
+            &target,
+            &candidate,
+            &(),
+            &config,
+            std::time::Instant::now()
+        ));
+        assert_eq!(TEST_EQUIVALENCE_CHECKS.load(Ordering::SeqCst), 0);
+        assert_eq!(search.statistics().smt_queries, 0);
     }
 
     #[test]
