@@ -2143,6 +2143,35 @@ mod tests {
     }
 
     #[test]
+    fn cmp_then_cset_is_flag_dependent() {
+        let cmp_cset = vec![
+            Instruction::Cmp {
+                rn: Register::X2,
+                rm: Operand::Register(Register::X3),
+            },
+            Instruction::Cset {
+                rd: Register::X0,
+                cond: crate::ir::types::Condition::NE,
+            },
+        ];
+        let cset_only = vec![Instruction::Cset {
+            rd: Register::X0,
+            cond: crate::ir::types::Condition::NE,
+        }];
+        let cfg =
+            EquivalenceConfig::default().live_out(LiveOut::from_registers(vec![Register::X0]));
+
+        let result = check_equivalence_with_config(&cmp_cset, &cset_only, &cfg);
+        assert!(
+            matches!(
+                result,
+                EquivalenceResult::NotEquivalent | EquivalenceResult::NotEquivalentFast(_)
+            ),
+            "CMP+CSET must not be equivalent to CSET alone when X0 is live; got {result:?}"
+        );
+    }
+
+    #[test]
     fn preserved_cset_after_dead_mov_is_equivalent() {
         // Regression for issue #99: dropping a dead `MOV X1, #0` that writes an
         // unobserved register before a `CSET X0, NE` must not change the result.
@@ -2162,12 +2191,20 @@ mod tests {
             rd: Register::X0,
             cond: crate::ir::types::Condition::NE,
         }];
-        let cfg =
+        let register_only_cfg =
             EquivalenceConfig::default().live_out(LiveOut::from_registers(vec![Register::X0]));
         assert_eq!(
-            check_equivalence_with_config(&target, &candidate, &cfg),
+            check_equivalence_with_config(&target, &candidate, &register_only_cfg),
             EquivalenceResult::Equivalent,
             "removing a dead MOV before CSET must not change the result: both sequences read the same incoming flags"
+        );
+
+        let register_and_flags_cfg = EquivalenceConfig::default()
+            .live_out(LiveOut::from_registers(vec![Register::X0]).with_flags(true));
+        assert_eq!(
+            check_equivalence_with_config(&target, &candidate, &register_and_flags_cfg),
+            EquivalenceResult::Equivalent,
+            "removing a dead, flag-preserving MOV before CSET must preserve X0 and NZCV"
         );
     }
 
