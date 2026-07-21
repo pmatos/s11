@@ -2805,6 +2805,8 @@ mod tests {
 
     #[test]
     fn parse_line_rejects_sp_in_multiply_family() {
+        // The IR-level test `test_is_encodable_multiply_family_rejects_sp_all_slots`
+        // exhaustively covers every slot; this table samples one slot per mnemonic.
         for text in [
             "mul sp, x1, x2",
             "sdiv x0, sp, x2",
