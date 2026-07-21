@@ -3,7 +3,8 @@
 #![allow(dead_code)]
 
 use crate::ir::Register;
-use crate::ir::types::{AccessWidth, Condition};
+use crate::ir::types::{AccessWidth, Condition, VectorRegister};
+use crate::isa::x86::{X86Register, X86RegisterView};
 use std::collections::{BTreeMap, HashMap};
 use std::fmt;
 
@@ -51,6 +52,30 @@ impl ConditionFlags {
             (lhs_neg != rhs_neg) && (lhs_neg != res_neg)
         };
         Self { n, z, c, v }
+    }
+
+    /// Compute flags from an add-with-carry result: `lhs + rhs + carry_in`.
+    /// `carry_in` is 0 or 1. Uses 128-bit widening for exact carry-out (C)
+    /// and signed overflow (V).
+    pub fn from_adc(lhs: u64, rhs: u64, carry_in: u64) -> Self {
+        let wide = lhs as u128 + rhs as u128 + carry_in as u128;
+        let result = wide as u64;
+        let v =
+            (lhs as i64 as i128 + rhs as i64 as i128 + carry_in as i128) != result as i64 as i128;
+        Self {
+            n: (result as i64) < 0,
+            z: result == 0,
+            c: wide > u64::MAX as u128,
+            v,
+        }
+    }
+
+    /// Compute flags from a subtract-with-carry result. AArch64 SBC computes
+    /// `rn - rm - (1 - carry_in)`, which equals `rn + NOT(rm) + carry_in`.
+    /// `carry_in` is 0 or 1. Reusing the add-with-carry rule on the bitwise
+    /// complement of `rm` gives the correct NZCV (C = "no borrow").
+    pub fn from_sbc(lhs: u64, rhs: u64, carry_in: u64) -> Self {
+        Self::from_adc(lhs, !rhs, carry_in)
     }
 
     /// Compute flags from a logical operation result (AND, ORR, EOR, TST)
@@ -125,10 +150,11 @@ impl Eflags {
     /// unsigned overflow (low-`width` bits wrap).
     pub fn from_add(lhs: u64, rhs: u64, result: u64, width: u32) -> Self {
         let lhs_w = mask_to_width(lhs, width);
-        let rhs_w = mask_to_width(rhs, width);
         let result_w = mask_to_width(result, width);
-        // Unsigned carry: result < either operand (mod width).
-        let cf = result_w < lhs_w || result_w < rhs_w;
+        // Unsigned carry: the low-`width` sum wrapped, so `result < lhs` (mod
+        // width). `result < rhs` is the symmetric restatement of the same
+        // condition (both detect `lhs + rhs >= 2^width`), so it is redundant.
+        let cf = result_w < lhs_w;
         let zf = result_w == 0;
         let sf = top_bit(result, width);
         // Signed overflow on addition: input signs match AND result sign differs.
@@ -220,7 +246,7 @@ pub(crate) fn mask_to_width(value: u64, width: u32) -> u64 {
         32 => value & 0xffff_ffff,
         16 => value & 0xffff,
         8 => value & 0xff,
-        _ => value,
+        _ => unreachable!("unsupported BV width: {}", width),
     }
 }
 
@@ -230,7 +256,7 @@ fn top_bit(value: u64, width: u32) -> bool {
         32 => (value & 0x8000_0000) != 0,
         16 => (value & 0x8000) != 0,
         8 => (value & 0x80) != 0,
-        _ => (value as i64) < 0,
+        _ => unreachable!("unsupported BV width: {}", width),
     }
 }
 
@@ -284,6 +310,7 @@ impl fmt::Display for ConcreteValue {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ConcreteMachineState {
     registers: HashMap<Register, ConcreteValue>,
+    vectors: HashMap<VectorRegister, u128>,
     flags: ConditionFlags,
     width: u32,
     /// Sparse byte-addressed memory. Absent keys denote zero so that
@@ -312,8 +339,14 @@ impl ConcreteMachineState {
         registers.insert(Register::XZR, ConcreteValue::new(0));
         registers.insert(Register::SP, ConcreteValue::new(0));
 
+        let vectors = (0..32)
+            .filter_map(VectorRegister::from_index)
+            .map(|register| (register, 0))
+            .collect();
+
         ConcreteMachineState {
             registers,
+            vectors,
             flags: ConditionFlags::new(),
             width,
             memory: BTreeMap::new(),
@@ -346,6 +379,10 @@ impl ConcreteMachineState {
     /// Set the value of a register (XZR writes are ignored). Masks the value
     /// to the state's width per ADR-0004 decision 6.
     pub fn set_register(&mut self, reg: Register, value: ConcreteValue) {
+        assert!(
+            !matches!(reg, Register::Vector(_)),
+            "use set_vector for 128-bit vector registers"
+        );
         if reg != Register::XZR {
             let masked = mask_to_width(value.0, self.width);
             self.registers.insert(reg, ConcreteValue::new(masked));
@@ -355,6 +392,20 @@ impl ConcreteMachineState {
     /// Get all registers and their values
     pub fn registers(&self) -> &HashMap<Register, ConcreteValue> {
         &self.registers
+    }
+
+    /// Read the packed 128-bit value of an Advanced SIMD/FP register.
+    pub fn get_vector(&self, reg: VectorRegister) -> u128 {
+        self.vectors.get(&reg).copied().unwrap_or(0)
+    }
+
+    /// Replace the packed 128-bit value of an Advanced SIMD/FP register.
+    pub fn set_vector(&mut self, reg: VectorRegister, value: u128) {
+        self.vectors.insert(reg, value);
+    }
+
+    pub fn vectors(&self) -> &HashMap<VectorRegister, u128> {
+        &self.vectors
     }
 
     /// Get the condition flags
@@ -422,6 +473,13 @@ impl fmt::Display for ConcreteMachineState {
         if sp.0 != 0 {
             writeln!(f, "  sp: {}", sp)?;
         }
+        for i in 0..32 {
+            let register = VectorRegister::from_index(i).expect("valid vector register index");
+            let value = self.get_vector(register);
+            if value != 0 {
+                writeln!(f, "  {}: 0x{:032x}", register, value)?;
+            }
+        }
         writeln!(f, "  {}", self.flags)?;
         write!(f, "}}")
     }
@@ -435,7 +493,7 @@ impl fmt::Display for ConcreteMachineState {
 /// reference R8..R15.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct X86ConcreteMachineState {
-    registers: HashMap<crate::isa::x86::X86Register, ConcreteValue>,
+    registers: HashMap<X86Register, ConcreteValue>,
     flags: Eflags,
     width: u32,
 }
@@ -444,7 +502,7 @@ impl X86ConcreteMachineState {
     pub fn new_zeroed(width: u32) -> Self {
         let mut registers = HashMap::new();
         for i in 0..16u8 {
-            if let Some(r) = crate::isa::x86::X86Register::from_index(i) {
+            if let Some(r) = X86Register::from_index(i) {
                 registers.insert(r, ConcreteValue::new(0));
             }
         }
@@ -459,14 +517,52 @@ impl X86ConcreteMachineState {
         self.width
     }
 
-    pub fn get_register(&self, reg: crate::isa::x86::X86Register) -> ConcreteValue {
-        *self.registers.get(&reg).unwrap_or(&ConcreteValue::new(0))
+    pub fn get_register(&self, reg: X86Register) -> ConcreteValue {
+        *self
+            .registers
+            .get(&reg.canonical())
+            .unwrap_or(&ConcreteValue::new(0))
     }
 
-    /// Set a register value, masking to the low `width` bits.
-    pub fn set_register(&mut self, reg: crate::isa::x86::X86Register, value: ConcreteValue) {
+    /// Set a complete architectural register value, masking to the machine
+    /// width. Register views are canonicalized because callers that initialize
+    /// or compare machine state operate on whole registers; instruction
+    /// execution uses [`Self::write_operand`] for architectural partial writes.
+    pub fn set_register(&mut self, reg: X86Register, value: ConcreteValue) {
         let masked = mask_to_width(value.as_u64(), self.width);
-        self.registers.insert(reg, ConcreteValue::new(masked));
+        self.registers
+            .insert(reg.canonical(), ConcreteValue::new(masked));
+    }
+
+    /// Read the value denoted by an instruction register operand.
+    pub(crate) fn read_operand(&self, reg: X86Register) -> ConcreteValue {
+        let full = self.get_register(reg).as_u64();
+        let value = match reg.view() {
+            X86RegisterView::Native => full,
+            X86RegisterView::Dword => full & 0xffff_ffff,
+            X86RegisterView::Word => full & 0xffff,
+            X86RegisterView::LowByte => full & 0xff,
+            X86RegisterView::HighByte => (full >> 8) & 0xff,
+        };
+        ConcreteValue::new(value)
+    }
+
+    /// Write the value denoted by an instruction register operand.
+    ///
+    /// Byte and word writes preserve the surrounding bits. A 32-bit write in
+    /// x86-64 clears the upper half, while in x86-32 it is a whole-register
+    /// write. Native operands retain the historical mode-width behavior.
+    pub(crate) fn write_operand(&mut self, reg: X86Register, value: ConcreteValue) {
+        let old = self.get_register(reg).as_u64();
+        let value = value.as_u64();
+        let merged = match reg.view() {
+            X86RegisterView::Native => value,
+            X86RegisterView::Dword => value & 0xffff_ffff,
+            X86RegisterView::Word => (old & !0xffff) | (value & 0xffff),
+            X86RegisterView::LowByte => (old & !0xff) | (value & 0xff),
+            X86RegisterView::HighByte => (old & !0xff00) | ((value & 0xff) << 8),
+        };
+        self.set_register(reg.canonical(), ConcreteValue::new(merged));
     }
 
     pub fn get_flags(&self) -> Eflags {
@@ -477,7 +573,7 @@ impl X86ConcreteMachineState {
         self.flags = flags;
     }
 
-    pub fn registers(&self) -> &HashMap<crate::isa::x86::X86Register, ConcreteValue> {
+    pub fn registers(&self) -> &HashMap<X86Register, ConcreteValue> {
         &self.registers
     }
 }
@@ -587,15 +683,25 @@ mod tests {
     }
 
     #[test]
-    fn width_helpers_cover_small_and_fallback_widths() {
+    fn width_helpers_cover_small_widths() {
         assert_eq!(mask_to_width(0x12345, 16), 0x2345);
         assert_eq!(mask_to_width(0x12345, 8), 0x45);
-        assert_eq!(mask_to_width(0x12345, 24), 0x12345);
 
         assert!(top_bit(0x8000, 16));
         assert!(top_bit(0x80, 8));
         assert!(!top_bit(0x7f, 8));
-        assert!(!top_bit(0x7f, 24));
+    }
+
+    #[test]
+    #[should_panic(expected = "unsupported BV width: 24")]
+    fn mask_to_width_panics_on_unsupported_width() {
+        let _ = mask_to_width(0x12345, 24);
+    }
+
+    #[test]
+    #[should_panic(expected = "unsupported BV width: 24")]
+    fn top_bit_panics_on_unsupported_width() {
+        let _ = top_bit(0x7f, 24);
     }
 
     #[test]
@@ -629,6 +735,56 @@ mod tests {
             state.get_register(X86Register::RAX).as_u64(),
             0x9abc_def0,
             "32-bit ISA must truncate writes to low 32 bits"
+        );
+    }
+
+    #[test]
+    fn x86_state_reads_and_writes_register_views() {
+        use crate::isa::x86::X86Register;
+        let mut state = X86ConcreteMachineState::new_zeroed(64);
+        state.set_register(X86Register::RAX, ConcreteValue::new(0x1122_3344_5566_7788));
+
+        assert_eq!(
+            state.read_operand(X86Register::AL).as_u64(),
+            0x88,
+            "AL reads bits 7:0"
+        );
+        assert_eq!(
+            state.read_operand(X86Register::AH).as_u64(),
+            0x77,
+            "AH reads bits 15:8"
+        );
+        assert_eq!(
+            state.read_operand(X86Register::AX).as_u64(),
+            0x7788,
+            "AX reads bits 15:0"
+        );
+        assert_eq!(
+            state.read_operand(X86Register::EAX).as_u64(),
+            0x5566_7788,
+            "EAX reads bits 31:0"
+        );
+
+        state.write_operand(X86Register::AL, ConcreteValue::new(0xaa));
+        assert_eq!(
+            state.get_register(X86Register::RAX).as_u64(),
+            0x1122_3344_5566_77aa
+        );
+        state.write_operand(X86Register::AH, ConcreteValue::new(0xbb));
+        assert_eq!(
+            state.get_register(X86Register::RAX).as_u64(),
+            0x1122_3344_5566_bbaa
+        );
+        state.write_operand(X86Register::AX, ConcreteValue::new(0xccdd));
+        assert_eq!(
+            state.get_register(X86Register::RAX).as_u64(),
+            0x1122_3344_5566_ccdd
+        );
+        state.write_operand(X86Register::EAX, ConcreteValue::new(0xdead_beef));
+        assert_eq!(
+            state.get_register(X86Register::RAX).as_u64(),
+            0x0000_0000_dead_beef,
+            "32-bit writes zero-extend in x86-64"
         );
     }
 
@@ -674,6 +830,19 @@ mod tests {
         assert!(f.zf, "result is 0");
         assert!(!f.sf);
         assert!(!f.of, "0xff..ff + 1 = 0 is not a signed overflow");
+    }
+
+    #[test]
+    fn eflags_from_add_carry_with_distinct_small_lhs() {
+        // Distinct operands (lhs != rhs, lhs small) whose sum wraps. Guards the
+        // single-clause `result < lhs` carry test: 3 + (2^64-1) = 2 (mod 2^64),
+        // and 2 < 3, so CF must be set.
+        let lhs = 3u64;
+        let rhs = u64::MAX;
+        let result = lhs.wrapping_add(rhs);
+        let f = Eflags::from_add(lhs, rhs, result, 64);
+        assert!(f.cf, "carry expected when the low-width sum wraps");
+        assert_eq!(result, 2);
     }
 
     #[test]

@@ -1,0 +1,8 @@
+# Pin the toolchain and the components CI + local builds rely on so they
+# resolve identically. rustup reads this file automatically, installing the
+# channel and components on first cargo invocation. Centralizing them here
+# lets the workflow bootstraps drop their ad-hoc `--component` flags over time.
+[toolchain]
+channel = "stable"
+components = ["rustfmt", "clippy", "llvm-tools-preview"]
+profile = "minimal"

@@ -42,6 +42,18 @@ pub trait StochasticBackend<I: ISA>: Sized {
     /// immediates, mutation weights, mode-where-applicable).
     fn make_mutator(config: &SearchConfig) -> I::Mutator;
 
+    /// Registers to randomize during stochastic fast validation.
+    ///
+    /// Defaults to the configured mutation pool. Backends may extend this
+    /// when a target can read registers outside that pool.
+    fn validation_registers(
+        configured: &[I::Register],
+        _target: &[I::Instruction],
+        _live_out: &Self::LiveOut,
+    ) -> Vec<I::Register> {
+        configured.to_vec()
+    }
+
     /// Random test inputs covering `regs`. The width parameter sizes
     /// x86 register-write masking; AArch64 ignores it.
     fn make_test_inputs(regs: &[I::Register], width: u32, count: usize) -> Vec<Self::State>;
@@ -52,19 +64,9 @@ pub trait StochasticBackend<I: ISA>: Sized {
     fn apply_sequence(state: Self::State, seq: &[I::Instruction]) -> Self::State;
     /// Compare two states over the live-out contract.
     ///
-    /// **Invariant:** any `flags_live` bit on the mask is honoured by the
-    /// equivalence-checking layer (`semantics::equivalence`), not here.
-    /// Implementations of this trait method **must** treat the comparison as
-    /// register-only — the pre-SMT flag-writer guard upstream rejects
-    /// flag-divergent candidates before stochastic comparison runs. If the
-    /// call path is ever rearranged so stochastic compares states without
-    /// passing through the upstream guard, this invariant has to be revisited.
-    ///
-    /// This is the only known caller in the codebase that intentionally
-    /// passes `flags_live=false` to `concrete::states_equal_for_live_out`
-    /// regardless of the mask's `flags_live()` value; the cleanup tracked in
-    /// issue #282 must preserve this exception (e.g. by routing every other
-    /// caller through `live_out.flags_live()` and leaving this one explicit).
+    /// Implementations should honor the observable state carried by their
+    /// live-out mask. Stochastic validation is a prefilter; the full
+    /// equivalence checker remains authoritative.
     fn states_equal(s1: &Self::State, s2: &Self::State, live_out: &Self::LiveOut) -> bool;
 
     /// Sum the cost of every instruction in the sequence.
@@ -101,10 +103,9 @@ pub trait StochasticBackend<I: ISA>: Sized {
     }
 
     /// Width parameter for cost + state masking. Architecture markers own
-    /// this width so a mismatched config cannot silently change semantics.
-    /// `config` is retained only for API symmetry; implementations are
-    /// expected to return an architectural constant and must not read it.
-    fn width(config: &SearchConfig) -> u32;
+    /// this width so a mismatched config cannot silently change semantics;
+    /// implementations return an architectural constant.
+    fn width() -> u32;
 }
 
 // ---- AArch64 backend ----
@@ -127,6 +128,30 @@ impl StochasticBackend<crate::isa::AArch64> for crate::isa::AArch64 {
             config.available_immediates.clone(),
             config.stochastic.mutation_weights.clone(),
         )
+    }
+
+    fn validation_registers(
+        configured: &[crate::ir::Register],
+        target: &[crate::ir::Instruction],
+        live_out: &Self::LiveOut,
+    ) -> Vec<crate::ir::Register> {
+        let mut regs = std::collections::HashSet::new();
+
+        for reg in configured {
+            regs.insert(*reg);
+        }
+        for reg in live_out.iter() {
+            regs.insert(*reg);
+        }
+        for instr in target {
+            for reg in instr.source_registers() {
+                regs.insert(reg);
+            }
+        }
+
+        let mut regs: Vec<_> = regs.into_iter().collect();
+        regs.sort_by_key(|reg| reg.sort_key());
+        regs
     }
 
     fn make_test_inputs(
@@ -152,14 +177,12 @@ impl StochasticBackend<crate::isa::AArch64> for crate::isa::AArch64 {
     }
 
     fn states_equal(s1: &Self::State, s2: &Self::State, live_out: &Self::LiveOut) -> bool {
-        // Pass `flags_live = false` deliberately: the over-approximate
-        // flag-writer guard in equivalence.rs pre-SMT already handles flag
-        // divergence before stochastic comparison is reached. The mask may
-        // carry `flags_live = true`, but it is honoured upstream, not here.
-        // `memory_live = false` here for the same reason — equivalence.rs
-        // force-enables it via `touches_memory()` before calling this path.
-        // Mirrors mcmc.rs's existing call site.
-        crate::semantics::concrete::states_equal_for_live_out(s1, s2, live_out, false, false)
+        // Honor the flag liveness carried by the mask: `states_equal_for_live_out`
+        // derives it from `live_out.flags_live()`. Stochastic validation is still
+        // a register/flag prefilter; the full equivalence path force-enables
+        // memory comparison when either sequence touches memory, so
+        // `memory_live = false` here.
+        crate::semantics::concrete::states_equal_for_live_out(s1, s2, live_out, false)
     }
 
     fn sequence_cost(seq: &[crate::ir::Instruction], metric: &CostMetric, _width: u32) -> u64 {
@@ -201,7 +224,7 @@ impl StochasticBackend<crate::isa::AArch64> for crate::isa::AArch64 {
         crate::search::candidate::generate_random_sequence(rng, len, regs, imms)
     }
 
-    fn width(_config: &SearchConfig) -> u32 {
+    fn width() -> u32 {
         64
     }
 }
@@ -247,9 +270,7 @@ fn x86_random_sequence<R: RngExt>(
     let regs: Vec<_> = regs
         .iter()
         .copied()
-        .filter(|r| {
-            mode != crate::assembler::x86::X86Mode::Mode32 || matches!(r.index(), Some(i) if i < 8)
-        })
+        .filter(|r| r.is_available_in(mode))
         .collect();
     if regs.is_empty() {
         return Vec::new();
@@ -262,6 +283,35 @@ fn x86_random_sequence<R: RngExt>(
     (0..len)
         .map(|_| crate::isa::x86::X86InstructionGenerator.generate_random(rng, &regs, &imms))
         .collect()
+}
+
+/// Registers to randomize during x86 stochastic fast validation. Mirrors
+/// the AArch64 override: seeds a set from `configured`, then unions the
+/// live-out registers and every target instruction's source registers, so
+/// validation exercises registers the target reads even if they aren't in
+/// the configured mutation pool.
+fn x86_validation_registers(
+    configured: &[crate::isa::x86::X86Register],
+    target: &[crate::isa::x86::X86Instruction],
+    live_out: &crate::semantics::live_out::X86LiveOut,
+) -> Vec<crate::isa::x86::X86Register> {
+    let mut regs = std::collections::HashSet::new();
+
+    for reg in configured {
+        regs.insert(*reg);
+    }
+    for reg in live_out.iter() {
+        regs.insert(*reg);
+    }
+    for instr in target {
+        for reg in instr.source_registers() {
+            regs.insert(reg);
+        }
+    }
+
+    let mut regs: Vec<_> = regs.into_iter().collect();
+    regs.sort_by_key(|reg| reg.index().unwrap_or(u8::MAX));
+    regs
 }
 
 impl StochasticBackend<crate::isa::X86_64> for crate::isa::X86_64 {
@@ -278,6 +328,14 @@ impl StochasticBackend<crate::isa::X86_64> for crate::isa::X86_64 {
 
     fn make_mutator(config: &SearchConfig) -> crate::isa::x86::X86Mutator {
         x86_make_mutator(config, crate::assembler::x86::X86Mode::Mode64)
+    }
+
+    fn validation_registers(
+        configured: &[crate::isa::x86::X86Register],
+        target: &[crate::isa::x86::X86Instruction],
+        live_out: &Self::LiveOut,
+    ) -> Vec<crate::isa::x86::X86Register> {
+        x86_validation_registers(configured, target, live_out)
     }
 
     fn make_test_inputs(
@@ -350,7 +408,7 @@ impl StochasticBackend<crate::isa::X86_64> for crate::isa::X86_64 {
             .copied()
     }
 
-    fn width(_config: &SearchConfig) -> u32 {
+    fn width() -> u32 {
         64
     }
 }
@@ -369,6 +427,14 @@ impl StochasticBackend<crate::isa::X86_32> for crate::isa::X86_32 {
 
     fn make_mutator(config: &SearchConfig) -> crate::isa::x86::X86Mutator {
         x86_make_mutator(config, crate::assembler::x86::X86Mode::Mode32)
+    }
+
+    fn validation_registers(
+        configured: &[crate::isa::x86::X86Register],
+        target: &[crate::isa::x86::X86Instruction],
+        live_out: &Self::LiveOut,
+    ) -> Vec<crate::isa::x86::X86Register> {
+        x86_validation_registers(configured, target, live_out)
     }
 
     fn make_test_inputs(
@@ -441,7 +507,7 @@ impl StochasticBackend<crate::isa::X86_32> for crate::isa::X86_32 {
             .copied()
     }
 
-    fn width(_config: &SearchConfig) -> u32 {
+    fn width() -> u32 {
         crate::isa::X86_32.register_width()
     }
 }
@@ -457,11 +523,12 @@ mod tests {
     //! candidate, which depends on RNG and isn't a reliable coverage
     //! signal).
     use super::*;
-    use crate::ir::{Instruction, Operand, Register};
+    use crate::ir::{Instruction, Operand, Register, VectorArrangement, VectorRegister};
     use crate::isa::AArch64;
     use crate::isa::x86::{X86Instruction, X86Register};
     use crate::semantics::live_out::LiveOut;
     use crate::semantics::live_out::X86LiveOut;
+    use crate::semantics::state::{ConcreteMachineState, ConditionFlags};
 
     #[test]
     fn aarch64_backend_honors_flags_dead_live_out_mask() {
@@ -503,21 +570,108 @@ mod tests {
     }
 
     #[test]
-    fn x86_32_stochastic_width_is_architectural_even_with_default_config() {
-        let config = SearchConfig::default();
-        assert_eq!(config.x86_width, 64);
+    fn aarch64_validation_registers_include_target_sources() {
+        let target = vec![
+            Instruction::MovReg {
+                rd: Register::X0,
+                rn: Register::X1,
+            },
+            Instruction::Add {
+                rd: Register::X0,
+                rn: Register::X0,
+                rm: Operand::Immediate(1),
+            },
+            Instruction::VectorAdd {
+                vd: VectorRegister::V0,
+                vn: VectorRegister::V1,
+                vm: VectorRegister::V0,
+                arrangement: VectorArrangement::TwoD,
+            },
+        ];
+        let live_out =
+            LiveOut::from_registers(vec![Register::X0, Register::Vector(VectorRegister::V0)]);
 
-        assert_eq!(
-            <crate::isa::X86_32 as StochasticBackend<crate::isa::X86_32>>::width(&config),
-            32
+        let regs = <AArch64 as StochasticBackend<AArch64>>::validation_registers(
+            &[Register::X0],
+            &target,
+            &live_out,
         );
 
-        // X86_64 was already correct; this cross-check guards against a
-        // future regression and is not part of the x86-32 bug being fixed.
         assert_eq!(
-            <crate::isa::X86_64 as StochasticBackend<crate::isa::X86_64>>::width(
-                &SearchConfig::default().with_x86_width(32),
-            ),
+            regs,
+            vec![
+                Register::X0,
+                Register::X1,
+                Register::Vector(VectorRegister::V0),
+                Register::Vector(VectorRegister::V1),
+            ]
+        );
+    }
+
+    #[test]
+    fn x86_validation_registers_include_target_sources() {
+        // RBX is a target source register and RDX is live-out; neither is in
+        // the configured pool, so the x86 default would omit both. The
+        // override must union them in.
+        let target = vec![X86Instruction::MovReg {
+            rd: X86Register::RAX,
+            rs: X86Register::RBX,
+        }];
+        let live_out = X86LiveOut::from_registers(vec![X86Register::RDX]);
+
+        let regs =
+            <crate::isa::X86_64 as StochasticBackend<crate::isa::X86_64>>::validation_registers(
+                &[X86Register::RAX],
+                &target,
+                &live_out,
+            );
+
+        assert!(regs.contains(&X86Register::RAX), "configured register kept");
+        assert!(regs.contains(&X86Register::RBX), "target source unioned");
+        assert!(regs.contains(&X86Register::RDX), "live-out unioned");
+        // Sorted by register index (RAX=0, RDX=2, RBX=3).
+        assert_eq!(
+            regs,
+            vec![X86Register::RAX, X86Register::RDX, X86Register::RBX]
+        );
+    }
+
+    #[test]
+    fn aarch64_fast_state_comparison_honors_flags_live() {
+        let state1 = ConcreteMachineState::new_zeroed();
+        let mut state2 = ConcreteMachineState::new_zeroed();
+        state2.set_flags(ConditionFlags {
+            n: true,
+            z: false,
+            c: false,
+            v: false,
+        });
+        let live_out = LiveOut::from_registers(vec![Register::X0]);
+
+        assert!(<AArch64 as StochasticBackend<AArch64>>::states_equal(
+            &state1, &state2, &live_out,
+        ));
+        assert!(!<AArch64 as StochasticBackend<AArch64>>::states_equal(
+            &state1,
+            &state2,
+            &live_out.with_flags(true),
+        ));
+    }
+
+    #[test]
+    fn stochastic_width_is_architectural() {
+        // Width is owned by the ISA marker, not configuration: each backend
+        // returns its architectural constant from the no-arg `width()`.
+        assert_eq!(
+            <crate::isa::X86_32 as StochasticBackend<crate::isa::X86_32>>::width(),
+            32
+        );
+        assert_eq!(
+            <crate::isa::X86_64 as StochasticBackend<crate::isa::X86_64>>::width(),
+            64
+        );
+        assert_eq!(
+            <crate::isa::AArch64 as StochasticBackend<crate::isa::AArch64>>::width(),
             64
         );
     }

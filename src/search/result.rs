@@ -5,6 +5,7 @@
 use crate::ir::Instruction;
 use crate::isa::ISA;
 use crate::search::config::Algorithm;
+use crate::semantics::{EquivalenceMetrics, EquivalenceResult};
 use std::time::Duration;
 
 /// Result of a search operation
@@ -118,6 +119,60 @@ impl From<SearchResultFor<crate::isa::AArch64>> for SearchResult {
     }
 }
 
+/// The counter deltas produced by folding one candidate verification into a
+/// [`SearchStatistics`].
+///
+/// This separates the *policy* — what a verification outcome means for the
+/// counters — from the *sink* it is applied to. The symbolic and stochastic
+/// (MCMC) search paths fold the tally into plain `&mut SearchStatistics` fields
+/// via [`VerificationTally::fold_into`]; the parallel enumerative path applies
+/// the same tally to its atomic counters. All three share one definition via
+/// [`SearchStatistics::verification_tally`], so the paths cannot drift.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct VerificationTally {
+    /// Wall-clock time this verification spent inside `solver.check()`. Folds
+    /// into `smt_elapsed`. `Duration::ZERO` when the solver was not invoked.
+    pub smt_elapsed: Duration,
+    /// Whether the verification reached Z3 (`EquivalenceMetrics::smt_called`).
+    ///
+    /// When true the candidate counts as *both* an SMT query and a fast-
+    /// validation pass, even if Z3 later disproved it: reaching the solver means
+    /// it cleared the concrete pre-filter. Fast-path refutations and the pre-SMT
+    /// flag-writer guard leave `smt_called` false, so neither is counted here.
+    pub reached_solver: bool,
+    /// Whether Z3 proved the candidate equivalent to the target. Folds into
+    /// `smt_equivalent`.
+    pub proved_equivalent: bool,
+}
+
+impl VerificationTally {
+    /// Fold this tally's SMT-counter deltas into a single-threaded
+    /// [`SearchStatistics`] sink: `smt_elapsed`, `smt_queries` (when the solver
+    /// was reached), and `smt_equivalent` (when equivalence was proven).
+    ///
+    /// This is the shared fold behind every plain-`&mut SearchStatistics`
+    /// verification path — the symbolic search ([`SearchStatistics::record_verification`])
+    /// and the stochastic (MCMC) search both call it, so the SMT accounting
+    /// cannot drift between them. The parallel enumerative path applies the same
+    /// [`SearchStatistics::verification_tally`] to *atomic* counters instead, the
+    /// one genuinely different sink.
+    ///
+    /// It deliberately does **not** touch `candidates_passed_fast`: what counts
+    /// as a fast-validation pass is a per-path policy. The symbolic path ties it
+    /// to `reached_solver` (a candidate that cleared the concrete pre-filter to
+    /// reach Z3); the stochastic path counts it earlier, at the concrete-test
+    /// stage before the cost gate. Each path owns that increment.
+    pub fn fold_into(&self, stats: &mut SearchStatistics) {
+        stats.smt_elapsed += self.smt_elapsed;
+        if self.reached_solver {
+            stats.smt_queries += 1;
+        }
+        if self.proved_equivalent {
+            stats.smt_equivalent += 1;
+        }
+    }
+}
+
 /// Statistics from a search operation
 #[derive(Debug, Clone, Default)]
 pub struct SearchStatistics {
@@ -125,11 +180,16 @@ pub struct SearchStatistics {
     pub algorithm: Algorithm,
     /// Total time spent searching
     pub elapsed_time: Duration,
-    /// Number of candidates evaluated
+    /// Number of candidates constructed and considered by the search.
+    /// This includes candidates later rejected by a cost/best-bound gate.
     pub candidates_evaluated: u64,
+    /// Number of evaluated candidates rejected before verification because
+    /// they were not cheaper than the current best solution.
+    pub candidates_pruned_by_cost: u64,
     /// Number of candidates that passed fast (concrete) validation
     pub candidates_passed_fast: u64,
-    /// Number of SMT queries made
+    /// Number of SMT solver queries that reached Z3 `solver.check()`.
+    /// Fast-path refutations and other pre-SMT exits are not counted.
     pub smt_queries: u64,
     /// Cumulative wall-clock time spent inside Z3 `solver.check()` calls,
     /// aggregated across every SMT-reaching candidate during the search.
@@ -155,6 +215,101 @@ impl SearchStatistics {
             algorithm,
             ..Default::default()
         }
+    }
+
+    /// The canonical policy mapping one equivalence verification to its counter
+    /// deltas.
+    ///
+    /// This is the single source of truth for how a `(metrics, verdict)` pair
+    /// updates the SMT counters, shared by both the symbolic and the parallel
+    /// enumerative verification paths. See [`VerificationTally`] for what each
+    /// field counts.
+    pub fn verification_tally(
+        metrics: &EquivalenceMetrics,
+        verdict: &EquivalenceResult,
+    ) -> VerificationTally {
+        VerificationTally {
+            smt_elapsed: metrics.smt_elapsed,
+            reached_solver: metrics.smt_called,
+            proved_equivalent: matches!(verdict, EquivalenceResult::Equivalent),
+        }
+    }
+
+    /// Fold one equivalence verification into the (single-threaded) SMT
+    /// counters, returning whether the candidate proved equivalent.
+    ///
+    /// Used by the symbolic search path. The stochastic (MCMC) path shares the
+    /// SMT fold via [`VerificationTally::fold_into`] but owns its own
+    /// `candidates_passed_fast` policy, so it applies the tally directly rather
+    /// than calling this method. The parallel enumerative path applies the same
+    /// [`Self::verification_tally`] to its atomic counters instead. All three
+    /// agree on what each counter means because they share one tally.
+    pub fn record_verification(
+        &mut self,
+        metrics: &EquivalenceMetrics,
+        verdict: &EquivalenceResult,
+    ) -> bool {
+        let tally = Self::verification_tally(metrics, verdict);
+        if tally.reached_solver {
+            // Symbolic-path policy: reaching Z3 means the candidate cleared the
+            // concrete pre-filter, so it also counts as one fast-validation pass.
+            self.candidates_passed_fast += 1;
+        }
+        tally.fold_into(self);
+        tally.proved_equivalent
+    }
+
+    /// Combine the per-worker statistics collected by the parallel coordinator
+    /// into a single cross-worker aggregate for a hybrid search.
+    ///
+    /// This is the single home for the reduce rules the parallel coordinator
+    /// used to inline into its receive loop. Keeping the field list next to
+    /// [`SearchStatistics`] means adding a counter can no longer silently
+    /// under-report in the aggregate.
+    ///
+    /// The rules, matching the [`ParallelResult`](crate::search::parallel::coordinator)
+    /// contract:
+    /// * every counter field **sums** across workers;
+    /// * `original_cost` takes the **max** — workers see the same target, so the
+    ///   max is robust against a worker that exited before recording it;
+    /// * `best_cost_found` takes the **minimum nonzero** value, falling back to
+    ///   the aggregated `original_cost` so the CLI never reports a best cost of 0
+    ///   when some worker verified a candidate;
+    /// * `algorithm` is always [`Algorithm::Hybrid`] (the parallel coordinator's
+    ///   identity) and `elapsed_time` is the coordinator wall-clock, passed in so
+    ///   every aggregate shares one time origin.
+    ///
+    /// The worker id in each entry is not part of the aggregation; it is accepted
+    /// so callers can pass the coordinator's `worker_stats` vector directly.
+    pub fn aggregate_workers(
+        worker_stats: &[(usize, SearchStatistics)],
+        elapsed: Duration,
+    ) -> SearchStatistics {
+        let mut total = SearchStatistics::new(Algorithm::Hybrid);
+        total.elapsed_time = elapsed;
+        for (_, s) in worker_stats {
+            total.candidates_evaluated += s.candidates_evaluated;
+            total.candidates_pruned_by_cost += s.candidates_pruned_by_cost;
+            total.candidates_passed_fast += s.candidates_passed_fast;
+            total.smt_queries += s.smt_queries;
+            total.smt_elapsed += s.smt_elapsed;
+            total.smt_equivalent += s.smt_equivalent;
+            total.iterations += s.iterations;
+            total.accepted_proposals += s.accepted_proposals;
+            total.improvements_found += s.improvements_found;
+        }
+        total.original_cost = worker_stats
+            .iter()
+            .map(|(_, s)| s.original_cost)
+            .max()
+            .unwrap_or(0);
+        total.best_cost_found = worker_stats
+            .iter()
+            .map(|(_, s)| s.best_cost_found)
+            .filter(|&c| c > 0)
+            .min()
+            .unwrap_or(total.original_cost);
+        total
     }
 
     /// Record the start of timing
@@ -208,6 +363,12 @@ impl SearchStatistics {
             "Candidates evaluated: {}\n",
             self.candidates_evaluated
         ));
+        if self.candidates_pruned_by_cost > 0 {
+            s.push_str(&format!(
+                "Candidates pruned by cost: {}\n",
+                self.candidates_pruned_by_cost
+            ));
+        }
         s.push_str(&format!(
             "Throughput: {:.0} candidates/sec\n",
             self.throughput()
@@ -380,6 +541,7 @@ mod tests {
         stats.start_timer();
         stats.elapsed_time = Duration::from_millis(500);
         stats.candidates_evaluated = 100;
+        stats.candidates_pruned_by_cost = 7;
         stats.candidates_passed_fast = 25;
         stats.smt_queries = 10;
         stats.smt_equivalent = 2;
@@ -391,6 +553,7 @@ mod tests {
 
         let summary = stats.format_summary();
         assert!(summary.contains("Algorithm: stochastic"));
+        assert!(summary.contains("Candidates pruned by cost: 7"));
         assert!(summary.contains("Fast pass rate"));
         assert!(summary.contains("SMT queries"));
         assert!(summary.contains("Acceptance rate"));
@@ -412,5 +575,320 @@ mod tests {
         assert!(with_opt_text.contains("Optimization found!"));
         assert!(with_opt_text.contains("Optimized sequence"));
         assert!(with_opt_text.contains("Savings: 1 instructions"));
+    }
+
+    // --- Verification accounting seam (verification_tally / record_verification) ---
+    //
+    // These pin the canonical policy for folding one candidate verification into
+    // the SMT counters, shared by the symbolic and enumerative search paths.
+    use crate::semantics::{EquivalenceMetrics, EquivalenceResult};
+
+    fn reached_solver(elapsed_ms: u64) -> EquivalenceMetrics {
+        EquivalenceMetrics {
+            smt_called: true,
+            smt_elapsed: Duration::from_millis(elapsed_ms),
+            ..Default::default()
+        }
+    }
+
+    fn refuted_before_solver() -> EquivalenceMetrics {
+        EquivalenceMetrics {
+            smt_called: false,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn record_verification_counts_solver_reaching_equivalent_candidate() {
+        // A candidate that reached Z3 and was proven equivalent counts as one SMT
+        // query, one fast-validation pass (it cleared the concrete pre-filter to
+        // reach Z3), and one proven equivalence; its solver time is accumulated.
+        let mut stats = SearchStatistics::default();
+        let proved = stats.record_verification(&reached_solver(7), &EquivalenceResult::Equivalent);
+        assert!(proved);
+        assert_eq!(stats.smt_queries, 1);
+        assert_eq!(stats.candidates_passed_fast, 1);
+        assert_eq!(stats.smt_equivalent, 1);
+        assert_eq!(stats.smt_elapsed, Duration::from_millis(7));
+    }
+
+    #[test]
+    fn record_verification_counts_solver_reaching_but_disproved_candidate() {
+        // Reaching Z3 but being disproved still counts as a fast pass + an SMT
+        // query (the documented meaning of candidates_passed_fast), but NOT an
+        // equivalence.
+        let mut stats = SearchStatistics::default();
+        let proved =
+            stats.record_verification(&reached_solver(3), &EquivalenceResult::NotEquivalent);
+        assert!(!proved);
+        assert_eq!(stats.smt_queries, 1);
+        assert_eq!(stats.candidates_passed_fast, 1);
+        assert_eq!(stats.smt_equivalent, 0);
+        assert_eq!(stats.smt_elapsed, Duration::from_millis(3));
+    }
+
+    #[test]
+    fn record_verification_ignores_candidates_that_never_reached_the_solver() {
+        // A fast-path refutation (smt_called == false) is neither an SMT query
+        // nor a fast pass; only the (zero) solver time is folded in.
+        let mut stats = SearchStatistics::default();
+        let proved = stats.record_verification(
+            &refuted_before_solver(),
+            &EquivalenceResult::Unknown("timeout".into()),
+        );
+        assert!(!proved);
+        assert_eq!(stats.smt_queries, 0);
+        assert_eq!(stats.candidates_passed_fast, 0);
+        assert_eq!(stats.smt_equivalent, 0);
+        assert_eq!(stats.smt_elapsed, Duration::ZERO);
+    }
+
+    #[test]
+    fn record_verification_accumulates_across_calls() {
+        let mut stats = SearchStatistics::default();
+        stats.record_verification(&reached_solver(2), &EquivalenceResult::Equivalent);
+        stats.record_verification(&refuted_before_solver(), &EquivalenceResult::NotEquivalent);
+        stats.record_verification(&reached_solver(2), &EquivalenceResult::NotEquivalent);
+        assert_eq!(stats.smt_queries, 2);
+        assert_eq!(stats.candidates_passed_fast, 2);
+        assert_eq!(stats.smt_equivalent, 1);
+        assert_eq!(stats.smt_elapsed, Duration::from_millis(4));
+    }
+
+    #[test]
+    fn fold_into_counts_solver_reaching_equivalent_candidate() {
+        // Folding a solver-reaching, proven-equivalent tally into a plain sink
+        // adds its solver time, one SMT query, and one proven equivalence.
+        let tally = SearchStatistics::verification_tally(
+            &reached_solver(7),
+            &EquivalenceResult::Equivalent,
+        );
+        let mut stats = SearchStatistics::default();
+        tally.fold_into(&mut stats);
+        assert_eq!(stats.smt_queries, 1);
+        assert_eq!(stats.smt_equivalent, 1);
+        assert_eq!(stats.smt_elapsed, Duration::from_millis(7));
+    }
+
+    #[test]
+    fn fold_into_leaves_candidates_passed_fast_untouched() {
+        // The fast-pass increment is a per-path policy, not part of the shared
+        // SMT fold: fold_into must never move candidates_passed_fast, even for a
+        // solver-reaching candidate. (The symbolic path adds it separately; the
+        // stochastic path counts it at the concrete-test stage.)
+        let tally = SearchStatistics::verification_tally(
+            &reached_solver(4),
+            &EquivalenceResult::Equivalent,
+        );
+        let mut stats = SearchStatistics::default();
+        tally.fold_into(&mut stats);
+        assert_eq!(stats.candidates_passed_fast, 0);
+    }
+
+    #[test]
+    fn fold_into_ignores_candidates_that_never_reached_the_solver() {
+        // A pre-solver refutation folds in only its (zero) solver time.
+        let tally = SearchStatistics::verification_tally(
+            &refuted_before_solver(),
+            &EquivalenceResult::NotEquivalent,
+        );
+        let mut stats = SearchStatistics::default();
+        tally.fold_into(&mut stats);
+        assert_eq!(stats.smt_queries, 0);
+        assert_eq!(stats.smt_equivalent, 0);
+        assert_eq!(stats.smt_elapsed, Duration::ZERO);
+    }
+
+    #[test]
+    fn verification_tally_exposes_the_three_counter_decisions() {
+        // The enumerative (parallel) path applies the same tally to its atomic
+        // counters, so the tally must expose exactly the decisions they need.
+        let tally = SearchStatistics::verification_tally(
+            &reached_solver(5),
+            &EquivalenceResult::Equivalent,
+        );
+        assert_eq!(tally.smt_elapsed, Duration::from_millis(5));
+        assert!(tally.reached_solver);
+        assert!(tally.proved_equivalent);
+
+        let refuted = SearchStatistics::verification_tally(
+            &refuted_before_solver(),
+            &EquivalenceResult::NotEquivalent,
+        );
+        assert_eq!(refuted.smt_elapsed, Duration::ZERO);
+        assert!(!refuted.reached_solver);
+        assert!(!refuted.proved_equivalent);
+    }
+
+    // --- Cross-worker aggregation seam (aggregate_workers) ---
+    //
+    // These pin the reduce rules the parallel coordinator used to inline into
+    // its receive loop: counter sums, max original_cost, min-nonzero
+    // best_cost_found with a fallback, and the hybrid identity. Expected values
+    // are hand-computed, independent of the aggregation code.
+
+    /// Two workers whose counter fields are distinct primes/round numbers so a
+    /// dropped or double-counted field is visible in the sum.
+    fn two_worker_stats() -> Vec<(usize, SearchStatistics)> {
+        let a = SearchStatistics {
+            algorithm: Algorithm::Stochastic,
+            candidates_evaluated: 10,
+            candidates_pruned_by_cost: 2,
+            candidates_passed_fast: 5,
+            smt_queries: 3,
+            smt_elapsed: Duration::from_millis(4),
+            smt_equivalent: 1,
+            iterations: 100,
+            accepted_proposals: 20,
+            improvements_found: 2,
+            original_cost: 6,
+            best_cost_found: 4,
+            elapsed_time: Duration::from_millis(900),
+        };
+        let b = SearchStatistics {
+            algorithm: Algorithm::Symbolic,
+            candidates_evaluated: 7,
+            candidates_pruned_by_cost: 1,
+            candidates_passed_fast: 3,
+            smt_queries: 2,
+            smt_elapsed: Duration::from_millis(6),
+            smt_equivalent: 1,
+            iterations: 50,
+            accepted_proposals: 10,
+            improvements_found: 1,
+            original_cost: 6,
+            best_cost_found: 3,
+            elapsed_time: Duration::from_millis(500),
+        };
+        vec![(0, a), (1, b)]
+    }
+
+    #[test]
+    fn aggregate_workers_sums_counters_and_labels_hybrid() {
+        let total =
+            SearchStatistics::aggregate_workers(&two_worker_stats(), Duration::from_millis(250));
+
+        // Every counter field is the sum of the two workers' values.
+        assert_eq!(total.candidates_evaluated, 17);
+        assert_eq!(total.candidates_pruned_by_cost, 3);
+        assert_eq!(total.candidates_passed_fast, 8);
+        assert_eq!(total.smt_queries, 5);
+        assert_eq!(total.smt_elapsed, Duration::from_millis(10));
+        assert_eq!(total.smt_equivalent, 2);
+        assert_eq!(total.iterations, 150);
+        assert_eq!(total.accepted_proposals, 30);
+        assert_eq!(total.improvements_found, 3);
+
+        // The aggregate is labelled Hybrid and carries the passed-in wall-clock,
+        // regardless of the per-worker algorithms or elapsed times.
+        assert_eq!(total.algorithm, Algorithm::Hybrid);
+        assert_eq!(total.elapsed_time, Duration::from_millis(250));
+    }
+
+    #[test]
+    fn aggregate_workers_takes_max_original_cost() {
+        // original_cost is a max, not a sum: workers see the same target, so its
+        // real cost is the largest any worker recorded. A worker that exited
+        // before recording it (original_cost 0) must not drag the aggregate down.
+        let workers = vec![
+            (
+                0,
+                SearchStatistics {
+                    original_cost: 6,
+                    ..SearchStatistics::new(Algorithm::Stochastic)
+                },
+            ),
+            (
+                1,
+                SearchStatistics {
+                    original_cost: 0,
+                    ..SearchStatistics::new(Algorithm::Symbolic)
+                },
+            ),
+        ];
+
+        let total = SearchStatistics::aggregate_workers(&workers, Duration::from_millis(1));
+
+        assert_eq!(total.original_cost, 6);
+    }
+
+    #[test]
+    fn aggregate_workers_takes_min_nonzero_best_cost() {
+        // best_cost_found is the smallest cost any worker actually achieved. A
+        // best_cost_found of 0 means "this worker never verified a candidate"
+        // and must be skipped, not treated as the (unbeatable) minimum.
+        let workers = vec![
+            (
+                0,
+                SearchStatistics {
+                    original_cost: 6,
+                    best_cost_found: 0, // never found one
+                    ..SearchStatistics::new(Algorithm::Stochastic)
+                },
+            ),
+            (
+                1,
+                SearchStatistics {
+                    original_cost: 6,
+                    best_cost_found: 4,
+                    ..SearchStatistics::new(Algorithm::Symbolic)
+                },
+            ),
+            (
+                2,
+                SearchStatistics {
+                    original_cost: 6,
+                    best_cost_found: 3,
+                    ..SearchStatistics::new(Algorithm::Symbolic)
+                },
+            ),
+        ];
+
+        let total = SearchStatistics::aggregate_workers(&workers, Duration::from_millis(1));
+
+        assert_eq!(total.best_cost_found, 3);
+    }
+
+    #[test]
+    fn aggregate_workers_best_cost_falls_back_to_original_cost_when_none_found() {
+        // When no worker verified a candidate (every best_cost_found is 0), the
+        // aggregate falls back to the aggregated original_cost so the CLI never
+        // prints a best cost of 0 for a run that simply found no improvement.
+        let workers = vec![
+            (
+                0,
+                SearchStatistics {
+                    original_cost: 5,
+                    best_cost_found: 0,
+                    ..SearchStatistics::new(Algorithm::Stochastic)
+                },
+            ),
+            (
+                1,
+                SearchStatistics {
+                    original_cost: 5,
+                    best_cost_found: 0,
+                    ..SearchStatistics::new(Algorithm::Symbolic)
+                },
+            ),
+        ];
+
+        let total = SearchStatistics::aggregate_workers(&workers, Duration::from_millis(1));
+
+        assert_eq!(total.best_cost_found, 5);
+    }
+
+    #[test]
+    fn aggregate_workers_of_no_workers_is_a_zeroed_hybrid_aggregate() {
+        // The empty case must not panic: with no workers, every field is zero
+        // (best_cost_found falls back to the zero original_cost), and the
+        // aggregate is still a Hybrid record carrying the passed-in wall-clock.
+        let total = SearchStatistics::aggregate_workers(&[], Duration::from_millis(42));
+
+        assert_eq!(total.algorithm, Algorithm::Hybrid);
+        assert_eq!(total.elapsed_time, Duration::from_millis(42));
+        assert_eq!(total.candidates_evaluated, 0);
+        assert_eq!(total.original_cost, 0);
+        assert_eq!(total.best_cost_found, 0);
     }
 }

@@ -37,6 +37,18 @@ pub trait SymbolicBackend<I: ISA>: Sized {
         None
     }
 
+    /// Whether this backend may find a strict metric improvement without
+    /// reducing the number of rewritable instructions for this target/config.
+    ///
+    /// For x86 code-size search, the config flag lets callers conservatively
+    /// disable same-count rewrites independently of the metric comparison.
+    fn can_improve_at_same_instruction_count(
+        _target: &[I::Instruction],
+        _config: &SearchConfig,
+    ) -> bool {
+        false
+    }
+
     /// Sum the cost of every instruction in the sequence.
     fn sequence_cost(seq: &[I::Instruction], metric: &CostMetric, width: u32) -> u64;
 
@@ -50,10 +62,9 @@ pub trait SymbolicBackend<I: ISA>: Sized {
     ) -> (EquivalenceResult, EquivalenceMetrics);
 
     /// Width parameter for cost + state masking. Architecture markers own
-    /// this width so a mismatched config cannot silently change semantics.
-    /// `config` is retained only for API symmetry; implementations are
-    /// expected to return an architectural constant and must not read it.
-    fn width(config: &SearchConfig) -> u32;
+    /// this width so a mismatched config cannot silently change semantics;
+    /// implementations return an architectural constant.
+    fn width() -> u32;
 }
 
 // ---- AArch64 backend ----
@@ -102,7 +113,7 @@ impl SymbolicBackend<crate::isa::AArch64> for crate::isa::AArch64 {
         crate::semantics::equivalence::check_equivalence_with_config_metrics(target, proposal, &cfg)
     }
 
-    fn width(_config: &SearchConfig) -> u32 {
+    fn width() -> u32 {
         64
     }
 }
@@ -124,7 +135,16 @@ impl SymbolicBackend<crate::isa::X86_64> for crate::isa::X86_64 {
         regs: &[crate::isa::x86::X86Register],
         imms: &[i64],
     ) -> Vec<crate::isa::x86::X86Instruction> {
-        crate::isa::x86::X86InstructionGenerator.generate_all(regs, imms)
+        crate::isa::x86::X86InstructionGenerator
+            .generate_all(regs, imms)
+            .into_iter()
+            .filter(|instruction| {
+                crate::search::candidate::is_sequence_encodable_for(
+                    std::slice::from_ref(instruction),
+                    &crate::isa::X86_64,
+                )
+            })
+            .collect()
     }
 
     fn target_terminator(
@@ -133,6 +153,14 @@ impl SymbolicBackend<crate::isa::X86_64> for crate::isa::X86_64 {
         crate::ir::instructions::split_terminator_x86(target)
             .1
             .copied()
+    }
+
+    fn can_improve_at_same_instruction_count(
+        _target: &[crate::isa::x86::X86Instruction],
+        config: &SearchConfig,
+    ) -> bool {
+        matches!(config.cost_metric, CostMetric::CodeSize)
+            && config.x86_same_count_code_size_allowed
     }
 
     fn sequence_cost(
@@ -163,7 +191,7 @@ impl SymbolicBackend<crate::isa::X86_64> for crate::isa::X86_64 {
         )
     }
 
-    fn width(_config: &SearchConfig) -> u32 {
+    fn width() -> u32 {
         64
     }
 }
@@ -182,7 +210,7 @@ impl SymbolicBackend<crate::isa::X86_32> for crate::isa::X86_32 {
             .x86_available_registers
             .iter()
             .copied()
-            .filter(|r| matches!(r.index(), Some(i) if i < 8))
+            .filter(|r| r.is_available_in(crate::assembler::x86::X86Mode::Mode32))
             .collect()
     }
 
@@ -194,7 +222,16 @@ impl SymbolicBackend<crate::isa::X86_32> for crate::isa::X86_32 {
         regs: &[crate::isa::x86::X86Register],
         imms: &[i64],
     ) -> Vec<crate::isa::x86::X86Instruction> {
-        crate::isa::x86::X86InstructionGenerator.generate_all(regs, imms)
+        crate::isa::x86::X86InstructionGenerator
+            .generate_all(regs, imms)
+            .into_iter()
+            .filter(|instruction| {
+                crate::search::candidate::is_sequence_encodable_for(
+                    std::slice::from_ref(instruction),
+                    &crate::isa::X86_32,
+                )
+            })
+            .collect()
     }
 
     fn target_terminator(
@@ -203,6 +240,14 @@ impl SymbolicBackend<crate::isa::X86_32> for crate::isa::X86_32 {
         crate::ir::instructions::split_terminator_x86(target)
             .1
             .copied()
+    }
+
+    fn can_improve_at_same_instruction_count(
+        _target: &[crate::isa::x86::X86Instruction],
+        config: &SearchConfig,
+    ) -> bool {
+        matches!(config.cost_metric, CostMetric::CodeSize)
+            && config.x86_same_count_code_size_allowed
     }
 
     fn sequence_cost(
@@ -233,7 +278,7 @@ impl SymbolicBackend<crate::isa::X86_32> for crate::isa::X86_32 {
         )
     }
 
-    fn width(_config: &SearchConfig) -> u32 {
+    fn width() -> u32 {
         crate::isa::X86_32.register_width()
     }
 }
@@ -285,22 +330,100 @@ mod tests {
     }
 
     #[test]
-    fn x86_32_symbolic_width_is_architectural_even_with_default_config() {
-        let config = SearchConfig::default();
-        assert_eq!(config.x86_width, 64);
-
+    fn symbolic_width_is_architectural() {
+        // Width is owned by the ISA marker, not configuration: each backend
+        // returns its architectural constant from the no-arg `width()`.
         assert_eq!(
-            <crate::isa::X86_32 as SymbolicBackend<crate::isa::X86_32>>::width(&config),
+            <crate::isa::X86_32 as SymbolicBackend<crate::isa::X86_32>>::width(),
             32
         );
-
-        // X86_64 was already correct; this cross-check guards against a
-        // future regression and is not part of the x86-32 bug being fixed.
         assert_eq!(
-            <crate::isa::X86_64 as SymbolicBackend<crate::isa::X86_64>>::width(
-                &SearchConfig::default().with_x86_width(32),
-            ),
+            <crate::isa::X86_64 as SymbolicBackend<crate::isa::X86_64>>::width(),
             64
+        );
+        assert_eq!(
+            <crate::isa::AArch64 as SymbolicBackend<crate::isa::AArch64>>::width(),
+            64
+        );
+    }
+
+    #[test]
+    fn x86_32_symbolic_candidates_are_encodable() {
+        use crate::isa::x86::{X86Instruction, X86Register};
+        use crate::isa::{Assembler, X86_32};
+
+        let candidates = <X86_32 as SymbolicBackend<X86_32>>::enumerate_all(
+            &[X86Register::RAX, X86Register::RSI, X86Register::RDI],
+            &[0],
+        );
+
+        assert!(
+            candidates
+                .iter()
+                .all(|instruction| X86_32.can_assemble(instruction))
+        );
+        for rs in [X86Register::RSI, X86Register::RDI] {
+            assert!(!candidates.contains(&X86Instruction::Movzx {
+                rd: X86Register::RAX,
+                rs,
+                src_width: 8,
+            }));
+            assert!(!candidates.contains(&X86Instruction::Movsx {
+                rd: X86Register::RAX,
+                rs,
+                src_width: 8,
+            }));
+            assert!(candidates.contains(&X86Instruction::Movzx {
+                rd: X86Register::RAX,
+                rs,
+                src_width: 16,
+            }));
+            assert!(candidates.contains(&X86Instruction::Movsx {
+                rd: X86Register::RAX,
+                rs,
+                src_width: 16,
+            }));
+        }
+    }
+
+    #[test]
+    fn x86_32_symbolic_only_generates_assemblable_setcc_candidates() {
+        use crate::isa::x86::{X86Instruction, X86Register};
+        use crate::isa::{Assembler, X86_32};
+
+        let regs = [
+            X86Register::RAX,
+            X86Register::RSP,
+            X86Register::RBP,
+            X86Register::RSI,
+            X86Register::RDI,
+        ];
+        let candidates = <X86_32 as SymbolicBackend<X86_32>>::enumerate_all(&regs, &[0]);
+        let setcc_count = candidates
+            .iter()
+            .filter(|instruction| matches!(instruction, X86Instruction::Setcc { .. }))
+            .count();
+
+        assert!(
+            candidates
+                .iter()
+                .all(|instruction| X86_32.can_assemble(instruction)),
+            "x86-32 symbolic search generated an unassemblable candidate"
+        );
+        assert_eq!(
+            setcc_count,
+            crate::isa::x86::X86Condition::ALL.len(),
+            "symbolic search must retain every SETcc condition for EAX"
+        );
+        assert!(
+            candidates.iter().any(|instruction| matches!(
+                instruction,
+                X86Instruction::MovImm {
+                    rd: X86Register::RSI,
+                    ..
+                }
+            )),
+            "mode-specific SETcc filtering must not remove encodable ESI candidates"
         );
     }
 }

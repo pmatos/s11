@@ -9,6 +9,11 @@ repository = "https://github.com/pmatos/s11"
 readme = "README.md"
 keywords = ["aarch64", "s11", "compiler", "optimization", "smt"]
 categories = ["compilers", "development-tools::testing", "science"]
+# Benchmarks are declared explicitly via [[bench]] below; disabling
+# auto-discovery keeps the shared `benches/common.rs` helper from being
+# built as its own libtest target (which would reject Criterion CLI args
+# like `--save-baseline`).
+autobenches = false
 
 [dependencies]
 elf = "0.8"

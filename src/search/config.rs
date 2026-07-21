@@ -165,15 +165,30 @@ impl Default for MutationWeights {
 }
 
 impl MutationWeights {
-    /// Get cumulative thresholds for random selection
-    pub fn cumulative_thresholds(&self) -> [f64; 4] {
+    /// Bucket a uniform draw `r ∈ [0, 1)` into one of the four mutation
+    /// categories, indexed in `MutationType` order: 0 = operand, 1 = opcode,
+    /// 2 = swap, 3 = instruction. A category is chosen with probability
+    /// proportional to its weight.
+    ///
+    /// Degenerate all-zero weights (total ≤ 0) collapse the whole interval
+    /// onto the last bucket instead of dividing by zero into NaN thresholds.
+    pub fn select_index(&self, r: f64) -> usize {
         let total = self.operand + self.opcode + self.swap + self.instruction;
-        [
-            self.operand / total,
-            (self.operand + self.opcode) / total,
-            (self.operand + self.opcode + self.swap) / total,
-            1.0,
-        ]
+        if total <= 0.0 {
+            return 3;
+        }
+        let t0 = self.operand / total;
+        let t1 = (self.operand + self.opcode) / total;
+        let t2 = (self.operand + self.opcode + self.swap) / total;
+        if r < t0 {
+            0
+        } else if r < t1 {
+            1
+        } else if r < t2 {
+            2
+        } else {
+            3
+        }
     }
 }
 
@@ -211,17 +226,25 @@ impl std::str::FromStr for SearchMode {
     }
 }
 
+/// Default timeout for each SMT solver query used by verification/synthesis.
+pub const DEFAULT_SYMBOLIC_SOLVER_TIMEOUT: Duration = Duration::from_secs(30);
+
 /// Configuration for symbolic (SMT) search
 #[derive(Debug, Clone)]
 pub struct SymbolicConfig {
-    /// Maximum window size for synthesis
+    /// Maximum number of synthesized non-terminator instructions to consider.
+    ///
+    /// A value of 0 disables candidate search. If the target ends in a fixed
+    /// terminator, that terminator is appended after synthesis and does not
+    /// count against this window.
     pub window_size: usize,
-    /// Initial cost bound (None = use target cost)
+    /// Exclusive initial cost bound.
+    ///
+    /// Candidate sequences must be strictly cheaper than this bound and the
+    /// original target cost. `None` uses the original target cost.
     pub cost_bound: Option<u64>,
     /// Search mode (linear or binary)
     pub search_mode: SearchMode,
-    /// Timeout for each SMT query
-    pub solver_timeout: Option<Duration>,
 }
 
 impl Default for SymbolicConfig {
@@ -230,7 +253,6 @@ impl Default for SymbolicConfig {
             window_size: 3,
             cost_bound: None,
             search_mode: SearchMode::Linear,
-            solver_timeout: Some(Duration::from_secs(30)),
         }
     }
 }
@@ -248,11 +270,6 @@ impl SymbolicConfig {
 
     pub fn with_search_mode(mut self, mode: SearchMode) -> Self {
         self.search_mode = mode;
-        self
-    }
-
-    pub fn with_timeout(mut self, timeout: Duration) -> Self {
-        self.solver_timeout = Some(timeout);
         self
     }
 }
@@ -319,6 +336,8 @@ pub struct SearchConfig {
     pub cost_metric: CostMetric,
     /// Overall timeout for the search
     pub timeout: Option<Duration>,
+    /// Timeout for each SMT solver query used by verification/synthesis.
+    pub solver_timeout: Option<Duration>,
     /// Number of worker threads (rayon) for algorithms that parallelise.
     /// `None` lets rayon pick its default (typically logical-core count).
     /// `Some(0)` is coerced to 1 thread (rayon rejects zero-thread pools).
@@ -334,10 +353,10 @@ pub struct SearchConfig {
     /// x86 symbolic / LLM backends. Defaults to the same 8 GPRs the
     /// AArch64 pool ships at the same cardinality.
     pub x86_available_registers: Vec<crate::isa::x86::X86Register>,
-    /// x86 operand width: 64 for x86-64, 32 for x86-32.
-    pub x86_width: u32,
-    /// x86 assembler mode. Mirrors `x86_width`.
-    pub x86_mode: crate::assembler::x86::X86Mode,
+    /// Whether x86 symbolic code-size search may consider same-instruction-count
+    /// candidates. Defaults to true; callers may disable it as an additional
+    /// conservative policy gate.
+    pub x86_same_count_code_size_allowed: bool,
     /// Stochastic-specific configuration
     pub stochastic: StochasticConfig,
     /// Symbolic-specific configuration
@@ -361,6 +380,7 @@ impl Default for SearchConfig {
             algorithm: Algorithm::default(),
             cost_metric: CostMetric::default(),
             timeout: Some(Duration::from_secs(60)),
+            solver_timeout: Some(DEFAULT_SYMBOLIC_SOLVER_TIMEOUT),
             cores: None,
             available_registers: vec![
                 Register::X0,
@@ -374,8 +394,7 @@ impl Default for SearchConfig {
                 0, 1, 2, 3, 4, 5, 7, 8, 10, 15, 16, 31, 32, 63, 64, 100, 255, 256, 1000, 4095,
             ],
             x86_available_registers: crate::isa::x86::default_x86_registers(),
-            x86_width: 64,
-            x86_mode: crate::assembler::x86::X86Mode::Mode64,
+            x86_same_count_code_size_allowed: true,
             stochastic: StochasticConfig::default(),
             symbolic: SymbolicConfig::default(),
             llm: LlmConfig::default(),
@@ -398,6 +417,11 @@ impl SearchConfig {
 
     pub fn with_timeout(mut self, timeout: Duration) -> Self {
         self.timeout = Some(timeout);
+        self
+    }
+
+    pub fn with_solver_timeout(mut self, timeout: Duration) -> Self {
+        self.solver_timeout = Some(timeout);
         self
     }
 
@@ -451,6 +475,11 @@ impl SearchConfig {
         self
     }
 
+    pub fn with_solver_timeout_option(mut self, timeout: Option<Duration>) -> Self {
+        self.solver_timeout = timeout;
+        self
+    }
+
     /// Set the x86 register pool (issue #73).
     pub fn with_x86_registers(mut self, registers: Vec<crate::isa::x86::X86Register>) -> Self {
         self.x86_available_registers = registers;
@@ -468,22 +497,43 @@ impl SearchConfig {
         self
     }
 
-    /// Set the x86 width (32 or 64) and matching assembler mode.
-    pub fn with_x86_width(mut self, width: u32) -> Self {
-        // Only 32 and 64 are valid x86 widths; any other value would
-        // be silently coerced to Mode64 below, which is a misuse trap.
-        debug_assert!(
-            width == 32 || width == 64,
-            "with_x86_width: only 32 or 64 are valid; got {}",
-            width
-        );
-        self.x86_width = width;
-        self.x86_mode = if width == 32 {
-            crate::assembler::x86::X86Mode::Mode32
-        } else {
-            crate::assembler::x86::X86Mode::Mode64
-        };
+    pub fn with_x86_same_count_code_size_allowed(mut self, allowed: bool) -> Self {
+        self.x86_same_count_code_size_allowed = allowed;
         self
+    }
+
+    /// Per-query SMT solver timeout, resolving the fallback when unset.
+    ///
+    /// Single home for the fallback used when [`solver_timeout`] is `None`;
+    /// the search backends resolve the timeout here rather than each repeating
+    /// the literal. The fallback is `5s` — the value every backend used before
+    /// this seam existed; note it differs from the `30s` the default config
+    /// ships in the `Some` field, and only applies when a caller explicitly
+    /// clears the timeout.
+    ///
+    /// [`solver_timeout`]: Self::solver_timeout
+    pub fn solver_timeout(&self) -> Duration {
+        self.solver_timeout.unwrap_or(Duration::from_secs(5))
+    }
+
+    /// Per-query SMT solver timeout clamped to the remaining search budget.
+    ///
+    /// `elapsed` is how long the overall search has been running. The result
+    /// is [`solver_timeout`](Self::solver_timeout) capped at the time left
+    /// before [`timeout`](Self::timeout) elapses (unbounded when `timeout` is
+    /// `None`). Returns `None` when the budget is exhausted: Z3 timeouts are
+    /// configured in whole milliseconds, so a sub-millisecond remainder cannot
+    /// be represented usefully and is treated as exhausted.
+    ///
+    /// All SMT-driven backends resolve their per-query timeout here so the
+    /// budget-clamping rule cannot drift between them.
+    pub fn solver_timeout_within_budget(&self, elapsed: Duration) -> Option<Duration> {
+        let solver_timeout = self.solver_timeout();
+        let timeout = match self.timeout {
+            Some(search_timeout) => solver_timeout.min(search_timeout.checked_sub(elapsed)?),
+            None => solver_timeout,
+        };
+        (timeout.as_millis() > 0).then_some(timeout)
     }
 }
 
@@ -556,14 +606,74 @@ mod tests {
     }
 
     #[test]
-    fn test_mutation_weights_cumulative() {
-        let weights = MutationWeights::default();
-        let thresholds = weights.cumulative_thresholds();
+    fn select_index_partitions_unit_interval_by_weight() {
+        // Equal weights split [0, 1) into exact quarters (0.25/0.5/0.75 are
+        // all representable in f64), so bucket boundaries are unambiguous.
+        let weights = MutationWeights {
+            operand: 1.0,
+            opcode: 1.0,
+            swap: 1.0,
+            instruction: 1.0,
+        };
+        assert_eq!(weights.select_index(0.0), 0);
+        assert_eq!(weights.select_index(0.24), 0);
+        assert_eq!(weights.select_index(0.25), 1);
+        assert_eq!(weights.select_index(0.49), 1);
+        assert_eq!(weights.select_index(0.50), 2);
+        assert_eq!(weights.select_index(0.74), 2);
+        assert_eq!(weights.select_index(0.75), 3);
+        assert_eq!(weights.select_index(0.999), 3);
+    }
 
-        assert!(thresholds[0] > 0.0);
-        assert!(thresholds[0] < thresholds[1]);
-        assert!(thresholds[1] < thresholds[2]);
-        assert!((thresholds[3] - 1.0).abs() < 1e-10);
+    #[test]
+    fn select_index_default_weights_keep_operand_first() {
+        // Defaults: operand 0.50, opcode 0.16, swap 0.16, instruction 0.18
+        // (sum 1.0), so cutoffs sit at 0.50 / 0.66 / 0.82.
+        let weights = MutationWeights::default();
+        assert_eq!(weights.select_index(0.0), 0);
+        assert_eq!(weights.select_index(0.49), 0);
+        assert_eq!(weights.select_index(0.60), 1);
+        assert_eq!(weights.select_index(0.70), 2);
+        assert_eq!(weights.select_index(0.90), 3);
+    }
+
+    #[test]
+    fn select_index_honours_skewed_weights() {
+        // All mass on operand: every draw in [0, 1) buckets to operand (0).
+        let weights = MutationWeights {
+            operand: 1.0,
+            opcode: 0.0,
+            swap: 0.0,
+            instruction: 0.0,
+        };
+        assert_eq!(weights.select_index(0.0), 0);
+        assert_eq!(weights.select_index(0.5), 0);
+        assert_eq!(weights.select_index(0.999), 0);
+
+        // All mass on swap: every draw buckets to swap (2).
+        let swap_only = MutationWeights {
+            operand: 0.0,
+            opcode: 0.0,
+            swap: 1.0,
+            instruction: 0.0,
+        };
+        assert_eq!(swap_only.select_index(0.0), 2);
+        assert_eq!(swap_only.select_index(0.999), 2);
+    }
+
+    #[test]
+    fn select_index_with_zero_total_is_defined() {
+        // Degenerate all-zero weights must stay well-defined (no NaN from a
+        // divide-by-zero); the whole interval collapses to the last bucket.
+        let weights = MutationWeights {
+            operand: 0.0,
+            opcode: 0.0,
+            swap: 0.0,
+            instruction: 0.0,
+        };
+        assert_eq!(weights.select_index(0.0), 3);
+        assert_eq!(weights.select_index(0.5), 3);
+        assert_eq!(weights.select_index(0.999), 3);
     }
 
     #[test]
@@ -586,6 +696,102 @@ mod tests {
     }
 
     #[test]
+    fn search_config_solver_timeout_builder_round_trips() {
+        let default = SearchConfig::default();
+        assert_eq!(default.solver_timeout, Some(Duration::from_secs(30)));
+
+        let explicit = SearchConfig::default().with_solver_timeout(Duration::from_millis(250));
+        assert_eq!(explicit.solver_timeout, Some(Duration::from_millis(250)));
+
+        let unset = SearchConfig::default().with_solver_timeout_option(None);
+        assert_eq!(unset.solver_timeout, None);
+    }
+
+    #[test]
+    fn solver_timeout_resolves_default_fallback() {
+        // Default config ships an explicit solver timeout.
+        assert_eq!(
+            SearchConfig::default().solver_timeout(),
+            Duration::from_secs(30)
+        );
+        // An explicit value is returned verbatim.
+        assert_eq!(
+            SearchConfig::default()
+                .with_solver_timeout(Duration::from_millis(250))
+                .solver_timeout(),
+            Duration::from_millis(250)
+        );
+        // When unset, the shared fallback is 5s (the value every backend used).
+        assert_eq!(
+            SearchConfig::default()
+                .with_solver_timeout_option(None)
+                .solver_timeout(),
+            Duration::from_secs(5)
+        );
+    }
+
+    #[test]
+    fn solver_timeout_within_budget_clamps_to_remaining_search_time() {
+        // Solver timeout below the remaining budget is used unchanged.
+        let solver_smaller = SearchConfig::default()
+            .with_timeout(Duration::from_secs(10))
+            .with_solver_timeout(Duration::from_millis(250));
+        assert_eq!(
+            solver_smaller.solver_timeout_within_budget(Duration::from_secs(1)),
+            Some(Duration::from_millis(250))
+        );
+
+        // Solver timeout larger than the remaining budget is clamped down.
+        let capped = SearchConfig::default()
+            .with_timeout(Duration::from_millis(100))
+            .with_solver_timeout(Duration::from_secs(1));
+        assert_eq!(
+            capped.solver_timeout_within_budget(Duration::from_millis(40)),
+            Some(Duration::from_millis(60))
+        );
+
+        // Exactly-exhausted budget yields None.
+        assert_eq!(
+            capped.solver_timeout_within_budget(Duration::from_millis(100)),
+            None
+        );
+
+        // A sub-millisecond remainder cannot be represented as a Z3 timeout,
+        // so it is treated as exhausted.
+        assert_eq!(
+            capped.solver_timeout_within_budget(Duration::from_micros(99_500)),
+            None
+        );
+
+        // Over-elapsed (elapsed beyond the deadline) is also exhausted.
+        assert_eq!(
+            capped.solver_timeout_within_budget(Duration::from_millis(250)),
+            None
+        );
+    }
+
+    #[test]
+    fn solver_timeout_within_budget_is_unbounded_without_search_timeout() {
+        // No overall timeout: the resolved solver timeout is returned as-is
+        // regardless of elapsed time, falling back to 5s when unset.
+        let unbounded = SearchConfig::default()
+            .with_timeout_option(None)
+            .with_solver_timeout_option(None);
+        assert_eq!(
+            unbounded.solver_timeout_within_budget(Duration::from_secs(999)),
+            Some(Duration::from_secs(5))
+        );
+
+        let unbounded_explicit = SearchConfig::default()
+            .with_timeout_option(None)
+            .with_solver_timeout(Duration::from_secs(30));
+        assert_eq!(
+            unbounded_explicit.solver_timeout_within_budget(Duration::from_secs(999)),
+            Some(Duration::from_secs(30))
+        );
+    }
+
+    #[test]
     fn test_stochastic_config_builder() {
         let config = StochasticConfig::default()
             .with_beta(2.0)
@@ -605,13 +811,11 @@ mod tests {
         let config = SymbolicConfig::default()
             .with_window_size(5)
             .with_cost_bound(2)
-            .with_search_mode(SearchMode::Binary)
-            .with_timeout(Duration::from_millis(250));
+            .with_search_mode(SearchMode::Binary);
 
         assert_eq!(config.window_size, 5);
         assert_eq!(config.cost_bound, Some(2));
         assert_eq!(config.search_mode, SearchMode::Binary);
-        assert_eq!(config.solver_timeout, Some(Duration::from_millis(250)));
     }
 
     #[test]

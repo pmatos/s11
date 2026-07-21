@@ -28,11 +28,18 @@ pub fn instruction_cost(instr: &Instruction, metric: &CostMetric) -> u64 {
 /// Get the latency of an instruction (simplified model)
 fn instruction_latency(instr: &Instruction) -> u64 {
     match instr {
-        Instruction::MovReg { .. } | Instruction::MovRegW { .. } | Instruction::MovImm { .. } => 1,
+        Instruction::MovReg { .. }
+        | Instruction::MovRegW { .. }
+        | Instruction::MovImm { .. }
+        | Instruction::Movi { .. } => 1,
+        // SIMD/FP-to-GPR transfer crosses register files on representative
+        // AArch64 cores and is costed one cycle above same-file moves.
+        Instruction::MovFromVectorLane { .. } => 2,
         Instruction::Add { .. }
         | Instruction::AddW { .. }
         | Instruction::Sub { .. }
-        | Instruction::SubW { .. } => 1,
+        | Instruction::SubW { .. }
+        | Instruction::VectorAdd { .. } => 1,
         Instruction::And { .. } | Instruction::Orr { .. } | Instruction::Eor { .. } => 1,
         Instruction::Lsl { .. } | Instruction::Lsr { .. } | Instruction::Asr { .. } => 1,
         // Multiply has higher latency than simple ALU ops
@@ -66,6 +73,11 @@ fn instruction_latency(instr: &Instruction) -> u64 {
         | Instruction::Eon { .. } => 1,
         // Flag-setting arith / logical
         Instruction::Adds { .. } | Instruction::Subs { .. } | Instruction::Ands { .. } => 1,
+        // Add/subtract with carry
+        Instruction::Adc { .. }
+        | Instruction::Adcs { .. }
+        | Instruction::Sbc { .. }
+        | Instruction::Sbcs { .. } => 1,
         // Conditional set aliases
         Instruction::Cset { .. } | Instruction::Csetm { .. } => 1,
         // Rotate right
@@ -139,7 +151,8 @@ pub fn cost_difference(a: &[Instruction], b: &[Instruction], metric: &CostMetric
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ir::{Operand, Register};
+    use crate::ir::{Operand, Register, VectorArrangement, VectorRegister};
+    use crate::test_utils::instruction_fixtures::aarch64_instruction_families;
 
     fn mov_imm(rd: Register, imm: i64) -> Instruction {
         Instruction::MovImm { rd, imm }
@@ -169,6 +182,24 @@ mod tests {
     fn test_instruction_cost_latency() {
         let instr = mov_imm(Register::X0, 0);
         assert_eq!(instruction_cost(&instr, &CostMetric::Latency), 1);
+    }
+
+    #[test]
+    fn first_neon_slice_has_explicit_latency_costs() {
+        let add = Instruction::VectorAdd {
+            vd: VectorRegister::V0,
+            vn: VectorRegister::V1,
+            vm: VectorRegister::V2,
+            arrangement: VectorArrangement::TwoD,
+        };
+        let extract = Instruction::MovFromVectorLane {
+            rd: Register::X0,
+            vn: VectorRegister::V0,
+            lane: 0,
+        };
+        assert_eq!(instruction_cost(&add, &CostMetric::Latency), 1);
+        assert_eq!(instruction_cost(&extract, &CostMetric::Latency), 2);
+        assert_eq!(instruction_cost(&extract, &CostMetric::CodeSize), 4);
     }
 
     #[test]
@@ -278,76 +309,8 @@ mod tests {
 
     #[test]
     fn test_all_instruction_types_have_cost() {
-        let instructions = vec![
-            Instruction::MovReg {
-                rd: Register::X0,
-                rn: Register::X1,
-            },
-            Instruction::MovImm {
-                rd: Register::X0,
-                imm: 0,
-            },
-            Instruction::Add {
-                rd: Register::X0,
-                rn: Register::X1,
-                rm: Operand::Immediate(1),
-            },
-            Instruction::Sub {
-                rd: Register::X0,
-                rn: Register::X1,
-                rm: Operand::Immediate(1),
-            },
-            Instruction::And {
-                rd: Register::X0,
-                rn: Register::X1,
-                rm: Operand::Immediate(1),
-                width: crate::ir::RegisterWidth::X64,
-            },
-            Instruction::Orr {
-                rd: Register::X0,
-                rn: Register::X1,
-                rm: Operand::Immediate(1),
-                width: crate::ir::RegisterWidth::X64,
-            },
-            Instruction::Eor {
-                rd: Register::X0,
-                rn: Register::X1,
-                rm: Operand::Immediate(1),
-                width: crate::ir::RegisterWidth::X64,
-            },
-            Instruction::Lsl {
-                rd: Register::X0,
-                rn: Register::X1,
-                shift: Operand::Immediate(1),
-            },
-            Instruction::Lsr {
-                rd: Register::X0,
-                rn: Register::X1,
-                shift: Operand::Immediate(1),
-            },
-            Instruction::Asr {
-                rd: Register::X0,
-                rn: Register::X1,
-                shift: Operand::Immediate(1),
-            },
-            Instruction::Mul {
-                rd: Register::X0,
-                rn: Register::X1,
-                rm: Register::X2,
-            },
-            Instruction::Sdiv {
-                rd: Register::X0,
-                rn: Register::X1,
-                rm: Register::X2,
-            },
-            Instruction::Udiv {
-                rd: Register::X0,
-                rn: Register::X1,
-                rm: Register::X2,
-            },
-        ];
-
-        for instr in &instructions {
+        for fixture in aarch64_instruction_families() {
+            let instr = &fixture.instruction;
             assert!(instruction_cost(instr, &CostMetric::InstructionCount) > 0);
             assert!(instruction_cost(instr, &CostMetric::Latency) > 0);
             assert!(instruction_cost(instr, &CostMetric::CodeSize) > 0);

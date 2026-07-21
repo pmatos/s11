@@ -2,7 +2,8 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use s11::docs_support::{
-    AARCH64_FIXED_TERMINATORS, AARCH64_REWRITABLE_MNEMONICS, X86_SUPPORTED_MNEMONICS,
+    AARCH64_FIXED_TERMINATORS, AARCH64_REWRITABLE_MNEMONICS, X86_FIXED_TERMINATORS,
+    X86_REWRITABLE_MNEMONICS, X86_SYNTHESIZABLE_ONLY_MNEMONICS,
 };
 
 fn repo_file(relative: &str) -> PathBuf {
@@ -68,6 +69,12 @@ fn docs_capability_documents_w_logical_immediates() {
             "logical-immediate forms for `and`, `ands`, `orr`, `eor`, and `tst` support both 64-bit `x` registers and 32-bit `w` registers"
         ),
         "docs/capability.md must document W-register logical-immediate support"
+    );
+    assert!(
+        matrix.contains(
+            "non-flag-setting `and`, `orr`, and `eor` also support 32-bit `w` register and shifted-register forms"
+        ),
+        "docs/capability.md must document W-register logical shifted-register support"
     );
     assert!(
         matrix.contains(
@@ -158,6 +165,12 @@ fn memory_operations_are_consistently_documented_with_known_gaps() {
         matrix.contains("`ldur`, `stur`, and `ldr (literal)` are out of scope"),
         "docs/capability.md must document unsupported memory-operation gaps"
     );
+    assert!(
+        matrix.contains(
+            "`ldrsb` / `ldrsh` / `ldrsw` signed loads currently accept only x-form destinations"
+        ),
+        "docs/capability.md must document the current signed-load destination-width limit"
+    );
 
     let tutorial = normalized_doc("TUTORIAL.md");
     assert!(
@@ -206,6 +219,36 @@ fn memory_operations_are_consistently_documented_with_known_gaps() {
         s11::parser::parse_line("ldr x0, #0x1234").is_err(),
         "parser must reject out-of-scope LDR literal form"
     );
+}
+
+#[test]
+fn docs_capability_documents_pair_memory_addressing_restriction() {
+    let matrix = normalized_doc("docs/capability.md");
+    assert!(
+        matrix.contains(
+            "single-register memory instructions accept immediate-offset, pre-index, post-index, register-offset, and register-extend addressing"
+        ),
+        "docs/capability.md must keep single-register memory addressing support visible"
+    );
+    assert!(
+        matrix.contains(
+            "pair memory instructions accept immediate-offset, pre-index, and post-index addressing only"
+        ),
+        "docs/capability.md must document pair memory addressing restrictions"
+    );
+
+    for (text, expected) in [
+        ("ldp x0, x1, [x2, x3]", "register-offset"),
+        ("stp x0, x1, [x2, w3, sxtw]", "register-extend"),
+    ] {
+        let err = s11::parser::parse_line(text)
+            .expect_err("pair register-index addressing should be rejected");
+        let msg = err.to_string();
+        assert!(
+            msg.contains(expected),
+            "{text}: error should mention {expected}, got {msg}"
+        );
+    }
 }
 
 #[test]
@@ -260,14 +303,26 @@ fn x86_support_is_visible_in_public_docs() {
         !matrix.contains("parallel x86 pipeline"),
         "docs/capability.md must not describe x86 as a parallel pipeline"
     );
-    for mnemonic in X86_SUPPORTED_MNEMONICS {
+    for mnemonic in X86_REWRITABLE_MNEMONICS {
         assert!(
             matrix.contains(&format!("`{mnemonic}`")),
-            "docs/capability.md must list x86 mnemonic `{mnemonic}`"
+            "docs/capability.md must list x86 rewritable mnemonic `{mnemonic}`"
+        );
+    }
+    for terminator in X86_FIXED_TERMINATORS {
+        assert!(
+            matrix.contains(&format!("`{terminator}`")),
+            "docs/capability.md must list x86 fixed terminator `{terminator}`"
+        );
+    }
+    for pseudo in X86_SYNTHESIZABLE_ONLY_MNEMONICS {
+        assert!(
+            matrix.contains(&format!("`{pseudo}`")),
+            "docs/capability.md must list x86 synthesizable-only pseudo-family `{pseudo}`"
         );
     }
 
-    for family in ["cmov<cond>", "j<cond>"] {
+    for family in ["set<cond>", "cmov<cond>", "j<cond>"] {
         assert!(
             matrix.contains(&format!("`{family}`")),
             "docs/capability.md must list x86 family `{family}`"
@@ -276,6 +331,28 @@ fn x86_support_is_visible_in_public_docs() {
     assert!(
         matrix.contains("rewritable") && matrix.contains("`cmov<cond>`"),
         "docs/capability.md must describe CMOVcc as rewritable"
+    );
+    assert!(
+        !X86_REWRITABLE_MNEMONICS.contains(&"set<cond>"),
+        "architectural byte SETcc must not be classified as binary-rewritable"
+    );
+    assert!(
+        X86_SYNTHESIZABLE_ONLY_MNEMONICS.contains(&"set<cond>"),
+        "full-width SETcc must be classified as synthesizable-only"
+    );
+    assert!(
+        matrix.contains("synthesizable-only") && matrix.contains("`set<cond>`"),
+        "docs/capability.md must describe SETcc as a synthesizable-only pseudo-family"
+    );
+    assert!(
+        matrix.contains("architectural byte setcc")
+            && matrix.contains("elf")
+            && matrix.contains("rejected until #75"),
+        "docs/capability.md must document architectural byte SETcc ELF rejection"
+    );
+    assert!(
+        matrix.contains("setcc") && matrix.contains("followed by") && matrix.contains("movzx"),
+        "docs/capability.md must document the SETcc followed by MOVZX lowering"
     );
     assert!(
         matrix.contains("fixed") && matrix.contains("terminator") && matrix.contains("`j<cond>`"),

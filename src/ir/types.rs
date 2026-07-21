@@ -2,7 +2,105 @@
 
 use std::fmt;
 
-/// AArch64 general-purpose registers
+/// One of AArch64's 32 fixed-width 128-bit Advanced SIMD/FP registers.
+///
+/// Arrangement suffixes such as `.2d` and `.4s` are instruction metadata,
+/// not distinct registers: every view aliases the same packed 128 bits.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct VectorRegister(u8);
+
+impl VectorRegister {
+    pub const V0: Self = Self(0);
+    pub const V1: Self = Self(1);
+    pub const V2: Self = Self(2);
+    pub const V3: Self = Self(3);
+    pub const V4: Self = Self(4);
+    pub const V5: Self = Self(5);
+    pub const V6: Self = Self(6);
+    pub const V7: Self = Self(7);
+    pub const V8: Self = Self(8);
+    pub const V9: Self = Self(9);
+    pub const V10: Self = Self(10);
+    pub const V11: Self = Self(11);
+    pub const V12: Self = Self(12);
+    pub const V13: Self = Self(13);
+    pub const V14: Self = Self(14);
+    pub const V15: Self = Self(15);
+    pub const V16: Self = Self(16);
+    pub const V17: Self = Self(17);
+    pub const V18: Self = Self(18);
+    pub const V19: Self = Self(19);
+    pub const V20: Self = Self(20);
+    pub const V21: Self = Self(21);
+    pub const V22: Self = Self(22);
+    pub const V23: Self = Self(23);
+    pub const V24: Self = Self(24);
+    pub const V25: Self = Self(25);
+    pub const V26: Self = Self(26);
+    pub const V27: Self = Self(27);
+    pub const V28: Self = Self(28);
+    pub const V29: Self = Self(29);
+    pub const V30: Self = Self(30);
+    pub const V31: Self = Self(31);
+
+    #[must_use]
+    pub const fn from_index(index: u8) -> Option<Self> {
+        if index < 32 { Some(Self(index)) } else { None }
+    }
+
+    #[must_use]
+    pub const fn index(self) -> u8 {
+        self.0
+    }
+}
+
+impl fmt::Display for VectorRegister {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "v{}", self.0)
+    }
+}
+
+/// Packed integer lane arrangement supported by the first NEON slice.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum VectorArrangement {
+    /// Two 64-bit doubleword lanes (`.2d`).
+    TwoD,
+    /// Four 32-bit word lanes (`.4s`).
+    FourS,
+}
+
+impl VectorArrangement {
+    #[must_use]
+    pub const fn lane_count(self) -> u8 {
+        match self {
+            Self::TwoD => 2,
+            Self::FourS => 4,
+        }
+    }
+
+    #[must_use]
+    pub const fn lane_width(self) -> u8 {
+        match self {
+            Self::TwoD => 64,
+            Self::FourS => 32,
+        }
+    }
+}
+
+impl fmt::Display for VectorArrangement {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::TwoD => f.write_str("2d"),
+            Self::FourS => f.write_str("4s"),
+        }
+    }
+}
+
+/// AArch64 architectural registers used by liveness contracts.
+///
+/// Scalar instruction operands continue to use the X/SP variants. The
+/// `Vector` variant lets the existing generic register-set carrier represent
+/// SIMD live-in/live-out state without conflating 64-bit and 128-bit values.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[allow(clippy::upper_case_acronyms)]
 pub enum Register {
@@ -41,12 +139,14 @@ pub enum Register {
     // Special registers
     XZR, // Zero register
     SP,  // Stack pointer
+    // Advanced SIMD/FP register
+    Vector(VectorRegister),
 }
 
 impl Register {
     /// Get register index for X0-X30
     #[allow(dead_code)]
-    pub fn index(&self) -> Option<u8> {
+    pub const fn index(&self) -> Option<u8> {
         match self {
             Register::X0 => Some(0),
             Register::X1 => Some(1),
@@ -80,7 +180,7 @@ impl Register {
             Register::X29 => Some(29),
             Register::X30 => Some(30),
             Register::XZR => Some(31),
-            Register::SP => None,
+            Register::SP | Register::Vector(_) => None,
         }
     }
 
@@ -122,6 +222,43 @@ impl Register {
             _ => None,
         }
     }
+
+    #[must_use]
+    pub const fn vector(self) -> Option<VectorRegister> {
+        match self {
+            Register::Vector(register) => Some(register),
+            _ => None,
+        }
+    }
+
+    #[must_use]
+    pub const fn is_general_or_zero(self) -> bool {
+        !matches!(self, Register::SP | Register::Vector(_))
+    }
+
+    #[must_use]
+    pub const fn is_general_or_sp(self) -> bool {
+        !matches!(self, Register::XZR | Register::Vector(_))
+    }
+
+    #[must_use]
+    pub const fn sort_key(self) -> u16 {
+        match self {
+            Register::SP => 32,
+            Register::Vector(register) => 64 + register.index() as u16,
+            Register::XZR => 31,
+            _ => match self.index() {
+                Some(index) => index as u16,
+                None => 63,
+            },
+        }
+    }
+}
+
+impl From<VectorRegister> for Register {
+    fn from(register: VectorRegister) -> Self {
+        Self::Vector(register)
+    }
 }
 
 impl fmt::Display for Register {
@@ -160,6 +297,7 @@ impl fmt::Display for Register {
             Register::X30 => write!(f, "x30"),
             Register::XZR => write!(f, "xzr"),
             Register::SP => write!(f, "sp"),
+            Register::Vector(register) => register.fmt(f),
         }
     }
 }
@@ -193,6 +331,9 @@ impl RegisterWidth {
         ];
 
         match (self, register) {
+            (_, Register::Vector(_)) => {
+                panic!("vector register has no scalar W/X register name")
+            }
             (RegisterWidth::X64, Register::XZR) => "xzr",
             (RegisterWidth::X64, Register::SP) => "sp",
             (RegisterWidth::X64, reg) => X_NAMES[reg.index().expect("x register index") as usize],
@@ -286,6 +427,22 @@ pub enum Operand {
 }
 
 impl Operand {
+    /// The register this operand reads, if any: the inner register for the
+    /// `Register`, `ShiftedRegister`, and `ExtendedRegister` forms, and `None`
+    /// for an `Immediate`. This is the single home for "which register does an
+    /// rm/shift operand contribute as a source" — read-set computations such as
+    /// `Instruction::source_registers` route through it so a shifted or extended
+    /// operand never silently drops its inner register from liveness tracking.
+    #[must_use]
+    pub fn source_register(&self) -> Option<Register> {
+        match self {
+            Operand::Register(reg)
+            | Operand::ShiftedRegister { reg, .. }
+            | Operand::ExtendedRegister { reg, .. } => Some(*reg),
+            Operand::Immediate(_) => None,
+        }
+    }
+
     pub fn display_with_width(&self, width: RegisterWidth) -> String {
         match self {
             Operand::Register(reg) => width.register_name(*reg).to_string(),
@@ -313,11 +470,14 @@ impl fmt::Display for Operand {
                 let inner = if kind.is_x_form() {
                     format!("{}", reg)
                 } else {
-                    match reg.index() {
-                        Some(idx) => format!("w{}", idx),
-                        // SP has no W-form; fall back to its canonical name
-                        // (encodability gates SP out before any caller sees it).
-                        None => format!("{}", reg),
+                    match reg {
+                        Register::XZR => "wzr".to_string(),
+                        reg => match reg.index() {
+                            Some(idx) => format!("w{}", idx),
+                            // SP has no W-form; fall back to its canonical name
+                            // (encodability gates SP out before any caller sees it).
+                            None => format!("{}", reg),
+                        },
                     }
                 };
                 write!(f, "{}, {} #{}", inner, kind, shift)
@@ -339,9 +499,9 @@ impl fmt::Display for LabelId {
     }
 }
 
-/// Access width for LDR/STR/LDP/STP families. Byte = 8 bits (LDRB/STRB),
-/// Half = 16 bits (LDRH/STRH), Word = 32 bits (LDR/STR W-form, LDRSW,
-/// LDPSW), Extended = 64 bits (LDR/STR X-form). See ADR-0007.
+/// Access width for single-register memory families. Byte = 8 bits
+/// (LDRB/STRB), Half = 16 bits (LDRH/STRH), Word = 32 bits (LDR/STR W-form,
+/// LDRSW), Extended = 64 bits (LDR/STR X-form). See ADR-0007.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[allow(dead_code)]
 pub enum AccessWidth {
@@ -361,6 +521,82 @@ impl AccessWidth {
             AccessWidth::Half => 2,
             AccessWidth::Word => 4,
             AccessWidth::Extended => 8,
+        }
+    }
+
+    /// Log2 of the access size in bytes, used by scaled memory operands.
+    #[must_use]
+    pub fn scale_shift(&self) -> u8 {
+        match self {
+            AccessWidth::Byte => 0,
+            AccessWidth::Half => 1,
+            AccessWidth::Word => 2,
+            AccessWidth::Extended => 3,
+        }
+    }
+}
+
+/// Access width for LDP/STP-family pair transfers. AArch64 pair forms only
+/// encode 32-bit and 64-bit per-register accesses.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum PairAccessWidth {
+    Word,
+    Extended,
+}
+
+impl PairAccessWidth {
+    /// Convert to the shared single-register access width representation.
+    #[must_use]
+    pub fn as_access_width(self) -> AccessWidth {
+        self.into()
+    }
+
+    /// Number of bytes each register in the pair reads or writes.
+    #[must_use]
+    pub fn bytes(self) -> u32 {
+        self.as_access_width().bytes()
+    }
+
+    /// Log2 of the per-register transfer size in bytes.
+    #[must_use]
+    pub fn scale_shift(self) -> u8 {
+        self.as_access_width().scale_shift()
+    }
+}
+
+impl From<PairAccessWidth> for AccessWidth {
+    fn from(width: PairAccessWidth) -> Self {
+        match width {
+            PairAccessWidth::Word => AccessWidth::Word,
+            PairAccessWidth::Extended => AccessWidth::Extended,
+        }
+    }
+}
+
+/// Error returned when a byte or half-word access is used for a pair form.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct InvalidPairAccessWidth(pub AccessWidth);
+
+impl fmt::Display for InvalidPairAccessWidth {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "pair access width {:?} is not supported (Word/Extended only)",
+            self.0
+        )
+    }
+}
+
+impl std::error::Error for InvalidPairAccessWidth {}
+
+impl TryFrom<AccessWidth> for PairAccessWidth {
+    type Error = InvalidPairAccessWidth;
+
+    fn try_from(width: AccessWidth) -> Result<Self, Self::Error> {
+        match width {
+            AccessWidth::Word => Ok(PairAccessWidth::Word),
+            AccessWidth::Extended => Ok(PairAccessWidth::Extended),
+            AccessWidth::Byte | AccessWidth::Half => Err(InvalidPairAccessWidth(width)),
         }
     }
 }
@@ -396,9 +632,9 @@ pub enum AddressOperand {
         shift: u8,
     },
     /// `[base, idx, kind{ #shift}]` where `kind` is one of UXTW/SXTW (idx
-    /// is W-form) or UXTX/SXTX (idx is X-form). UXTB/UXTH/SXTB/SXTH are
-    /// not valid AArch64 memory-extend kinds and are rejected by
-    /// `is_encodable_aarch64`.
+    /// is W-form) or UXTX/SXTX (idx is X-form), and `shift` is 0 or the
+    /// access-size scale shift. UXTB/UXTH/SXTB/SXTH and invalid shifts are
+    /// rejected by `is_encodable_aarch64`.
     Ext {
         base: Register,
         idx: Register,
@@ -651,6 +887,32 @@ mod tests {
     }
 
     #[test]
+    fn test_extended_register_display_w_form_xzr() {
+        assert_eq!(
+            Operand::ExtendedRegister {
+                reg: Register::XZR,
+                kind: ExtendKind::Uxtb,
+                shift: 0,
+            }
+            .to_string(),
+            "wzr, uxtb #0"
+        );
+    }
+
+    #[test]
+    fn test_extended_register_display_x_form_xzr() {
+        assert_eq!(
+            Operand::ExtendedRegister {
+                reg: Register::XZR,
+                kind: ExtendKind::Uxtx,
+                shift: 0,
+            }
+            .to_string(),
+            "xzr, uxtx #0"
+        );
+    }
+
+    #[test]
     fn test_condition_invert_pairs() {
         let pairs = [
             (Condition::EQ, Condition::NE),
@@ -709,6 +971,12 @@ mod tests {
         assert_eq!(format!("{}", Register::XZR), "xzr");
         assert_eq!(Register::SP.index(), None);
         assert_eq!(format!("{}", Register::SP), "sp");
+    }
+
+    #[test]
+    #[should_panic(expected = "vector register has no scalar W/X register name")]
+    fn x64_register_name_rejects_vector_with_scalar_width_diagnostic() {
+        RegisterWidth::X64.register_name(Register::Vector(VectorRegister::V0));
     }
 
     #[test]
@@ -848,5 +1116,29 @@ mod tests {
         assert_eq!(AccessWidth::Half.bytes(), 2);
         assert_eq!(AccessWidth::Word.bytes(), 4);
         assert_eq!(AccessWidth::Extended.bytes(), 8);
+        assert_eq!(AccessWidth::Byte.scale_shift(), 0);
+        assert_eq!(AccessWidth::Half.scale_shift(), 1);
+        assert_eq!(AccessWidth::Word.scale_shift(), 2);
+        assert_eq!(AccessWidth::Extended.scale_shift(), 3);
+    }
+
+    #[test]
+    fn pair_access_width_only_accepts_word_and_extended() {
+        assert_eq!(
+            PairAccessWidth::try_from(AccessWidth::Word),
+            Ok(PairAccessWidth::Word)
+        );
+        assert_eq!(
+            PairAccessWidth::try_from(AccessWidth::Extended),
+            Ok(PairAccessWidth::Extended)
+        );
+        assert_eq!(
+            PairAccessWidth::try_from(AccessWidth::Byte),
+            Err(InvalidPairAccessWidth(AccessWidth::Byte))
+        );
+        assert_eq!(
+            PairAccessWidth::try_from(AccessWidth::Half),
+            Err(InvalidPairAccessWidth(AccessWidth::Half))
+        );
     }
 }

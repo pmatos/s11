@@ -31,7 +31,7 @@ use rand::{RngExt, SeedableRng};
 use rand_chacha::ChaCha8Rng;
 use std::marker::PhantomData;
 use std::sync::atomic::Ordering;
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 /// Stochastic search using MCMC-style proposals and Metropolis cost
 /// acceptance, generic over ISA.
@@ -79,7 +79,7 @@ where
     ) -> Self::Result {
         self.reset();
         let start_time = Instant::now();
-        let width = <I as StochasticBackend<I>>::width(config);
+        let width = <I as StochasticBackend<I>>::width();
 
         let original_cost =
             <I as StochasticBackend<I>>::sequence_cost(target, &config.cost_metric, width);
@@ -102,14 +102,16 @@ where
         // Pull register / immediate pools out of the config via the backend.
         let regs = <I as StochasticBackend<I>>::registers_from_config(config);
         let imms = <I as StochasticBackend<I>>::immediates_from_config(config);
+        let validation_regs =
+            <I as StochasticBackend<I>>::validation_registers(&regs, target, live_out);
 
         // Generate test cases: random + edge.
         let test_inputs = <I as StochasticBackend<I>>::make_test_inputs(
-            &regs,
+            &validation_regs,
             width,
             config.stochastic.test_count,
         );
-        let edge_inputs = <I as StochasticBackend<I>>::make_edge_inputs(&regs, width);
+        let edge_inputs = <I as StochasticBackend<I>>::make_edge_inputs(&validation_regs, width);
 
         // Precompute target outputs.
         let target_outputs: Vec<_> = test_inputs
@@ -159,10 +161,6 @@ where
         // tail, so length-change proposals only vary the prefix length.
         let min_length = 1 + terminator_len;
         let max_length = target.len();
-        let smt_timeout = config
-            .symbolic
-            .solver_timeout
-            .unwrap_or(Duration::from_secs(5));
 
         for iteration in 0..config.stochastic.iterations {
             self.statistics.iterations = iteration + 1;
@@ -240,9 +238,16 @@ where
 
             self.statistics.candidates_passed_fast += 1;
 
+            let mut smt_refuted = false;
             if proposal_cost < best_cost {
-                self.statistics.smt_queries += 1;
-
+                let Some(smt_timeout) = config.solver_timeout_within_budget(start_time.elapsed())
+                else {
+                    // No millisecond-granularity SMT budget remains, so the
+                    // overall search deadline is effectively reached; stop
+                    // rather than hand Z3 a timeout it cannot honour. Mirrors
+                    // the enumerative path.
+                    break;
+                };
                 let (verdict, metrics) = <I as StochasticBackend<I>>::check_equivalence(
                     target,
                     &proposal,
@@ -250,9 +255,14 @@ where
                     width,
                     smt_timeout,
                 );
-                self.statistics.smt_elapsed += metrics.smt_elapsed;
-                if let EquivalenceResult::Equivalent = verdict {
-                    self.statistics.smt_equivalent += 1;
+                // Fold the SMT counters through the canonical accounting seam so
+                // this path cannot drift from the symbolic/enumerative ones.
+                // `candidates_passed_fast` is counted separately above (at the
+                // concrete-test stage), which is why we apply the tally directly
+                // rather than calling `record_verification`.
+                let tally = SearchStatistics::verification_tally(&metrics, &verdict);
+                tally.fold_into(&mut self.statistics);
+                if tally.proved_equivalent {
                     self.statistics.improvements_found += 1;
 
                     best_equivalent = Some(proposal.clone());
@@ -265,7 +275,21 @@ where
                             iteration, original_cost, best_cost
                         );
                     }
+                } else if matches!(
+                    verdict,
+                    EquivalenceResult::NotEquivalent | EquivalenceResult::NotEquivalentFast(_)
+                ) {
+                    smt_refuted = true;
                 }
+                // SMT timeout / inconclusive (`Unknown`): we cannot prove the
+                // proposal incorrect, so leave the Metropolis decision below
+                // intact rather than vetoing exploration.
+            } else {
+                self.statistics.candidates_pruned_by_cost += 1;
+            }
+
+            if smt_refuted {
+                continue;
             }
 
             if acceptance.accept(&mut rng, current_cost, proposal_cost) {
@@ -316,7 +340,7 @@ pub fn evaluate_with_tests(
 
     for (input, target_output) in test_inputs.iter().zip(target_outputs.iter()) {
         let proposal_output = apply_sequence_concrete(input.clone(), proposal);
-        if !states_equal_for_live_out(&proposal_output, target_output, live_out, false, false) {
+        if !states_equal_for_live_out(&proposal_output, target_output, live_out, false) {
             passes_all = false;
             break;
         }
@@ -335,10 +359,14 @@ pub fn evaluate_with_tests(
 mod tests {
     use super::*;
     use crate::ir::{Operand, Register};
-    use crate::isa::{AArch64, ISA, ISAMutator, InstructionType, OperandType, RegisterType, U64};
-    use crate::search::config::{StochasticConfig, SymbolicConfig};
+    use crate::isa::{AArch64, ISA, ISAMutator, U64};
+    use crate::search::config::StochasticConfig;
     use crate::semantics::cost::CostMetric;
     use crate::semantics::live_out::LiveOut;
+    use crate::semantics::state::{ConcreteValue, ConditionFlags};
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering as AtomicOrdering};
+    use std::sync::{Mutex as TestMutex, MutexGuard};
+    use std::time::Duration;
 
     fn mov_add_sequence() -> Vec<Instruction> {
         vec![
@@ -382,120 +410,22 @@ mod tests {
     #[derive(Clone)]
     struct TimeoutProbeIsa;
 
-    #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-    struct TimeoutProbeRegister;
-
-    impl std::fmt::Display for TimeoutProbeRegister {
-        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-            write!(f, "tp0")
-        }
-    }
-
-    impl RegisterType for TimeoutProbeRegister {
-        fn index(&self) -> Option<u8> {
-            Some(0)
-        }
-
-        fn from_index(idx: u8) -> Option<Self> {
-            (idx == 0).then_some(Self)
-        }
-
-        fn is_zero_register(&self) -> bool {
-            false
-        }
-
-        fn is_special(&self) -> bool {
-            false
-        }
-    }
-
-    #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-    enum TimeoutProbeOperand {
-        Reg(TimeoutProbeRegister),
-        Imm(i64),
-    }
-
-    impl std::fmt::Display for TimeoutProbeOperand {
-        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-            match self {
-                Self::Reg(reg) => write!(f, "{reg}"),
-                Self::Imm(imm) => write!(f, "#{imm}"),
-            }
-        }
-    }
-
-    impl OperandType for TimeoutProbeOperand {
-        type Register = TimeoutProbeRegister;
-
-        fn as_register(&self) -> Option<Self::Register> {
-            match self {
-                Self::Reg(reg) => Some(*reg),
-                Self::Imm(_) => None,
-            }
-        }
-
-        fn as_immediate(&self) -> Option<i64> {
-            match self {
-                Self::Reg(_) => None,
-                Self::Imm(imm) => Some(*imm),
-            }
-        }
-
-        fn from_register(reg: Self::Register) -> Self {
-            Self::Reg(reg)
-        }
-
-        fn from_immediate(imm: i64) -> Self {
-            Self::Imm(imm)
-        }
-    }
-
-    #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-    struct TimeoutProbeInstruction(u8);
-
-    impl std::fmt::Display for TimeoutProbeInstruction {
-        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-            write!(f, "probe{}", self.0)
-        }
-    }
-
-    impl InstructionType for TimeoutProbeInstruction {
-        type Register = TimeoutProbeRegister;
-        type Operand = TimeoutProbeOperand;
-
-        fn destination(&self) -> Option<Self::Register> {
-            Some(TimeoutProbeRegister)
-        }
-
-        fn source_registers(&self) -> Vec<Self::Register> {
-            Vec::new()
-        }
-
-        fn opcode_id(&self) -> u8 {
-            self.0
-        }
-
-        fn mnemonic(&self) -> &'static str {
-            "probe"
-        }
-    }
-
     struct TimeoutProbeMutator;
 
-    impl ISAMutator<TimeoutProbeInstruction> for TimeoutProbeMutator {
+    impl ISAMutator<Instruction> for TimeoutProbeMutator {
         fn mutate<R: rand::RngExt>(
             &self,
             _rng: &mut R,
-            _sequence: &[TimeoutProbeInstruction],
-        ) -> Vec<TimeoutProbeInstruction> {
-            vec![TimeoutProbeInstruction(9)]
+            _sequence: &[Instruction],
+        ) -> Vec<Instruction> {
+            mov_zero_sequence()
         }
     }
 
     impl ISA for TimeoutProbeIsa {
-        type Register = TimeoutProbeRegister;
-        type Operand = TimeoutProbeOperand;
-        type Instruction = TimeoutProbeInstruction;
+        type Register = Register;
+        type Operand = Operand;
+        type Instruction = Instruction;
         type Width = U64;
         type Flags = ();
         type Mutator = TimeoutProbeMutator;
@@ -513,7 +443,7 @@ mod tests {
         }
 
         fn general_registers(&self) -> Vec<Self::Register> {
-            vec![TimeoutProbeRegister]
+            vec![Register::X0]
         }
 
         fn zero_register(&self) -> Option<Self::Register> {
@@ -522,16 +452,33 @@ mod tests {
     }
 
     std::thread_local! {
-        static RECORDED_SMT_TIMEOUT_MS: std::cell::Cell<Option<u64>> =
+        static RECORDED_SMT_TIMEOUT_MS: std::cell::Cell<Option<u128>> =
             const { std::cell::Cell::new(None) };
+    }
+
+    const TIMEOUT_PROBE_NOT_EQUIVALENT: usize = 0;
+    const TIMEOUT_PROBE_EQUIVALENT: usize = 1;
+
+    static TIMEOUT_PROBE_TEST_LOCK: TestMutex<()> = TestMutex::new(());
+    static TIMEOUT_PROBE_VERDICT: AtomicUsize = AtomicUsize::new(TIMEOUT_PROBE_EQUIVALENT);
+    static TIMEOUT_PROBE_SMT_CALLED: AtomicBool = AtomicBool::new(true);
+
+    fn set_timeout_probe_result(verdict: usize, smt_called: bool) -> MutexGuard<'static, ()> {
+        let guard = TIMEOUT_PROBE_TEST_LOCK
+            .lock()
+            .expect("timeout probe test lock poisoned");
+        TIMEOUT_PROBE_VERDICT.store(verdict, AtomicOrdering::SeqCst);
+        TIMEOUT_PROBE_SMT_CALLED.store(smt_called, AtomicOrdering::SeqCst);
+        RECORDED_SMT_TIMEOUT_MS.with(|recorded| recorded.set(None));
+        guard
     }
 
     impl StochasticBackend<TimeoutProbeIsa> for TimeoutProbeIsa {
         type State = ();
         type LiveOut = ();
 
-        fn registers_from_config(_config: &SearchConfig) -> Vec<TimeoutProbeRegister> {
-            vec![TimeoutProbeRegister]
+        fn registers_from_config(_config: &SearchConfig) -> Vec<Register> {
+            vec![Register::X0]
         }
 
         fn immediates_from_config(_config: &SearchConfig) -> Vec<i64> {
@@ -542,19 +489,15 @@ mod tests {
             TimeoutProbeMutator
         }
 
-        fn make_test_inputs(
-            _regs: &[TimeoutProbeRegister],
-            _width: u32,
-            count: usize,
-        ) -> Vec<Self::State> {
+        fn make_test_inputs(_regs: &[Register], _width: u32, count: usize) -> Vec<Self::State> {
             vec![(); count]
         }
 
-        fn make_edge_inputs(_regs: &[TimeoutProbeRegister], _width: u32) -> Vec<Self::State> {
+        fn make_edge_inputs(_regs: &[Register], _width: u32) -> Vec<Self::State> {
             Vec::new()
         }
 
-        fn apply_sequence(state: Self::State, _seq: &[TimeoutProbeInstruction]) -> Self::State {
+        fn apply_sequence(state: Self::State, _seq: &[Instruction]) -> Self::State {
             state
         }
 
@@ -562,85 +505,250 @@ mod tests {
             true
         }
 
-        fn sequence_cost(
-            seq: &[TimeoutProbeInstruction],
-            _metric: &CostMetric,
-            _width: u32,
-        ) -> u64 {
+        fn sequence_cost(seq: &[Instruction], _metric: &CostMetric, _width: u32) -> u64 {
             seq.len() as u64
         }
 
-        fn is_encodable(_seq: &[TimeoutProbeInstruction]) -> bool {
+        fn is_encodable(_seq: &[Instruction]) -> bool {
             true
         }
 
         fn check_equivalence(
-            _target: &[TimeoutProbeInstruction],
-            _proposal: &[TimeoutProbeInstruction],
+            _target: &[Instruction],
+            _proposal: &[Instruction],
             _live_out: &Self::LiveOut,
             _width: u32,
             timeout: Duration,
         ) -> (EquivalenceResult, crate::semantics::EquivalenceMetrics) {
-            RECORDED_SMT_TIMEOUT_MS.with(|recorded| recorded.set(Some(timeout.as_millis() as u64)));
+            RECORDED_SMT_TIMEOUT_MS.with(|recorded| recorded.set(Some(timeout.as_millis())));
+            let metrics = crate::semantics::EquivalenceMetrics {
+                smt_called: TIMEOUT_PROBE_SMT_CALLED.load(AtomicOrdering::SeqCst),
+                ..crate::semantics::EquivalenceMetrics::default()
+            };
             (
-                EquivalenceResult::Equivalent,
-                crate::semantics::EquivalenceMetrics::default(),
+                match TIMEOUT_PROBE_VERDICT.load(AtomicOrdering::SeqCst) {
+                    TIMEOUT_PROBE_EQUIVALENT => EquivalenceResult::Equivalent,
+                    _ => EquivalenceResult::NotEquivalent,
+                },
+                metrics,
             )
         }
 
         fn random_sequence<R: rand::RngExt>(
             _rng: &mut R,
             len: usize,
-            _regs: &[TimeoutProbeRegister],
+            _regs: &[Register],
             _imms: &[i64],
             _config: &SearchConfig,
-        ) -> Vec<TimeoutProbeInstruction> {
-            vec![TimeoutProbeInstruction(1); len]
+        ) -> Vec<Instruction> {
+            vec![
+                Instruction::MovImm {
+                    rd: Register::X0,
+                    imm: 0,
+                };
+                len
+            ]
         }
 
-        fn width(_config: &SearchConfig) -> u32 {
+        fn width() -> u32 {
             64
         }
     }
 
-    fn run_timeout_probe_search(symbolic_config: SymbolicConfig) -> Option<u64> {
-        RECORDED_SMT_TIMEOUT_MS.with(|recorded| recorded.set(None));
-
+    fn run_timeout_probe_search_with(
+        config: SearchConfig,
+        verdict: usize,
+        smt_called: bool,
+    ) -> (SearchStatistics, Option<u128>) {
+        let _guard = set_timeout_probe_result(verdict, smt_called);
         let mut search: StochasticSearch<TimeoutProbeIsa> = StochasticSearch::new();
-        let config = SearchConfig::default()
-            .with_stochastic(
-                StochasticConfig::default()
-                    .with_iterations(1)
-                    .with_test_count(0)
-                    .with_seed(1),
-            )
-            .with_symbolic(symbolic_config);
-        let target = [TimeoutProbeInstruction(1), TimeoutProbeInstruction(2)];
+        let target = mov_add_sequence();
         let result = search.search(&target, &(), &config);
-        assert_eq!(result.statistics.smt_queries, 1);
+        let statistics = result.statistics;
 
-        RECORDED_SMT_TIMEOUT_MS.with(|recorded| recorded.get())
+        (
+            statistics,
+            RECORDED_SMT_TIMEOUT_MS.with(|recorded| recorded.get()),
+        )
+    }
+
+    fn run_timeout_probe_search(config: SearchConfig) -> Option<u128> {
+        let (statistics, recorded_timeout) =
+            run_timeout_probe_search_with(config, TIMEOUT_PROBE_EQUIVALENT, true);
+        assert_eq!(statistics.smt_queries, 1);
+        recorded_timeout
     }
 
     #[test]
-    fn stochastic_search_uses_symbolic_solver_timeout_for_smt() {
+    fn stochastic_search_accounts_solver_proven_improvement_through_the_seam() {
+        // The equivalent branch folds its SMT counters through the shared
+        // `VerificationTally` seam: a solver-reaching, proven-equivalent cheaper
+        // proposal counts as one SMT query, one proven equivalence, and one
+        // recorded improvement — the counterpart to the refuted case below.
+        let _guard = set_timeout_probe_result(TIMEOUT_PROBE_EQUIVALENT, true);
+
+        let mut search: StochasticSearch<TimeoutProbeIsa> = StochasticSearch::new();
+        let config = SearchConfig::default().with_stochastic(
+            StochasticConfig::default()
+                .with_iterations(1)
+                .with_test_count(0)
+                .with_seed(1),
+        );
+        let target = mov_add_sequence();
+
+        let result = search.search(&target, &(), &config);
+
+        assert_eq!(result.statistics.smt_queries, 1);
+        assert_eq!(result.statistics.smt_equivalent, 1);
+        assert_eq!(result.statistics.improvements_found, 1);
+        assert!(result.found_optimization);
+    }
+
+    #[test]
+    fn stochastic_search_does_not_accept_smt_refuted_cheaper_proposal() {
+        let _guard = set_timeout_probe_result(TIMEOUT_PROBE_NOT_EQUIVALENT, true);
+
+        let mut search: StochasticSearch<TimeoutProbeIsa> = StochasticSearch::new();
+        let config = SearchConfig::default().with_stochastic(
+            StochasticConfig::default()
+                .with_iterations(1)
+                .with_test_count(0)
+                .with_seed(1),
+        );
+        let target = mov_add_sequence();
+
+        let result = search.search(&target, &(), &config);
+
+        assert_eq!(result.statistics.smt_queries, 1);
+        assert_eq!(result.statistics.smt_equivalent, 0);
+        assert_eq!(result.statistics.improvements_found, 0);
+        assert!(!result.found_optimization);
+        assert_eq!(result.statistics.accepted_proposals, 0);
+    }
+
+    #[test]
+    fn stochastic_search_uses_top_level_solver_timeout_for_smt() {
         let recorded_timeout = run_timeout_probe_search(
-            SymbolicConfig::default().with_timeout(Duration::from_millis(17)),
+            SearchConfig::default()
+                .with_stochastic(
+                    StochasticConfig::default()
+                        .with_iterations(1)
+                        .with_test_count(0)
+                        .with_seed(1),
+                )
+                .with_solver_timeout(Duration::from_millis(17)),
         );
 
         assert_eq!(recorded_timeout, Some(17));
     }
 
     #[test]
-    fn stochastic_search_falls_back_to_five_seconds_when_solver_timeout_unset() {
-        let symbolic_config = SymbolicConfig {
-            solver_timeout: None,
-            ..SymbolicConfig::default()
-        };
+    fn timeout_probe_preserves_full_millisecond_value() {
+        let recorded_timeout = run_timeout_probe_search(
+            SearchConfig::default()
+                .with_stochastic(
+                    StochasticConfig::default()
+                        .with_iterations(1)
+                        .with_test_count(0)
+                        .with_seed(1),
+                )
+                .with_timeout_option(None)
+                .with_solver_timeout(Duration::MAX),
+        );
 
-        let recorded_timeout = run_timeout_probe_search(symbolic_config);
+        assert_eq!(recorded_timeout, Some(Duration::MAX.as_millis()));
+    }
+
+    #[test]
+    fn stochastic_smt_timeout_is_clamped_to_remaining_search_budget() {
+        // Solver timeout (30s) vastly exceeds the remaining search budget
+        // (50ms). The timeout handed to Z3 must be clamped to the budget rather
+        // than the full solver timeout — the deadline-respecting behaviour this
+        // seam restores to the MCMC path. Mirrors the symbolic backend's
+        // `symbolic_smt_timeout_is_clamped_to_remaining_search_budget`, using
+        // the deterministic `TimeoutProbeIsa` probe rather than wall-clock
+        // timing.
+        let (statistics, recorded_timeout) = run_timeout_probe_search_with(
+            SearchConfig::default()
+                .with_stochastic(
+                    StochasticConfig::default()
+                        .with_iterations(1)
+                        .with_test_count(0)
+                        .with_seed(1),
+                )
+                .with_timeout(Duration::from_millis(50))
+                .with_solver_timeout(Duration::from_secs(30)),
+            TIMEOUT_PROBE_EQUIVALENT,
+            true,
+        );
+
+        // The cheaper proposal still reaches the solver (the budget is not yet
+        // exhausted at ~0ms elapsed), so exactly one SMT query runs...
+        assert_eq!(statistics.smt_queries, 1);
+        // ...and the timeout it was handed is clamped to the ~50ms budget, not
+        // the 30s solver timeout.
+        let recorded = recorded_timeout.expect("an SMT query should have recorded a timeout");
+        assert!(
+            (1..=50).contains(&recorded),
+            "solver timeout should be clamped to the ~50ms budget, got {recorded}ms",
+        );
+    }
+
+    #[test]
+    fn stochastic_search_falls_back_to_five_seconds_when_solver_timeout_unset() {
+        let recorded_timeout = run_timeout_probe_search(
+            SearchConfig::default()
+                .with_stochastic(
+                    StochasticConfig::default()
+                        .with_iterations(1)
+                        .with_test_count(0)
+                        .with_seed(1),
+                )
+                .with_solver_timeout_option(None),
+        );
 
         assert_eq!(recorded_timeout, Some(5000));
+    }
+
+    #[test]
+    fn stochastic_counts_fast_passing_non_improving_proposal_as_cost_pruned() {
+        let mut search: StochasticSearch<TimeoutProbeIsa> = StochasticSearch::new();
+        let config = SearchConfig::default().with_stochastic(
+            StochasticConfig::default()
+                .with_iterations(1)
+                .with_test_count(0)
+                .with_seed(1),
+        );
+        let target = mov_zero_sequence();
+
+        let result = search.search(&target, &(), &config);
+
+        assert!(!result.found_optimization);
+        assert_eq!(result.statistics.candidates_evaluated, 1);
+        assert_eq!(result.statistics.candidates_passed_fast, 1);
+        assert_eq!(result.statistics.candidates_pruned_by_cost, 1);
+        assert_eq!(result.statistics.smt_queries, 0);
+    }
+
+    #[test]
+    fn stochastic_search_does_not_count_pre_smt_refutation_as_smt_query() {
+        let (statistics, recorded_timeout) = run_timeout_probe_search_with(
+            SearchConfig::default()
+                .with_stochastic(
+                    StochasticConfig::default()
+                        .with_iterations(1)
+                        .with_test_count(0)
+                        .with_seed(1),
+                )
+                .with_solver_timeout(Duration::from_millis(17)),
+            TIMEOUT_PROBE_NOT_EQUIVALENT,
+            false,
+        );
+
+        assert_eq!(recorded_timeout, Some(17));
+        assert_eq!(statistics.candidates_passed_fast, 1);
+        assert_eq!(statistics.smt_queries, 0);
+        assert_eq!(statistics.smt_equivalent, 0);
     }
 
     #[test]
@@ -749,6 +857,54 @@ mod tests {
     }
 
     #[test]
+    fn test_evaluate_with_tests_honors_flags_from_mask() {
+        let target = Vec::new();
+        let proposal = Vec::new();
+
+        let mut input = ConcreteMachineState::new_zeroed();
+        input.set_register(Register::X0, ConcreteValue(42));
+        input.set_flags(ConditionFlags {
+            n: true,
+            z: false,
+            c: false,
+            v: false,
+        });
+
+        let mut target_output = input.clone();
+        target_output.set_flags(ConditionFlags {
+            n: false,
+            z: true,
+            c: false,
+            v: false,
+        });
+
+        // Mask without flag liveness: the divergent NZCV bits are ignored, so
+        // the proposal still passes.
+        let live_out_flags_dead = RegisterSet::<Register>::from_registers(vec![Register::X0]);
+        let (cost, passes) = evaluate_with_tests(
+            &proposal,
+            &target,
+            &[input.clone()],
+            &[target_output.clone()],
+            &live_out_flags_dead,
+        );
+        assert!(passes);
+        assert_eq!(cost, 0);
+
+        // Mask with flag liveness: NZCV divergence now fails the proposal,
+        // matching the flag-honoring stochastic prefilter.
+        let live_out_flags_live = live_out_flags_dead.with_flags(true);
+        let (_cost, passes) = evaluate_with_tests(
+            &proposal,
+            &target,
+            &[input],
+            &[target_output],
+            &live_out_flags_live,
+        );
+        assert!(!passes);
+    }
+
+    #[test]
     fn test_statistics_tracking() {
         let mut search: StochasticSearch<AArch64> = StochasticSearch::new();
 
@@ -846,11 +1002,8 @@ mod tests {
     // ---- x86 stochastic search (issue #73 Phase C step 5) ----
 
     /// Tracer-bullet test that the generic `StochasticSearch<X86_64>`
-    /// instantiates, runs an MCMC loop end-to-end on a 2-instruction
-    /// x86 target, and finishes without panic. The target is the
-    /// canonical zeroing fusion `mov rax, 0; add rax, rbx` — the
-    /// search should at minimum *not crash*, and the iteration counter
-    /// should advance.
+    /// instantiates and discovers the dead-flags collapse for a
+    /// 2-instruction x86 target.
     #[test]
     fn x86_stochastic_runs_end_to_end() {
         use crate::isa::X86_64;
@@ -860,13 +1013,16 @@ mod tests {
         let mut search: StochasticSearch<X86_64> = StochasticSearch::new();
         let config = SearchConfig::default()
             .with_stochastic(
+                // Adding rewritable families shifts the seeded mutation
+                // trajectory. With MOVZX/MOVSX and SETcc raising the opcode
+                // count to 32, seed 2 reaches the equally valid `mov rax, rbx`
+                // collapse within 500 iterations (flags are dead in this test).
                 StochasticConfig::default()
                     .with_iterations(500)
-                    .with_seed(7),
+                    .with_seed(2),
             )
             .with_x86_registers(vec![X86Register::RAX, X86Register::RBX, X86Register::RCX])
-            .with_immediates(vec![0, 1])
-            .with_x86_width(64);
+            .with_immediates(vec![0, 1]);
 
         let live_out = X86LiveOut::from_registers(vec![X86Register::RAX]).with_flags(false);
 
@@ -882,13 +1038,20 @@ mod tests {
         ];
 
         let result = search.search(&target, &live_out, &config);
-        let stats = result.statistics;
+        let stats = &result.statistics;
 
         assert_eq!(stats.algorithm, Algorithm::Stochastic);
         assert_eq!(stats.iterations, 500);
-        // The search may or may not find an optimisation in 500
-        // iterations; we only require that the loop made progress.
         assert!(stats.candidates_evaluated > 0);
+        assert!(result.found_optimization);
+        assert_eq!(result.cost_savings(), 1);
+        assert_eq!(
+            result.optimized_sequence,
+            Some(vec![X86Instruction::MovReg {
+                rd: X86Register::RAX,
+                rs: X86Register::RBX,
+            }])
+        );
     }
 
     /// Mirror of `x86_stochastic_runs_end_to_end` for x86-32 (Mode32 /
@@ -911,8 +1074,7 @@ mod tests {
             )
             // Mode32 restricts to the low-8 GPRs.
             .with_x86_registers(vec![X86Register::RAX, X86Register::RBX, X86Register::RCX])
-            .with_immediates(vec![0, 1])
-            .with_x86_width(32);
+            .with_immediates(vec![0, 1]);
 
         let live_out = X86LiveOut::from_registers(vec![X86Register::RAX]).with_flags(false);
         let target = vec![

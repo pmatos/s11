@@ -17,6 +17,15 @@ See [docs/capability.md](docs/capability.md) for the canonical instruction and I
 - ISA abstraction supporting AArch64 (primary), x86-64/x86-32, RISC-V (scaffolded)
 - Binary patching for applying optimizations (per-arch alignment + NOP padding)
 
+## Planning Artifact
+
+The automated planning stage (`prompts/plan.md`) writes or overwrites the
+repository-root `PLAN.md`, and the implementation stage (`prompts/impl.md`)
+reads it from the same workspace. This file is an ignored, workspace-local
+handoff, not durable project documentation. Do not stage, commit, or force-add
+it. Preserve lasting rationale in the issue or pull request, an ADR, or a
+deliberately named document instead.
+
 ## Development Commands
 
 This project uses `just` as the task runner. Common commands:
@@ -89,7 +98,8 @@ and how to add a fixture.
   harness sets `spec.seed + sample_index` per record so runs are
   deterministic given the pair.
 - Phase 2 fixtures are not committed; run
-  `scripts/harvest_llvm_codegen.sh` to populate them.
+  `scripts/harvest_llvm_codegen.sh` to populate them; see
+  `benches/llvm_codegen/README.md` for refresh and review notes.
 
 ### Mutation Testing (informational, local-only)
 
