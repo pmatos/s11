@@ -550,7 +550,7 @@ mod tests {
     }
 
     std::thread_local! {
-        static RECORDED_SMT_TIMEOUT_MS: std::cell::Cell<Option<u64>> =
+        static RECORDED_SMT_TIMEOUT_MS: std::cell::Cell<Option<u128>> =
             const { std::cell::Cell::new(None) };
     }
 
@@ -626,7 +626,7 @@ mod tests {
             _width: u32,
             timeout: Duration,
         ) -> (EquivalenceResult, crate::semantics::EquivalenceMetrics) {
-            RECORDED_SMT_TIMEOUT_MS.with(|recorded| recorded.set(Some(timeout.as_millis() as u64)));
+            RECORDED_SMT_TIMEOUT_MS.with(|recorded| recorded.set(Some(timeout.as_millis())));
             let metrics = crate::semantics::EquivalenceMetrics {
                 smt_called: TIMEOUT_PROBE_SMT_CALLED.load(AtomicOrdering::SeqCst),
                 ..crate::semantics::EquivalenceMetrics::default()
@@ -659,7 +659,7 @@ mod tests {
         config: SearchConfig,
         verdict: usize,
         smt_called: bool,
-    ) -> (SearchStatistics, Option<u64>) {
+    ) -> (SearchStatistics, Option<u128>) {
         let _guard = set_timeout_probe_result(verdict, smt_called);
         let mut search: StochasticSearch<TimeoutProbeIsa> = StochasticSearch::new();
         let target = [TimeoutProbeInstruction(1), TimeoutProbeInstruction(2)];
@@ -672,7 +672,7 @@ mod tests {
         )
     }
 
-    fn run_timeout_probe_search(config: SearchConfig) -> Option<u64> {
+    fn run_timeout_probe_search(config: SearchConfig) -> Option<u128> {
         let (statistics, recorded_timeout) =
             run_timeout_probe_search_with(config, TIMEOUT_PROBE_EQUIVALENT, true);
         assert_eq!(statistics.smt_queries, 1);
@@ -740,6 +740,23 @@ mod tests {
         );
 
         assert_eq!(recorded_timeout, Some(17));
+    }
+
+    #[test]
+    fn timeout_probe_preserves_full_millisecond_value() {
+        let recorded_timeout = run_timeout_probe_search(
+            SearchConfig::default()
+                .with_stochastic(
+                    StochasticConfig::default()
+                        .with_iterations(1)
+                        .with_test_count(0)
+                        .with_seed(1),
+                )
+                .with_timeout_option(None)
+                .with_solver_timeout(Duration::MAX),
+        );
+
+        assert_eq!(recorded_timeout, Some(Duration::MAX.as_millis()));
     }
 
     #[test]
