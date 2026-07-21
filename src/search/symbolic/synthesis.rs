@@ -95,6 +95,17 @@ enum CandidateEval<Insn> {
     Improved { candidate: Vec<Insn>, cost: u64 },
 }
 
+struct EvalContext<'a, I>
+where
+    I: ISA + SymbolicBackend<I>,
+{
+    target: &'a [I::Instruction],
+    live_out: &'a <I as SymbolicBackend<I>>::LiveOut,
+    config: &'a SearchConfig,
+    width: u32,
+    start_time: Instant,
+}
+
 impl<I> SymbolicSearch<I>
 where
     I: ISA + SymbolicBackend<I>,
@@ -112,6 +123,13 @@ where
         let regs = <I as SymbolicBackend<I>>::registers_from_config(config);
         let imms = <I as SymbolicBackend<I>>::immediates_from_config(config);
         let width = <I as SymbolicBackend<I>>::width();
+        let ctx = EvalContext::<I> {
+            target,
+            live_out,
+            config,
+            width,
+            start_time,
+        };
         let all_instructions = <I as SymbolicBackend<I>>::enumerate_all(&regs, &imms);
 
         let original_cost =
@@ -139,15 +157,7 @@ where
             }
 
             // Generate and test all sequences of this length
-            let found = self.search_at_length(
-                target,
-                live_out,
-                config,
-                &all_instructions,
-                length,
-                &mut best_cost,
-                start_time,
-            );
+            let found = self.search_at_length(&ctx, &all_instructions, length, &mut best_cost);
 
             if let Some(seq) = found {
                 best_solution = Some(seq);
@@ -160,24 +170,19 @@ where
     }
 
     /// Search for equivalent sequences at a specific length
-    #[allow(clippy::too_many_arguments)]
     fn search_at_length(
         &mut self,
-        target: &[I::Instruction],
-        live_out: &<I as SymbolicBackend<I>>::LiveOut,
-        config: &SearchConfig,
+        ctx: &EvalContext<'_, I>,
         all_instructions: &[I::Instruction],
         length: usize,
         best_cost: &mut u64,
-        start_time: Instant,
     ) -> Option<Vec<I::Instruction>> {
-        let width = <I as SymbolicBackend<I>>::width();
         let mut best_at_length: Option<Vec<I::Instruction>> = None;
         // If the target ends in a terminator (x86 Jcc, AArch64 branch),
         // candidate proposals must end in the same terminator for the
         // equivalence check's peel-and-compare precheck to admit them.
         // Compute once and append below.
-        let target_terminator = <I as SymbolicBackend<I>>::target_terminator(target);
+        let target_terminator = <I as SymbolicBackend<I>>::target_terminator(ctx.target);
         let with_term = |mut seq: Vec<I::Instruction>| -> Vec<I::Instruction> {
             if let Some(t) = target_terminator {
                 seq.push(t);
@@ -189,19 +194,17 @@ where
             // Single instruction search
             for instr in all_instructions {
                 // Check timeout / cooperative-cancel flag.
-                if should_stop(config, start_time) {
+                if should_stop(ctx.config, ctx.start_time) {
                     return best_at_length;
                 }
 
                 let candidate = with_term(vec![*instr]);
-                match self.evaluate_candidate(
-                    target, live_out, config, width, candidate, best_cost, start_time,
-                ) {
+                match self.evaluate_candidate(ctx, candidate, best_cost) {
                     CandidateEval::Stopped => return best_at_length,
                     CandidateEval::Rejected => {}
                     CandidateEval::Improved { candidate, cost } => {
                         best_at_length = Some(candidate);
-                        if config.verbose {
+                        if ctx.config.verbose {
                             println!("Found equivalent: {} (cost {})", instr, cost);
                         }
                     }
@@ -211,24 +214,22 @@ where
             // Two instruction search
             for instr1 in all_instructions {
                 // Check timeout / cooperative-cancel flag periodically.
-                if should_stop(config, start_time) {
+                if should_stop(ctx.config, ctx.start_time) {
                     return best_at_length;
                 }
 
                 for instr2 in all_instructions {
-                    if should_stop(config, start_time) {
+                    if should_stop(ctx.config, ctx.start_time) {
                         return best_at_length;
                     }
 
                     let candidate = with_term(vec![*instr1, *instr2]);
-                    match self.evaluate_candidate(
-                        target, live_out, config, width, candidate, best_cost, start_time,
-                    ) {
+                    match self.evaluate_candidate(ctx, candidate, best_cost) {
                         CandidateEval::Stopped => return best_at_length,
                         CandidateEval::Rejected => {}
                         CandidateEval::Improved { candidate, cost } => {
                             best_at_length = Some(candidate);
-                            if config.verbose {
+                            if ctx.config.verbose {
                                 println!(
                                     "Found equivalent: {}; {} (cost {})",
                                     instr1, instr2, cost
@@ -248,7 +249,7 @@ where
                 if count >= sample_size {
                     break;
                 }
-                if should_stop(config, start_time) {
+                if should_stop(ctx.config, ctx.start_time) {
                     return best_at_length;
                 }
 
@@ -256,7 +257,7 @@ where
                     if count >= sample_size {
                         break;
                     }
-                    if should_stop(config, start_time) {
+                    if should_stop(ctx.config, ctx.start_time) {
                         return best_at_length;
                     }
 
@@ -264,7 +265,7 @@ where
                         if count >= sample_size {
                             break;
                         }
-                        if should_stop(config, start_time) {
+                        if should_stop(ctx.config, ctx.start_time) {
                             return best_at_length;
                         }
 
@@ -279,14 +280,12 @@ where
                             with_term(seq)
                         };
 
-                        match self.evaluate_candidate(
-                            target, live_out, config, width, candidate, best_cost, start_time,
-                        ) {
+                        match self.evaluate_candidate(ctx, candidate, best_cost) {
                             CandidateEval::Stopped => return best_at_length,
                             CandidateEval::Rejected => {}
                             CandidateEval::Improved { candidate, cost } => {
                                 best_at_length = Some(candidate);
-                                if config.verbose {
+                                if ctx.config.verbose {
                                     println!(
                                         "Found equivalent sequence of length {} (cost {})",
                                         length, cost
@@ -312,20 +311,18 @@ where
     /// not strictly cheaper than `best_cost`, and otherwise runs the SMT check.
     /// On a cheaper, equivalent candidate it lowers `*best_cost` and returns the
     /// winner; the caller owns only candidate generation and verbose reporting.
-    #[allow(clippy::too_many_arguments)]
     fn evaluate_candidate(
         &mut self,
-        target: &[I::Instruction],
-        live_out: &<I as SymbolicBackend<I>>::LiveOut,
-        config: &SearchConfig,
-        width: u32,
+        ctx: &EvalContext<'_, I>,
         candidate: Vec<I::Instruction>,
         best_cost: &mut u64,
-        start_time: Instant,
     ) -> CandidateEval<I::Instruction> {
-        let candidate_cost =
-            <I as SymbolicBackend<I>>::sequence_cost(&candidate, &config.cost_metric, width);
-        if should_stop(config, start_time) {
+        let candidate_cost = <I as SymbolicBackend<I>>::sequence_cost(
+            &candidate,
+            &ctx.config.cost_metric,
+            ctx.width,
+        );
+        if should_stop(ctx.config, ctx.start_time) {
             return CandidateEval::Stopped;
         }
 
@@ -335,7 +332,13 @@ where
             return CandidateEval::Rejected;
         }
 
-        if self.verify_equivalence(target, &candidate, live_out, config, start_time) {
+        if self.verify_equivalence(
+            ctx.target,
+            &candidate,
+            ctx.live_out,
+            ctx.config,
+            ctx.start_time,
+        ) {
             *best_cost = candidate_cost;
             self.statistics.improvements_found += 1;
             CandidateEval::Improved {
@@ -1074,17 +1077,16 @@ mod tests {
             TestInstruction(101),
             TestInstruction(102),
         ];
+        let ctx = EvalContext::<TestIsa> {
+            target: &target,
+            live_out: &(),
+            config: &config,
+            width: 64,
+            start_time: Instant::now(),
+        };
         let mut best_cost = u64::MAX;
 
-        let result = search.search_at_length(
-            &target,
-            &(),
-            &config,
-            &all_instructions,
-            2,
-            &mut best_cost,
-            Instant::now(),
-        );
+        let result = search.search_at_length(&ctx, &all_instructions, 2, &mut best_cost);
 
         let checks = TEST_EQUIVALENCE_CHECKS.load(Ordering::SeqCst);
         assert_eq!(result, None);
@@ -1117,17 +1119,16 @@ mod tests {
             TestInstruction(101),
             TestInstruction(102),
         ];
+        let ctx = EvalContext::<TestIsa> {
+            target: &target,
+            live_out: &(),
+            config: &config,
+            width: 64,
+            start_time: Instant::now(),
+        };
         let mut best_cost = u64::MAX;
 
-        let result = search.search_at_length(
-            &target,
-            &(),
-            &config,
-            &all_instructions,
-            2,
-            &mut best_cost,
-            Instant::now(),
-        );
+        let result = search.search_at_length(&ctx, &all_instructions, 2, &mut best_cost);
 
         TEST_SEQUENCE_COST_DELAY_MS.store(0, Ordering::SeqCst);
 
@@ -1157,17 +1158,16 @@ mod tests {
         let config = SearchConfig::default().with_timeout_option(None);
         let all_instructions = [TestInstruction(0)];
         let target = [TestInstruction(100), TestInstruction(101)];
+        let ctx = EvalContext::<TestIsa> {
+            target: &target,
+            live_out: &(),
+            config: &config,
+            width: 64,
+            start_time: Instant::now(),
+        };
         let mut best_cost = 0;
 
-        let result = search.search_at_length(
-            &target,
-            &(),
-            &config,
-            &all_instructions,
-            1,
-            &mut best_cost,
-            Instant::now(),
-        );
+        let result = search.search_at_length(&ctx, &all_instructions, 1, &mut best_cost);
 
         assert_eq!(result, None);
         assert_eq!(search.statistics().candidates_evaluated, 1);
@@ -1194,17 +1194,16 @@ mod tests {
             TestInstruction(101),
             TestInstruction(102),
         ];
+        let ctx = EvalContext::<TestIsa> {
+            target: &target,
+            live_out: &(),
+            config: &config,
+            width: 64,
+            start_time: Instant::now(),
+        };
         let mut best_cost = 0;
 
-        let result = search.search_at_length(
-            &target,
-            &(),
-            &config,
-            &all_instructions,
-            2,
-            &mut best_cost,
-            Instant::now(),
-        );
+        let result = search.search_at_length(&ctx, &all_instructions, 2, &mut best_cost);
 
         assert_eq!(result, None);
         assert_eq!(search.statistics().candidates_evaluated, 1);
@@ -1232,17 +1231,16 @@ mod tests {
             TestInstruction(102),
             TestInstruction(103),
         ];
+        let ctx = EvalContext::<TestIsa> {
+            target: &target,
+            live_out: &(),
+            config: &config,
+            width: 64,
+            start_time: Instant::now(),
+        };
         let mut best_cost = 0;
 
-        let result = search.search_at_length(
-            &target,
-            &(),
-            &config,
-            &all_instructions,
-            3,
-            &mut best_cost,
-            Instant::now(),
-        );
+        let result = search.search_at_length(&ctx, &all_instructions, 3, &mut best_cost);
 
         assert_eq!(result, None);
         assert_eq!(search.statistics().candidates_evaluated, 1);
@@ -1275,17 +1273,16 @@ mod tests {
             TestInstruction(102),
             TestInstruction(103),
         ];
+        let ctx = EvalContext::<TestIsa> {
+            target: &target,
+            live_out: &(),
+            config: &config,
+            width: 64,
+            start_time: Instant::now(),
+        };
         let mut best_cost = u64::MAX;
 
-        let result = search.search_at_length(
-            &target,
-            &(),
-            &config,
-            &all_instructions,
-            3,
-            &mut best_cost,
-            Instant::now(),
-        );
+        let result = search.search_at_length(&ctx, &all_instructions, 3, &mut best_cost);
 
         let checks = TEST_EQUIVALENCE_CHECKS.load(Ordering::SeqCst);
         assert_eq!(result, None);
@@ -1319,17 +1316,16 @@ mod tests {
             TestInstruction(102),
             TestInstruction(103),
         ];
+        let ctx = EvalContext::<TestIsa> {
+            target: &target,
+            live_out: &(),
+            config: &config,
+            width: 64,
+            start_time: Instant::now(),
+        };
         let mut best_cost = u64::MAX;
 
-        let result = search.search_at_length(
-            &target,
-            &(),
-            &config,
-            &all_instructions,
-            3,
-            &mut best_cost,
-            Instant::now(),
-        );
+        let result = search.search_at_length(&ctx, &all_instructions, 3, &mut best_cost);
 
         TEST_SEQUENCE_COST_DELAY_MS.store(0, Ordering::SeqCst);
 
@@ -1374,17 +1370,16 @@ mod tests {
             TestInstruction(101),
             TestInstruction(102),
         ];
+        let ctx = EvalContext::<TestIsa> {
+            target: &target,
+            live_out: &(),
+            config: &config,
+            width: 64,
+            start_time: Instant::now(),
+        };
         let mut best_cost = u64::MAX;
 
-        let result = search.search_at_length(
-            &target,
-            &(),
-            &config,
-            &all_instructions,
-            2,
-            &mut best_cost,
-            Instant::now(),
-        );
+        let result = search.search_at_length(&ctx, &all_instructions, 2, &mut best_cost);
 
         assert_eq!(
             result,
@@ -1857,18 +1852,18 @@ mod tests {
 
         let mut search: SymbolicSearch<TestIsa> = SymbolicSearch::new();
         let config = SearchConfig::default();
+        let target = [TestInstruction(100)];
+        let ctx = EvalContext::<TestIsa> {
+            target: &target,
+            live_out: &(),
+            config: &config,
+            width: 64,
+            start_time: Instant::now(),
+        };
         let mut best_cost = 1;
         // TestIsa::sequence_cost == seq.len(); a one-instruction candidate costs
         // 1, which is not strictly cheaper than best_cost 1.
-        let outcome = search.evaluate_candidate(
-            &[TestInstruction(100)],
-            &(),
-            &config,
-            64,
-            vec![TestInstruction(0)],
-            &mut best_cost,
-            Instant::now(),
-        );
+        let outcome = search.evaluate_candidate(&ctx, vec![TestInstruction(0)], &mut best_cost);
 
         assert!(matches!(outcome, CandidateEval::Rejected));
         assert_eq!(search.statistics.candidates_evaluated, 1);
@@ -1890,16 +1885,16 @@ mod tests {
 
         let mut search: SymbolicSearch<TestIsa> = SymbolicSearch::new();
         let config = SearchConfig::default();
+        let target = [TestInstruction(100)];
+        let ctx = EvalContext::<TestIsa> {
+            target: &target,
+            live_out: &(),
+            config: &config,
+            width: 64,
+            start_time: Instant::now(),
+        };
         let mut best_cost = 5;
-        let outcome = search.evaluate_candidate(
-            &[TestInstruction(100)],
-            &(),
-            &config,
-            64,
-            vec![TestInstruction(0)],
-            &mut best_cost,
-            Instant::now(),
-        );
+        let outcome = search.evaluate_candidate(&ctx, vec![TestInstruction(0)], &mut best_cost);
 
         match outcome {
             CandidateEval::Improved { candidate, cost } => {
@@ -1926,16 +1921,16 @@ mod tests {
 
         let mut search: SymbolicSearch<TestIsa> = SymbolicSearch::new();
         let config = SearchConfig::default();
+        let target = [TestInstruction(100)];
+        let ctx = EvalContext::<TestIsa> {
+            target: &target,
+            live_out: &(),
+            config: &config,
+            width: 64,
+            start_time: Instant::now(),
+        };
         let mut best_cost = 5;
-        let outcome = search.evaluate_candidate(
-            &[TestInstruction(100)],
-            &(),
-            &config,
-            64,
-            vec![TestInstruction(0)],
-            &mut best_cost,
-            Instant::now(),
-        );
+        let outcome = search.evaluate_candidate(&ctx, vec![TestInstruction(0)], &mut best_cost);
 
         assert!(matches!(outcome, CandidateEval::Rejected));
         // Cheaper than best_cost, so it is counted and SMT-checked, but not
@@ -1957,16 +1952,16 @@ mod tests {
         let stop = Arc::new(AtomicBool::new(true));
         let mut search: SymbolicSearch<TestIsa> = SymbolicSearch::new();
         let config = SearchConfig::default().with_stop_flag(Arc::clone(&stop));
+        let target = [TestInstruction(100)];
+        let ctx = EvalContext::<TestIsa> {
+            target: &target,
+            live_out: &(),
+            config: &config,
+            width: 64,
+            start_time: Instant::now(),
+        };
         let mut best_cost = 5;
-        let outcome = search.evaluate_candidate(
-            &[TestInstruction(100)],
-            &(),
-            &config,
-            64,
-            vec![TestInstruction(0)],
-            &mut best_cost,
-            Instant::now(),
-        );
+        let outcome = search.evaluate_candidate(&ctx, vec![TestInstruction(0)], &mut best_cost);
 
         assert!(matches!(outcome, CandidateEval::Stopped));
         // A stop observed after costing must not count the candidate, prune it,
