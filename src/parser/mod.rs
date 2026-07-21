@@ -17,7 +17,10 @@ use std::path::Path;
 
 use crate::ir::instructions::MOVW_LEGAL_SHIFTS;
 use crate::ir::types::NORMAL_CONDITIONS;
-use crate::ir::{Condition, Instruction, LabelId, Operand, Register, RegisterWidth, ShiftKind};
+use crate::ir::{
+    Condition, Instruction, LabelId, Operand, Register, RegisterWidth, ShiftKind,
+    VectorArrangement, VectorRegister,
+};
 
 pub mod x86;
 
@@ -156,6 +159,37 @@ pub fn parse_w_or_x_register(s: &str) -> Result<Register, String> {
         "wsp" => Ok(Register::SP),
         _ => Err(format!("unknown register: {}", s)),
     }
+}
+
+fn parse_vector_register(s: &str) -> Result<VectorRegister, String> {
+    let lower = s.trim().to_ascii_lowercase();
+    let raw_index = lower
+        .strip_prefix('v')
+        .ok_or_else(|| format!("unknown vector register: {}", s))?;
+    if raw_index.is_empty()
+        || !raw_index.bytes().all(|b| b.is_ascii_digit())
+        || (raw_index != "0" && raw_index.starts_with('0'))
+    {
+        return Err(format!("unknown vector register: {}", s));
+    }
+    let index = raw_index
+        .parse::<u8>()
+        .map_err(|_| format!("unknown vector register: {}", s))?;
+    VectorRegister::from_index(index).ok_or_else(|| format!("unknown vector register: {}", s))
+}
+
+fn parse_vector_operand(s: &str) -> Result<(VectorRegister, VectorArrangement), String> {
+    let (register, arrangement) = s
+        .trim()
+        .split_once('.')
+        .ok_or_else(|| format!("vector operand requires an arrangement suffix: {}", s))?;
+    let register = parse_vector_register(register)?;
+    let arrangement = match arrangement.to_ascii_lowercase().as_str() {
+        "2d" => VectorArrangement::TwoD,
+        "4s" => VectorArrangement::FourS,
+        other => return Err(format!("unsupported vector arrangement: .{}", other)),
+    };
+    Ok((register, arrangement))
 }
 
 fn parse_sized_register(s: &str) -> Result<(Register, RegisterWidth), String> {
@@ -394,6 +428,15 @@ fn parse_mov(operands: &[&str]) -> Result<Instruction, String> {
         return Ok(Instruction::MovRegW { rd, rn });
     }
 
+    if operands[1].to_ascii_lowercase().contains(".d[") {
+        let rd = parse_register(operands[0])?;
+        if !rd.is_general_or_zero() {
+            return Err("mov vector-lane destination must be an X register".to_string());
+        }
+        let (vn, lane) = parse_vector_d_lane(operands[1])?;
+        return Ok(Instruction::MovFromVectorLane { rd, vn, lane });
+    }
+
     let rd = parse_register(operands[0])?;
     let src = parse_operand(operands[1])?;
 
@@ -404,6 +447,42 @@ fn parse_mov(operands: &[&str]) -> Result<Instruction, String> {
             Err("mov second operand must be a register or immediate".to_string())
         }
     }
+}
+
+fn parse_vector_d_lane(text: &str) -> Result<(VectorRegister, u8), String> {
+    let lower = text.trim().to_ascii_lowercase();
+    let (register, lane_text) = lower
+        .split_once(".d[")
+        .ok_or_else(|| format!("invalid vector lane operand: {text}"))?;
+    let lane_text = lane_text
+        .strip_suffix(']')
+        .ok_or_else(|| format!("invalid vector lane operand: {text}"))?;
+    let lane = lane_text
+        .parse::<u8>()
+        .map_err(|_| format!("invalid vector lane index: {lane_text}"))?;
+    if lane >= 2 {
+        return Err(format!("vector .d lane index must be 0 or 1, got {lane}"));
+    }
+    Ok((parse_vector_register(register)?, lane))
+}
+
+fn parse_movi(operands: &[&str]) -> Result<Instruction, String> {
+    if operands.len() != 2 {
+        return Err(format!("movi requires 2 operands, got {}", operands.len()));
+    }
+    let (vd, arrangement) = parse_vector_operand(operands[0])?;
+    let imm = parse_immediate(operands[1])?;
+    if imm != 0 {
+        return Err(format!(
+            "movi immediate {} is outside the first-slice supported set (#0 only)",
+            imm
+        ));
+    }
+    Ok(Instruction::Movi {
+        vd,
+        arrangement,
+        imm: 0,
+    })
 }
 
 /// Parse MVN instruction
@@ -1292,6 +1371,20 @@ fn parse_add(operands: &[&str]) -> Result<Instruction, String> {
             operands.len()
         ));
     }
+    if operands.len() == 3 && operands[0].contains('.') {
+        let (vd, arrangement) = parse_vector_operand(operands[0])?;
+        let (vn, source_arrangement) = parse_vector_operand(operands[1])?;
+        let (vm, second_source_arrangement) = parse_vector_operand(operands[2])?;
+        if source_arrangement != arrangement || second_source_arrangement != arrangement {
+            return Err("vector add operands must use matching arrangements".to_string());
+        }
+        return Ok(Instruction::VectorAdd {
+            vd,
+            vn,
+            vm,
+            arrangement,
+        });
+    }
     let (rd, rn, width) = parse_same_width_registers("add", operands)?;
     let rm = parse_rm_3op_with_width("add", operands, width)?;
     match width {
@@ -1899,6 +1992,7 @@ pub fn parse_line(line: &str) -> Result<LineResult, ParseLineError> {
 
     let instruction = match opcode.as_str() {
         "mov" => parse_mov(&operands).map_err(ParseLineError::Other)?,
+        "movi" => parse_movi(&operands).map_err(ParseLineError::Other)?,
         "add" => parse_add(&operands).map_err(ParseLineError::Other)?,
         "sub" => parse_sub(&operands).map_err(ParseLineError::Other)?,
         "and" => parse_and(&operands).map_err(ParseLineError::Other)?,
@@ -2174,7 +2268,7 @@ pub fn parse_assembly_string(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ir::ShiftKind;
+    use crate::ir::{ShiftKind, VectorArrangement, VectorRegister};
     use crate::test_utils::TempFile;
 
     // Register parsing tests
@@ -2190,6 +2284,73 @@ mod tests {
         assert_eq!(parse_register("SP").unwrap(), Register::SP);
         assert_eq!(parse_register("fp").unwrap(), Register::X29);
         assert_eq!(parse_register("lr").unwrap(), Register::X30);
+    }
+
+    #[test]
+    fn parse_movi_zero_preserves_neon_register_and_arrangement() {
+        for (text, register, arrangement) in [
+            (
+                "movi v0.2d, #0",
+                VectorRegister::V0,
+                VectorArrangement::TwoD,
+            ),
+            (
+                "MOVI V31.4S, #0",
+                VectorRegister::V31,
+                VectorArrangement::FourS,
+            ),
+        ] {
+            let instruction = parse_one(text);
+            assert_eq!(
+                instruction,
+                Instruction::Movi {
+                    vd: register,
+                    arrangement,
+                    imm: 0,
+                }
+            );
+            assert_eq!(
+                instruction.to_string(),
+                format!("movi {register}.{arrangement}, #0")
+            );
+        }
+
+        assert!(parse_line("movi v0.2d, #1").is_err());
+        assert!(parse_line("movi v32.2d, #0").is_err());
+        assert!(parse_line("movi v0.8h, #0").is_err());
+    }
+
+    #[test]
+    fn parse_vector_add_and_lane_move_preserve_neon_operands() {
+        assert_eq!(
+            parse_one("add v0.2d, v1.2d, v2.2d"),
+            Instruction::VectorAdd {
+                vd: VectorRegister::V0,
+                vn: VectorRegister::V1,
+                vm: VectorRegister::V2,
+                arrangement: VectorArrangement::TwoD,
+            }
+        );
+        assert_eq!(
+            parse_one("ADD V3.4S, V4.4S, V5.4S").to_string(),
+            "add v3.4s, v4.4s, v5.4s"
+        );
+        assert_eq!(
+            parse_one("mov x0, v1.d[0]"),
+            Instruction::MovFromVectorLane {
+                rd: Register::X0,
+                vn: VectorRegister::V1,
+                lane: 0,
+            }
+        );
+        assert_eq!(
+            parse_one("MOV X30, V31.D[1]").to_string(),
+            "mov x30, v31.d[1]"
+        );
+
+        assert!(parse_line("add v0.2d, v1.4s, v2.2d").is_err());
+        assert!(parse_line("mov x0, v1.d[2]").is_err());
+        assert!(parse_line("mov w0, v1.d[0]").is_err());
     }
 
     fn parse_one(line: &str) -> Instruction {
@@ -2644,6 +2805,8 @@ mod tests {
 
     #[test]
     fn parse_line_rejects_sp_in_multiply_family() {
+        // The IR-level test `test_is_encodable_multiply_family_rejects_sp_all_slots`
+        // exhaustively covers every slot; this table samples one slot per mnemonic.
         for text in [
             "mul sp, x1, x2",
             "sdiv x0, sp, x2",

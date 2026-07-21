@@ -1,0 +1,32 @@
+# Enforces that PR titles follow the Conventional Commits spec.
+# Lints the title with commitlint itself (same ruleset as commitlint.yml) so PR-title
+# acceptance can't diverge from what the push-time commitlint job accepts on main.
+# https://www.conventionalcommits.org/
+name: Lint PR title
+
+on:
+  pull_request:
+    types:
+      - opened
+      - edited
+      - reopened
+      - synchronize
+
+permissions: {}
+
+jobs:
+  validate:
+    name: Validate PR title
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/setup-node@v7.0.0
+        with:
+          node-version: lts/*
+      - name: Install commitlint
+        run: npm install --no-save @commitlint/cli@21 @commitlint/config-conventional@21
+      - name: Lint PR title
+        env:
+          PR_TITLE: ${{ github.event.pull_request.title }}
+        # Keep --extends in sync with commitlint.config.cjs; this job has no checkout
+        # step (avoids pulling untrusted fork code) so it can't read that file directly.
+        run: echo "$PR_TITLE" | npx commitlint --extends @commitlint/config-conventional --verbose

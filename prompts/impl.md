@@ -1,6 +1,6 @@
 # Vow implementation stage: issue #{{issue.number}} {{issue.title}}
 
-You are the **implementation** agent. A planning pass has written `{{workspace.path}}/PLAN.md`. Read it first. If it is missing or stale, re-derive the slices from the issue body before writing code.
+You are the **implementation** agent. A planning pass has written `{{workspace.path}}/PLAN.md`. Read it first. It is an ignored, workspace-local handoff rather than a PR deliverable. If it is missing or stale, re-derive the slices from the issue body before writing code.
 
 ## Issue under work
 
@@ -47,6 +47,7 @@ You are the **implementation** agent. A planning pass has written `{{workspace.p
 
 ## Commit hygiene
 
+- Exclude the repository-root `PLAN.md` from every commit, even if it changes during implementation. Do not stage or force-add it.
 - Commit in small focused units that match the TDD slices. Many small commits beat one large one — they are easier to review, `git bisect`, and revert.
 - Write commit messages that describe the change and the why. Use a conventional prefix (`fix(...)`, `feat(...)`, `refactor(...)`) consistent with recent history (`git log --oneline -20`).
 - Commits in this repo must be authored as `p@ocmatos.com`. If the workspace git config has a different identity, set `user.email` to `p@ocmatos.com` for this repo only (`git config user.email p@ocmatos.com`) before committing.
