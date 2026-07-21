@@ -258,6 +258,8 @@ enum Commands {
 /// Prefix shared by every "architecture mismatch" diagnostic so the disasm
 /// caller can recognise the error without coupling to the full message text.
 const ARCH_MISMATCH_PREFIX: &str = "Architecture mismatch:";
+const RISC_V_OPTIMIZATION_UNSUPPORTED: &str =
+    "RISC-V optimization is not yet supported (ISA traits available but not integrated)";
 
 fn cli_arch_from_e_machine(machine: u16) -> Result<CliArch, Box<dyn std::error::Error>> {
     match machine {
@@ -2161,11 +2163,18 @@ fn main() {
             llm_max_calls,
             llm_model,
         } => {
-            // Architecture selection — always read the ELF e_machine first so
-            // a stale or wrong --arch value cannot route bytes through the
-            // wrong optimization pipeline. Build the ElfPatcher once here
-            // (issue #88) and thread it into both helpers so the file isn't
-            // read + parsed twice.
+            // RISC-V has no optimization pipeline, so reject an explicit
+            // RISC-V target before asking the supported-architecture patcher
+            // to open the ELF. Supported architecture hints still read and
+            // cross-check e_machine so stale values cannot route bytes through
+            // the wrong optimization pipeline.
+            if matches!(arch, Some(CliArch::Riscv32 | CliArch::Riscv64)) {
+                eprintln!("{RISC_V_OPTIMIZATION_UNSUPPORTED}");
+                std::process::exit(1);
+            }
+
+            // Build the ElfPatcher once here (issue #88) and thread it into
+            // both helpers so the file isn't read + parsed twice.
             let patcher = ElfPatcher::new(&binary).unwrap_or_else(|e| {
                 eprintln!("Error reading ELF: {}", e);
                 std::process::exit(1);
@@ -2184,9 +2193,7 @@ fn main() {
             match cli_arch {
                 CliArch::Aarch64 | CliArch::X86_64 | CliArch::X86_32 => {}
                 CliArch::Riscv32 | CliArch::Riscv64 => {
-                    eprintln!(
-                        "RISC-V optimization is not yet supported (ISA traits available but not integrated)"
-                    );
+                    eprintln!("{RISC_V_OPTIMIZATION_UNSUPPORTED}");
                     std::process::exit(1);
                 }
             }

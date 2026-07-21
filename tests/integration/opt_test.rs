@@ -24,6 +24,33 @@ fn get_binary_path() -> PathBuf {
     PathBuf::from(env!("CARGO_BIN_EXE_s11"))
 }
 
+fn write_minimal_riscv_elf(class: elf::file::Class) -> tempfile::NamedTempFile {
+    let (class_byte, header_size, header_size_offset) = match class {
+        elf::file::Class::ELF32 => (elf::abi::ELFCLASS32, 52, 40),
+        elf::file::Class::ELF64 => (elf::abi::ELFCLASS64, 64, 52),
+    };
+    let mut bytes = vec![0; header_size];
+    bytes[..4].copy_from_slice(&elf::abi::ELFMAGIC);
+    bytes[elf::abi::EI_CLASS] = class_byte;
+    bytes[elf::abi::EI_DATA] = elf::abi::ELFDATA2LSB;
+    bytes[elf::abi::EI_VERSION] = elf::abi::EV_CURRENT;
+    bytes[16..18].copy_from_slice(&elf::abi::ET_EXEC.to_le_bytes());
+    bytes[18..20].copy_from_slice(&elf::abi::EM_RISCV.to_le_bytes());
+    bytes[20..24].copy_from_slice(&(elf::abi::EV_CURRENT as u32).to_le_bytes());
+    bytes[header_size_offset..header_size_offset + 2]
+        .copy_from_slice(&(header_size as u16).to_le_bytes());
+
+    let file = tempfile::NamedTempFile::new().expect("create temporary RISC-V ELF");
+    fs::write(file.path(), &bytes).expect("write temporary RISC-V ELF");
+
+    let parsed = elf::ElfBytes::<elf::endian::AnyEndian>::minimal_parse(&bytes)
+        .expect("generated fixture should be a valid ELF header");
+    assert_eq!(parsed.ehdr.class, class);
+    assert_eq!(parsed.ehdr.e_machine, elf::abi::EM_RISCV);
+
+    file
+}
+
 // AArch64 only: scans at 4-byte-aligned offsets in every executable section
 // of `elf_path` for a little-endian AArch64 encoding matching `expected`
 // under `mask` (i.e. `bytes[i] & mask[i] == expected[i] & mask[i]` for each
@@ -323,6 +350,48 @@ fn test_opt_rejects_arch_mismatch_before_optimization() {
         eprintln!(
             "Skipping x86-64 opt mismatch case: {:?} not present (run build_tests.sh)",
             x86_elf
+        );
+    }
+}
+
+#[test]
+fn test_opt_matching_riscv_arch_reports_unsupported() {
+    const UNSUPPORTED_MESSAGE: &str =
+        "RISC-V optimization is not yet supported (ISA traits available but not integrated)";
+
+    for (arch, class) in [
+        ("riscv32", elf::file::Class::ELF32),
+        ("riscv64", elf::file::Class::ELF64),
+    ] {
+        let test_elf = write_minimal_riscv_elf(class);
+        let output = Command::new(get_binary_path())
+            .arg("opt")
+            .arg(test_elf.path())
+            .arg("--arch")
+            .arg(arch)
+            .arg("--start-addr")
+            .arg("0x0")
+            .arg("--end-addr")
+            .arg("0x4")
+            .output()
+            .expect("execute s11 opt");
+
+        assert!(!output.status.success(), "{arch} optimization should fail");
+        assert_eq!(
+            String::from_utf8_lossy(&output.stderr),
+            format!("{UNSUPPORTED_MESSAGE}\n"),
+            "{arch} should report the RISC-V support boundary"
+        );
+        assert!(
+            !String::from_utf8_lossy(&output.stderr).contains("Error reading ELF"),
+            "{arch} should not expose an ELF-reading error"
+        );
+
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(
+            !stdout.contains("Optimizing ELF binary")
+                && !stdout.contains("Optimizing x86 ELF binary"),
+            "{arch} should be rejected before optimization starts, stdout: {stdout}"
         );
     }
 }
