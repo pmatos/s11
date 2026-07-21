@@ -819,10 +819,24 @@ impl Mutator {
                 1 => Instruction::Lsr { rd, rn, shift },
                 _ => Instruction::Asr { rd, rn, shift },
             },
-            Instruction::Mul { rd, rn, rm } => match rng.random_range(0..4) {
+            // MUL bridges the division opcodes and multiply-accumulate cluster.
+            // Expanding to a four-register form selects `ra` from the register pool.
+            Instruction::Mul { rd, rn, rm } => match rng.random_range(0..6) {
                 0 => Instruction::Sdiv { rd, rn, rm },
                 1 => Instruction::Udiv { rd, rn, rm },
                 2 => Instruction::Mneg { rd, rn, rm },
+                3 => Instruction::Madd {
+                    rd,
+                    rn,
+                    rm,
+                    ra: self.random_register(rng),
+                },
+                4 => Instruction::Msub {
+                    rd,
+                    rn,
+                    rm,
+                    ra: self.random_register(rng),
+                },
                 _ => Instruction::Mul { rd, rn, rm },
             },
             Instruction::Sdiv { rd, rn, rm } => match rng.random_range(0..3) {
@@ -3751,6 +3765,56 @@ mod tests {
         }
 
         assert!(changed_to_different_opcode);
+    }
+
+    #[test]
+    fn mul_opcode_mutation_reaches_madd_and_msub() {
+        let mutator = Mutator::new(vec![Register::X3], vec![0], MutationWeights::default());
+        let mut rng = StdRng::seed_from_u64(410);
+        let original = Instruction::Mul {
+            rd: Register::X0,
+            rn: Register::X1,
+            rm: Register::X2,
+        };
+        let mut seen_madd = false;
+        let mut seen_msub = false;
+
+        for _ in 0..200 {
+            let mut seq = vec![original];
+            mutator.mutate_opcode(&mut rng, &mut seq);
+            assert!(
+                seq[0].is_encodable_aarch64(),
+                "MUL opcode mutation must stay encodable: {}",
+                seq[0]
+            );
+
+            match seq[0] {
+                Instruction::Madd { rd, rn, rm, ra } => {
+                    assert_eq!(
+                        (rd, rn, rm, ra),
+                        (Register::X0, Register::X1, Register::X2, Register::X3)
+                    );
+                    seen_madd = true;
+                }
+                Instruction::Msub { rd, rn, rm, ra } => {
+                    assert_eq!(
+                        (rd, rn, rm, ra),
+                        (Register::X0, Register::X1, Register::X2, Register::X3)
+                    );
+                    seen_msub = true;
+                }
+                Instruction::Mul { rd, rn, rm }
+                | Instruction::Mneg { rd, rn, rm }
+                | Instruction::Sdiv { rd, rn, rm }
+                | Instruction::Udiv { rd, rn, rm } => {
+                    assert_eq!((rd, rn, rm), (Register::X0, Register::X1, Register::X2));
+                }
+                other => panic!("unexpected MUL opcode mutation: {other:?}"),
+            }
+        }
+
+        assert!(seen_madd, "MUL opcode mutation must reach MADD");
+        assert!(seen_msub, "MUL opcode mutation must reach MSUB");
     }
 
     #[test]
