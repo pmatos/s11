@@ -69,8 +69,9 @@ sha256sum --check SHA256SUMS.txt
 `scripts/bump-version.sh` is standalone and reusable:
 
 ```sh
-scripts/bump-version.sh patch     # 0.1.0 -> 0.1.1
-scripts/bump-version.sh minor     # 0.1.0 -> 0.2.0
+scripts/bump-version.sh patch       # 0.1.0 -> 0.1.1
+scripts/bump-version.sh patch       # 0.1.1-dev -> 0.1.1
+scripts/bump-version.sh minor       # 0.1.0 -> 0.2.0
 scripts/bump-version.sh 1.0.0-rc.1  # explicit version
 ```
 
