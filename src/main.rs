@@ -3364,11 +3364,44 @@ fn main() {
             llm_max_calls,
             llm_model,
         } => {
-            // Architecture selection — always read the ELF e_machine first so
-            // a stale or wrong --arch value cannot route bytes through the
-            // wrong optimization pipeline. Build the ElfPatcher once here
-            // (issue #88) and thread it into both helpers so the file isn't
-            // read + parsed twice.
+            // RISC-V has no optimization pipeline, so reject an explicit
+            // RISC-V target before asking the supported-architecture patcher
+            // to open the ELF (constructing it fails hard on a RISC-V e_machine,
+            // which is bug #207). Peek at the header first — rather than exit
+            // unconditionally — so an unreadable file or a genuine arch
+            // mismatch still gets its own diagnostic ahead of the RISC-V one.
+            if let Some(requested) = arch
+                && matches!(requested, CliArch::Riscv32 | CliArch::Riscv64)
+            {
+                match fs::read(&binary)
+                    .map_err(|e| e.to_string())
+                    .and_then(|data| {
+                        ElfBytes::<AnyEndian>::minimal_parse(&data)
+                            .map(|elf| elf.ehdr.e_machine)
+                            .map_err(|e| e.to_string())
+                    }) {
+                    Ok(machine) => match SupportedArch::from_e_machine(machine) {
+                        Ok(detected) => {
+                            let detected: CliArch = detected.into();
+                            eprintln!(
+                                "{ARCH_MISMATCH_PREFIX} --arch {requested} but ELF reports {detected}"
+                            );
+                            std::process::exit(1);
+                        }
+                        Err(_) => {
+                            eprintln!("{}", OptTargetError::RiscvUnsupported);
+                            std::process::exit(1);
+                        }
+                    },
+                    Err(e) => {
+                        eprintln!("Error reading ELF: {}", e);
+                        std::process::exit(1);
+                    }
+                }
+            }
+
+            // Build the ElfPatcher once here (issue #88) and thread it into
+            // both helpers so the file isn't read + parsed twice.
             let patcher = ElfPatcher::new(&binary).unwrap_or_else(|e| {
                 eprintln!("Error reading ELF: {}", e);
                 std::process::exit(1);
