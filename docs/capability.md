@@ -41,6 +41,13 @@ Rewritable straight-line mnemonics accepted by the parser and Capstone bridge:
 - Data movement and aliases: `mov`, `mvn`, `neg`, `negs`, `movn`, `movz`,
   `movk`
   - Register `mov` supports both 64-bit `X` and 32-bit `W` forms.
+- First NEON/SIMD vertical slice: `movi` with `Vn.2d|4s, #0`, lane-wise
+  wrapping `add Vd.2d|4s, Vn.2d|4s, Vm.2d|4s`, and
+  `mov Xd, Vn.d[0|1]`.
+  `V0..V31` are modelled as aliased 128-bit registers across arrangement
+  views and may be named in `--live-out`. Concrete and SMT equivalence compare
+  the full 128 bits. Other arrangements, modified immediates, vector loads,
+  reductions, shuffles, and scalar `q`/`d`/`s` spellings remain out of scope.
 - Arithmetic and flag-setting arithmetic: `add`, `sub`, `adds`, `subs`
 - Add/subtract with carry (X-only, register form): `adc`, `adcs`, `sbc`, `sbcs`
   - Non-flag-setting `add` and `sub` support both 64-bit `X` and 32-bit `W`
