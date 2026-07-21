@@ -644,7 +644,7 @@ mod tests {
                 .with_test_count(0)
                 .with_seed(1),
         );
-        let target = [TimeoutProbeInstruction(1), TimeoutProbeInstruction(2)];
+        let target = mov_add_sequence();
 
         let result = search.search(&target, &(), &config);
 
@@ -667,7 +667,7 @@ mod tests {
                 .with_test_count(1)
                 .with_seed(1),
         );
-        let target = [TimeoutProbeInstruction(1), TimeoutProbeInstruction(2)];
+        let target = mov_add_sequence();
 
         let result = search.search(&target, &(), &config);
 
