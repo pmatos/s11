@@ -3981,6 +3981,7 @@ mod tests {
 
         let mutated = mutator.mutate(&mut rng, &target);
 
+        // rn (RAX) must survive the form change; only the right operand is replaced.
         assert_eq!(
             mutated,
             vec![X86Instruction::CmpImm {
@@ -4026,6 +4027,53 @@ mod tests {
                 rn: X86Register::RCX,
                 rs: X86Register::RBX,
             }]
+        );
+    }
+
+    #[test]
+    fn x86_mutator_opcode_mutates_cmp_at_selected_nonzero_index() {
+        use crate::search::config::MutationWeights;
+
+        let mutator = X86Mutator::new(
+            Vec::new(),
+            vec![7],
+            MutationWeights::default(),
+            crate::assembler::x86::X86Mode::Mode64,
+        );
+        let mut sequence = vec![
+            X86Instruction::MovImm {
+                rd: X86Register::RAX,
+                imm: 0,
+            },
+            X86Instruction::CmpReg {
+                rn: X86Register::RCX,
+                rs: X86Register::RBX,
+            },
+            X86Instruction::SubImm {
+                rd: X86Register::RDX,
+                imm: 1,
+            },
+        ];
+        let mut rng = BudgetedRng::new(vec![word_for_range(3, 1), word_for_range(1, 0)]);
+
+        mutator.mutate_opcode(&mut rng, &mut sequence);
+
+        assert_eq!(
+            sequence,
+            vec![
+                X86Instruction::MovImm {
+                    rd: X86Register::RAX,
+                    imm: 0,
+                },
+                X86Instruction::CmpImm {
+                    rn: X86Register::RCX,
+                    imm: 7,
+                },
+                X86Instruction::SubImm {
+                    rd: X86Register::RDX,
+                    imm: 1,
+                },
+            ]
         );
     }
 
