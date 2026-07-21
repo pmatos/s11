@@ -230,7 +230,16 @@ enum Commands {
     },
     /// Optimize a window of instructions in an ELF binary
     #[command(
-        after_help = "Auto mode: `--auto` superoptimizes the whole binary and is mutually exclusive with --start-addr/--end-addr. Use -o/--output to name the result file; when omitted the result is written next to the input as <stem>_optimized.<ext>.\n\nNote: enumerative search scales with the generated instruction families in its candidate pool. At the default AArch64 8-register CLI scope, multiply-accumulate and high-half multiply add 9,728 candidates per length bucket; use --timeout or smaller windows to bound runtime."
+        after_help = concat!(
+            "Auto mode: `--auto` superoptimizes the whole binary and is mutually ",
+            "exclusive with --start-addr/--end-addr. Use -o/--output to name the ",
+            "result file; when omitted the result is written next to the input as ",
+            "<stem>_optimized.<ext>.\n\n",
+            "Note: enumerative search scales with the generated instruction families ",
+            "in its candidate pool. At the default AArch64 8-register CLI scope, ",
+            "multiply-accumulate and high-half multiply add 9,728 candidates per ",
+            "length bucket; use --timeout or smaller windows to bound runtime."
+        )
     )]
     Opt {
         /// Path to ELF binary to optimize

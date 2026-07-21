@@ -27,10 +27,13 @@ Algorithms:
 - Enumerative, stochastic, symbolic, hybrid, and LLM-assisted search are
   available for AArch64.
 - Enumerative search scales with the generated instruction families in its
-  candidate pool. At the default AArch64 8-register CLI scope, `madd`/`msub`
-  contribute `2 * 8^4` and `mneg`/`smulh`/`umulh` contribute `3 * 8^3`, or
-  9,728 extra candidates per length bucket; use `--timeout` or smaller
-  optimization windows to bound runtime.
+  candidate pool. The source entry point is
+  [`generate_all_instructions`](../src/search/candidate.rs). At the default
+  AArch64 8-register CLI scope, `madd`/`msub` contribute `2 * 8^4` and
+  `mneg`/`smulh`/`umulh` contribute `3 * 8^3`, adding 9,728 additional
+  instructions to the candidate pool. The sequence space in each length bucket
+  therefore grows as `pool_size^L`; use `--timeout` or smaller optimization
+  windows to bound runtime.
 - Hybrid and LLM remain AArch64-only.
 
 Rewritable straight-line mnemonics accepted by the parser and Capstone bridge:
