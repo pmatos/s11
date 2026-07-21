@@ -285,7 +285,7 @@ enum Commands {
         /// Search mode for symbolic synthesis
         #[arg(long, value_enum, default_value = "linear")]
         search_mode: CliSearchMode,
-        /// Solver timeout in seconds
+        /// Solver timeout in seconds; 0 disables SMT queries and does not request an unbounded solver query
         #[arg(long, default_value = "5")]
         solver_timeout: u64,
 
@@ -4009,6 +4009,24 @@ mod cli_helper_tests {
         assert!(
             opt_help.contains("9,728"),
             "opt help should mention the default AArch64 multiply candidate growth:\n{opt_help}"
+        );
+    }
+
+    #[test]
+    fn opt_help_defines_zero_solver_timeout_as_disabling_smt() {
+        use clap::CommandFactory;
+
+        let mut command = Args::command();
+        let opt_help = command
+            .find_subcommand_mut("opt")
+            .expect("opt subcommand should be registered")
+            .render_long_help()
+            .to_string();
+
+        assert!(
+            opt_help.contains("0 disables SMT queries")
+                && opt_help.contains("does not request an unbounded solver query"),
+            "opt help should define the zero solver-timeout policy:\n{opt_help}"
         );
     }
 
