@@ -854,6 +854,35 @@ mod tests {
     }
 
     #[test]
+    fn symbolic_cost_bound_and_window_size_are_enforced_together() {
+        let _guard = SYMBOLIC_INNER_LOOP_TEST_LOCK
+            .lock()
+            .expect("symbolic inner-loop test lock poisoned");
+        reset_symbolic_inner_loop_test_state();
+
+        let mut search: SymbolicSearch<TestIsa> = SymbolicSearch::new();
+        let config = SearchConfig::default().with_symbolic(
+            SymbolicConfig::default()
+                .with_window_size(2)
+                .with_cost_bound(2),
+        );
+        let target = [
+            TestInstruction(100),
+            TestInstruction(101),
+            TestInstruction(102),
+            TestInstruction(103),
+        ];
+
+        let result = search.search(&target, &(), &config);
+
+        assert!(!result.found_optimization);
+        assert!(result.optimized_sequence.is_none());
+        assert_eq!(TEST_EQUIVALENCE_CHECKS.load(Ordering::SeqCst), 1);
+        assert_eq!(result.statistics.candidates_evaluated, 2);
+        assert_eq!(result.statistics.candidates_pruned_by_cost, 1);
+    }
+
+    #[test]
     fn symbolic_search_drops_flag_writer_only_when_flags_are_dead() {
         let config = SearchConfig::default()
             .with_solver_timeout(Duration::from_secs(5))
