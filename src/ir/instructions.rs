@@ -829,7 +829,7 @@ impl Instruction {
     /// This validates immediate operand ranges against AArch64 encoding constraints:
     /// - MOV immediate: 0 to 0xFFFF (16-bit)
     /// - ADD/SUB immediate: 0 to 0xFFF (12-bit unsigned); rd/rn ≠ XZR (Xn|SP slot, SP allowed)
-    /// - CMP/CMN immediate: 0 to 0xFFF (12-bit unsigned)
+    /// - CMP/CMN immediate: 0 to 0xFFF (12-bit unsigned); rn ≠ XZR (Xn|SP slot, SP allowed)
     /// - LSL/LSR/ASR immediate: 0 to 63
     /// - AND/ORR/EOR immediate: register, or encodable bitmask immediate
     ///   (rd ≠ XZR for the imm form — Xn|SP slot rejects the zero register)
