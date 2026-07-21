@@ -28,5 +28,8 @@ mutants.out.old/
 .clawpatch/
 .claude/
 
+# Workspace-local planning-to-implementation handoff
+/PLAN.md
+
 # criterion benchmark output and JSONL accumulator (issue #70)
 benches/results/

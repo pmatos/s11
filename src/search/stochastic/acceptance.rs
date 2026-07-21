@@ -10,8 +10,6 @@
 //! Higher beta = more greedy (less likely to accept worse solutions)
 //! Lower beta = more exploration (more likely to accept worse solutions)
 
-#![allow(dead_code)]
-
 use rand::RngExt;
 
 /// Cost-only Metropolis acceptance criterion.

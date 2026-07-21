@@ -305,8 +305,9 @@ Exhaustively searches all possible instruction sequences up to a given length. G
 
 Note: enumerative search scales with the generated instruction families in its
 candidate pool. At the default AArch64 8-register CLI scope,
-multiply-accumulate and high-half multiply add 9,728 candidates per length
-bucket; use `--timeout` or smaller optimization windows to bound runtime.
+multiply-accumulate and high-half multiply add 9,728 additional instructions to
+the candidate pool. The sequence space in each length bucket therefore grows as
+`pool_size^L`; use `--timeout` or smaller optimization windows to bound runtime.
 
 ### 2. Stochastic Search (MCMC)
 

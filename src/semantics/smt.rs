@@ -3,7 +3,9 @@
 #![allow(dead_code)]
 
 use crate::ir::types::{AccessWidth, AddressOperand, IndexMode};
-use crate::ir::{ExtendKind, Instruction, Operand, Register, RegisterWidth};
+use crate::ir::{
+    ExtendKind, Instruction, Operand, Register, RegisterWidth, VectorArrangement, VectorRegister,
+};
 use crate::semantics::live_out::RegisterSet;
 use std::collections::HashMap;
 use std::time::Duration;
@@ -58,6 +60,21 @@ fn bv_reverse_bits(value: &BV, width: u32) -> BV {
     let mut result = value.extract(0, 0);
     for i in 1..width {
         result = result.concat(value.extract(i, i));
+    }
+    result
+}
+
+fn bv_add_vector_lanes(lhs: &BV, rhs: &BV, arrangement: VectorArrangement) -> BV {
+    let lane_width = u32::from(arrangement.lane_width());
+    let lane_count = u32::from(arrangement.lane_count());
+    let mut result = lhs
+        .extract(lane_width - 1, 0)
+        .bvadd(rhs.extract(lane_width - 1, 0));
+    for lane in 1..lane_count {
+        let low = lane * lane_width;
+        let high = low + lane_width - 1;
+        let sum = lhs.extract(high, low).bvadd(rhs.extract(high, low));
+        result = sum.concat(result);
     }
     result
 }
@@ -214,6 +231,8 @@ pub fn create_solver_with_config(cfg: &SolverConfig) -> Solver {
 pub struct MachineState {
     /// Register values as `width`-bit bitvectors
     pub registers: HashMap<Register, BV>,
+    /// Packed 128-bit Advanced SIMD/FP register values.
+    pub vectors: HashMap<VectorRegister, BV>,
     /// NZCV condition flags as 1-bit bitvectors
     pub n: BV,
     pub z: BV,
@@ -248,6 +267,16 @@ impl MachineState {
         registers.insert(Register::XZR, BV::from_i64(0, width));
         registers.insert(Register::SP, BV::new_const(format!("{}_sp", prefix), width));
 
+        let vectors = (0..32)
+            .filter_map(VectorRegister::from_index)
+            .map(|register| {
+                (
+                    register,
+                    BV::new_const(format!("{}_v{}", prefix, register.index()), 128),
+                )
+            })
+            .collect();
+
         let n = BV::new_const(format!("{}_n", prefix), 1);
         let z = BV::new_const(format!("{}_z", prefix), 1);
         let c = BV::new_const(format!("{}_c", prefix), 1);
@@ -264,6 +293,7 @@ impl MachineState {
 
         MachineState {
             registers,
+            vectors,
             n,
             z,
             c,
@@ -289,6 +319,15 @@ impl MachineState {
         if reg != Register::XZR {
             self.registers.insert(reg, value);
         }
+    }
+
+    pub fn get_vector(&self, reg: VectorRegister) -> &BV {
+        self.vectors.get(&reg).expect("Vector register not found")
+    }
+
+    pub fn set_vector(&mut self, reg: VectorRegister, value: BV) {
+        debug_assert_eq!(value.get_size(), 128);
+        self.vectors.insert(reg, value);
     }
 
     /// Read the four NZCV flag bitvectors.
@@ -601,6 +640,25 @@ pub fn apply_instruction(mut state: MachineState, instruction: &Instruction) -> 
         Instruction::MovImm { rd, imm } => {
             let value = BV::from_i64(*imm, width);
             state.set_register(*rd, value);
+        }
+        Instruction::Movi { vd, imm, .. } => {
+            debug_assert_eq!(*imm, 0, "first-slice MOVI admits only #0");
+            state.set_vector(*vd, BV::from_u64(0, 128));
+        }
+        Instruction::MovFromVectorLane { rd, vn, lane } => {
+            let low = u32::from(*lane) * 64;
+            let value = state.get_vector(*vn).extract(low + 63, low);
+            state.set_register(*rd, value);
+        }
+        Instruction::VectorAdd {
+            vd,
+            vn,
+            vm,
+            arrangement,
+        } => {
+            let result =
+                bv_add_vector_lanes(state.get_vector(*vn), state.get_vector(*vm), *arrangement);
+            state.set_vector(*vd, result);
         }
         Instruction::Add { rd, rn, rm } => {
             let lhs = state.get_register(*rn).clone();
@@ -1353,6 +1411,15 @@ pub fn states_not_equal(state1: &MachineState, state2: &MachineState) -> z3::ast
     let sp_not_equal = sp1.eq(sp2).not();
     not_equal = z3::ast::Bool::or(&[&not_equal, &sp_not_equal]);
 
+    for i in 0..32 {
+        let register = VectorRegister::from_index(i).expect("valid vector register index");
+        let vector_not_equal = state1
+            .get_vector(register)
+            .eq(state2.get_vector(register))
+            .not();
+        not_equal = z3::ast::Bool::or(&[&not_equal, &vector_not_equal]);
+    }
+
     // And the NZCV flag bits and the whole memory array.
     not_equal = z3::ast::Bool::or(&[&not_equal, &flags_not_equal(state1, state2)]);
     z3::ast::Bool::or(&[&not_equal, &state1.memory.eq(&state2.memory).not()])
@@ -1370,8 +1437,12 @@ pub fn states_not_equal_for_live_out(
     let mut not_equal = z3::ast::Bool::from_bool(false);
 
     for reg in live_out.iter() {
-        let val1 = state1.get_register(*reg);
-        let val2 = state2.get_register(*reg);
+        let (val1, val2) = match reg {
+            Register::Vector(register) => {
+                (state1.get_vector(*register), state2.get_vector(*register))
+            }
+            _ => (state1.get_register(*reg), state2.get_register(*reg)),
+        };
         let reg_not_equal = val1.eq(val2).not();
         not_equal = z3::ast::Bool::or(&[&not_equal, &reg_not_equal]);
     }
@@ -2490,6 +2561,83 @@ mod tests {
         ]);
         solver.assert(&neq);
         assert_eq!(solver.check(), SatResult::Unsat);
+    }
+
+    #[test]
+    fn first_neon_slice_concrete_and_smt_semantics_agree() {
+        use crate::semantics::concrete::apply_instruction_concrete;
+        use crate::semantics::state::ConcreteMachineState;
+
+        fn bv128(value: u128) -> BV {
+            BV::from_u64((value >> 64) as u64, 64).concat(BV::from_u64(value as u64, 64))
+        }
+
+        let lhs = 0xffff_ffff_0000_0001_ffff_ffff_ffff_ffff;
+        let rhs = 0x0000_0001_ffff_ffff_0000_0001_0000_0001;
+        for arrangement in [VectorArrangement::TwoD, VectorArrangement::FourS] {
+            let instruction = Instruction::VectorAdd {
+                vd: VectorRegister::V0,
+                vn: VectorRegister::V1,
+                vm: VectorRegister::V2,
+                arrangement,
+            };
+            let mut concrete_pre = ConcreteMachineState::new_zeroed();
+            concrete_pre.set_vector(VectorRegister::V1, lhs);
+            concrete_pre.set_vector(VectorRegister::V2, rhs);
+            let concrete_post = apply_instruction_concrete(concrete_pre, &instruction);
+
+            let symbolic_pre = MachineState::new_symbolic("neon_add_pre");
+            let solver = Solver::new();
+            solver.assert(symbolic_pre.get_vector(VectorRegister::V1).eq(bv128(lhs)));
+            solver.assert(symbolic_pre.get_vector(VectorRegister::V2).eq(bv128(rhs)));
+            let symbolic_post = apply_instruction(symbolic_pre, &instruction);
+            solver.assert(
+                symbolic_post
+                    .get_vector(VectorRegister::V0)
+                    .eq(bv128(concrete_post.get_vector(VectorRegister::V0)))
+                    .not(),
+            );
+            assert_eq!(
+                solver.check(),
+                SatResult::Unsat,
+                "vector add parity failed for {arrangement}"
+            );
+        }
+
+        let packed = 0xfedc_ba98_7654_3210_0123_4567_89ab_cdef;
+        for lane in 0..2 {
+            let instruction = Instruction::MovFromVectorLane {
+                rd: Register::X0,
+                vn: VectorRegister::V1,
+                lane,
+            };
+            let mut concrete_pre = ConcreteMachineState::new_zeroed();
+            concrete_pre.set_vector(VectorRegister::V1, packed);
+            let concrete_post = apply_instruction_concrete(concrete_pre, &instruction);
+
+            let symbolic_pre = MachineState::new_symbolic("neon_lane_pre");
+            let solver = Solver::new();
+            solver.assert(
+                symbolic_pre
+                    .get_vector(VectorRegister::V1)
+                    .eq(bv128(packed)),
+            );
+            let symbolic_post = apply_instruction(symbolic_pre, &instruction);
+            solver.assert(
+                symbolic_post
+                    .get_register(Register::X0)
+                    .eq(BV::from_u64(
+                        concrete_post.get_register(Register::X0).as_u64(),
+                        64,
+                    ))
+                    .not(),
+            );
+            assert_eq!(
+                solver.check(),
+                SatResult::Unsat,
+                "vector lane extract parity failed for lane {lane}"
+            );
+        }
     }
 
     // Issue #77 Stage 1 / Step 2 safety nets:
