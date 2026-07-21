@@ -236,6 +236,8 @@ where
 
             self.statistics.candidates_passed_fast += 1;
 
+            // Only cheaper proposals enter verification below and can set this
+            // veto; cost-pruned proposals receive no equivalence verdict.
             let mut smt_refuted = false;
             if proposal_cost < best_cost {
                 let Some(smt_timeout) = config.solver_timeout_within_budget(start_time.elapsed())
@@ -456,6 +458,8 @@ mod tests {
 
     const TIMEOUT_PROBE_NOT_EQUIVALENT: usize = 0;
     const TIMEOUT_PROBE_EQUIVALENT: usize = 1;
+    const TIMEOUT_PROBE_UNKNOWN: usize = 2;
+    const TIMEOUT_PROBE_NOT_EQUIVALENT_FAST: usize = 3;
 
     static TIMEOUT_PROBE_TEST_LOCK: TestMutex<()> = TestMutex::new(());
     static TIMEOUT_PROBE_VERDICT: AtomicUsize = AtomicUsize::new(TIMEOUT_PROBE_EQUIVALENT);
@@ -526,6 +530,10 @@ mod tests {
             (
                 match TIMEOUT_PROBE_VERDICT.load(AtomicOrdering::SeqCst) {
                     TIMEOUT_PROBE_EQUIVALENT => EquivalenceResult::Equivalent,
+                    TIMEOUT_PROBE_UNKNOWN => EquivalenceResult::Unknown("solver timeout".into()),
+                    TIMEOUT_PROBE_NOT_EQUIVALENT_FAST => {
+                        EquivalenceResult::NotEquivalentFast(ConcreteMachineState::new_zeroed())
+                    }
                     _ => EquivalenceResult::NotEquivalent,
                 },
                 metrics,
@@ -617,7 +625,54 @@ mod tests {
 
         let result = search.search(&target, &(), &config);
 
+        assert_eq!(result.statistics.candidates_passed_fast, 1);
         assert_eq!(result.statistics.smt_queries, 1);
+        assert_eq!(result.statistics.smt_equivalent, 0);
+        assert_eq!(result.statistics.improvements_found, 0);
+        assert!(!result.found_optimization);
+        assert_eq!(result.statistics.accepted_proposals, 0);
+    }
+
+    #[test]
+    fn stochastic_search_allows_unknown_cheaper_proposal_into_metropolis() {
+        let _guard = set_timeout_probe_result(TIMEOUT_PROBE_UNKNOWN, true);
+
+        let mut search: StochasticSearch<TimeoutProbeIsa> = StochasticSearch::new();
+        let config = SearchConfig::default().with_stochastic(
+            StochasticConfig::default()
+                .with_iterations(1)
+                .with_test_count(0)
+                .with_seed(1),
+        );
+        let target = mov_add_sequence();
+
+        let result = search.search(&target, &(), &config);
+
+        assert_eq!(result.statistics.candidates_passed_fast, 1);
+        assert_eq!(result.statistics.smt_queries, 1);
+        assert_eq!(result.statistics.smt_equivalent, 0);
+        assert_eq!(result.statistics.improvements_found, 0);
+        assert!(!result.found_optimization);
+        assert_eq!(result.statistics.accepted_proposals, 1);
+    }
+
+    #[test]
+    fn stochastic_search_does_not_accept_fast_refuted_cheaper_proposal_after_concrete_tests() {
+        let _guard = set_timeout_probe_result(TIMEOUT_PROBE_NOT_EQUIVALENT_FAST, false);
+
+        let mut search: StochasticSearch<TimeoutProbeIsa> = StochasticSearch::new();
+        let config = SearchConfig::default().with_stochastic(
+            StochasticConfig::default()
+                .with_iterations(1)
+                .with_test_count(1)
+                .with_seed(1),
+        );
+        let target = mov_add_sequence();
+
+        let result = search.search(&target, &(), &config);
+
+        assert_eq!(result.statistics.candidates_passed_fast, 1);
+        assert_eq!(result.statistics.smt_queries, 0);
         assert_eq!(result.statistics.smt_equivalent, 0);
         assert_eq!(result.statistics.improvements_found, 0);
         assert!(!result.found_optimization);
