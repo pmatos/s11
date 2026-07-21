@@ -6176,6 +6176,32 @@ mod cli_helper_tests {
             ]
         );
 
+        // b8 00 00 00 00 = mov eax, 0. A dword write zero-extends RAX, so
+        // symbolic CodeSize search may safely replace it with a shorter
+        // same-count dword zeroing instruction.
+        let dword_instructions = cs
+            .disasm_all(&[0xb8, 0x00, 0x00, 0x00, 0x00], 0x1000)
+            .unwrap();
+        let dword_ir = backend.convert_ir(&dword_instructions).unwrap();
+        assert_eq!(
+            dword_ir,
+            vec![X86Instruction::MovImm {
+                rd: X86Register::EAX,
+                imm: 0,
+            }]
+        );
+        let dword_optimized = backend
+            .run_search(&dword_ir, &dword_instructions, &opts, context.clone())
+            .unwrap()
+            .expect("x86-64 EAX should allow a same-count code-size rewrite");
+        assert_eq!(dword_optimized.len(), dword_ir.len());
+        assert_ne!(dword_optimized, dword_ir);
+        assert_eq!(
+            dword_optimized[0].destination_operand(),
+            Some(X86Register::EAX),
+            "the rewrite must retain the zero-extending dword destination view"
+        );
+
         // 48 c7 c0 00 00 00 00 = mov rax, 0
         let full_instructions = cs
             .disasm_all(&[0x48, 0xc7, 0xc0, 0x00, 0x00, 0x00, 0x00], 0x1000)
