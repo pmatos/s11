@@ -1,7 +1,9 @@
 //! Concrete interpreter for fast validation of instruction sequences
 
 use crate::ir::types::{AccessWidth, AddressOperand, IndexMode};
-use crate::ir::{Condition, Instruction, Operand, Register, RegisterWidth, ShiftKind};
+use crate::ir::{
+    Condition, Instruction, Operand, Register, RegisterWidth, ShiftKind, VectorArrangement,
+};
 use crate::semantics::live_out::RegisterSet;
 use crate::semantics::state::{ConcreteMachineState, ConcreteValue, ConditionFlags};
 
@@ -105,6 +107,27 @@ fn logical_flags(result: u64, width: RegisterWidth) -> ConditionFlags {
     }
 }
 
+fn add_vector_lanes(lhs: u128, rhs: u128, arrangement: VectorArrangement) -> u128 {
+    let mut result = 0u128;
+    match arrangement {
+        VectorArrangement::TwoD => {
+            for lane in 0..2 {
+                let shift = lane * 64;
+                let sum = ((lhs >> shift) as u64).wrapping_add((rhs >> shift) as u64);
+                result |= u128::from(sum) << shift;
+            }
+        }
+        VectorArrangement::FourS => {
+            for lane in 0..4 {
+                let shift = lane * 32;
+                let sum = ((lhs >> shift) as u32).wrapping_add((rhs >> shift) as u32);
+                result |= u128::from(sum) << shift;
+            }
+        }
+    }
+    result
+}
+
 /// Apply a single instruction to a concrete machine state
 pub fn apply_instruction_concrete(
     mut state: ConcreteMachineState,
@@ -122,6 +145,24 @@ pub fn apply_instruction_concrete(
         Instruction::MovImm { rd, imm } => {
             let value = ConcreteValue::from_i64(*imm);
             state.set_register(*rd, value);
+        }
+        Instruction::Movi { vd, imm, .. } => {
+            debug_assert_eq!(*imm, 0, "first-slice MOVI admits only #0");
+            state.set_vector(*vd, 0);
+        }
+        Instruction::MovFromVectorLane { rd, vn, lane } => {
+            let value = (state.get_vector(*vn) >> (u32::from(*lane) * 64)) as u64;
+            state.set_register(*rd, ConcreteValue::new(value));
+        }
+        Instruction::VectorAdd {
+            vd,
+            vn,
+            vm,
+            arrangement,
+        } => {
+            let result =
+                add_vector_lanes(state.get_vector(*vn), state.get_vector(*vm), *arrangement);
+            state.set_vector(*vd, result);
         }
         Instruction::Add { rd, rn, rm } => {
             let lhs = state.get_register(*rn).as_u64();
@@ -883,8 +924,14 @@ pub fn states_equal_for_live_out(
     memory_live: bool,
 ) -> bool {
     for reg in live_out.iter() {
-        if state1.get_register(*reg) != state2.get_register(*reg) {
-            return false;
+        match reg {
+            Register::Vector(register) => {
+                if state1.get_vector(*register) != state2.get_vector(*register) {
+                    return false;
+                }
+            }
+            _ if state1.get_register(*reg) != state2.get_register(*reg) => return false,
+            _ => {}
         }
     }
     if live_out.flags_live() && state1.get_flags() != state2.get_flags() {
@@ -905,6 +952,21 @@ pub fn find_first_difference(
     live_out: &RegisterSet<Register>,
 ) -> Option<(Register, ConcreteValue, ConcreteValue)> {
     for reg in live_out.iter() {
+        if let Register::Vector(register) = reg {
+            let v1 = state1.get_vector(*register);
+            let v2 = state2.get_vector(*register);
+            if v1 != v2 {
+                // This legacy diagnostic return type is 64-bit. Preserve the
+                // low half while the boolean comparison above remains fully
+                // 128-bit sound.
+                return Some((
+                    *reg,
+                    ConcreteValue::new(v1 as u64),
+                    ConcreteValue::new(v2 as u64),
+                ));
+            }
+            continue;
+        }
         let v1 = state1.get_register(*reg);
         let v2 = state2.get_register(*reg);
         if v1 != v2 {
@@ -933,11 +995,68 @@ pub fn find_first_difference(
 mod tests {
     use super::*;
     use crate::ir::types::PairAccessWidth;
+    use crate::ir::{VectorArrangement, VectorRegister};
     use std::collections::HashMap;
 
     fn state_with(values: Vec<(Register, u64)>) -> ConcreteMachineState {
         let map: HashMap<Register, u64> = values.into_iter().collect();
         ConcreteMachineState::from_values(map)
+    }
+
+    #[test]
+    fn vector_add_wraps_each_lane_and_lane_move_reads_selected_doubleword() {
+        let mut state = ConcreteMachineState::new_zeroed();
+        state.set_vector(
+            VectorRegister::V1,
+            (u128::from(u64::MAX) << 64) | u128::from(u64::MAX),
+        );
+        state.set_vector(
+            VectorRegister::V2,
+            (u128::from(2u64) << 64) | u128::from(1u64),
+        );
+        let state = apply_instruction_concrete(
+            state,
+            &Instruction::VectorAdd {
+                vd: VectorRegister::V0,
+                vn: VectorRegister::V1,
+                vm: VectorRegister::V2,
+                arrangement: VectorArrangement::TwoD,
+            },
+        );
+        assert_eq!(state.get_vector(VectorRegister::V0), 1u128 << 64);
+
+        let state = apply_instruction_concrete(
+            state,
+            &Instruction::MovFromVectorLane {
+                rd: Register::X0,
+                vn: VectorRegister::V0,
+                lane: 1,
+            },
+        );
+        assert_eq!(state.get_register(Register::X0).as_u64(), 1);
+
+        let mut state = ConcreteMachineState::new_zeroed();
+        state.set_vector(
+            VectorRegister::V1,
+            (u128::from(u32::MAX) << 96)
+                | (u128::from(u32::MAX) << 64)
+                | (u128::from(u32::MAX) << 32)
+                | u128::from(u32::MAX),
+        );
+        state.set_vector(
+            VectorRegister::V2,
+            0x0000_0001_0000_0001_0000_0001_0000_0001,
+        );
+        let state = apply_instruction_concrete(
+            state,
+            &Instruction::VectorAdd {
+                vd: VectorRegister::V0,
+                vn: VectorRegister::V1,
+                vm: VectorRegister::V2,
+                arrangement: VectorArrangement::FourS,
+            },
+        );
+        assert_eq!(state.get_vector(VectorRegister::V0), 0);
     }
 
     #[test]
