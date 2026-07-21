@@ -1,4 +1,6 @@
-use crate::ir::{Condition, Instruction, Operand, Register, RegisterWidth};
+use crate::ir::{
+    Condition, Instruction, Operand, Register, RegisterWidth, VectorArrangement, VectorRegister,
+};
 use crate::isa::{RiscVInstruction, RiscVRegister};
 
 /// One representative and its expected contracts for every opcode family
@@ -899,6 +901,55 @@ pub(crate) fn aarch64_instruction_families() -> Vec<AArch64InstructionFamily> {
             "sbfiz x0, x1, #4, #8",
             Some(X0),
             &[X1],
+            false,
+            false,
+            false
+        ),
+        family!(
+            Instruction::Movi {
+                vd: VectorRegister::V0,
+                arrangement: VectorArrangement::TwoD,
+                imm: 0,
+            },
+            60,
+            "movi",
+            "movi v0.2d, #0",
+            Some(Register::Vector(VectorRegister::V0)),
+            &[],
+            false,
+            false,
+            false
+        ),
+        family!(
+            Instruction::VectorAdd {
+                vd: VectorRegister::V0,
+                vn: VectorRegister::V1,
+                vm: VectorRegister::V2,
+                arrangement: VectorArrangement::FourS,
+            },
+            61,
+            "add",
+            "add v0.4s, v1.4s, v2.4s",
+            Some(Register::Vector(VectorRegister::V0)),
+            &[
+                Register::Vector(VectorRegister::V1),
+                Register::Vector(VectorRegister::V2)
+            ],
+            false,
+            false,
+            false
+        ),
+        family!(
+            Instruction::MovFromVectorLane {
+                rd: X0,
+                vn: VectorRegister::V1,
+                lane: 1,
+            },
+            62,
+            "mov",
+            "mov x0, v1.d[1]",
+            Some(X0),
+            &[Register::Vector(VectorRegister::V1)],
             false,
             false,
             false

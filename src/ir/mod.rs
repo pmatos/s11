@@ -6,4 +6,7 @@ pub mod types;
 
 // Re-export commonly used types
 pub use instructions::Instruction;
-pub use types::{Condition, ExtendKind, LabelId, Operand, Register, RegisterWidth, ShiftKind};
+pub use types::{
+    Condition, ExtendKind, LabelId, Operand, Register, RegisterWidth, ShiftKind, VectorArrangement,
+    VectorRegister,
+};

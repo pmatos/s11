@@ -1815,6 +1815,40 @@ fn build_x86_symbolic_search_config(
         .with_x86_same_count_code_size_allowed(same_count_code_size_allowed)
 }
 
+/// Build the AArch64 search register pool, preserving the historical X0..X7
+/// scalar policy while adding every vector register referenced by the target.
+/// A target-local vector pool avoids the 32^3 candidate explosion of enabling
+/// the entire SIMD register file for small enumerative searches.
+fn aarch64_search_registers(target: &[Instruction]) -> Vec<Register> {
+    let mut registers = vec![
+        Register::X0,
+        Register::X1,
+        Register::X2,
+        Register::X3,
+        Register::X4,
+        Register::X5,
+        Register::X6,
+        Register::X7,
+    ];
+
+    for register in target
+        .iter()
+        .flat_map(|instruction| instruction.source_registers().into_iter())
+        .chain(
+            target
+                .iter()
+                .flat_map(|instruction| instruction.destinations().into_iter()),
+        )
+        .filter(|register| register.vector().is_some())
+    {
+        if !registers.contains(&register) {
+            registers.push(register);
+        }
+    }
+    registers.sort_by_key(|register| register.sort_key());
+    registers
+}
+
 /// Run optimization using the selected algorithm.
 ///
 /// Issue #69: if `target` ends in a terminator (branch / control-flow
@@ -1839,17 +1873,9 @@ fn run_optimization(
         return Ok(None);
     }
 
-    // Default registers and immediates for search
-    let available_registers = vec![
-        Register::X0,
-        Register::X1,
-        Register::X2,
-        Register::X3,
-        Register::X4,
-        Register::X5,
-        Register::X6,
-        Register::X7,
-    ];
+    // Keep the historical scalar pool and add the target's vector registers
+    // so every search backend can generate NEON candidates for NEON windows.
+    let available_registers = aarch64_search_registers(prefix);
     let available_immediates = vec![
         0, 1, 2, 3, 4, 5, 7, 8, 10, 15, 16, 31, 32, 63, 64, 100, 255, 256, 1000, 4095,
     ];
@@ -3166,15 +3192,19 @@ fn push_live_out_registers(
     state: &semantics::ConcreteMachineState,
     live_out: &LiveOut,
 ) {
-    let mut regs: Vec<(Register, u64)> = state
-        .registers()
-        .iter()
-        .filter(|(reg, _)| live_out.contains_register(**reg))
-        .map(|(reg, val)| (*reg, val.as_u64()))
-        .collect();
-    regs.sort_by_key(|(reg, _)| reg.index().unwrap_or(u8::MAX));
-    for (reg, val) in regs {
-        lines.push(format!("    {} = 0x{:016x}", reg, val));
+    let mut regs: Vec<_> = live_out.iter().copied().collect();
+    regs.sort_by_key(|reg| reg.sort_key());
+    for reg in regs {
+        match reg {
+            Register::Vector(vector) => {
+                lines.push(format!("    {} = 0x{:032x}", reg, state.get_vector(vector)));
+            }
+            _ => lines.push(format!(
+                "    {} = 0x{:016x}",
+                reg,
+                state.get_register(reg).as_u64()
+            )),
+        }
     }
 }
 
@@ -3279,7 +3309,7 @@ fn run_equiv(
 
     if verbose {
         let mut regs: Vec<_> = live_out.iter().collect();
-        regs.sort_by_key(|r| r.index().unwrap_or(u8::MAX));
+        regs.sort_by_key(|r| r.sort_key());
         let names: Vec<String> = regs.iter().map(|r| format!("{}", r)).collect();
         println!("Live-out registers: {}", names.join(", "));
         if live_out.flags_live() {
@@ -4304,6 +4334,8 @@ mod cli_helper_tests {
             ("mov", "x0, #5"),
             ("mov", "w0, #0xff"),
             ("mov", "wsp, #0xff"),
+            ("mov", "x0, v1.d[0]"),
+            ("movi", "v0.2d, #0"),
             ("mvn", "x0, x1"),
             ("neg", "x0, x1"),
             ("negs", "x0, x1"),
@@ -4316,6 +4348,7 @@ mod cli_helper_tests {
             ("add", "w0, w1, #4"),
             ("add", "x0, x1, x2, lsl #3"),
             ("add", "w0, w1, w2, lsl #3"),
+            ("add", "v0.2d, v1.2d, v2.2d"),
             ("sub", "x0, x1, #3"),
             ("sub", "w0, w1, #3"),
             ("adds", "x0, x1, #1"),
@@ -4485,7 +4518,7 @@ mod cli_helper_tests {
         // Tripwire: bump in lockstep when adding/removing rows. Catches
         // accidental row deletion and forces a re-read when adding a parser
         // mnemonic without a matching test row.
-        assert_eq!(cases.len(), 154);
+        assert_eq!(cases.len(), 157);
 
         fn docs_mnemonic(mnemonic: &'static str) -> &'static str {
             if mnemonic.starts_with("b.") {
@@ -4699,6 +4732,37 @@ mod cli_helper_tests {
                 rm: Operand::Immediate(1),
             }]
         );
+    }
+
+    #[test]
+    fn first_neon_slice_round_trips_through_assembler_capstone_and_parser() {
+        let original = vec![
+            Instruction::Movi {
+                vd: ir::VectorRegister::V31,
+                arrangement: ir::VectorArrangement::FourS,
+                imm: 0,
+            },
+            Instruction::VectorAdd {
+                vd: ir::VectorRegister::V0,
+                vn: ir::VectorRegister::V1,
+                vm: ir::VectorRegister::V2,
+                arrangement: ir::VectorArrangement::TwoD,
+            },
+            Instruction::MovFromVectorLane {
+                rd: Register::X0,
+                vn: ir::VectorRegister::V0,
+                lane: 1,
+            },
+        ];
+        let bytes = assemble_aarch64_test_bytes(&original);
+        let cs = aarch64_test_capstone();
+        let instructions = cs
+            .disasm_all(&bytes, 0x1000)
+            .expect("first NEON slice should disassemble");
+
+        let recovered = convert_to_ir(&instructions).expect("Capstone spellings should parse");
+
+        assert_eq!(recovered, original);
     }
 
     #[test]
@@ -6983,6 +7047,36 @@ mod cli_helper_tests {
         assert_eq!(config.available_immediates, imms);
         // No algorithm layer applied: cores is left at the SearchConfig default.
         assert_eq!(config.cores, SearchConfig::default().cores);
+    }
+
+    #[test]
+    fn aarch64_search_registers_include_vectors_used_by_target() {
+        let target = [
+            Instruction::VectorAdd {
+                vd: ir::VectorRegister::V0,
+                vn: ir::VectorRegister::V1,
+                vm: ir::VectorRegister::V2,
+                arrangement: ir::VectorArrangement::TwoD,
+            },
+            Instruction::MovFromVectorLane {
+                rd: Register::X0,
+                vn: ir::VectorRegister::V0,
+                lane: 0,
+            },
+        ];
+
+        let registers = aarch64_search_registers(&target);
+
+        assert!(registers.contains(&Register::Vector(ir::VectorRegister::V0)));
+        assert!(registers.contains(&Register::Vector(ir::VectorRegister::V1)));
+        assert!(registers.contains(&Register::Vector(ir::VectorRegister::V2)));
+        assert_eq!(
+            registers
+                .iter()
+                .filter(|reg| reg.vector().is_some())
+                .count(),
+            3
+        );
     }
 
     /// Regression for issue #243, generalised: every AArch64 algorithm builder

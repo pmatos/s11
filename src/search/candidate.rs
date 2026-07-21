@@ -1,7 +1,7 @@
 //! Instruction generation utilities for search algorithms
 
 use crate::ir::instructions::{AARCH64_RANDOM_SHIFT_IMMEDIATES, MOVW_LEGAL_SHIFTS};
-use crate::ir::{Instruction, Operand, Register, RegisterWidth, ShiftKind};
+use crate::ir::{Instruction, Operand, Register, RegisterWidth, ShiftKind, VectorArrangement};
 use crate::isa::{AArch64, Assembler, InstructionType};
 
 /// Generic encodability check: for any `<I: InstructionType, A: Assembler<I>>`,
@@ -48,6 +48,16 @@ const TST_LOGICAL_IMM64_SAMPLES: &[i64] = &[0xff, 0xffff, 0x5555_5555_5555_5555,
 
 pub fn generate_all_instructions(registers: &[Register], immediates: &[i64]) -> Vec<Instruction> {
     let mut instrs = Vec::new();
+    let scalar_registers: Vec<_> = registers
+        .iter()
+        .copied()
+        .filter(|register| register.vector().is_none())
+        .collect();
+    let vector_registers: Vec<_> = registers
+        .iter()
+        .filter_map(|register| register.vector())
+        .collect();
+    let registers = scalar_registers.as_slice();
 
     for &rd in registers {
         // MovImm: mov rd, #imm
@@ -708,6 +718,36 @@ pub fn generate_all_instructions(registers: &[Register], immediates: &[i64]) -> 
         }
     }
 
+    for &vd in &vector_registers {
+        for arrangement in [VectorArrangement::TwoD, VectorArrangement::FourS] {
+            instrs.push(Instruction::Movi {
+                vd,
+                arrangement,
+                imm: 0,
+            });
+            for &vn in &vector_registers {
+                for &vm in &vector_registers {
+                    instrs.push(Instruction::VectorAdd {
+                        vd,
+                        vn,
+                        vm,
+                        arrangement,
+                    });
+                }
+            }
+        }
+    }
+    for &rd in registers {
+        if !rd.is_general_or_zero() {
+            continue;
+        }
+        for &vn in &vector_registers {
+            for lane in 0..2 {
+                instrs.push(Instruction::MovFromVectorLane { rd, vn, lane });
+            }
+        }
+    }
+
     instrs
 }
 
@@ -717,12 +757,57 @@ pub fn generate_random_instruction<R: rand::RngExt>(
     registers: &[Register],
     immediates: &[i64],
 ) -> Instruction {
-    if registers.is_empty() {
+    let scalar_registers: Vec<_> = registers
+        .iter()
+        .copied()
+        .filter(|register| register.vector().is_none())
+        .collect();
+    let vector_registers: Vec<_> = registers
+        .iter()
+        .filter_map(|register| register.vector())
+        .collect();
+    if scalar_registers.is_empty() && vector_registers.is_empty() {
         return Instruction::MovImm {
             rd: Register::X0,
             imm: 0,
         };
     }
+
+    let sample_neon = !vector_registers.is_empty()
+        && (scalar_registers.is_empty() || rng.random_range(0..51) >= 48);
+    if sample_neon {
+        let vd = vector_registers[rng.random_range(0..vector_registers.len())];
+        let arrangement = if rng.random_bool(0.5) {
+            VectorArrangement::TwoD
+        } else {
+            VectorArrangement::FourS
+        };
+        return match rng.random_range(0..3) {
+            0 => Instruction::Movi {
+                vd,
+                arrangement,
+                imm: 0,
+            },
+            1 => Instruction::VectorAdd {
+                vd,
+                vn: vector_registers[rng.random_range(0..vector_registers.len())],
+                vm: vector_registers[rng.random_range(0..vector_registers.len())],
+                arrangement,
+            },
+            _ if !scalar_registers.is_empty() => Instruction::MovFromVectorLane {
+                rd: scalar_registers[rng.random_range(0..scalar_registers.len())],
+                vn: vector_registers[rng.random_range(0..vector_registers.len())],
+                lane: rng.random_range(0..2),
+            },
+            _ => Instruction::Movi {
+                vd,
+                arrangement,
+                imm: 0,
+            },
+        };
+    }
+
+    let registers = scalar_registers.as_slice();
 
     let rd = registers[rng.random_range(0..registers.len())];
     let pick_reg = |rng: &mut R| registers[rng.random_range(0..registers.len())];
@@ -1582,11 +1667,54 @@ mod tests {
     }
 
     #[test]
+    fn generate_all_instructions_includes_first_neon_slice() {
+        use crate::ir::{VectorArrangement, VectorRegister};
+        let registers = [
+            Register::X0,
+            Register::Vector(VectorRegister::V0),
+            Register::Vector(VectorRegister::V1),
+            Register::Vector(VectorRegister::V2),
+        ];
+        let instrs = generate_all_encodable_instructions(&registers, &[0]);
+
+        assert!(instrs.iter().any(|instruction| matches!(
+            instruction,
+            Instruction::Movi {
+                vd: VectorRegister::V0,
+                arrangement: VectorArrangement::TwoD,
+                imm: 0,
+            }
+        )));
+        assert!(instrs.iter().any(|instruction| matches!(
+            instruction,
+            Instruction::VectorAdd {
+                vd: VectorRegister::V0,
+                vn: VectorRegister::V1,
+                vm: VectorRegister::V2,
+                arrangement: VectorArrangement::FourS,
+            }
+        )));
+        assert!(instrs.iter().any(|instruction| matches!(
+            instruction,
+            Instruction::MovFromVectorLane {
+                rd: Register::X0,
+                vn: VectorRegister::V1,
+                lane: 1,
+            }
+        )));
+    }
+
+    #[test]
     fn test_generate_all_instructions_covers_opcode_count() {
         // Candidate generation intentionally uses `InstructionType::opcode_id`
         // from `src/isa/aarch64.rs`; add a sync guard beside any future
         // candidate-local table instead of letting the two drift silently.
-        let instrs = generate_all_instructions(&default_registers(), &default_immediates());
+        let mut registers = default_registers();
+        registers.extend([
+            Register::Vector(crate::ir::VectorRegister::V0),
+            Register::Vector(crate::ir::VectorRegister::V1),
+        ]);
+        let instrs = generate_all_instructions(&registers, &default_immediates());
         let ids: std::collections::BTreeSet<u8> =
             instrs.iter().map(InstructionType::opcode_id).collect();
         let generator = AArch64InstructionGenerator;
@@ -1608,6 +1736,23 @@ mod tests {
         (0..draws)
             .map(|_| generate_random_instruction(&mut rng, &regs, &imms).opcode_id())
             .collect()
+    }
+
+    #[test]
+    fn random_instruction_generation_reaches_neon_families() {
+        use rand::SeedableRng;
+        use rand_chacha::ChaCha8Rng;
+        let registers = [
+            Register::X0,
+            Register::Vector(crate::ir::VectorRegister::V0),
+            Register::Vector(crate::ir::VectorRegister::V1),
+        ];
+        let mut rng = ChaCha8Rng::seed_from_u64(208);
+        let ids: std::collections::BTreeSet<_> = (0..10_000)
+            .map(|_| generate_random_instruction(&mut rng, &registers, &[0]).opcode_id())
+            .filter(|id| *id >= 60)
+            .collect();
+        assert_eq!(ids, std::collections::BTreeSet::from([60, 61, 62]));
     }
 
     #[test]

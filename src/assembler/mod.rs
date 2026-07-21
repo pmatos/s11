@@ -4,7 +4,7 @@ use crate::ir::aarch64_encoding::logical_imm64_encodable;
 use crate::ir::instructions::logical_imm32_value;
 use crate::ir::types::{
     AccessWidth, AddressOperand, Condition, ExtendKind, IndexMode, LabelId, PairAccessWidth,
-    ShiftKind,
+    ShiftKind, VectorArrangement,
 };
 use crate::ir::{Instruction, Operand, Register, RegisterWidth};
 use dynasmrt::{DynasmApi, dynasm};
@@ -734,6 +734,48 @@ impl AArch64Assembler {
                     ; .arch aarch64
                     ; mov X(rd_reg), *imm as u64
                 );
+                Ok(())
+            }
+            Instruction::Movi {
+                vd,
+                arrangement,
+                imm,
+            } => {
+                if *imm != 0 {
+                    return Err(format!("MOVI immediate {} is unsupported (#0 only)", imm));
+                }
+                let base = match arrangement {
+                    VectorArrangement::TwoD => 0x6f00_e400,
+                    VectorArrangement::FourS => 0x4f00_0400,
+                };
+                ops.push_u32(base | u32::from(vd.index()));
+                Ok(())
+            }
+            Instruction::MovFromVectorLane { rd, vn, lane } => {
+                if *lane >= 2 {
+                    return Err(format!("MOV vector lane must be 0 or 1, got {}", lane));
+                }
+                let rd_reg = register_to_dynasm(*rd)? as u32;
+                let encoding =
+                    0x4e08_3c00 | (u32::from(*lane) << 20) | (u32::from(vn.index()) << 5) | rd_reg;
+                ops.push_u32(encoding);
+                Ok(())
+            }
+            Instruction::VectorAdd {
+                vd,
+                vn,
+                vm,
+                arrangement,
+            } => {
+                let base = match arrangement {
+                    VectorArrangement::TwoD => 0x4ee0_8400,
+                    VectorArrangement::FourS => 0x4ea0_8400,
+                };
+                let encoding = base
+                    | (u32::from(vm.index()) << 16)
+                    | (u32::from(vn.index()) << 5)
+                    | u32::from(vd.index());
+                ops.push_u32(encoding);
                 Ok(())
             }
             Instruction::Add { rd, rn, rm } => {
@@ -2377,7 +2419,58 @@ fn logical_imm32_for_assembler(mnemonic: &str, imm: i64) -> Result<u32, String> 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ir::VectorRegister;
     use crate::test_utils::instruction_fixtures::aarch64_instruction_families;
+
+    #[test]
+    fn assemble_first_neon_slice_matches_aarch64_encodings() {
+        let mut assembler = AArch64Assembler::new();
+        let instructions = [
+            Instruction::Movi {
+                vd: VectorRegister::V0,
+                arrangement: VectorArrangement::TwoD,
+                imm: 0,
+            },
+            Instruction::Movi {
+                vd: VectorRegister::V31,
+                arrangement: VectorArrangement::FourS,
+                imm: 0,
+            },
+            Instruction::VectorAdd {
+                vd: VectorRegister::V0,
+                vn: VectorRegister::V1,
+                vm: VectorRegister::V2,
+                arrangement: VectorArrangement::TwoD,
+            },
+            Instruction::VectorAdd {
+                vd: VectorRegister::V3,
+                vn: VectorRegister::V4,
+                vm: VectorRegister::V5,
+                arrangement: VectorArrangement::FourS,
+            },
+            Instruction::MovFromVectorLane {
+                rd: Register::X0,
+                vn: VectorRegister::V1,
+                lane: 0,
+            },
+            Instruction::MovFromVectorLane {
+                rd: Register::X2,
+                vn: VectorRegister::V3,
+                lane: 1,
+            },
+        ];
+
+        let bytes = assembler
+            .assemble_instructions(&instructions, 0)
+            .expect("first NEON slice should assemble");
+        assert_eq!(
+            bytes,
+            [
+                0x00, 0xe4, 0x00, 0x6f, 0x1f, 0x04, 0x00, 0x4f, 0x20, 0x84, 0xe2, 0x4e, 0x83, 0x84,
+                0xa5, 0x4e, 0x20, 0x3c, 0x08, 0x4e, 0x62, 0x3c, 0x18, 0x4e,
+            ]
+        );
+    }
 
     #[test]
     fn every_enumerated_instruction_family_assembles() {
