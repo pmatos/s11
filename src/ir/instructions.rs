@@ -4067,6 +4067,11 @@ mod tests {
 
         for instr in [
             Instruction::Mul {
+                rd: Register::X0,
+                rn: Register::XZR,
+                rm: Register::X1,
+            },
+            Instruction::Mul {
                 rd: Register::XZR,
                 rn: Register::XZR,
                 rm: Register::XZR,
@@ -4080,6 +4085,12 @@ mod tests {
                 rd: Register::XZR,
                 rn: Register::XZR,
                 rm: Register::XZR,
+            },
+            Instruction::Madd {
+                rd: Register::X0,
+                rn: Register::XZR,
+                rm: Register::X2,
+                ra: Register::XZR,
             },
             Instruction::Madd {
                 rd: Register::XZR,
