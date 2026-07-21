@@ -2,7 +2,7 @@
 
 #![allow(dead_code)]
 
-use crate::ir::{Instruction, Register};
+use crate::ir::{Instruction, Register, VectorRegister};
 use crate::semantics::live_out::{LiveOut, RegisterSet};
 use std::str::FromStr;
 
@@ -55,6 +55,12 @@ fn parse_register(s: &str) -> Result<Register, ParseRegisterSetError> {
         && let Some(reg) = Register::from_index(num)
     {
         return Ok(reg);
+    }
+    if let Some(num_str) = s.strip_prefix('v')
+        && let Ok(num) = num_str.parse::<u8>()
+        && let Some(reg) = VectorRegister::from_index(num)
+    {
+        return Ok(Register::Vector(reg));
     }
 
     Err(ParseRegisterSetError::new(format!(
@@ -122,7 +128,7 @@ fn misplaced_flag_token_error(token: &str, input: &str) -> ParseRegisterSetError
 ///
 /// Grammar: `<regs>` or `<regs>;<flags>`. The register half follows
 /// `RegisterSet::<Register>::from_str` (comma- or space-separated, case-insensitive,
-/// accepts `x0..x30`, `sp`, `xzr`). The flag half currently accepts only the
+/// accepts `x0..x30`, `v0..v31`, `sp`, `xzr`). The flag half currently accepts only the
 /// group token `nzcv`; per-flag tokens `n`/`z`/`c`/`v` are reserved for a
 /// future per-flag liveness extension and rejected today. A bareword `nzcv`
 /// with no leading `;` is rejected to keep that reservation unambiguous.
@@ -135,14 +141,14 @@ pub fn parse_live_out_contract(s: &str) -> Result<LiveOut, ParseLiveOutError> {
     let trimmed = s.trim();
     let semicolon_count = trimmed.matches(';').count();
     if semicolon_count > 1 {
-        return Err(ParseRegisterSetError::new(format!(
+        return Err(ParseLiveOutError::new(format!(
             "--live-out accepts at most one ';' (got: '{}')",
             s
         )));
     }
     if semicolon_count == 0 {
         if trimmed.eq_ignore_ascii_case("nzcv") {
-            return Err(ParseRegisterSetError::new(format!(
+            return Err(ParseLiveOutError::new(format!(
                 "flag-only live-out requires a leading ';' (e.g. \";nzcv\"); got '{}'",
                 s
             )));
@@ -163,13 +169,13 @@ pub fn parse_live_out_contract(s: &str) -> Result<LiveOut, ParseLiveOutError> {
         "" => false,
         "nzcv" => true,
         "n" | "z" | "c" | "v" => {
-            return Err(ParseRegisterSetError::new(format!(
+            return Err(ParseLiveOutError::new(format!(
                 "per-flag token '{}' is reserved for a future extension; use 'nzcv' for all flags",
                 flags_tok
             )));
         }
         other => {
-            return Err(ParseRegisterSetError::new(format!(
+            return Err(ParseLiveOutError::new(format!(
                 "unknown flag token '{}'; expected 'nzcv'",
                 other
             )));
@@ -413,6 +419,7 @@ mod tests {
     #[test]
     fn display_renders_message_without_type_prefix() {
         let err: ParseLiveOutError = parse_live_out_contract("x0;bogus").unwrap_err();
+        // Deliberately fragile: ADR-0006 diagnostic wording changes should require review.
         assert_eq!(
             err.to_string(),
             "unknown flag token 'bogus'; expected 'nzcv'"
@@ -854,6 +861,16 @@ mod tests {
     }
 
     #[test]
+    fn parse_live_out_contract_accepts_vector_registers() {
+        let live_out = parse_live_out_contract("x0,v0,V31;nzcv").unwrap();
+        assert!(live_out.contains(Register::X0));
+        assert!(live_out.contains(Register::Vector(crate::ir::VectorRegister::V0)));
+        assert!(live_out.contains(Register::Vector(crate::ir::VectorRegister::V31)));
+        assert!(live_out.flags_live());
+        assert!(parse_live_out_contract("v32").is_err());
+    }
+
+    #[test]
     fn test_parse_live_out_contract_space_separated_regs_and_flags() {
         let live_out = parse_live_out_contract("x0 x1;nzcv").unwrap();
         assert!(live_out.contains_register(Register::X0));
@@ -1001,6 +1018,7 @@ mod tests {
     #[test]
     fn test_parse_live_out_contract_reversed_order_nzcv_x0_error() {
         let err = parse_live_out_contract("nzcv;x0").unwrap_err();
+        // Deliberately fragile: review the complete issue #181 diagnostic before changing it.
         assert_eq!(
             err.to_string(),
             "flag token 'nzcv' must follow the register list after ';' (for example ';nzcv'); got 'nzcv;x0'"
