@@ -3981,6 +3981,7 @@ mod tests {
 
         let mutated = mutator.mutate(&mut rng, &target);
 
+        // rn (RAX) must survive the form change; only the right operand is replaced.
         assert_eq!(
             mutated,
             vec![X86Instruction::CmpImm {
