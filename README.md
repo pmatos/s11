@@ -81,8 +81,16 @@ Useful flags on `opt`:
 | `--timeout SECS` | wall-clock budget for the search |
 | `--beta`, `--iterations`, `--seed` | MCMC tuning for `stochastic` |
 | `--search-mode linear\|binary` | SMT synthesis search tuning |
-| `--solver-timeout SECS` | per-query SMT verifier/synthesis timeout |
+| `--solver-timeout SECS` | per-query SMT timeout; `0` disables SMT queries (never unbounded) |
 | `--no-symbolic` | run hybrid as all-stochastic workers |
+
+Every accepted optimization requires an SMT proof. Consequently,
+`--solver-timeout 0` prevents enumerative, stochastic, symbolic, hybrid, and
+LLM search from accepting a candidate; it is a query-disable sentinel, not a
+fast-only mode. An unset programmatic `SearchConfig::solver_timeout` still uses
+the 5-second fallback. See
+[ADR-0011](docs/adr/0011-zero-solver-timeout-disables-smt.md) for the policy and
+alternatives.
 
 Note: enumerative search scales with the generated instruction families in its
 candidate pool. At the default AArch64 8-register CLI scope,
