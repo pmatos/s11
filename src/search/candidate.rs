@@ -1072,11 +1072,11 @@ fn random_cond_compare_instruction<R: rand::RngExt>(
     }
     let pick_non_sp = |rng: &mut R| non_sp[rng.random_range(0..non_sp.len())];
     let rn = pick_non_sp(rng);
-    let rm = match random_operand(rng, registers, immediates) {
+    let rm = match random_imm12_operand(rng, registers, immediates) {
         Operand::Register(Register::SP) => Operand::Register(pick_non_sp(rng)),
         Operand::Register(r) => Operand::Register(r),
         Operand::Immediate(v) => Operand::Immediate(v.rem_euclid(32)),
-        // random_operand only returns Register/Immediate, but the compiler can't
+        // random_imm12_operand only returns Register/Immediate, but the compiler can't
         // prove that. Drop shifted/extended forms to a plain register; CCMP and
         // CCMN reject both forms.
         Operand::ShiftedRegister { reg, .. } | Operand::ExtendedRegister { reg, .. }
@@ -1337,7 +1337,7 @@ fn non_sp_registers(registers: &[Register]) -> Vec<Register> {
         .collect()
 }
 
-fn random_operand<R: rand::RngExt>(
+fn random_imm12_operand<R: rand::RngExt>(
     rng: &mut R,
     registers: &[Register],
     immediates: &[i64],
@@ -1362,7 +1362,7 @@ fn random_arith_rm_operand<R: rand::RngExt>(
     if !non_sp.is_empty() && rng.random_range(0..3) == 2 {
         random_compare_shifted_operand(rng, &non_sp, false)
     } else {
-        match random_operand(rng, registers, immediates) {
+        match random_imm12_operand(rng, registers, immediates) {
             Operand::Immediate(imm) => Operand::Immediate(imm.rem_euclid(0x1000)),
             other => other,
         }
@@ -1578,7 +1578,7 @@ mod tests {
     }
 
     #[test]
-    fn random_operand_clamps_immediates_to_imm12_range() {
+    fn random_imm12_operand_clamps_immediates_to_imm12_range() {
         let immediates = [0, 1, 0xFFF, 0x1000, 8192, 0x1_0000, 1_000_000, -1];
 
         for (index, &raw_imm) in immediates.iter().enumerate() {
@@ -1587,7 +1587,7 @@ mod tests {
                 0,
                 word_for_range(immediates.len() as u32, index as u32),
             ]);
-            let operand = random_operand(&mut rng, &[], &immediates);
+            let operand = random_imm12_operand(&mut rng, &[], &immediates);
             assert_eq!(
                 operand,
                 Operand::Immediate(raw_imm.rem_euclid(0x1000)),
@@ -2771,7 +2771,7 @@ mod tests {
         // ADD/SUB/ADDS/SUBS (slots 2, 3, 18, 19) consume, in order: `rd`, the
         // opcode slot, `rn`, then `random_arith_rm_operand`. The latter first
         // draws a 0..3 shape selector (2 = shifted register, issue #279) and,
-        // when that is not 2, falls through to `random_operand`, whose
+        // when that is not 2, falls through to `random_imm12_operand`, whose
         // `random_bool(0.5)` register/immediate coin pulls a u64 (two words).
         // Drive shape != 2 and bias the coin toward the immediate branch so the
         // imm12 clamp is exercised. The high word governs the 0.5 split, so
