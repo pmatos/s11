@@ -27,10 +27,13 @@ Algorithms:
 - Enumerative, stochastic, symbolic, hybrid, and LLM-assisted search are
   available for AArch64.
 - Enumerative search scales with the generated instruction families in its
-  candidate pool. At the default AArch64 8-register CLI scope, `madd`/`msub`
-  contribute `2 * 8^4` and `mneg`/`smulh`/`umulh` contribute `3 * 8^3`, or
-  9,728 extra candidates per length bucket; use `--timeout` or smaller
-  optimization windows to bound runtime.
+  candidate pool. The source entry point is
+  [`generate_all_instructions`](../src/search/candidate.rs). At the default
+  AArch64 8-register CLI scope, `madd`/`msub` contribute `2 * 8^4` and
+  `mneg`/`smulh`/`umulh` contribute `3 * 8^3`, adding 9,728 additional
+  instructions to the candidate pool. The sequence space in each length bucket
+  therefore grows as `pool_size^L`; use `--timeout` or smaller optimization
+  windows to bound runtime.
 - Hybrid and LLM remain AArch64-only.
 
 Rewritable straight-line mnemonics accepted by the parser and Capstone bridge:
@@ -38,6 +41,13 @@ Rewritable straight-line mnemonics accepted by the parser and Capstone bridge:
 - Data movement and aliases: `mov`, `mvn`, `neg`, `negs`, `movn`, `movz`,
   `movk`
   - Register `mov` supports both 64-bit `X` and 32-bit `W` forms.
+- First NEON/SIMD vertical slice: `movi` with `Vn.2d|4s, #0`, lane-wise
+  wrapping `add Vd.2d|4s, Vn.2d|4s, Vm.2d|4s`, and
+  `mov Xd, Vn.d[0|1]`.
+  `V0..V31` are modelled as aliased 128-bit registers across arrangement
+  views and may be named in `--live-out`. Concrete and SMT equivalence compare
+  the full 128 bits. Other arrangements, modified immediates, vector loads,
+  reductions, shuffles, and scalar `q`/`d`/`s` spellings remain out of scope.
 - Arithmetic and flag-setting arithmetic: `add`, `sub`, `adds`, `subs`
 - Add/subtract with carry (X-only, register form): `adc`, `adcs`, `sbc`, `sbcs`
   - Non-flag-setting `add` and `sub` support both 64-bit `X` and 32-bit `W`
