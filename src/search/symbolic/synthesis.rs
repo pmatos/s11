@@ -466,6 +466,7 @@ mod tests {
     static TEST_EQUIVALENCE_SMT_CALLED: AtomicBool = AtomicBool::new(false);
     static TEST_RECORDED_TIMEOUT_MS: AtomicU64 = AtomicU64::new(u64::MAX);
     static TEST_SEQUENCE_COST_DELAY_MS: AtomicU64 = AtomicU64::new(0);
+    static TEST_GENERATED_CANDIDATE_COST_OVERRIDE: AtomicU64 = AtomicU64::new(0);
     static TEST_STOP_FLAG: Mutex<Option<Arc<AtomicBool>>> = Mutex::new(None);
     static SYMBOLIC_INNER_LOOP_TEST_LOCK: Mutex<()> = Mutex::new(());
 
@@ -492,6 +493,7 @@ mod tests {
         TEST_EQUIVALENCE_SMT_CALLED.store(false, Ordering::SeqCst);
         TEST_RECORDED_TIMEOUT_MS.store(u64::MAX, Ordering::SeqCst);
         TEST_SEQUENCE_COST_DELAY_MS.store(0, Ordering::SeqCst);
+        TEST_GENERATED_CANDIDATE_COST_OVERRIDE.store(0, Ordering::SeqCst);
         let mut slot = TEST_STOP_FLAG.lock().expect("test stop flag lock poisoned");
         *slot = None;
     }
@@ -658,6 +660,13 @@ mod tests {
             if delay_ms > 0 {
                 std::thread::sleep(Duration::from_millis(delay_ms));
             }
+            let generated_cost = TEST_GENERATED_CANDIDATE_COST_OVERRIDE.load(Ordering::SeqCst);
+            if generated_cost > 0
+                && !seq.is_empty()
+                && seq.iter().all(|instruction| instruction.0 == 0)
+            {
+                return generated_cost;
+            }
             seq.len() as u64
         }
 
@@ -816,6 +825,29 @@ mod tests {
         let mut search: SymbolicSearch<TestIsa> = SymbolicSearch::new();
         let config =
             SearchConfig::default().with_symbolic(SymbolicConfig::default().with_cost_bound(1));
+        let target = [TestInstruction(100), TestInstruction(101)];
+
+        let result = search.search(&target, &(), &config);
+
+        assert!(!result.found_optimization);
+        assert!(result.optimized_sequence.is_none());
+        assert_eq!(result.statistics.best_cost_found, 2);
+        assert_eq!(TEST_EQUIVALENCE_CHECKS.load(Ordering::SeqCst), 0);
+        assert_eq!(result.statistics.candidates_evaluated, 1);
+        assert_eq!(result.statistics.candidates_pruned_by_cost, 1);
+    }
+
+    #[test]
+    fn symbolic_cost_bound_above_original_cost_keeps_original_ceiling() {
+        let _guard = SYMBOLIC_INNER_LOOP_TEST_LOCK
+            .lock()
+            .expect("symbolic inner-loop test lock poisoned");
+        reset_symbolic_inner_loop_test_state();
+        TEST_GENERATED_CANDIDATE_COST_OVERRIDE.store(3, Ordering::SeqCst);
+
+        let mut search: SymbolicSearch<TestIsa> = SymbolicSearch::new();
+        let config =
+            SearchConfig::default().with_symbolic(SymbolicConfig::default().with_cost_bound(4));
         let target = [TestInstruction(100), TestInstruction(101)];
 
         let result = search.search(&target, &(), &config);
