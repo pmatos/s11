@@ -14,7 +14,9 @@
 
 use crate::ir::instructions::{AARCH64_RANDOM_SHIFT_IMMEDIATES, MOVW_LEGAL_SHIFTS};
 use crate::ir::types::Condition;
-use crate::ir::{ExtendKind, Instruction, Operand, Register, RegisterWidth};
+use crate::ir::{
+    ExtendKind, Instruction, Operand, Register, RegisterWidth, VectorArrangement, VectorRegister,
+};
 use crate::search::candidate::generate_random_instruction;
 use crate::search::config::MutationWeights;
 use rand::RngExt;
@@ -75,6 +77,13 @@ fn strip_ror_for_arith(rm: Operand) -> Operand {
         Operand::Register(reg)
     } else {
         rm
+    }
+}
+
+fn alternate_arrangement(arrangement: VectorArrangement) -> VectorArrangement {
+    match arrangement {
+        VectorArrangement::TwoD => VectorArrangement::FourS,
+        VectorArrangement::FourS => VectorArrangement::TwoD,
     }
 }
 
@@ -210,6 +219,49 @@ impl Mutator {
                     *imm = self.random_immediate(rng);
                 }
             }
+            Instruction::Movi {
+                vd, arrangement, ..
+            } => {
+                if rng.random_bool(0.5) {
+                    if let Some(register) = self.random_vector_register(rng) {
+                        *vd = register;
+                    }
+                } else {
+                    *arrangement = alternate_arrangement(*arrangement);
+                }
+            }
+            Instruction::MovFromVectorLane { rd, vn, lane } => match rng.random_range(0..3) {
+                0 => *rd = self.random_register(rng),
+                1 => {
+                    if let Some(register) = self.random_vector_register(rng) {
+                        *vn = register;
+                    }
+                }
+                _ => *lane ^= 1,
+            },
+            Instruction::VectorAdd {
+                vd,
+                vn,
+                vm,
+                arrangement,
+            } => match rng.random_range(0..4) {
+                0 => {
+                    if let Some(register) = self.random_vector_register(rng) {
+                        *vd = register;
+                    }
+                }
+                1 => {
+                    if let Some(register) = self.random_vector_register(rng) {
+                        *vn = register;
+                    }
+                }
+                2 => {
+                    if let Some(register) = self.random_vector_register(rng) {
+                        *vm = register;
+                    }
+                }
+                _ => *arrangement = alternate_arrangement(*arrangement),
+            },
             Instruction::Add { rd, rn, rm } | Instruction::Sub { rd, rn, rm } => {
                 let choice = rng.random_range(0..3);
                 match choice {
@@ -588,6 +640,25 @@ impl Mutator {
         let instr = sequence[idx];
 
         sequence[idx] = match instr {
+            Instruction::Movi {
+                vd, arrangement, ..
+            } => {
+                let source = self.random_vector_register(rng).unwrap_or(vd);
+                Instruction::VectorAdd {
+                    vd,
+                    vn: source,
+                    vm: source,
+                    arrangement,
+                }
+            }
+            Instruction::VectorAdd {
+                vd, arrangement, ..
+            } => Instruction::Movi {
+                vd,
+                arrangement,
+                imm: 0,
+            },
+            Instruction::MovFromVectorLane { .. } => instr,
             Instruction::MovReg { rd, rn } => {
                 if rng.random_bool(0.5) {
                     Instruction::MovImm {
@@ -746,10 +817,24 @@ impl Mutator {
                 1 => Instruction::Lsr { rd, rn, shift },
                 _ => Instruction::Asr { rd, rn, shift },
             },
-            Instruction::Mul { rd, rn, rm } => match rng.random_range(0..4) {
+            // MUL bridges the division opcodes and multiply-accumulate cluster.
+            // Expanding to a four-register form selects `ra` from the register pool.
+            Instruction::Mul { rd, rn, rm } => match rng.random_range(0..6) {
                 0 => Instruction::Sdiv { rd, rn, rm },
                 1 => Instruction::Udiv { rd, rn, rm },
                 2 => Instruction::Mneg { rd, rn, rm },
+                3 => Instruction::Madd {
+                    rd,
+                    rn,
+                    rm,
+                    ra: self.random_register(rng),
+                },
+                4 => Instruction::Msub {
+                    rd,
+                    rn,
+                    rm,
+                    ra: self.random_register(rng),
+                },
                 _ => Instruction::Mul { rd, rn, rm },
             },
             Instruction::Sdiv { rd, rn, rm } => match rng.random_range(0..3) {
@@ -858,8 +943,8 @@ impl Mutator {
             // outgoing arm than MOVN/MOVK. The top-level search accepts it as
             // a heuristic proposal without a Hastings correction.
             //
-            // Topology note: before this PR, MOVN had a direct MOVN ↔ MovImm
-            // edge. We removed it so MOVN now reaches MovImm via two hops
+            // Topology note: before PR #108, MOVN had a direct MOVN ↔ MovImm
+            // edge. PR #108 removed it, so MOVN now reaches MovImm via two hops
             // (MOVN → MOVZ → MovImm). Ergodicity is preserved — every move
             // family member can still reach every other — but mixing time
             // along the MOVN/MovImm corridor is one step longer. The trade
@@ -1483,10 +1568,28 @@ impl Mutator {
     }
 
     fn random_register<R: RngExt>(&self, rng: &mut R) -> Register {
-        if self.registers.is_empty() {
-            Register::X0
+        let scalar_registers: Vec<_> = self
+            .registers
+            .iter()
+            .copied()
+            .filter(|register| register.vector().is_none())
+            .collect();
+        if scalar_registers.is_empty() {
+            return Register::X0;
+        }
+        scalar_registers[rng.random_range(0..scalar_registers.len())]
+    }
+
+    fn random_vector_register<R: RngExt>(&self, rng: &mut R) -> Option<VectorRegister> {
+        let vector_registers: Vec<_> = self
+            .registers
+            .iter()
+            .filter_map(|register| register.vector())
+            .collect();
+        if vector_registers.is_empty() {
+            None
         } else {
-            self.registers[rng.random_range(0..self.registers.len())]
+            Some(vector_registers[rng.random_range(0..vector_registers.len())])
         }
     }
 
@@ -1660,14 +1763,14 @@ impl Mutator {
     fn has_extended_register_source(&self) -> bool {
         self.registers
             .iter()
-            .any(|reg| !matches!(reg, Register::SP | Register::XZR))
+            .any(|reg| reg.index().is_some() && *reg != Register::XZR)
     }
 
     fn random_extended_register<R: RngExt>(&self, rng: &mut R) -> Operand {
         let eligible_count = self
             .registers
             .iter()
-            .filter(|reg| !matches!(reg, Register::SP | Register::XZR))
+            .filter(|reg| reg.index().is_some() && **reg != Register::XZR)
             .count();
         debug_assert!(eligible_count > 0);
         let selected = rng.random_range(0..eligible_count);
@@ -1675,7 +1778,7 @@ impl Mutator {
             .registers
             .iter()
             .copied()
-            .filter(|reg| !matches!(reg, Register::SP | Register::XZR))
+            .filter(|reg| reg.index().is_some() && *reg != Register::XZR)
             .nth(selected)
             .expect("random_extended_register requires at least one non-SP/non-XZR register");
         let kinds = [
@@ -3638,6 +3741,56 @@ mod tests {
     }
 
     #[test]
+    fn mul_opcode_mutation_reaches_madd_and_msub() {
+        let mutator = Mutator::new(vec![Register::X3], vec![0], MutationWeights::default());
+        let mut rng = StdRng::seed_from_u64(410);
+        let original = Instruction::Mul {
+            rd: Register::X0,
+            rn: Register::X1,
+            rm: Register::X2,
+        };
+        let mut seen_madd = false;
+        let mut seen_msub = false;
+
+        for _ in 0..200 {
+            let mut seq = vec![original];
+            mutator.mutate_opcode(&mut rng, &mut seq);
+            assert!(
+                seq[0].is_encodable_aarch64(),
+                "MUL opcode mutation must stay encodable: {}",
+                seq[0]
+            );
+
+            match seq[0] {
+                Instruction::Madd { rd, rn, rm, ra } => {
+                    assert_eq!(
+                        (rd, rn, rm, ra),
+                        (Register::X0, Register::X1, Register::X2, Register::X3)
+                    );
+                    seen_madd = true;
+                }
+                Instruction::Msub { rd, rn, rm, ra } => {
+                    assert_eq!(
+                        (rd, rn, rm, ra),
+                        (Register::X0, Register::X1, Register::X2, Register::X3)
+                    );
+                    seen_msub = true;
+                }
+                Instruction::Mul { rd, rn, rm }
+                | Instruction::Mneg { rd, rn, rm }
+                | Instruction::Sdiv { rd, rn, rm }
+                | Instruction::Udiv { rd, rn, rm } => {
+                    assert_eq!((rd, rn, rm), (Register::X0, Register::X1, Register::X2));
+                }
+                other => panic!("unexpected MUL opcode mutation: {other:?}"),
+            }
+        }
+
+        assert!(seen_madd, "MUL opcode mutation must reach MADD");
+        assert!(seen_msub, "MUL opcode mutation must reach MSUB");
+    }
+
+    #[test]
     fn mneg_opcode_mutation_reaches_madd_and_msub() {
         let mutator = Mutator::new(vec![Register::X3], vec![0], MutationWeights::default());
         let mut rng = StdRng::seed_from_u64(127);
@@ -4053,6 +4206,51 @@ mod tests {
         // Swap mutation should be a no-op on single instruction
         mutator.mutate_swap(&mut rng, &mut mutated);
         assert_eq!(mutated.len(), 1);
+    }
+
+    #[test]
+    fn operand_mutation_keeps_scalar_and_vector_register_classes_separate() {
+        let mutator = Mutator::new(
+            vec![
+                Register::X0,
+                Register::X1,
+                Register::Vector(VectorRegister::V0),
+                Register::Vector(VectorRegister::V1),
+            ],
+            vec![0, 1],
+            MutationWeights::default(),
+        );
+        let originals = [
+            Instruction::Add {
+                rd: Register::X0,
+                rn: Register::X1,
+                rm: Operand::Register(Register::X0),
+            },
+            Instruction::VectorAdd {
+                vd: VectorRegister::V0,
+                vn: VectorRegister::V1,
+                vm: VectorRegister::V0,
+                arrangement: VectorArrangement::TwoD,
+            },
+            Instruction::MovFromVectorLane {
+                rd: Register::X0,
+                vn: VectorRegister::V1,
+                lane: 0,
+            },
+        ];
+        let mut rng = ChaCha8Rng::seed_from_u64(208);
+
+        for original in originals {
+            for _ in 0..10_000 {
+                let mut sequence = vec![original];
+                mutator.mutate_operand(&mut rng, &mut sequence);
+                assert!(
+                    sequence[0].is_encodable_aarch64(),
+                    "operand mutation crossed register classes: {:?}",
+                    sequence[0]
+                );
+            }
+        }
     }
 
     // ===== Issue #69: terminator-aware mutation =====
