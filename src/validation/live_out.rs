@@ -413,6 +413,7 @@ mod tests {
     #[test]
     fn display_renders_message_without_type_prefix() {
         let err: ParseLiveOutError = parse_live_out_contract("x0;bogus").unwrap_err();
+        // Deliberately fragile: ADR-0006 diagnostic wording changes should require review.
         assert_eq!(
             err.to_string(),
             "unknown flag token 'bogus'; expected 'nzcv'"
@@ -993,6 +994,7 @@ mod tests {
     #[test]
     fn test_parse_live_out_contract_reversed_order_nzcv_x0_error() {
         let err = parse_live_out_contract("nzcv;x0").unwrap_err();
+        // Deliberately fragile: review the complete issue #181 diagnostic before changing it.
         assert_eq!(
             err.to_string(),
             "flag token 'nzcv' must follow the register list after ';' (for example ';nzcv'); got 'nzcv;x0'"
