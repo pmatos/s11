@@ -860,8 +860,8 @@ impl Mutator {
             // outgoing arm than MOVN/MOVK. The top-level search accepts it as
             // a heuristic proposal without a Hastings correction.
             //
-            // Topology note: before this PR, MOVN had a direct MOVN ↔ MovImm
-            // edge. We removed it so MOVN now reaches MovImm via two hops
+            // Topology note: before PR #108, MOVN had a direct MOVN ↔ MovImm
+            // edge. PR #108 removed it, so MOVN now reaches MovImm via two hops
             // (MOVN → MOVZ → MovImm). Ergodicity is preserved — every move
             // family member can still reach every other — but mixing time
             // along the MOVN/MovImm corridor is one step longer. The trade
