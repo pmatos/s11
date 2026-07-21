@@ -135,14 +135,14 @@ pub fn parse_live_out_contract(s: &str) -> Result<LiveOut, ParseLiveOutError> {
     let trimmed = s.trim();
     let semicolon_count = trimmed.matches(';').count();
     if semicolon_count > 1 {
-        return Err(ParseRegisterSetError::new(format!(
+        return Err(ParseLiveOutError::new(format!(
             "--live-out accepts at most one ';' (got: '{}')",
             s
         )));
     }
     if semicolon_count == 0 {
         if trimmed.eq_ignore_ascii_case("nzcv") {
-            return Err(ParseRegisterSetError::new(format!(
+            return Err(ParseLiveOutError::new(format!(
                 "flag-only live-out requires a leading ';' (e.g. \";nzcv\"); got '{}'",
                 s
             )));
@@ -163,13 +163,13 @@ pub fn parse_live_out_contract(s: &str) -> Result<LiveOut, ParseLiveOutError> {
         "" => false,
         "nzcv" => true,
         "n" | "z" | "c" | "v" => {
-            return Err(ParseRegisterSetError::new(format!(
+            return Err(ParseLiveOutError::new(format!(
                 "per-flag token '{}' is reserved for a future extension; use 'nzcv' for all flags",
                 flags_tok
             )));
         }
         other => {
-            return Err(ParseRegisterSetError::new(format!(
+            return Err(ParseLiveOutError::new(format!(
                 "unknown flag token '{}'; expected 'nzcv'",
                 other
             )));
