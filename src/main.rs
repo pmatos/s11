@@ -3394,11 +3394,44 @@ fn main() {
             llm_max_calls,
             llm_model,
         } => {
-            // Architecture selection — always read the ELF e_machine first so
-            // a stale or wrong --arch value cannot route bytes through the
-            // wrong optimization pipeline. Build the ElfPatcher once here
-            // (issue #88) and thread it into both helpers so the file isn't
-            // read + parsed twice.
+            // RISC-V has no optimization pipeline, so reject an explicit
+            // RISC-V target before asking the supported-architecture patcher
+            // to open the ELF (constructing it fails hard on a RISC-V e_machine,
+            // which is bug #207). Peek at the header first — rather than exit
+            // unconditionally — so an unreadable file or a genuine arch
+            // mismatch still gets its own diagnostic ahead of the RISC-V one.
+            if let Some(requested) = arch
+                && matches!(requested, CliArch::Riscv32 | CliArch::Riscv64)
+            {
+                match fs::read(&binary)
+                    .map_err(|e| e.to_string())
+                    .and_then(|data| {
+                        ElfBytes::<AnyEndian>::minimal_parse(&data)
+                            .map(|elf| elf.ehdr.e_machine)
+                            .map_err(|e| e.to_string())
+                    }) {
+                    Ok(machine) => match SupportedArch::from_e_machine(machine) {
+                        Ok(detected) => {
+                            let detected: CliArch = detected.into();
+                            eprintln!(
+                                "{ARCH_MISMATCH_PREFIX} --arch {requested} but ELF reports {detected}"
+                            );
+                            std::process::exit(1);
+                        }
+                        Err(_) => {
+                            eprintln!("{}", OptTargetError::RiscvUnsupported);
+                            std::process::exit(1);
+                        }
+                    },
+                    Err(e) => {
+                        eprintln!("Error reading ELF: {}", e);
+                        std::process::exit(1);
+                    }
+                }
+            }
+
+            // Build the ElfPatcher once here (issue #88) and thread it into
+            // both helpers so the file isn't read + parsed twice.
             let patcher = ElfPatcher::new(&binary).unwrap_or_else(|e| {
                 eprintln!("Error reading ELF: {}", e);
                 std::process::exit(1);
@@ -3544,6 +3577,19 @@ mod cli_helper_tests {
             llm_max_calls: 0,
             llm_model: "test-model".to_string(),
         }
+    }
+
+    fn assert_stochastic_config_matches_options(
+        config: &SearchConfig,
+        options: &OptimizationOptions,
+    ) {
+        assert_eq!(config.solver_timeout, Some(options.solver_timeout));
+        assert_eq!(config.stochastic.beta, options.beta);
+        assert_eq!(config.stochastic.iterations, options.iterations);
+        assert_eq!(config.stochastic.seed, options.seed);
+        assert_eq!(config.cost_metric, options.cost_metric);
+        assert_eq!(config.timeout, options.timeout);
+        assert_eq!(config.verbose, options.verbose);
     }
 
     fn r10_zeroing_target() -> [X86Instruction; 2] {
@@ -6972,13 +7018,7 @@ mod cli_helper_tests {
         let imms = vec![0, 7];
         let config = build_stochastic_search_config(&opts, regs.clone(), imms.clone());
 
-        assert_eq!(config.solver_timeout, Some(Duration::from_millis(17)));
-        assert_eq!(config.stochastic.beta, 2.5);
-        assert_eq!(config.stochastic.iterations, 123);
-        assert_eq!(config.stochastic.seed, Some(99));
-        assert_eq!(config.cost_metric, CostMetric::Latency);
-        assert_eq!(config.timeout, Some(Duration::from_millis(11)));
-        assert!(config.verbose);
+        assert_stochastic_config_matches_options(&config, &opts);
         assert_eq!(config.available_registers, regs);
         assert_eq!(config.available_immediates, imms);
     }
@@ -7127,13 +7167,7 @@ mod cli_helper_tests {
         ];
         let config = build_x86_stochastic_search_config(&target, &opts);
 
-        assert_eq!(config.solver_timeout, Some(Duration::from_millis(19)));
-        assert_eq!(config.stochastic.beta, 3.5);
-        assert_eq!(config.stochastic.iterations, 456);
-        assert_eq!(config.stochastic.seed, Some(101));
-        assert_eq!(config.cost_metric, CostMetric::CodeSize);
-        assert_eq!(config.timeout, Some(Duration::from_millis(13)));
-        assert!(config.verbose);
+        assert_stochastic_config_matches_options(&config, &opts);
         assert_eq!(
             config.x86_available_registers,
             vec![X86Register::R11, X86Register::R12]

@@ -2420,6 +2420,7 @@ fn logical_imm32_for_assembler(mnemonic: &str, imm: i64) -> Result<u32, String> 
 mod tests {
     use super::*;
     use crate::ir::VectorRegister;
+    use crate::test_utils::instruction_fixtures::aarch64_instruction_families;
 
     #[test]
     fn assemble_first_neon_slice_matches_aarch64_encodings() {
@@ -2469,6 +2470,16 @@ mod tests {
                 0xa5, 0x4e, 0x20, 0x3c, 0x08, 0x4e, 0x62, 0x3c, 0x18, 0x4e,
             ]
         );
+    }
+
+    #[test]
+    fn every_enumerated_instruction_family_assembles() {
+        for fixture in aarch64_instruction_families() {
+            let mut assembler = AArch64Assembler::new();
+            assembler
+                .assemble_instructions(&[fixture.instruction], 0)
+                .unwrap_or_else(|error| panic!("{} failed to assemble: {error}", fixture.mnemonic));
+        }
     }
 
     #[test]
