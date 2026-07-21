@@ -538,6 +538,63 @@ fn test_opt_matching_riscv_arch_reports_unsupported() {
 }
 
 #[test]
+fn test_opt_mismatched_riscv_arch_reports_arch_mismatch() {
+    let aarch64_elf = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("binaries")
+        .join("simple_debug");
+    check_test_binary(&aarch64_elf);
+
+    let output = Command::new(get_binary_path())
+        .arg("opt")
+        .arg(&aarch64_elf)
+        .arg("--arch")
+        .arg("riscv64")
+        .arg("--start-addr")
+        .arg("0x0")
+        .arg("--end-addr")
+        .arg("0x4")
+        .output()
+        .expect("execute s11 opt");
+
+    assert!(
+        !output.status.success(),
+        "mismatched --arch riscv64 should fail"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.starts_with("Architecture mismatch: --arch riscv64 but ELF reports aarch64"),
+        "an AArch64 ELF requested as riscv64 should report the mismatch, not the RISC-V \
+         support boundary; stderr: {stderr}"
+    );
+}
+
+#[test]
+fn test_opt_riscv_arch_with_missing_file_reports_io_error() {
+    let output = Command::new(get_binary_path())
+        .arg("opt")
+        .arg("/nonexistent/path/does-not-exist.elf")
+        .arg("--arch")
+        .arg("riscv64")
+        .arg("--start-addr")
+        .arg("0x0")
+        .arg("--end-addr")
+        .arg("0x4")
+        .output()
+        .expect("execute s11 opt");
+
+    assert!(
+        !output.status.success(),
+        "a missing file requested as riscv64 should fail"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.starts_with("Error reading ELF"),
+        "a missing file should report the I/O error, not the RISC-V support boundary; \
+         stderr: {stderr}"
+    );
+}
+
+#[test]
 fn test_opt_address_out_of_bounds() {
     let binary = get_binary_path();
     let test_elf = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
