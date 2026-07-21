@@ -3,7 +3,7 @@
 use crate::ir::aarch64_encoding::logical_imm64_encodable;
 use crate::ir::types::{
     AccessWidth, AddressOperand, Condition, ExtendKind, IndexMode, LabelId, Operand,
-    PairAccessWidth, Register, RegisterWidth, ShiftKind,
+    PairAccessWidth, Register, RegisterWidth, ShiftKind, VectorArrangement, VectorRegister,
 };
 use std::fmt;
 
@@ -35,15 +35,15 @@ pub(crate) fn logical_imm32_encodable(imm: i64) -> bool {
 }
 
 fn is_x_or_xzr(reg: Register) -> bool {
-    reg != Register::SP
+    reg.is_general_or_zero()
 }
 
 fn is_xsp(reg: Register) -> bool {
-    reg != Register::XZR
+    reg.is_general_or_sp()
 }
 
 fn is_plain_x(reg: Register) -> bool {
-    reg != Register::SP && reg != Register::XZR
+    reg.index().is_some() && reg != Register::XZR
 }
 
 /// Helper for `Instruction::destinations` on single-register memory ops: the
@@ -119,6 +119,19 @@ pub enum Instruction {
         rd: Register,
         imm: i64,
     },
+    /// Initialize every lane of a 128-bit NEON register from a modified
+    /// immediate. The first slice intentionally admits only immediate zero.
+    Movi {
+        vd: VectorRegister,
+        arrangement: VectorArrangement,
+        imm: u8,
+    },
+    /// Copy one 64-bit `.d` lane from a NEON register into an X register.
+    MovFromVectorLane {
+        rd: Register,
+        vn: VectorRegister,
+        lane: u8,
+    },
 
     // Arithmetic
     Add {
@@ -130,6 +143,13 @@ pub enum Instruction {
         rd: Register,
         rn: Register,
         rm: Operand,
+    },
+    /// Wrapping lane-wise integer addition over a 128-bit NEON register.
+    VectorAdd {
+        vd: VectorRegister,
+        vn: VectorRegister,
+        vm: VectorRegister,
+        arrangement: VectorArrangement,
     },
     Sub {
         rd: Register,
@@ -620,6 +640,7 @@ impl Instruction {
             Instruction::MovReg { rd, .. }
             | Instruction::MovRegW { rd, .. }
             | Instruction::MovImm { rd, .. }
+            | Instruction::MovFromVectorLane { rd, .. }
             | Instruction::Add { rd, .. }
             | Instruction::AddW { rd, .. }
             | Instruction::Sub { rd, .. }
@@ -679,6 +700,9 @@ impl Instruction {
             | Instruction::Bfxil { rd, .. }
             | Instruction::Ubfiz { rd, .. }
             | Instruction::Sbfiz { rd, .. } => Some(*rd),
+            Instruction::Movi { vd, .. } | Instruction::VectorAdd { vd, .. } => {
+                Some(Register::Vector(*vd))
+            }
             // Comparison instructions only set flags, no destination register
             Instruction::Cmp { .. }
             | Instruction::Cmn { .. }
@@ -819,6 +843,9 @@ impl Instruction {
 
             // MOV immediate: 16-bit range
             Instruction::MovImm { rd, imm } => is_x_or_xzr(*rd) && *imm >= 0 && *imm <= 0xFFFF,
+            Instruction::Movi { imm, .. } => *imm == 0,
+            Instruction::MovFromVectorLane { rd, lane, .. } => is_x_or_xzr(*rd) && *lane < 2,
+            Instruction::VectorAdd { .. } => true,
 
             // ADD/SUB: register or immediate (12-bit unsigned), or shifted-register
             // (LSL/LSR/ASR only — ROR not encodable for arithmetic shifted-register form).
@@ -1197,7 +1224,11 @@ impl Instruction {
     pub fn source_registers(&self) -> Vec<Register> {
         match self {
             Instruction::MovReg { rn, .. } | Instruction::MovRegW { rn, .. } => vec![*rn],
-            Instruction::MovImm { .. } => vec![],
+            Instruction::MovImm { .. } | Instruction::Movi { .. } => vec![],
+            Instruction::MovFromVectorLane { vn, .. } => vec![Register::Vector(*vn)],
+            Instruction::VectorAdd { vn, vm, .. } => {
+                vec![Register::Vector(*vn), Register::Vector(*vm)]
+            }
             Instruction::Add { rn, rm, .. }
             | Instruction::AddW { rn, rm, .. }
             | Instruction::Sub { rn, rm, .. }
@@ -1531,6 +1562,14 @@ impl fmt::Display for Instruction {
                 RegisterWidth::W32.register_name(*rn)
             ),
             Instruction::MovImm { rd, imm } => write!(f, "mov {}, #{}", rd, imm),
+            Instruction::Movi {
+                vd,
+                arrangement,
+                imm,
+            } => write!(f, "movi {}.{}, #{}", vd, arrangement, imm),
+            Instruction::MovFromVectorLane { rd, vn, lane } => {
+                write!(f, "mov {}, {}.d[{}]", rd, vn, lane)
+            }
             Instruction::Add { rd, rn, rm } => write!(f, "add {}, {}, {}", rd, rn, rm),
             Instruction::AddW { rd, rn, rm } => write!(
                 f,
@@ -1538,6 +1577,16 @@ impl fmt::Display for Instruction {
                 RegisterWidth::W32.register_name(*rd),
                 RegisterWidth::W32.register_name(*rn),
                 rm.display_with_width(RegisterWidth::W32)
+            ),
+            Instruction::VectorAdd {
+                vd,
+                vn,
+                vm,
+                arrangement,
+            } => write!(
+                f,
+                "add {}.{}, {}.{}, {}.{}",
+                vd, arrangement, vn, arrangement, vm, arrangement
             ),
             Instruction::Sub { rd, rn, rm } => write!(f, "sub {}, {}, {}", rd, rn, rm),
             Instruction::SubW { rd, rn, rm } => write!(

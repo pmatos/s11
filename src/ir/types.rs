@@ -2,7 +2,105 @@
 
 use std::fmt;
 
-/// AArch64 general-purpose registers
+/// One of AArch64's 32 fixed-width 128-bit Advanced SIMD/FP registers.
+///
+/// Arrangement suffixes such as `.2d` and `.4s` are instruction metadata,
+/// not distinct registers: every view aliases the same packed 128 bits.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct VectorRegister(u8);
+
+impl VectorRegister {
+    pub const V0: Self = Self(0);
+    pub const V1: Self = Self(1);
+    pub const V2: Self = Self(2);
+    pub const V3: Self = Self(3);
+    pub const V4: Self = Self(4);
+    pub const V5: Self = Self(5);
+    pub const V6: Self = Self(6);
+    pub const V7: Self = Self(7);
+    pub const V8: Self = Self(8);
+    pub const V9: Self = Self(9);
+    pub const V10: Self = Self(10);
+    pub const V11: Self = Self(11);
+    pub const V12: Self = Self(12);
+    pub const V13: Self = Self(13);
+    pub const V14: Self = Self(14);
+    pub const V15: Self = Self(15);
+    pub const V16: Self = Self(16);
+    pub const V17: Self = Self(17);
+    pub const V18: Self = Self(18);
+    pub const V19: Self = Self(19);
+    pub const V20: Self = Self(20);
+    pub const V21: Self = Self(21);
+    pub const V22: Self = Self(22);
+    pub const V23: Self = Self(23);
+    pub const V24: Self = Self(24);
+    pub const V25: Self = Self(25);
+    pub const V26: Self = Self(26);
+    pub const V27: Self = Self(27);
+    pub const V28: Self = Self(28);
+    pub const V29: Self = Self(29);
+    pub const V30: Self = Self(30);
+    pub const V31: Self = Self(31);
+
+    #[must_use]
+    pub const fn from_index(index: u8) -> Option<Self> {
+        if index < 32 { Some(Self(index)) } else { None }
+    }
+
+    #[must_use]
+    pub const fn index(self) -> u8 {
+        self.0
+    }
+}
+
+impl fmt::Display for VectorRegister {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "v{}", self.0)
+    }
+}
+
+/// Packed integer lane arrangement supported by the first NEON slice.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum VectorArrangement {
+    /// Two 64-bit doubleword lanes (`.2d`).
+    TwoD,
+    /// Four 32-bit word lanes (`.4s`).
+    FourS,
+}
+
+impl VectorArrangement {
+    #[must_use]
+    pub const fn lane_count(self) -> u8 {
+        match self {
+            Self::TwoD => 2,
+            Self::FourS => 4,
+        }
+    }
+
+    #[must_use]
+    pub const fn lane_width(self) -> u8 {
+        match self {
+            Self::TwoD => 64,
+            Self::FourS => 32,
+        }
+    }
+}
+
+impl fmt::Display for VectorArrangement {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::TwoD => f.write_str("2d"),
+            Self::FourS => f.write_str("4s"),
+        }
+    }
+}
+
+/// AArch64 architectural registers used by liveness contracts.
+///
+/// Scalar instruction operands continue to use the X/SP variants. The
+/// `Vector` variant lets the existing generic register-set carrier represent
+/// SIMD live-in/live-out state without conflating 64-bit and 128-bit values.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[allow(clippy::upper_case_acronyms)]
 pub enum Register {
@@ -41,12 +139,14 @@ pub enum Register {
     // Special registers
     XZR, // Zero register
     SP,  // Stack pointer
+    // Advanced SIMD/FP register
+    Vector(VectorRegister),
 }
 
 impl Register {
     /// Get register index for X0-X30
     #[allow(dead_code)]
-    pub fn index(&self) -> Option<u8> {
+    pub const fn index(&self) -> Option<u8> {
         match self {
             Register::X0 => Some(0),
             Register::X1 => Some(1),
@@ -80,7 +180,7 @@ impl Register {
             Register::X29 => Some(29),
             Register::X30 => Some(30),
             Register::XZR => Some(31),
-            Register::SP => None,
+            Register::SP | Register::Vector(_) => None,
         }
     }
 
@@ -122,6 +222,43 @@ impl Register {
             _ => None,
         }
     }
+
+    #[must_use]
+    pub const fn vector(self) -> Option<VectorRegister> {
+        match self {
+            Register::Vector(register) => Some(register),
+            _ => None,
+        }
+    }
+
+    #[must_use]
+    pub const fn is_general_or_zero(self) -> bool {
+        !matches!(self, Register::SP | Register::Vector(_))
+    }
+
+    #[must_use]
+    pub const fn is_general_or_sp(self) -> bool {
+        !matches!(self, Register::XZR | Register::Vector(_))
+    }
+
+    #[must_use]
+    pub const fn sort_key(self) -> u16 {
+        match self {
+            Register::SP => 32,
+            Register::Vector(register) => 64 + register.index() as u16,
+            Register::XZR => 31,
+            _ => match self.index() {
+                Some(index) => index as u16,
+                None => 63,
+            },
+        }
+    }
+}
+
+impl From<VectorRegister> for Register {
+    fn from(register: VectorRegister) -> Self {
+        Self::Vector(register)
+    }
 }
 
 impl fmt::Display for Register {
@@ -160,6 +297,7 @@ impl fmt::Display for Register {
             Register::X30 => write!(f, "x30"),
             Register::XZR => write!(f, "xzr"),
             Register::SP => write!(f, "sp"),
+            Register::Vector(register) => register.fmt(f),
         }
     }
 }
@@ -198,6 +336,9 @@ impl RegisterWidth {
             (RegisterWidth::X64, reg) => X_NAMES[reg.index().expect("x register index") as usize],
             (RegisterWidth::W32, Register::XZR) => "wzr",
             (RegisterWidth::W32, Register::SP) => "wsp",
+            (_, Register::Vector(_)) => {
+                panic!("vector register has no scalar W/X register name")
+            }
             (RegisterWidth::W32, reg) => W_NAMES[reg.index().expect("w register index") as usize],
         }
     }

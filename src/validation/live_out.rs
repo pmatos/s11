@@ -2,7 +2,7 @@
 
 #![allow(dead_code)]
 
-use crate::ir::{Instruction, Register};
+use crate::ir::{Instruction, Register, VectorRegister};
 use crate::semantics::live_out::{LiveOut, RegisterSet};
 use std::str::FromStr;
 
@@ -55,6 +55,12 @@ fn parse_register(s: &str) -> Result<Register, ParseRegisterSetError> {
         && let Some(reg) = Register::from_index(num)
     {
         return Ok(reg);
+    }
+    if let Some(num_str) = s.strip_prefix('v')
+        && let Ok(num) = num_str.parse::<u8>()
+        && let Some(reg) = VectorRegister::from_index(num)
+    {
+        return Ok(Register::Vector(reg));
     }
 
     Err(ParseRegisterSetError::new(format!(
@@ -122,7 +128,7 @@ fn misplaced_flag_token_error(token: &str, input: &str) -> ParseRegisterSetError
 ///
 /// Grammar: `<regs>` or `<regs>;<flags>`. The register half follows
 /// `RegisterSet::<Register>::from_str` (comma- or space-separated, case-insensitive,
-/// accepts `x0..x30`, `sp`, `xzr`). The flag half currently accepts only the
+/// accepts `x0..x30`, `v0..v31`, `sp`, `xzr`). The flag half currently accepts only the
 /// group token `nzcv`; per-flag tokens `n`/`z`/`c`/`v` are reserved for a
 /// future per-flag liveness extension and rejected today. A bareword `nzcv`
 /// with no leading `;` is rejected to keep that reservation unambiguous.
@@ -851,6 +857,16 @@ mod tests {
         assert!(live_out.contains_register(Register::X0));
         assert!(live_out.contains_register(Register::X1));
         assert!(live_out.flags_live());
+    }
+
+    #[test]
+    fn parse_live_out_contract_accepts_vector_registers() {
+        let live_out = parse_live_out_contract("x0,v0,V31;nzcv").unwrap();
+        assert!(live_out.contains(Register::X0));
+        assert!(live_out.contains(Register::Vector(crate::ir::VectorRegister::V0)));
+        assert!(live_out.contains(Register::Vector(crate::ir::VectorRegister::V31)));
+        assert!(live_out.flags_live());
+        assert!(parse_live_out_contract("v32").is_err());
     }
 
     #[test]
