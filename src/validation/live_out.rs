@@ -135,14 +135,14 @@ pub fn parse_live_out_contract(s: &str) -> Result<LiveOut, ParseLiveOutError> {
     let trimmed = s.trim();
     let semicolon_count = trimmed.matches(';').count();
     if semicolon_count > 1 {
-        return Err(ParseRegisterSetError::new(format!(
+        return Err(ParseLiveOutError::new(format!(
             "--live-out accepts at most one ';' (got: '{}')",
             s
         )));
     }
     if semicolon_count == 0 {
         if trimmed.eq_ignore_ascii_case("nzcv") {
-            return Err(ParseRegisterSetError::new(format!(
+            return Err(ParseLiveOutError::new(format!(
                 "flag-only live-out requires a leading ';' (e.g. \";nzcv\"); got '{}'",
                 s
             )));
@@ -163,13 +163,13 @@ pub fn parse_live_out_contract(s: &str) -> Result<LiveOut, ParseLiveOutError> {
         "" => false,
         "nzcv" => true,
         "n" | "z" | "c" | "v" => {
-            return Err(ParseRegisterSetError::new(format!(
+            return Err(ParseLiveOutError::new(format!(
                 "per-flag token '{}' is reserved for a future extension; use 'nzcv' for all flags",
                 flags_tok
             )));
         }
         other => {
-            return Err(ParseRegisterSetError::new(format!(
+            return Err(ParseLiveOutError::new(format!(
                 "unknown flag token '{}'; expected 'nzcv'",
                 other
             )));
@@ -413,6 +413,7 @@ mod tests {
     #[test]
     fn display_renders_message_without_type_prefix() {
         let err: ParseLiveOutError = parse_live_out_contract("x0;bogus").unwrap_err();
+        // Deliberately fragile: ADR-0006 diagnostic wording changes should require review.
         assert_eq!(
             err.to_string(),
             "unknown flag token 'bogus'; expected 'nzcv'"
@@ -993,6 +994,7 @@ mod tests {
     #[test]
     fn test_parse_live_out_contract_reversed_order_nzcv_x0_error() {
         let err = parse_live_out_contract("nzcv;x0").unwrap_err();
+        // Deliberately fragile: review the complete issue #181 diagnostic before changing it.
         assert_eq!(
             err.to_string(),
             "flag token 'nzcv' must follow the register list after ';' (for example ';nzcv'); got 'nzcv;x0'"
