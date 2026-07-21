@@ -60,11 +60,16 @@ prepares that release.
 
 ## Recovering a partially published release
 
-`@semantic-release/git` pushes the release commit and tag during `prepare`,
-before `@semantic-release/github` creates the GitHub Release during `publish`.
-If the workflow fails between those operations, `main` contains the
-`chore(release): X.Y.Z [skip ci]` commit and `vX.Y.Z` tag, but
-`gh release view vX.Y.Z` fails because no GitHub Release exists.
+During `prepare`, `@semantic-release/git` commits and pushes the release
+assets as `chore(release): X.Y.Z [skip ci]`. semantic-release then creates and
+pushes the `vX.Y.Z` tag — but against the commit that was `HEAD` *before* that
+release commit was created, not the release commit itself: `nextRelease.gitHead`
+is captured once, before any `prepare` plugin runs, and is never refreshed
+afterward. Both happen before `@semantic-release/github` creates the GitHub
+Release during `publish`. If the workflow fails between those operations,
+`main` contains the `chore(release): X.Y.Z [skip ci]` commit and the `vX.Y.Z`
+tag points at its parent, but `gh release view vX.Y.Z` fails because no GitHub
+Release exists.
 
 Prefer completing that release without rewriting published Git history. The
 failed run retains its staged assets for 14 days in the
@@ -92,14 +97,17 @@ release tags to find the last published version and will treat that version as
 already released. If manual publication is not possible, restore the
 pre-release repository state before retrying. After confirming that no GitHub
 Release exists for the tag, revert the release commit, then delete the remote
-tag and dispatch a fresh run:
+tag and dispatch a fresh run. Because the tag points at the release commit's
+*parent* (see above), resolve the release commit by its message instead of by
+the tag:
 
 ```sh
 TAG=vX.Y.Z
 git fetch origin main --tags
 git switch main
 git pull --ff-only origin main
-RELEASE_COMMIT=$(git rev-list -n 1 "$TAG")
+RELEASE_COMMIT=$(git log --fixed-strings --format=%H \
+  --grep="chore(release): ${TAG#v} [skip ci]" -n 1)
 git revert --no-commit "$RELEASE_COMMIT"
 git commit -m "chore(release): roll back $TAG [skip ci]"
 git push origin main
