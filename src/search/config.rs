@@ -268,6 +268,11 @@ impl SymbolicConfig {
         self
     }
 
+    pub fn with_cost_bound_option(mut self, bound: Option<u64>) -> Self {
+        self.cost_bound = bound;
+        self
+    }
+
     pub fn with_search_mode(mut self, mode: SearchMode) -> Self {
         self.search_mode = mode;
         self
@@ -810,12 +815,15 @@ mod tests {
     fn test_symbolic_config_builder() {
         let config = SymbolicConfig::default()
             .with_window_size(5)
-            .with_cost_bound(2)
+            .with_cost_bound_option(Some(2))
             .with_search_mode(SearchMode::Binary);
 
         assert_eq!(config.window_size, 5);
         assert_eq!(config.cost_bound, Some(2));
         assert_eq!(config.search_mode, SearchMode::Binary);
+
+        let config = config.with_cost_bound(3).with_cost_bound_option(None);
+        assert_eq!(config.cost_bound, None);
     }
 
     #[test]
