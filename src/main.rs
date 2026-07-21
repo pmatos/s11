@@ -2014,85 +2014,131 @@ fn fmt_dur(d: Duration) -> String {
     }
 }
 
-/// Print the per-phase timing breakdown from an LLM-assisted run.
-fn print_llm_timings(timings: &search::llm::LlmTimings, total: Duration) {
+/// Render the per-phase LLM timing breakdown as one `String` per output line.
+///
+/// Pure seam: the pluralization, the conditional SMT sub-section (with its
+/// average-formula-bytes computation), and the conditional share-percentage
+/// section are all decided here so they can be asserted without capturing
+/// stdout. `print_llm_timings` prints the lines.
+fn format_llm_timings(timings: &search::llm::LlmTimings, total: Duration) -> Vec<String> {
     let codex = timings.codex_time;
     let verify = timings.verify_time;
     let other = total.saturating_sub(codex).saturating_sub(verify);
-    println!("\nLLM phase timing:");
-    println!(
-        "  Codex calls:      {}   ({} call{})",
-        fmt_dur(codex),
-        timings.codex_calls,
-        if timings.codex_calls == 1 { "" } else { "s" }
-    );
-    println!(
-        "  Verification:     {}   ({} verification{}, parse + fast + SMT)",
-        fmt_dur(verify),
-        timings.verifications,
-        if timings.verifications == 1 { "" } else { "s" }
-    );
+    let mut lines = vec![
+        "\nLLM phase timing:".to_string(),
+        format!(
+            "  Codex calls:      {}   ({} call{})",
+            fmt_dur(codex),
+            timings.codex_calls,
+            if timings.codex_calls == 1 { "" } else { "s" }
+        ),
+        format!(
+            "  Verification:     {}   ({} verification{}, parse + fast + SMT)",
+            fmt_dur(verify),
+            timings.verifications,
+            if timings.verifications == 1 { "" } else { "s" }
+        ),
+    ];
     if timings.smt_calls > 0 {
         let avg_bytes = timings.smt_formula_bytes_total / timings.smt_calls as usize;
-        println!(
+        lines.push(format!(
             "    SMT invoked:    {} time{}",
             timings.smt_calls,
             if timings.smt_calls == 1 { "" } else { "s" }
-        );
-        println!(
+        ));
+        lines.push(format!(
             "    SMT formula:    {}  total   ({}  avg, {}  max)",
             fmt_bytes(timings.smt_formula_bytes_total),
             fmt_bytes(avg_bytes),
             fmt_bytes(timings.smt_formula_bytes_max),
-        );
+        ));
     }
-    println!("  Other:            {}", fmt_dur(other));
-    println!("  Total:            {}", fmt_dur(total));
+    lines.push(format!("  Other:            {}", fmt_dur(other)));
+    lines.push(format!("  Total:            {}", fmt_dur(total)));
     if total.as_secs_f64() > 0.0 {
-        println!(
+        lines.push(format!(
             "  Codex share:      {:>6.2}%",
             100.0 * codex.as_secs_f64() / total.as_secs_f64()
-        );
-        println!(
+        ));
+        lines.push(format!(
             "  Verify share:     {:>6.2}%",
             100.0 * verify.as_secs_f64() / total.as_secs_f64()
-        );
+        ));
     }
+    lines
+}
+
+/// Print the per-phase timing breakdown from an LLM-assisted run.
+fn print_llm_timings(timings: &search::llm::LlmTimings, total: Duration) {
+    for line in format_llm_timings(timings, total) {
+        println!("{}", line);
+    }
+}
+
+/// Render the unsupported-mnemonic ledger as one `String` per output line.
+///
+/// Pure seam: returns an empty `Vec` for an empty ledger (so the printer emits
+/// nothing), otherwise a header plus one frequency-ranked entry line.
+fn format_unsupported_mnemonic_ledger(
+    ledger: &search::llm::ledger::UnsupportedMnemonicLedger,
+) -> Vec<String> {
+    if ledger.is_empty() {
+        return Vec::new();
+    }
+    let mut lines =
+        vec!["\nUnsupported mnemonics emitted by the LLM (frequency-ranked):".to_string()];
+    for (mnem, count) in ledger.sorted_entries() {
+        lines.push(format!("  {:>5}  {}", count, mnem));
+    }
+    lines
 }
 
 /// Print the unsupported-mnemonic ledger from an LLM-assisted run.
 fn print_unsupported_mnemonic_ledger(ledger: &search::llm::ledger::UnsupportedMnemonicLedger) {
-    if ledger.is_empty() {
-        return;
+    for line in format_unsupported_mnemonic_ledger(ledger) {
+        println!("{}", line);
     }
-    println!("\nUnsupported mnemonics emitted by the LLM (frequency-ranked):");
-    for (mnem, count) in ledger.sorted_entries() {
-        println!("  {:>5}  {}", count, mnem);
+}
+
+/// Render the search-statistics report as one `String` per output line.
+///
+/// Pure: the seam that lets tests assert on the exact report without capturing
+/// stdout. `print_search_statistics` prints the lines. Mirrors the
+/// `build_equiv_report` precedent.
+fn format_search_statistics(stats: &search::result::SearchStatistics) -> Vec<String> {
+    let mut lines = vec![
+        "\nSearch Statistics:".to_string(),
+        format!("  Algorithm: {:?}", stats.algorithm),
+        format!("  Elapsed time: {:?}", stats.elapsed_time),
+        format!("  Candidates evaluated: {}", stats.candidates_evaluated),
+        format!(
+            "  Candidates pruned by cost: {}",
+            stats.candidates_pruned_by_cost
+        ),
+        format!(
+            "  Candidates passed fast test: {}",
+            stats.candidates_passed_fast
+        ),
+        format!("  SMT queries: {}", stats.smt_queries),
+        format!("  SMT equivalent: {}", stats.smt_equivalent),
+        format!("  Improvements found: {}", stats.improvements_found),
+        format!("  Original cost: {}", stats.original_cost),
+        format!("  Best cost found: {}", stats.best_cost_found),
+    ];
+    if stats.iterations > 0 {
+        lines.push(format!("  Iterations: {}", stats.iterations));
+        lines.push(format!(
+            "  Acceptance rate: {:.2}%",
+            stats.acceptance_rate() * 100.0
+        ));
     }
+    lines
 }
 
 /// Print search statistics
 fn print_search_statistics(stats: &search::result::SearchStatistics) {
-    println!("\nSearch Statistics:");
-    println!("  Algorithm: {:?}", stats.algorithm);
-    println!("  Elapsed time: {:?}", stats.elapsed_time);
-    println!("  Candidates evaluated: {}", stats.candidates_evaluated);
-    println!(
-        "  Candidates pruned by cost: {}",
-        stats.candidates_pruned_by_cost
-    );
-    println!(
-        "  Candidates passed fast test: {}",
-        stats.candidates_passed_fast
-    );
-    println!("  SMT queries: {}", stats.smt_queries);
-    println!("  SMT equivalent: {}", stats.smt_equivalent);
-    println!("  Improvements found: {}", stats.improvements_found);
-    println!("  Original cost: {}", stats.original_cost);
-    println!("  Best cost found: {}", stats.best_cost_found);
-    if stats.iterations > 0 {
-        println!("  Iterations: {}", stats.iterations);
-        println!("  Acceptance rate: {:.2}%", stats.acceptance_rate() * 100.0);
+    for line in format_search_statistics(stats) {
+        println!("{}", line);
     }
 }
 
@@ -3318,11 +3364,44 @@ fn main() {
             llm_max_calls,
             llm_model,
         } => {
-            // Architecture selection — always read the ELF e_machine first so
-            // a stale or wrong --arch value cannot route bytes through the
-            // wrong optimization pipeline. Build the ElfPatcher once here
-            // (issue #88) and thread it into both helpers so the file isn't
-            // read + parsed twice.
+            // RISC-V has no optimization pipeline, so reject an explicit
+            // RISC-V target before asking the supported-architecture patcher
+            // to open the ELF (constructing it fails hard on a RISC-V e_machine,
+            // which is bug #207). Peek at the header first — rather than exit
+            // unconditionally — so an unreadable file or a genuine arch
+            // mismatch still gets its own diagnostic ahead of the RISC-V one.
+            if let Some(requested) = arch
+                && matches!(requested, CliArch::Riscv32 | CliArch::Riscv64)
+            {
+                match fs::read(&binary)
+                    .map_err(|e| e.to_string())
+                    .and_then(|data| {
+                        ElfBytes::<AnyEndian>::minimal_parse(&data)
+                            .map(|elf| elf.ehdr.e_machine)
+                            .map_err(|e| e.to_string())
+                    }) {
+                    Ok(machine) => match SupportedArch::from_e_machine(machine) {
+                        Ok(detected) => {
+                            let detected: CliArch = detected.into();
+                            eprintln!(
+                                "{ARCH_MISMATCH_PREFIX} --arch {requested} but ELF reports {detected}"
+                            );
+                            std::process::exit(1);
+                        }
+                        Err(_) => {
+                            eprintln!("{}", OptTargetError::RiscvUnsupported);
+                            std::process::exit(1);
+                        }
+                    },
+                    Err(e) => {
+                        eprintln!("Error reading ELF: {}", e);
+                        std::process::exit(1);
+                    }
+                }
+            }
+
+            // Build the ElfPatcher once here (issue #88) and thread it into
+            // both helpers so the file isn't read + parsed twice.
             let patcher = ElfPatcher::new(&binary).unwrap_or_else(|e| {
                 eprintln!("Error reading ELF: {}", e);
                 std::process::exit(1);
@@ -3468,6 +3547,19 @@ mod cli_helper_tests {
             llm_max_calls: 0,
             llm_model: "test-model".to_string(),
         }
+    }
+
+    fn assert_stochastic_config_matches_options(
+        config: &SearchConfig,
+        options: &OptimizationOptions,
+    ) {
+        assert_eq!(config.solver_timeout, Some(options.solver_timeout));
+        assert_eq!(config.stochastic.beta, options.beta);
+        assert_eq!(config.stochastic.iterations, options.iterations);
+        assert_eq!(config.stochastic.seed, options.seed);
+        assert_eq!(config.cost_metric, options.cost_metric);
+        assert_eq!(config.timeout, options.timeout);
+        assert_eq!(config.verbose, options.verbose);
     }
 
     fn r10_zeroing_target() -> [X86Instruction; 2] {
@@ -6648,6 +6740,159 @@ mod cli_helper_tests {
         print_search_statistics(&stats);
     }
 
+    #[test]
+    fn format_search_statistics_emits_all_fields_and_acceptance_rate() {
+        let mut stats = SearchStatistics::new(Algorithm::Stochastic);
+        stats.elapsed_time = Duration::from_millis(5);
+        stats.candidates_evaluated = 100;
+        stats.candidates_pruned_by_cost = 3;
+        stats.candidates_passed_fast = 12;
+        stats.smt_queries = 4;
+        stats.smt_equivalent = 1;
+        stats.improvements_found = 2;
+        stats.original_cost = 20;
+        stats.best_cost_found = 18;
+        stats.iterations = 10;
+        stats.accepted_proposals = 5;
+
+        assert_eq!(
+            format_search_statistics(&stats),
+            vec![
+                "\nSearch Statistics:",
+                "  Algorithm: Stochastic",
+                "  Elapsed time: 5ms",
+                "  Candidates evaluated: 100",
+                "  Candidates pruned by cost: 3",
+                "  Candidates passed fast test: 12",
+                "  SMT queries: 4",
+                "  SMT equivalent: 1",
+                "  Improvements found: 2",
+                "  Original cost: 20",
+                "  Best cost found: 18",
+                "  Iterations: 10",
+                "  Acceptance rate: 50.00%",
+            ],
+        );
+    }
+
+    #[test]
+    fn format_unsupported_mnemonic_ledger_is_empty_for_empty_ledger() {
+        let ledger = UnsupportedMnemonicLedger::new();
+        assert!(format_unsupported_mnemonic_ledger(&ledger).is_empty());
+    }
+
+    #[test]
+    fn format_unsupported_mnemonic_ledger_ranks_entries_by_frequency() {
+        let mut ledger = UnsupportedMnemonicLedger::new();
+        ledger.record("ldr");
+        ledger.record("ldr");
+        ledger.record("adc");
+
+        assert_eq!(
+            format_unsupported_mnemonic_ledger(&ledger),
+            vec![
+                "\nUnsupported mnemonics emitted by the LLM (frequency-ranked):",
+                "      2  ldr",
+                "      1  adc",
+            ],
+        );
+    }
+
+    #[test]
+    fn format_llm_timings_plural_with_smt_and_share_sections() {
+        // codex 5ms / verify 30ms of a 50ms total → other 15ms; shares 10% / 60%.
+        let timings = LlmTimings {
+            codex_calls: 2,
+            codex_time: Duration::from_millis(5),
+            verifications: 3,
+            verify_time: Duration::from_millis(30),
+            smt_calls: 2,
+            smt_formula_bytes_total: 2_048,
+            smt_formula_bytes_max: 1_536,
+        };
+        let lines = format_llm_timings(&timings, Duration::from_millis(50));
+
+        assert_eq!(
+            lines.first().map(String::as_str),
+            Some("\nLLM phase timing:")
+        );
+        // Plural suffixes on counts > 1.
+        let codex_line = lines.iter().find(|l| l.contains("Codex calls:")).unwrap();
+        assert!(codex_line.ends_with("(2 calls)"), "got {codex_line:?}");
+        assert!(
+            lines
+                .iter()
+                .any(|l| l.contains("(3 verifications, parse + fast + SMT)"))
+        );
+        // SMT sub-section present; "invoked" line is pure text so pin it exactly.
+        assert!(lines.iter().any(|l| l == "    SMT invoked:    2 times"));
+        // Average formula bytes = 2048 / 2 smt_calls = 1024 = 1.00 kB.
+        assert!(
+            lines.iter().any(|l| l.contains("1.00 kB  avg")),
+            "avg not rendered from total/smt_calls: {lines:?}"
+        );
+        // Share section: codex 5/50 = 10%, verify 30/50 = 60%.
+        assert!(lines.iter().any(|l| l.ends_with(" 10.00%")), "{lines:?}");
+        assert!(lines.iter().any(|l| l.ends_with(" 60.00%")), "{lines:?}");
+    }
+
+    #[test]
+    fn format_llm_timings_singular_suffixes() {
+        let timings = LlmTimings {
+            codex_calls: 1,
+            codex_time: Duration::from_millis(5),
+            verifications: 1,
+            verify_time: Duration::from_millis(5),
+            smt_calls: 1,
+            smt_formula_bytes_total: 1_024,
+            smt_formula_bytes_max: 1_024,
+        };
+        let lines = format_llm_timings(&timings, Duration::from_millis(20));
+        assert!(lines.iter().any(|l| l.ends_with("(1 call)")));
+        assert!(
+            lines
+                .iter()
+                .any(|l| l.contains("(1 verification, parse + fast + SMT)"))
+        );
+        assert!(lines.iter().any(|l| l == "    SMT invoked:    1 time"));
+    }
+
+    #[test]
+    fn format_llm_timings_omits_smt_and_share_sections() {
+        // No SMT calls → no SMT sub-section; zero total → no share section.
+        let timings = LlmTimings {
+            codex_calls: 1,
+            codex_time: Duration::ZERO,
+            verifications: 1,
+            verify_time: Duration::ZERO,
+            smt_calls: 0,
+            smt_formula_bytes_total: 0,
+            smt_formula_bytes_max: 0,
+        };
+        let lines = format_llm_timings(&timings, Duration::ZERO);
+        assert!(!lines.iter().any(|l| l.contains("SMT invoked")));
+        assert!(!lines.iter().any(|l| l.contains("SMT formula")));
+        assert!(!lines.iter().any(|l| l.contains("share:")));
+        // Non-share lines still present, in order.
+        assert_eq!(
+            lines.first().map(String::as_str),
+            Some("\nLLM phase timing:")
+        );
+        assert!(lines.iter().any(|l| l.contains("Total:")));
+    }
+
+    #[test]
+    fn format_search_statistics_omits_iteration_lines_when_no_iterations() {
+        let stats = SearchStatistics::new(Algorithm::Enumerative);
+        let lines = format_search_statistics(&stats);
+        assert!(!lines.iter().any(|l| l.contains("Iterations:")));
+        assert!(!lines.iter().any(|l| l.contains("Acceptance rate:")));
+        assert_eq!(
+            lines.first().map(String::as_str),
+            Some("\nSearch Statistics:")
+        );
+    }
+
     /// Regression for issue #243: the hybrid `SearchConfig` must inherit
     /// `options.timeout` from the CLI, otherwise workers run with the
     /// default 60 s timeout and the per-worker search loop is unbounded
@@ -6709,13 +6954,7 @@ mod cli_helper_tests {
         let imms = vec![0, 7];
         let config = build_stochastic_search_config(&opts, regs.clone(), imms.clone());
 
-        assert_eq!(config.solver_timeout, Some(Duration::from_millis(17)));
-        assert_eq!(config.stochastic.beta, 2.5);
-        assert_eq!(config.stochastic.iterations, 123);
-        assert_eq!(config.stochastic.seed, Some(99));
-        assert_eq!(config.cost_metric, CostMetric::Latency);
-        assert_eq!(config.timeout, Some(Duration::from_millis(11)));
-        assert!(config.verbose);
+        assert_stochastic_config_matches_options(&config, &opts);
         assert_eq!(config.available_registers, regs);
         assert_eq!(config.available_immediates, imms);
     }
@@ -6834,13 +7073,7 @@ mod cli_helper_tests {
         ];
         let config = build_x86_stochastic_search_config(&target, &opts);
 
-        assert_eq!(config.solver_timeout, Some(Duration::from_millis(19)));
-        assert_eq!(config.stochastic.beta, 3.5);
-        assert_eq!(config.stochastic.iterations, 456);
-        assert_eq!(config.stochastic.seed, Some(101));
-        assert_eq!(config.cost_metric, CostMetric::CodeSize);
-        assert_eq!(config.timeout, Some(Duration::from_millis(13)));
-        assert!(config.verbose);
+        assert_stochastic_config_matches_options(&config, &opts);
         assert_eq!(
             config.x86_available_registers,
             vec![X86Register::R11, X86Register::R12]

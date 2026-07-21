@@ -2377,6 +2377,17 @@ fn logical_imm32_for_assembler(mnemonic: &str, imm: i64) -> Result<u32, String> 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_utils::instruction_fixtures::aarch64_instruction_families;
+
+    #[test]
+    fn every_enumerated_instruction_family_assembles() {
+        for fixture in aarch64_instruction_families() {
+            let mut assembler = AArch64Assembler::new();
+            assembler
+                .assemble_instructions(&[fixture.instruction], 0)
+                .unwrap_or_else(|error| panic!("{} failed to assemble: {error}", fixture.mnemonic));
+        }
+    }
 
     #[test]
     fn test_mov_reg_encoding() {

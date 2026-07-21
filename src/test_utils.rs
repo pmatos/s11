@@ -1,6 +1,12 @@
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
+// `main.rs` includes this shared test utility module without compiling the
+// library-only instruction tests that consume these fixtures.
+#[allow(dead_code)]
+#[path = "test_utils/instruction_fixtures.rs"]
+pub(crate) mod instruction_fixtures;
+
 static TEMP_FILE_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 pub(crate) struct TempFile {
