@@ -12,8 +12,6 @@
 //! Hastings ratio to correct that asymmetry. The search is intended as an
 //! optimization heuristic, not as a detailed-balance sampler.
 
-#![allow(dead_code)]
-
 use crate::ir::instructions::{AARCH64_RANDOM_SHIFT_IMMEDIATES, MOVW_LEGAL_SHIFTS};
 use crate::ir::types::Condition;
 use crate::ir::{
@@ -60,9 +58,9 @@ const SHIFTED_REGISTER_AMOUNTS_W32: [u8; 7] = [1, 2, 3, 4, 8, 16, 31];
 
 /// Additional probability budget reserved for extended-register proposals,
 /// stacked on top of `SHIFTED_REGISTER_OPERAND_PROBABILITY` in
-/// `random_operand_3op` (issue #151). Kept as a separate constant so retuning
-/// the shifted-register heat does not silently shift the extended-register
-/// ceiling.
+/// `random_operand_3op_from_pool` (issue #151). Kept as a separate constant so
+/// retuning the shifted-register heat does not silently shift the
+/// extended-register ceiling.
 const EXTENDED_REGISTER_OPERAND_DELTA: f64 = 0.15;
 
 /// Drop ROR from a shifted-register operand when bridging from a logical
@@ -1668,14 +1666,6 @@ impl Mutator {
         }
     }
 
-    fn random_operand<R: RngExt>(&self, rng: &mut R) -> Operand {
-        if rng.random_bool(0.5) && !self.registers.is_empty() {
-            Operand::Register(self.random_register(rng))
-        } else {
-            Operand::Immediate(self.random_immediate(rng))
-        }
-    }
-
     fn random_immediate_from_pool<R: RngExt>(&self, rng: &mut R, pool: &[i64]) -> i64 {
         debug_assert!(!pool.is_empty(), "immediate pool must be non-empty");
         pool[rng.random_range(0..pool.len())]
@@ -1698,33 +1688,6 @@ impl Mutator {
         match operand {
             Operand::Immediate(v) => Operand::Immediate(v.rem_euclid(0x1000)),
             other => other,
-        }
-    }
-
-    /// Random rm operand for the in-scope arithmetic/logical/comparison
-    /// shifted/extended-register opcodes (issues #59, #151). Uses the tuned
-    /// shifted-register proposal rate; with an additional low probability
-    /// returns an `ExtendedRegister`; otherwise falls back to the plain
-    /// register/immediate distribution. `allow_ror` toggles whether ROR is in
-    /// the shifted kind pool — callers in arith bridges must pass false.
-    /// `width` selects the shift-amount pool (`RegisterWidth::W32` caps amounts
-    /// at 31, `RegisterWidth::X64` allows 32) and is forwarded to
-    /// `random_shifted_register`.
-    fn random_operand_3op<R: RngExt>(
-        &self,
-        rng: &mut R,
-        allow_ror: bool,
-        width: RegisterWidth,
-    ) -> Operand {
-        let choice: f64 = rng.random();
-        if choice < SHIFTED_REGISTER_OPERAND_PROBABILITY && !self.registers.is_empty() {
-            self.random_shifted_register(rng, allow_ror, width)
-        } else if choice < SHIFTED_REGISTER_OPERAND_PROBABILITY + EXTENDED_REGISTER_OPERAND_DELTA
-            && self.has_extended_register_source()
-        {
-            self.random_extended_register(rng)
-        } else {
-            self.random_operand(rng)
         }
     }
 
@@ -2772,7 +2735,7 @@ mod tests {
     }
 
     #[test]
-    fn random_operand_3op_uses_tuned_shifted_register_probability() {
+    fn random_operand_3op_from_pool_uses_tuned_shifted_register_probability() {
         let mutator = default_mutator();
         let mut rng = StdRng::seed_from_u64(134);
         let trials = 10_000;
@@ -2780,7 +2743,12 @@ mod tests {
         let mut x64_saw_amount_32 = false;
 
         for _ in 0..trials {
-            match mutator.random_operand_3op(&mut rng, false, RegisterWidth::X64) {
+            match mutator.random_operand_3op_from_pool(
+                &mut rng,
+                false,
+                RegisterWidth::X64,
+                &mutator.imm12_immediates,
+            ) {
                 Operand::ShiftedRegister {
                     kind: crate::ir::ShiftKind::Ror,
                     ..
@@ -2806,7 +2774,12 @@ mod tests {
         let mut w32_shifted = 0;
 
         for _ in 0..trials {
-            match mutator.random_operand_3op(&mut rng, false, RegisterWidth::W32) {
+            match mutator.random_operand_3op_from_pool(
+                &mut rng,
+                false,
+                RegisterWidth::W32,
+                &mutator.imm12_immediates,
+            ) {
                 Operand::ShiftedRegister {
                     kind: crate::ir::ShiftKind::Ror,
                     ..

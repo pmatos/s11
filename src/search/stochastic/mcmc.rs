@@ -14,8 +14,6 @@
 //!    d. Accept/reject based on Metropolis cost acceptance
 //! 4. Return best found optimization
 
-#![allow(dead_code)]
-
 use crate::ir::{Instruction, Register};
 use crate::isa::{ISA, ISAMutator};
 use crate::search::config::SearchConfig;
