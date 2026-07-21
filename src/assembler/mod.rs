@@ -3824,6 +3824,82 @@ mod tests {
         disassemble_and_verify(&bytes, "sub", &["x0", "sp", "#8"]);
     }
 
+    #[test]
+    fn test_cmp_imm_rejects_xzr_rn() {
+        let mut assembler = AArch64Assembler::new();
+        let result = assembler.assemble_instructions(
+            &[Instruction::Cmp {
+                rn: Register::XZR,
+                rm: Operand::Immediate(0),
+            }],
+            0,
+        );
+        assert!(
+            result.is_err(),
+            "CMP immediate must reject XZR rn instead of encoding SP"
+        );
+
+        for rm in [
+            Operand::Register(Register::X1),
+            Operand::ShiftedRegister {
+                reg: Register::X1,
+                kind: ShiftKind::Lsl,
+                amount: 1,
+            },
+        ] {
+            let mut assembler = AArch64Assembler::new();
+            let result = assembler.assemble_instructions(
+                &[Instruction::Cmp {
+                    rn: Register::XZR,
+                    rm,
+                }],
+                0,
+            );
+            assert!(
+                result.is_ok(),
+                "CMP register forms must keep accepting XZR rn: {result:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_cmn_imm_rejects_xzr_rn() {
+        let mut assembler = AArch64Assembler::new();
+        let result = assembler.assemble_instructions(
+            &[Instruction::Cmn {
+                rn: Register::XZR,
+                rm: Operand::Immediate(1),
+            }],
+            0,
+        );
+        assert!(
+            result.is_err(),
+            "CMN immediate must reject XZR rn instead of encoding SP"
+        );
+
+        for rm in [
+            Operand::Register(Register::X1),
+            Operand::ShiftedRegister {
+                reg: Register::X1,
+                kind: ShiftKind::Lsl,
+                amount: 1,
+            },
+        ] {
+            let mut assembler = AArch64Assembler::new();
+            let result = assembler.assemble_instructions(
+                &[Instruction::Cmn {
+                    rn: Register::XZR,
+                    rm,
+                }],
+                0,
+            );
+            assert!(
+                result.is_ok(),
+                "CMN register forms must keep accepting XZR rn: {result:?}"
+            );
+        }
+    }
+
     /// Capstone round-trip for ADDS with SP as `rn` — guards against silent
     /// off-by-one in the encoded slot. Capstone must disassemble back to
     /// `adds` with `sp` in the rn position.
