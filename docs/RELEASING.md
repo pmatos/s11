@@ -25,8 +25,13 @@ commit messages (see `.releaserc.json`).
      `Cargo.lock` changes. `[skip ci]` prevents this commit from re-triggering
      the release workflow.
 4. `workflow_dispatch` is also available (Actions → Release → Run workflow)
-   as a manual retry if a release run needs to be re-triggered on the same
-   unreleased history — it takes no inputs.
+   as a manual retry when a run fails before pushing its release commit and
+   tag — it takes no inputs.
+
+The repository does not open an `X.Y.(Z+1)-dev` cycle after a release.
+`Cargo.toml` remains at the most recently released version until
+semantic-release derives the next bump from the new Conventional Commits and
+prepares that release.
 
 ## What the workflow does
 
@@ -52,6 +57,67 @@ commit messages (see `.releaserc.json`).
 3. **Upload build artifacts** (`if: always()`) — uploads `release-upload/`
    as a workflow artifact for post-mortem/rerun debugging even if a later
    step (e.g. the git push or GitHub publish) fails.
+
+## Recovering a partially published release
+
+During `prepare`, `@semantic-release/git` commits and pushes the release
+assets as `chore(release): X.Y.Z [skip ci]`. semantic-release then creates and
+pushes the `vX.Y.Z` tag — but against the commit that was `HEAD` *before* that
+release commit was created, not the release commit itself: `nextRelease.gitHead`
+is captured once, before any `prepare` plugin runs, and is never refreshed
+afterward. Both happen before `@semantic-release/github` creates the GitHub
+Release during `publish`. If the workflow fails between those operations,
+`main` contains the `chore(release): X.Y.Z [skip ci]` commit and the `vX.Y.Z`
+tag points at its parent, but `gh release view vX.Y.Z` fails because no GitHub
+Release exists.
+
+Prefer completing that release without rewriting published Git history. The
+failed run retains its staged assets for 14 days in the
+`release-upload-TRIGGER_SHA` workflow artifact:
+
+```sh
+TAG=vX.Y.Z
+gh run download RUN_ID \
+  --name release-upload-TRIGGER_SHA \
+  --dir release-upload
+gh release create "$TAG" \
+  --verify-tag \
+  --generate-notes \
+  --title "$TAG" \
+  release-upload/*
+```
+
+`RUN_ID` and `TRIGGER_SHA` are shown on the failed workflow run. If exact
+semantic-release notes were saved separately, pass them with `--notes-file`
+instead of `--generate-notes`. No development-cycle commit is needed after
+manual publication.
+
+Do not merely re-run the workflow while the tag exists: semantic-release uses
+release tags to find the last published version and will treat that version as
+already released. If manual publication is not possible, restore the
+pre-release repository state before retrying. After confirming that no GitHub
+Release exists for the tag, revert the release commit, then delete the remote
+tag and dispatch a fresh run. Because the tag points at the release commit's
+*parent* (see above), resolve the release commit by its message instead of by
+the tag:
+
+```sh
+TAG=vX.Y.Z
+git fetch origin main --tags
+git switch main
+git pull --ff-only origin main
+RELEASE_COMMIT=$(git log --fixed-strings --format=%H \
+  --grep="chore(release): ${TAG#v} [skip ci]" -n 1)
+git revert --no-commit "$RELEASE_COMMIT"
+git commit -m "chore(release): roll back $TAG [skip ci]"
+git push origin main
+git push origin ":refs/tags/$TAG"
+gh workflow run release.yml --ref main
+```
+
+The rollback commit's `[skip ci]` marker prevents its push from starting a
+release run while the old tag still exists. The final explicit dispatch runs
+only after both the version-file changes and tag have been rolled back.
 
 ## Artifacts and runtime dependencies
 
