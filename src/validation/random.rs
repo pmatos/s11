@@ -4,7 +4,6 @@ use crate::ir::Register;
 use crate::ir::types::AccessWidth;
 use crate::semantics::state::ConcreteMachineState;
 use rand::RngExt;
-use std::collections::HashMap;
 
 /// Base address of the random-input memory seed region. See ADR-0007.
 pub const MEMORY_SEED_BASE: u64 = 0x1000_0000;
@@ -52,11 +51,19 @@ pub fn generate_random_inputs(config: &RandomInputConfig) -> Vec<ConcreteMachine
     let mut inputs = Vec::with_capacity(config.count);
 
     for _ in 0..config.count {
-        let mut values = HashMap::new();
+        let mut state = ConcreteMachineState::new_zeroed();
         for reg in &config.registers {
-            values.insert(*reg, rng.random::<u64>());
+            match reg {
+                Register::Vector(vector) => state.set_vector(
+                    *vector,
+                    (u128::from(rng.random::<u64>()) << 64) | u128::from(rng.random::<u64>()),
+                ),
+                _ => state.set_register(
+                    *reg,
+                    crate::semantics::state::ConcreteValue::new(rng.random::<u64>()),
+                ),
+            }
         }
-        let mut state = ConcreteMachineState::from_values(values);
         if config.memory_seed_size > 0 {
             for i in 0..config.memory_seed_size {
                 let byte = rng.random::<u8>();
@@ -92,24 +99,43 @@ pub fn generate_edge_case_inputs(registers: &[Register]) -> Vec<ConcreteMachineS
     let mut inputs = Vec::new();
 
     for &edge_val in &edge_values {
-        let mut values = HashMap::new();
+        let mut state = ConcreteMachineState::new_zeroed();
         for reg in registers {
-            values.insert(*reg, edge_val);
+            match reg {
+                Register::Vector(vector) => {
+                    state.set_vector(*vector, (u128::from(edge_val) << 64) | u128::from(edge_val));
+                }
+                _ => {
+                    state.set_register(*reg, crate::semantics::state::ConcreteValue::new(edge_val))
+                }
+            }
         }
-        inputs.push(ConcreteMachineState::from_values(values));
+        inputs.push(state);
     }
 
     if registers.len() >= 2 {
         for &val1 in &edge_values[..5] {
             for &val2 in &edge_values[..5] {
-                let mut values = HashMap::new();
+                let mut state = ConcreteMachineState::new_zeroed();
                 if let Some(reg) = registers.first() {
-                    values.insert(*reg, val1);
+                    match reg {
+                        Register::Vector(vector) => {
+                            state.set_vector(*vector, (u128::from(val1) << 64) | u128::from(val1))
+                        }
+                        _ => state
+                            .set_register(*reg, crate::semantics::state::ConcreteValue::new(val1)),
+                    }
                 }
                 if let Some(reg) = registers.get(1) {
-                    values.insert(*reg, val2);
+                    match reg {
+                        Register::Vector(vector) => {
+                            state.set_vector(*vector, (u128::from(val2) << 64) | u128::from(val2))
+                        }
+                        _ => state
+                            .set_register(*reg, crate::semantics::state::ConcreteValue::new(val2)),
+                    }
                 }
-                inputs.push(ConcreteMachineState::from_values(values));
+                inputs.push(state);
             }
         }
     }
@@ -250,6 +276,20 @@ mod tests {
             .collect::<std::collections::HashSet<_>>()
             .len();
         assert!(unique_count > 1);
+    }
+
+    #[test]
+    fn random_inputs_populate_full_vector_registers() {
+        let inputs = generate_random_inputs(&RandomInputConfig {
+            count: 8,
+            registers: vec![Register::Vector(crate::ir::VectorRegister::V0)],
+            memory_seed_size: 0,
+        });
+        assert!(
+            inputs
+                .iter()
+                .any(|state| { state.get_vector(crate::ir::VectorRegister::V0) >> 64 != 0 })
+        );
     }
 
     #[test]

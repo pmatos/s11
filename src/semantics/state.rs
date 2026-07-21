@@ -3,7 +3,7 @@
 #![allow(dead_code)]
 
 use crate::ir::Register;
-use crate::ir::types::{AccessWidth, Condition};
+use crate::ir::types::{AccessWidth, Condition, VectorRegister};
 use crate::isa::x86::{X86Register, X86RegisterView};
 use std::collections::{BTreeMap, HashMap};
 use std::fmt;
@@ -310,6 +310,7 @@ impl fmt::Display for ConcreteValue {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ConcreteMachineState {
     registers: HashMap<Register, ConcreteValue>,
+    vectors: HashMap<VectorRegister, u128>,
     flags: ConditionFlags,
     width: u32,
     /// Sparse byte-addressed memory. Absent keys denote zero so that
@@ -338,8 +339,14 @@ impl ConcreteMachineState {
         registers.insert(Register::XZR, ConcreteValue::new(0));
         registers.insert(Register::SP, ConcreteValue::new(0));
 
+        let vectors = (0..32)
+            .filter_map(VectorRegister::from_index)
+            .map(|register| (register, 0))
+            .collect();
+
         ConcreteMachineState {
             registers,
+            vectors,
             flags: ConditionFlags::new(),
             width,
             memory: BTreeMap::new(),
@@ -372,6 +379,10 @@ impl ConcreteMachineState {
     /// Set the value of a register (XZR writes are ignored). Masks the value
     /// to the state's width per ADR-0004 decision 6.
     pub fn set_register(&mut self, reg: Register, value: ConcreteValue) {
+        assert!(
+            !matches!(reg, Register::Vector(_)),
+            "use set_vector for 128-bit vector registers"
+        );
         if reg != Register::XZR {
             let masked = mask_to_width(value.0, self.width);
             self.registers.insert(reg, ConcreteValue::new(masked));
@@ -381,6 +392,20 @@ impl ConcreteMachineState {
     /// Get all registers and their values
     pub fn registers(&self) -> &HashMap<Register, ConcreteValue> {
         &self.registers
+    }
+
+    /// Read the packed 128-bit value of an Advanced SIMD/FP register.
+    pub fn get_vector(&self, reg: VectorRegister) -> u128 {
+        self.vectors.get(&reg).copied().unwrap_or(0)
+    }
+
+    /// Replace the packed 128-bit value of an Advanced SIMD/FP register.
+    pub fn set_vector(&mut self, reg: VectorRegister, value: u128) {
+        self.vectors.insert(reg, value);
+    }
+
+    pub fn vectors(&self) -> &HashMap<VectorRegister, u128> {
+        &self.vectors
     }
 
     /// Get the condition flags
@@ -447,6 +472,13 @@ impl fmt::Display for ConcreteMachineState {
         let sp = self.get_register(Register::SP);
         if sp.0 != 0 {
             writeln!(f, "  sp: {}", sp)?;
+        }
+        for i in 0..32 {
+            let register = VectorRegister::from_index(i).expect("valid vector register index");
+            let value = self.get_vector(register);
+            if value != 0 {
+                writeln!(f, "  {}: 0x{:032x}", register, value)?;
+            }
         }
         writeln!(f, "  {}", self.flags)?;
         write!(f, "}}")

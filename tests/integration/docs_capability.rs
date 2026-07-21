@@ -142,8 +142,24 @@ fn enumerative_candidate_growth_visible_in_public_docs() {
             "{doc} must document enumerative candidate-pool growth"
         );
         assert!(
-            body.contains("candidate pool") && body.contains("length bucket"),
-            "{doc} must use candidate-pool and length-bucket wording"
+            body.contains("candidate pool"),
+            "{doc} must use candidate-pool wording"
+        );
+        assert!(
+            body.contains("length bucket"),
+            "{doc} must use length-bucket wording"
+        );
+    }
+
+    for doc in ["README.md", "TUTORIAL.md"] {
+        let body = normalized_doc(doc);
+        assert!(
+            body.contains("add 9,728 additional instructions to the candidate pool"),
+            "{doc} must identify 9,728 as additional candidate-pool instructions"
+        );
+        assert!(
+            body.contains("pool_size^l"),
+            "{doc} must document length-L sequence-space growth from the pool"
         );
     }
 
@@ -151,6 +167,14 @@ fn enumerative_candidate_growth_visible_in_public_docs() {
     assert!(
         matrix.contains("9,728") && matrix.contains("8^4") && matrix.contains("8^3"),
         "docs/capability.md must keep the default AArch64 multiply-candidate budget visible"
+    );
+    assert!(
+        matrix.contains("generate_all_instructions"),
+        "docs/capability.md must name the candidate-generation source entry point"
+    );
+    assert!(
+        matrix.contains("(../src/search/candidate.rs)"),
+        "docs/capability.md must link the candidate-generation source file"
     );
 }
 

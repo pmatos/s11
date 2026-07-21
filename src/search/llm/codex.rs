@@ -2,10 +2,9 @@
 
 use serde::Deserialize;
 use std::fs::File;
-use std::io::Write;
-use std::path::{Path, PathBuf};
+use std::io::{Read, Seek, Write};
+use std::path::Path;
 use std::process::{Child, Command, ExitStatus, Stdio};
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use crate::search::config::LlmConfig;
@@ -70,6 +69,31 @@ struct Envelope {
     assembly: Option<String>,
 }
 
+#[cfg(unix)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct FileIdentity {
+    device: u64,
+    inode: u64,
+    owner_uid: u32,
+}
+
+#[cfg(unix)]
+impl FileIdentity {
+    fn from_metadata(metadata: &std::fs::Metadata) -> Self {
+        use std::os::unix::fs::MetadataExt;
+
+        Self {
+            device: metadata.dev(),
+            inode: metadata.ino(),
+            owner_uid: metadata.uid(),
+        }
+    }
+
+    fn is_same_file(self, other: Self) -> bool {
+        self.device == other.device && self.inode == other.inode
+    }
+}
+
 /// Parse the Codex `--output-schema` envelope into the assembly string.
 ///
 /// Returns `EmptyAssembly` for an envelope whose `assembly` field is the empty
@@ -84,47 +108,39 @@ pub fn parse_codex_envelope(json: &str) -> Result<String, EnvelopeError> {
     Ok(asm)
 }
 
-/// Per-process monotonic counter ensuring temp-file paths are unique across
-/// concurrent and sequential `invoke_codex` calls within a single process.
-/// Combined with the PID, this avoids cross-process collisions too.
-static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
-
-/// RAII guard that removes a path on drop. Survives early returns / panics.
-struct TempPath(PathBuf);
-
-impl Drop for TempPath {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_file(&self.0);
-    }
-}
-
-impl TempPath {
-    fn as_path(&self) -> &Path {
-        &self.0
-    }
-}
-
 /// Invoke `codex exec` with the given prompt and schema, return the asm string.
 ///
 /// Uses an ephemeral, read-only Codex run with subscription auth (no API key needed).
-/// Schema and answer files are written under the system temp dir with PID +
-/// monotonic-counter naming and removed via RAII guards before this function
-/// returns (success, error, or panic).
+/// Subprocess files live in an unpredictable private temporary directory. The
+/// answer file is pre-created with owner-only permissions on Unix and read
+/// through its retained descriptor after Codex exits.
 pub fn invoke_codex(
     config: &LlmConfig,
     prompt: &str,
     schema: &str,
     timeout: Duration,
 ) -> Result<String, CodexError> {
-    let id = TEMP_COUNTER.fetch_add(1, Ordering::Relaxed);
-    let pid = std::process::id();
-    let tmp = std::env::temp_dir();
-    let schema_path = TempPath(tmp.join(format!("s11-codex-schema-{}-{}.json", pid, id)));
-    let answer_path = TempPath(tmp.join(format!("s11-codex-answer-{}-{}.json", pid, id)));
-    let stderr_path = TempPath(tmp.join(format!("s11-codex-stderr-{}-{}.txt", pid, id)));
+    let workspace = create_temp_workspace()
+        .map_err(|e| CodexError::Io(format!("creating temporary workspace: {e}")))?;
+    let schema_path = workspace.path().join("schema.json");
+    let answer_path = workspace.path().join("answer.json");
+    let stderr_path = workspace.path().join("stderr.txt");
 
-    write_file(schema_path.as_path(), schema).map_err(CodexError::Io)?;
-    let stderr_file = create_file(stderr_path.as_path()).map_err(CodexError::Io)?;
+    write_file(&schema_path, schema)
+        .map_err(|e| CodexError::Io(format!("writing schema file: {e}")))?;
+    let mut answer_file = create_file(&answer_path)
+        .map_err(|e| CodexError::Io(format!("creating answer file: {e}")))?;
+    #[cfg(unix)]
+    let answer_identity = FileIdentity::from_metadata(
+        &answer_file
+            .metadata()
+            .map_err(|e| CodexError::Io(format!("recording answer file identity: {e}")))?,
+    );
+    let stderr_file = create_file(&stderr_path)
+        .map_err(|e| CodexError::Io(format!("creating stderr file: {e}")))?;
+    let mut stderr_reader = stderr_file
+        .try_clone()
+        .map_err(|e| CodexError::Io(format!("retaining stderr file: {e}")))?;
 
     let mut child = Command::new(&config.codex_bin)
         .arg("exec")
@@ -135,9 +151,9 @@ pub fn invoke_codex(
         .arg("--ephemeral")
         .arg("--skip-git-repo-check")
         .arg("--output-schema")
-        .arg(schema_path.as_path())
+        .arg(&schema_path)
         .arg("-o")
-        .arg(answer_path.as_path())
+        .arg(&answer_path)
         .arg(prompt)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
@@ -147,7 +163,7 @@ pub fn invoke_codex(
     let status = wait_for_child(&mut child, timeout)?;
 
     if !status.success() {
-        let stderr = std::fs::read_to_string(stderr_path.as_path())
+        let stderr = read_file_from_start(&mut stderr_reader)
             .unwrap_or_else(|e| format!("<failed to read codex stderr: {}>", e));
         return Err(CodexError::NonZeroExit {
             status: status.code().unwrap_or(-1),
@@ -155,10 +171,59 @@ pub fn invoke_codex(
         });
     }
 
-    let json = std::fs::read_to_string(answer_path.as_path())
-        .map_err(|e| CodexError::Io(format!("reading answer file: {}", e)))?;
+    let answer_path_metadata = std::fs::symlink_metadata(&answer_path)
+        .map_err(|e| CodexError::Io(format!("validating answer path: {e}")))?;
+    if !answer_path_metadata.file_type().is_file() {
+        return Err(CodexError::Io(
+            "answer path is not a regular file after codex invocation".to_string(),
+        ));
+    }
+    #[cfg(unix)]
+    validate_answer_metadata(answer_identity, &answer_path_metadata, &answer_file)
+        .map_err(CodexError::Io)?;
+    let json = read_file_from_start(&mut answer_file)
+        .map_err(|e| CodexError::Io(format!("reading answer file: {e}")))?;
+    if json.is_empty() {
+        return Err(CodexError::Io(
+            "answer file is empty after successful codex invocation".to_string(),
+        ));
+    }
 
     parse_codex_envelope(&json).map_err(CodexError::Envelope)
+}
+
+fn read_file_from_start(file: &mut File) -> std::io::Result<String> {
+    file.rewind()?;
+    let mut content = String::new();
+    file.read_to_string(&mut content)?;
+    Ok(content)
+}
+
+#[cfg(unix)]
+fn validate_answer_metadata(
+    expected: FileIdentity,
+    path_metadata: &std::fs::Metadata,
+    file: &File,
+) -> Result<(), String> {
+    use std::os::unix::fs::MetadataExt;
+
+    let path_identity = FileIdentity::from_metadata(path_metadata);
+    let open_metadata = file
+        .metadata()
+        .map_err(|e| format!("reading retained answer file identity: {e}"))?;
+    let open_identity = FileIdentity::from_metadata(&open_metadata);
+    if !path_identity.is_same_file(expected) || !open_identity.is_same_file(expected) {
+        return Err("answer file identity changed after codex invocation".to_string());
+    }
+    if path_identity.owner_uid != expected.owner_uid
+        || open_identity.owner_uid != expected.owner_uid
+    {
+        return Err("answer file ownership changed after codex invocation".to_string());
+    }
+    if path_metadata.mode() & 0o077 != 0 || open_metadata.mode() & 0o077 != 0 {
+        return Err("answer file permissions changed after codex invocation".to_string());
+    }
+    Ok(())
 }
 
 fn wait_for_child(child: &mut Child, timeout: Duration) -> Result<ExitStatus, CodexError> {
@@ -197,21 +262,34 @@ fn wait_for_child(child: &mut Child, timeout: Duration) -> Result<ExitStatus, Co
     }
 }
 
+fn create_temp_workspace() -> Result<tempfile::TempDir, String> {
+    let mut builder = tempfile::Builder::new();
+    builder.prefix("s11-codex-");
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        builder.permissions(std::fs::Permissions::from_mode(0o700));
+    }
+
+    builder.tempdir().map_err(|e| e.to_string())
+}
+
 /// Create a new file with owner-only (`0o600`) permissions on Unix; falls
 /// back to default permissions on non-Unix platforms (the LLM flow is only
 /// tested on Linux). The schema file is dull but the answer file briefly
 /// contains the model's response — we don't want to leak it to other users
 /// on a multi-user host during the (small) window before the RAII guard
 /// removes the file.
-fn write_file(path: &Path, content: &str) -> Result<(), String> {
+fn write_file(path: &Path, content: &str) -> std::io::Result<()> {
     let mut f = create_file(path)?;
-    f.write_all(content.as_bytes()).map_err(|e| e.to_string())
+    f.write_all(content.as_bytes())
 }
 
-fn create_file(path: &Path) -> Result<File, String> {
+fn create_file(path: &Path) -> std::io::Result<File> {
     use std::fs::OpenOptions;
     let mut opts = OpenOptions::new();
-    opts.write(true).create(true).truncate(true);
+    opts.read(true).write(true).create_new(true);
 
     #[cfg(unix)]
     {
@@ -219,7 +297,7 @@ fn create_file(path: &Path) -> Result<File, String> {
         opts.mode(0o600);
     }
 
-    opts.open(path).map_err(|e| e.to_string())
+    opts.open(path)
 }
 
 #[cfg(test)]
@@ -234,6 +312,25 @@ mod tests {
     #[cfg(unix)]
     fn generous_timeout() -> Duration {
         Duration::from_secs(5)
+    }
+
+    #[cfg(unix)]
+    fn answer_path_script(body: &str) -> String {
+        format!(
+            r#"answer=""
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    -o)
+      shift
+      answer="$1"
+      ;;
+  esac
+  shift || true
+done
+[ -n "$answer" ]
+{body}
+"#
+        )
     }
 
     #[test]
@@ -323,6 +420,57 @@ mod tests {
         assert!(envelope.source().is_some());
     }
 
+    #[test]
+    fn create_file_refuses_to_replace_existing_contents() {
+        let dir = tempfile::tempdir().expect("create test tempdir");
+        let path = dir.path().join("answer.json");
+        std::fs::write(&path, "original").expect("seed existing file");
+
+        let err = create_file(&path).unwrap_err();
+
+        assert_eq!(err.kind(), std::io::ErrorKind::AlreadyExists);
+        assert_eq!(
+            std::fs::read_to_string(path).expect("read preserved file"),
+            "original"
+        );
+    }
+
+    #[test]
+    fn temp_workspaces_are_private_and_unpredictable() {
+        let first = create_temp_workspace().expect("create first temp workspace");
+        let second = create_temp_workspace().expect("create second temp workspace");
+
+        assert_ne!(first.path(), second.path());
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+
+            let mode = first
+                .path()
+                .metadata()
+                .expect("stat temp workspace")
+                .permissions()
+                .mode();
+            assert_eq!(mode & 0o077, 0, "workspace must be owner-only");
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn answer_validation_rejects_owner_mismatch() {
+        let dir = tempfile::tempdir().expect("create test tempdir");
+        let path = dir.path().join("answer.json");
+        let file = create_file(&path).expect("create answer file");
+        let metadata = std::fs::symlink_metadata(&path).expect("stat answer path");
+        let mut expected = FileIdentity::from_metadata(&metadata);
+        expected.owner_uid ^= 1;
+
+        let err = validate_answer_metadata(expected, &metadata, &file).unwrap_err();
+
+        assert!(err.contains("answer file ownership changed"));
+    }
+
     #[cfg(unix)]
     #[test]
     fn invoke_codex_reads_answer_file_from_fake_cli() {
@@ -363,15 +511,79 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn invoke_codex_reports_missing_answer_file() {
+    fn invoke_codex_rejects_untouched_answer_file() {
         let fake = FakeCodex::new("exit 0\n");
         let config = LlmConfig::default().with_codex_bin(fake.path_string());
 
         let err = invoke_codex(&config, "try a candidate", "{}", generous_timeout()).unwrap_err();
 
         match err {
-            CodexError::Io(message) => assert!(message.contains("reading answer file")),
+            CodexError::Io(message) => assert!(message.contains("answer file is empty")),
             other => panic!("expected answer-file IO error, got {other:?}"),
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn invoke_codex_rejects_deleted_answer_path() {
+        let fake = FakeCodex::new(&answer_path_script("rm -f \"$answer\""));
+        let config = LlmConfig::default().with_codex_bin(fake.path_string());
+
+        let err = invoke_codex(&config, "try a candidate", "{}", generous_timeout()).unwrap_err();
+
+        match err {
+            CodexError::Io(message) => assert!(message.contains("validating answer path")),
+            other => panic!("expected answer-validation IO error, got {other:?}"),
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn invoke_codex_rejects_replaced_answer_file() {
+        let fake = FakeCodex::new(&answer_path_script(
+            "rm -f \"$answer\"\nprintf '%s' '{\"assembly\":\"stale\"}' > \"$answer\"",
+        ));
+        let config = LlmConfig::default().with_codex_bin(fake.path_string());
+
+        let err = invoke_codex(&config, "try a candidate", "{}", generous_timeout()).unwrap_err();
+
+        match err {
+            CodexError::Io(message) => assert!(message.contains("answer file identity changed")),
+            other => panic!("expected answer-identity IO error, got {other:?}"),
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn invoke_codex_rejects_symlinked_answer_path() {
+        let fake = FakeCodex::new(&answer_path_script(
+            "printf '%s' '{\"assembly\":\"stale\"}' > \"$answer.stale\"\nrm -f \"$answer\"\nln -s \"$answer.stale\" \"$answer\"",
+        ));
+        let config = LlmConfig::default().with_codex_bin(fake.path_string());
+
+        let err = invoke_codex(&config, "try a candidate", "{}", generous_timeout()).unwrap_err();
+
+        match err {
+            CodexError::Io(message) => {
+                assert!(message.contains("answer path is not a regular file"))
+            }
+            other => panic!("expected answer-file-type IO error, got {other:?}"),
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn invoke_codex_rejects_answer_with_group_or_other_permissions() {
+        let fake = FakeCodex::new(&answer_path_script(
+            "printf '%s' '{\"assembly\":\"mov x0, x1\"}' > \"$answer\"\nchmod 0644 \"$answer\"",
+        ));
+        let config = LlmConfig::default().with_codex_bin(fake.path_string());
+
+        let err = invoke_codex(&config, "try a candidate", "{}", generous_timeout()).unwrap_err();
+
+        match err {
+            CodexError::Io(message) => assert!(message.contains("answer file permissions changed")),
+            other => panic!("expected answer-permissions IO error, got {other:?}"),
         }
     }
 
