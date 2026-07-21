@@ -234,11 +234,11 @@ pub const DEFAULT_SYMBOLIC_SOLVER_TIMEOUT: Duration = Duration::from_secs(30);
 pub struct SymbolicConfig {
     /// Maximum number of synthesized non-terminator instructions to consider.
     ///
-    /// The default of 3 is actively enforced, so it caps candidate lengths for
-    /// targets with more than four rewritable instructions. A value of 0
-    /// disables candidate search. If the target ends in a fixed terminator,
-    /// that terminator is appended after synthesis and does not count against
-    /// this window.
+    /// The default of 3 is actively enforced, so synthesized candidates are
+    /// capped at three non-terminator instructions unless the caller raises
+    /// the window. A value of 0 disables candidate search. If the target ends
+    /// in a fixed terminator, that terminator is appended after synthesis and
+    /// does not count against this window.
     pub window_size: usize,
     /// Exclusive initial cost bound.
     ///
