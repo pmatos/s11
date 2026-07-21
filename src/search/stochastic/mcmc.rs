@@ -359,7 +359,7 @@ pub fn evaluate_with_tests(
 mod tests {
     use super::*;
     use crate::ir::{Operand, Register};
-    use crate::isa::{AArch64, ISA, ISAMutator, InstructionType, OperandType, RegisterType, U64};
+    use crate::isa::{AArch64, ISA, ISAMutator, U64};
     use crate::search::config::StochasticConfig;
     use crate::semantics::cost::CostMetric;
     use crate::semantics::live_out::LiveOut;
@@ -410,120 +410,22 @@ mod tests {
     #[derive(Clone)]
     struct TimeoutProbeIsa;
 
-    #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-    struct TimeoutProbeRegister;
-
-    impl std::fmt::Display for TimeoutProbeRegister {
-        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-            write!(f, "tp0")
-        }
-    }
-
-    impl RegisterType for TimeoutProbeRegister {
-        fn index(&self) -> Option<u8> {
-            Some(0)
-        }
-
-        fn from_index(idx: u8) -> Option<Self> {
-            (idx == 0).then_some(Self)
-        }
-
-        fn is_zero_register(&self) -> bool {
-            false
-        }
-
-        fn is_special(&self) -> bool {
-            false
-        }
-    }
-
-    #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-    enum TimeoutProbeOperand {
-        Reg(TimeoutProbeRegister),
-        Imm(i64),
-    }
-
-    impl std::fmt::Display for TimeoutProbeOperand {
-        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-            match self {
-                Self::Reg(reg) => write!(f, "{reg}"),
-                Self::Imm(imm) => write!(f, "#{imm}"),
-            }
-        }
-    }
-
-    impl OperandType for TimeoutProbeOperand {
-        type Register = TimeoutProbeRegister;
-
-        fn as_register(&self) -> Option<Self::Register> {
-            match self {
-                Self::Reg(reg) => Some(*reg),
-                Self::Imm(_) => None,
-            }
-        }
-
-        fn as_immediate(&self) -> Option<i64> {
-            match self {
-                Self::Reg(_) => None,
-                Self::Imm(imm) => Some(*imm),
-            }
-        }
-
-        fn from_register(reg: Self::Register) -> Self {
-            Self::Reg(reg)
-        }
-
-        fn from_immediate(imm: i64) -> Self {
-            Self::Imm(imm)
-        }
-    }
-
-    #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-    struct TimeoutProbeInstruction(u8);
-
-    impl std::fmt::Display for TimeoutProbeInstruction {
-        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-            write!(f, "probe{}", self.0)
-        }
-    }
-
-    impl InstructionType for TimeoutProbeInstruction {
-        type Register = TimeoutProbeRegister;
-        type Operand = TimeoutProbeOperand;
-
-        fn destination(&self) -> Option<Self::Register> {
-            Some(TimeoutProbeRegister)
-        }
-
-        fn source_registers(&self) -> Vec<Self::Register> {
-            Vec::new()
-        }
-
-        fn opcode_id(&self) -> u8 {
-            self.0
-        }
-
-        fn mnemonic(&self) -> &'static str {
-            "probe"
-        }
-    }
-
     struct TimeoutProbeMutator;
 
-    impl ISAMutator<TimeoutProbeInstruction> for TimeoutProbeMutator {
+    impl ISAMutator<Instruction> for TimeoutProbeMutator {
         fn mutate<R: rand::RngExt>(
             &self,
             _rng: &mut R,
-            _sequence: &[TimeoutProbeInstruction],
-        ) -> Vec<TimeoutProbeInstruction> {
-            vec![TimeoutProbeInstruction(9)]
+            _sequence: &[Instruction],
+        ) -> Vec<Instruction> {
+            mov_zero_sequence()
         }
     }
 
     impl ISA for TimeoutProbeIsa {
-        type Register = TimeoutProbeRegister;
-        type Operand = TimeoutProbeOperand;
-        type Instruction = TimeoutProbeInstruction;
+        type Register = Register;
+        type Operand = Operand;
+        type Instruction = Instruction;
         type Width = U64;
         type Flags = ();
         type Mutator = TimeoutProbeMutator;
@@ -541,7 +443,7 @@ mod tests {
         }
 
         fn general_registers(&self) -> Vec<Self::Register> {
-            vec![TimeoutProbeRegister]
+            vec![Register::X0]
         }
 
         fn zero_register(&self) -> Option<Self::Register> {
@@ -575,8 +477,8 @@ mod tests {
         type State = ();
         type LiveOut = ();
 
-        fn registers_from_config(_config: &SearchConfig) -> Vec<TimeoutProbeRegister> {
-            vec![TimeoutProbeRegister]
+        fn registers_from_config(_config: &SearchConfig) -> Vec<Register> {
+            vec![Register::X0]
         }
 
         fn immediates_from_config(_config: &SearchConfig) -> Vec<i64> {
@@ -587,19 +489,15 @@ mod tests {
             TimeoutProbeMutator
         }
 
-        fn make_test_inputs(
-            _regs: &[TimeoutProbeRegister],
-            _width: u32,
-            count: usize,
-        ) -> Vec<Self::State> {
+        fn make_test_inputs(_regs: &[Register], _width: u32, count: usize) -> Vec<Self::State> {
             vec![(); count]
         }
 
-        fn make_edge_inputs(_regs: &[TimeoutProbeRegister], _width: u32) -> Vec<Self::State> {
+        fn make_edge_inputs(_regs: &[Register], _width: u32) -> Vec<Self::State> {
             Vec::new()
         }
 
-        fn apply_sequence(state: Self::State, _seq: &[TimeoutProbeInstruction]) -> Self::State {
+        fn apply_sequence(state: Self::State, _seq: &[Instruction]) -> Self::State {
             state
         }
 
@@ -607,21 +505,17 @@ mod tests {
             true
         }
 
-        fn sequence_cost(
-            seq: &[TimeoutProbeInstruction],
-            _metric: &CostMetric,
-            _width: u32,
-        ) -> u64 {
+        fn sequence_cost(seq: &[Instruction], _metric: &CostMetric, _width: u32) -> u64 {
             seq.len() as u64
         }
 
-        fn is_encodable(_seq: &[TimeoutProbeInstruction]) -> bool {
+        fn is_encodable(_seq: &[Instruction]) -> bool {
             true
         }
 
         fn check_equivalence(
-            _target: &[TimeoutProbeInstruction],
-            _proposal: &[TimeoutProbeInstruction],
+            _target: &[Instruction],
+            _proposal: &[Instruction],
             _live_out: &Self::LiveOut,
             _width: u32,
             timeout: Duration,
@@ -643,11 +537,17 @@ mod tests {
         fn random_sequence<R: rand::RngExt>(
             _rng: &mut R,
             len: usize,
-            _regs: &[TimeoutProbeRegister],
+            _regs: &[Register],
             _imms: &[i64],
             _config: &SearchConfig,
-        ) -> Vec<TimeoutProbeInstruction> {
-            vec![TimeoutProbeInstruction(1); len]
+        ) -> Vec<Instruction> {
+            vec![
+                Instruction::MovImm {
+                    rd: Register::X0,
+                    imm: 0,
+                };
+                len
+            ]
         }
 
         fn width() -> u32 {
@@ -662,7 +562,7 @@ mod tests {
     ) -> (SearchStatistics, Option<u128>) {
         let _guard = set_timeout_probe_result(verdict, smt_called);
         let mut search: StochasticSearch<TimeoutProbeIsa> = StochasticSearch::new();
-        let target = [TimeoutProbeInstruction(1), TimeoutProbeInstruction(2)];
+        let target = mov_add_sequence();
         let result = search.search(&target, &(), &config);
         let statistics = result.statistics;
 
@@ -694,7 +594,7 @@ mod tests {
                 .with_test_count(0)
                 .with_seed(1),
         );
-        let target = [TimeoutProbeInstruction(1), TimeoutProbeInstruction(2)];
+        let target = mov_add_sequence();
 
         let result = search.search(&target, &(), &config);
 
@@ -715,7 +615,7 @@ mod tests {
                 .with_test_count(0)
                 .with_seed(1),
         );
-        let target = [TimeoutProbeInstruction(1), TimeoutProbeInstruction(2)];
+        let target = mov_add_sequence();
 
         let result = search.search(&target, &(), &config);
 
@@ -819,7 +719,7 @@ mod tests {
                 .with_test_count(0)
                 .with_seed(1),
         );
-        let target = [TimeoutProbeInstruction(1)];
+        let target = mov_zero_sequence();
 
         let result = search.search(&target, &(), &config);
 
