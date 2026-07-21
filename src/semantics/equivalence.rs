@@ -2098,12 +2098,20 @@ mod tests {
             rd: Register::X0,
             cond: crate::ir::types::Condition::NE,
         }];
-        let cfg =
+        let register_only_cfg =
             EquivalenceConfig::default().live_out(LiveOut::from_registers(vec![Register::X0]));
         assert_eq!(
-            check_equivalence_with_config(&target, &candidate, &cfg),
+            check_equivalence_with_config(&target, &candidate, &register_only_cfg),
             EquivalenceResult::Equivalent,
             "removing a dead MOV before CSET must not change the result: both sequences read the same incoming flags"
+        );
+
+        let register_and_flags_cfg = EquivalenceConfig::default()
+            .live_out(LiveOut::from_registers(vec![Register::X0]).with_flags(true));
+        assert_eq!(
+            check_equivalence_with_config(&target, &candidate, &register_and_flags_cfg),
+            EquivalenceResult::Equivalent,
+            "removing a dead, flag-preserving MOV before CSET must preserve X0 and NZCV"
         );
     }
 
