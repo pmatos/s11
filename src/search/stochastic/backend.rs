@@ -150,7 +150,7 @@ impl StochasticBackend<crate::isa::AArch64> for crate::isa::AArch64 {
         }
 
         let mut regs: Vec<_> = regs.into_iter().collect();
-        regs.sort_by_key(|reg| reg.index().unwrap_or(u8::MAX));
+        regs.sort_by_key(|reg| reg.sort_key());
         regs
     }
 
@@ -523,7 +523,7 @@ mod tests {
     //! candidate, which depends on RNG and isn't a reliable coverage
     //! signal).
     use super::*;
-    use crate::ir::{Instruction, Operand, Register};
+    use crate::ir::{Instruction, Operand, Register, VectorArrangement, VectorRegister};
     use crate::isa::AArch64;
     use crate::isa::x86::{X86Instruction, X86Register};
     use crate::semantics::live_out::LiveOut;
@@ -581,8 +581,15 @@ mod tests {
                 rn: Register::X0,
                 rm: Operand::Immediate(1),
             },
+            Instruction::VectorAdd {
+                vd: VectorRegister::V0,
+                vn: VectorRegister::V1,
+                vm: VectorRegister::V0,
+                arrangement: VectorArrangement::TwoD,
+            },
         ];
-        let live_out = LiveOut::from_registers(vec![Register::X0]);
+        let live_out =
+            LiveOut::from_registers(vec![Register::X0, Register::Vector(VectorRegister::V0)]);
 
         let regs = <AArch64 as StochasticBackend<AArch64>>::validation_registers(
             &[Register::X0],
@@ -590,7 +597,15 @@ mod tests {
             &live_out,
         );
 
-        assert_eq!(regs, vec![Register::X0, Register::X1]);
+        assert_eq!(
+            regs,
+            vec![
+                Register::X0,
+                Register::X1,
+                Register::Vector(VectorRegister::V0),
+                Register::Vector(VectorRegister::V1),
+            ]
+        );
     }
 
     #[test]

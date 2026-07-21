@@ -44,7 +44,11 @@ EOF
       exit 1
     fi
     case "$1" in
-      patch) patch=$((patch + 1)) ;;
+      patch)
+        if [ "$current" = "$base" ]; then
+          patch=$((patch + 1))
+        fi
+        ;;
       minor)
         minor=$((minor + 1))
         patch=0

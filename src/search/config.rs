@@ -234,14 +234,19 @@ pub const DEFAULT_SYMBOLIC_SOLVER_TIMEOUT: Duration = Duration::from_secs(30);
 pub struct SymbolicConfig {
     /// Maximum number of synthesized non-terminator instructions to consider.
     ///
-    /// A value of 0 disables candidate search. If the target ends in a fixed
-    /// terminator, that terminator is appended after synthesis and does not
-    /// count against this window.
+    /// The default of 3 is actively enforced, so synthesized candidates are
+    /// capped at three non-terminator instructions unless the caller raises
+    /// the window. A value of 0 disables candidate search. If the target ends
+    /// in a fixed terminator, that terminator is appended after synthesis and
+    /// does not count against this window.
     pub window_size: usize,
     /// Exclusive initial cost bound.
     ///
     /// Candidate sequences must be strictly cheaper than this bound and the
-    /// original target cost. `None` uses the original target cost.
+    /// original target cost. `None` leaves the original target cost as the
+    /// exclusive ceiling. `Some(0)` disables candidate verification because no
+    /// `u64` cost can be strictly below zero. Values above the original cost
+    /// have no further effect because the original cost remains the ceiling.
     pub cost_bound: Option<u64>,
     /// Search mode (linear or binary)
     pub search_mode: SearchMode,
@@ -265,6 +270,14 @@ impl SymbolicConfig {
 
     pub fn with_cost_bound(mut self, bound: u64) -> Self {
         self.cost_bound = Some(bound);
+        self
+    }
+
+    /// Sets or clears the explicit initial cost bound.
+    ///
+    /// Passing `None` clears a previously configured bound.
+    pub fn with_cost_bound_option(mut self, bound: Option<u64>) -> Self {
+        self.cost_bound = bound;
         self
     }
 
@@ -871,12 +884,15 @@ mod tests {
     fn test_symbolic_config_builder() {
         let config = SymbolicConfig::default()
             .with_window_size(5)
-            .with_cost_bound(2)
+            .with_cost_bound_option(Some(2))
             .with_search_mode(SearchMode::Binary);
 
         assert_eq!(config.window_size, 5);
         assert_eq!(config.cost_bound, Some(2));
         assert_eq!(config.search_mode, SearchMode::Binary);
+
+        let config = config.with_cost_bound(3).with_cost_bound_option(None);
+        assert_eq!(config.cost_bound, None);
     }
 
     #[test]
