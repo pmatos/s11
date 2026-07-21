@@ -1381,6 +1381,7 @@ mod tests {
     use super::*;
     use crate::isa::InstructionGenerator;
     use crate::isa::aarch64::AArch64InstructionGenerator;
+    use crate::test_utils::instruction_fixtures::aarch64_instruction_families;
     use std::convert::Infallible;
 
     fn default_registers() -> Vec<Register> {
@@ -2824,123 +2825,10 @@ mod tests {
 
     #[test]
     fn test_opcode_id_unique() {
-        let instrs = vec![
-            Instruction::MovReg {
-                rd: Register::X0,
-                rn: Register::X1,
-            },
-            Instruction::MovImm {
-                rd: Register::X0,
-                imm: 0,
-            },
-            Instruction::Add {
-                rd: Register::X0,
-                rn: Register::X1,
-                rm: Operand::Immediate(0),
-            },
-            Instruction::Sub {
-                rd: Register::X0,
-                rn: Register::X1,
-                rm: Operand::Immediate(0),
-            },
-            Instruction::And {
-                rd: Register::X0,
-                rn: Register::X1,
-                rm: Operand::Immediate(0),
-                width: RegisterWidth::X64,
-            },
-            Instruction::Orr {
-                rd: Register::X0,
-                rn: Register::X1,
-                rm: Operand::Immediate(0),
-                width: RegisterWidth::X64,
-            },
-            Instruction::Eor {
-                rd: Register::X0,
-                rn: Register::X1,
-                rm: Operand::Immediate(0),
-                width: RegisterWidth::X64,
-            },
-            Instruction::Lsl {
-                rd: Register::X0,
-                rn: Register::X1,
-                shift: Operand::Immediate(0),
-            },
-            Instruction::Lsr {
-                rd: Register::X0,
-                rn: Register::X1,
-                shift: Operand::Immediate(0),
-            },
-            Instruction::Asr {
-                rd: Register::X0,
-                rn: Register::X1,
-                shift: Operand::Immediate(0),
-            },
-            Instruction::Sxtb {
-                rd: Register::X0,
-                rn: Register::X1,
-            },
-            Instruction::Sxth {
-                rd: Register::X0,
-                rn: Register::X1,
-            },
-            Instruction::Sxtw {
-                rd: Register::X0,
-                rn: Register::X1,
-            },
-            Instruction::Uxtb {
-                rd: Register::X0,
-                rn: Register::X1,
-            },
-            Instruction::Uxth {
-                rd: Register::X0,
-                rn: Register::X1,
-            },
-            Instruction::Ubfx {
-                rd: Register::X0,
-                rn: Register::X1,
-                lsb: 0,
-                width: 1,
-                reg_width: crate::ir::RegisterWidth::X64,
-            },
-            Instruction::Sbfx {
-                rd: Register::X0,
-                rn: Register::X1,
-                lsb: 0,
-                width: 1,
-                reg_width: crate::ir::RegisterWidth::X64,
-            },
-            Instruction::Bfi {
-                rd: Register::X0,
-                rn: Register::X1,
-                lsb: 0,
-                width: 1,
-                reg_width: crate::ir::RegisterWidth::X64,
-            },
-            Instruction::Bfxil {
-                rd: Register::X0,
-                rn: Register::X1,
-                lsb: 0,
-                width: 1,
-                reg_width: crate::ir::RegisterWidth::X64,
-            },
-            Instruction::Ubfiz {
-                rd: Register::X0,
-                rn: Register::X1,
-                lsb: 0,
-                width: 1,
-                reg_width: crate::ir::RegisterWidth::X64,
-            },
-            Instruction::Sbfiz {
-                rd: Register::X0,
-                rn: Register::X1,
-                lsb: 0,
-                width: 1,
-                reg_width: crate::ir::RegisterWidth::X64,
-            },
-        ];
-
-        let ids: Vec<_> = instrs.iter().map(InstructionType::opcode_id).collect();
+        let ids: Vec<_> = aarch64_instruction_families()
+            .iter()
+            .map(|fixture| InstructionType::opcode_id(&fixture.instruction))
+            .collect();
         let unique: std::collections::HashSet<_> = ids.iter().collect();
         assert_eq!(ids.len(), unique.len());
     }

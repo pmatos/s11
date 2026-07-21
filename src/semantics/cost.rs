@@ -145,6 +145,7 @@ pub fn cost_difference(a: &[Instruction], b: &[Instruction], metric: &CostMetric
 mod tests {
     use super::*;
     use crate::ir::{Operand, Register};
+    use crate::test_utils::instruction_fixtures::aarch64_instruction_families;
 
     fn mov_imm(rd: Register, imm: i64) -> Instruction {
         Instruction::MovImm { rd, imm }
@@ -283,76 +284,8 @@ mod tests {
 
     #[test]
     fn test_all_instruction_types_have_cost() {
-        let instructions = vec![
-            Instruction::MovReg {
-                rd: Register::X0,
-                rn: Register::X1,
-            },
-            Instruction::MovImm {
-                rd: Register::X0,
-                imm: 0,
-            },
-            Instruction::Add {
-                rd: Register::X0,
-                rn: Register::X1,
-                rm: Operand::Immediate(1),
-            },
-            Instruction::Sub {
-                rd: Register::X0,
-                rn: Register::X1,
-                rm: Operand::Immediate(1),
-            },
-            Instruction::And {
-                rd: Register::X0,
-                rn: Register::X1,
-                rm: Operand::Immediate(1),
-                width: crate::ir::RegisterWidth::X64,
-            },
-            Instruction::Orr {
-                rd: Register::X0,
-                rn: Register::X1,
-                rm: Operand::Immediate(1),
-                width: crate::ir::RegisterWidth::X64,
-            },
-            Instruction::Eor {
-                rd: Register::X0,
-                rn: Register::X1,
-                rm: Operand::Immediate(1),
-                width: crate::ir::RegisterWidth::X64,
-            },
-            Instruction::Lsl {
-                rd: Register::X0,
-                rn: Register::X1,
-                shift: Operand::Immediate(1),
-            },
-            Instruction::Lsr {
-                rd: Register::X0,
-                rn: Register::X1,
-                shift: Operand::Immediate(1),
-            },
-            Instruction::Asr {
-                rd: Register::X0,
-                rn: Register::X1,
-                shift: Operand::Immediate(1),
-            },
-            Instruction::Mul {
-                rd: Register::X0,
-                rn: Register::X1,
-                rm: Register::X2,
-            },
-            Instruction::Sdiv {
-                rd: Register::X0,
-                rn: Register::X1,
-                rm: Register::X2,
-            },
-            Instruction::Udiv {
-                rd: Register::X0,
-                rn: Register::X1,
-                rm: Register::X2,
-            },
-        ];
-
-        for instr in &instructions {
+        for fixture in aarch64_instruction_families() {
+            let instr = &fixture.instruction;
             assert!(instruction_cost(instr, &CostMetric::InstructionCount) > 0);
             assert!(instruction_cost(instr, &CostMetric::Latency) > 0);
             assert!(instruction_cost(instr, &CostMetric::CodeSize) > 0);
