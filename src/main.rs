@@ -3516,6 +3516,19 @@ mod cli_helper_tests {
         }
     }
 
+    fn assert_stochastic_config_matches_options(
+        config: &SearchConfig,
+        options: &OptimizationOptions,
+    ) {
+        assert_eq!(config.solver_timeout, Some(options.solver_timeout));
+        assert_eq!(config.stochastic.beta, options.beta);
+        assert_eq!(config.stochastic.iterations, options.iterations);
+        assert_eq!(config.stochastic.seed, options.seed);
+        assert_eq!(config.cost_metric, options.cost_metric);
+        assert_eq!(config.timeout, options.timeout);
+        assert_eq!(config.verbose, options.verbose);
+    }
+
     fn r10_zeroing_target() -> [X86Instruction; 2] {
         let zero_r10 = X86Instruction::XorReg {
             rd: X86Register::R10,
@@ -6908,13 +6921,7 @@ mod cli_helper_tests {
         let imms = vec![0, 7];
         let config = build_stochastic_search_config(&opts, regs.clone(), imms.clone());
 
-        assert_eq!(config.solver_timeout, Some(Duration::from_millis(17)));
-        assert_eq!(config.stochastic.beta, 2.5);
-        assert_eq!(config.stochastic.iterations, 123);
-        assert_eq!(config.stochastic.seed, Some(99));
-        assert_eq!(config.cost_metric, CostMetric::Latency);
-        assert_eq!(config.timeout, Some(Duration::from_millis(11)));
-        assert!(config.verbose);
+        assert_stochastic_config_matches_options(&config, &opts);
         assert_eq!(config.available_registers, regs);
         assert_eq!(config.available_immediates, imms);
     }
@@ -7033,13 +7040,7 @@ mod cli_helper_tests {
         ];
         let config = build_x86_stochastic_search_config(&target, &opts);
 
-        assert_eq!(config.solver_timeout, Some(Duration::from_millis(19)));
-        assert_eq!(config.stochastic.beta, 3.5);
-        assert_eq!(config.stochastic.iterations, 456);
-        assert_eq!(config.stochastic.seed, Some(101));
-        assert_eq!(config.cost_metric, CostMetric::CodeSize);
-        assert_eq!(config.timeout, Some(Duration::from_millis(13)));
-        assert!(config.verbose);
+        assert_stochastic_config_matches_options(&config, &opts);
         assert_eq!(
             config.x86_available_registers,
             vec![X86Register::R11, X86Register::R12]
