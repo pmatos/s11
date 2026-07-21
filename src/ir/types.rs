@@ -331,14 +331,14 @@ impl RegisterWidth {
         ];
 
         match (self, register) {
+            (_, Register::Vector(_)) => {
+                panic!("vector register has no scalar W/X register name")
+            }
             (RegisterWidth::X64, Register::XZR) => "xzr",
             (RegisterWidth::X64, Register::SP) => "sp",
             (RegisterWidth::X64, reg) => X_NAMES[reg.index().expect("x register index") as usize],
             (RegisterWidth::W32, Register::XZR) => "wzr",
             (RegisterWidth::W32, Register::SP) => "wsp",
-            (_, Register::Vector(_)) => {
-                panic!("vector register has no scalar W/X register name")
-            }
             (RegisterWidth::W32, reg) => W_NAMES[reg.index().expect("w register index") as usize],
         }
     }
@@ -971,6 +971,12 @@ mod tests {
         assert_eq!(format!("{}", Register::XZR), "xzr");
         assert_eq!(Register::SP.index(), None);
         assert_eq!(format!("{}", Register::SP), "sp");
+    }
+
+    #[test]
+    #[should_panic(expected = "vector register has no scalar W/X register name")]
+    fn x64_register_name_rejects_vector_with_scalar_width_diagnostic() {
+        RegisterWidth::X64.register_name(Register::Vector(VectorRegister::V0));
     }
 
     #[test]
