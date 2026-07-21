@@ -294,7 +294,7 @@ enum Commands {
         /// Search mode for symbolic synthesis
         #[arg(long, value_enum, default_value = "linear")]
         search_mode: CliSearchMode,
-        /// Solver timeout in seconds
+        /// Solver timeout in seconds; 0 disables SMT queries and does not request an unbounded solver query
         #[arg(long, default_value = "5")]
         solver_timeout: u64,
 
@@ -4097,6 +4097,24 @@ mod cli_helper_tests {
         );
     }
 
+    #[test]
+    fn opt_help_defines_zero_solver_timeout_as_disabling_smt() {
+        use clap::CommandFactory;
+
+        let mut command = Args::command();
+        let opt_help = command
+            .find_subcommand_mut("opt")
+            .expect("opt subcommand should be registered")
+            .render_long_help()
+            .to_string();
+
+        assert!(
+            opt_help.contains("0 disables SMT queries")
+                && opt_help.contains("does not request an unbounded solver query"),
+            "opt help should define the zero solver-timeout policy:\n{opt_help}"
+        );
+    }
+
     /// Parse an `s11` invocation and return the `Opt` subcommand it selected,
     /// panicking if parsing fails or another subcommand was chosen. Keeps the
     /// `--auto`/`-o` parse tests terse.
@@ -4207,6 +4225,25 @@ mod cli_helper_tests {
             panic!("expected the opt subcommand");
         };
         assert_eq!(output, Some(PathBuf::from("out.elf")));
+    }
+
+    #[test]
+    fn opt_accepts_zero_solver_timeout_as_the_disable_sentinel() {
+        let Commands::Opt { solver_timeout, .. } = parse_opt(&[
+            "s11",
+            "opt",
+            "prog.elf",
+            "--start-addr",
+            "0x1000",
+            "--end-addr",
+            "0x1100",
+            "--solver-timeout",
+            "0",
+        ]) else {
+            panic!("expected the opt subcommand");
+        };
+
+        assert_eq!(solver_timeout, 0);
     }
 
     #[test]

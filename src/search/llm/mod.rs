@@ -24,8 +24,6 @@ use self::ledger::UnsupportedMnemonicLedger;
 use self::outcome::{IterationOutcome, classify};
 use self::prompt::{OUTPUT_SCHEMA, build_prompt};
 
-const MIN_SMT_TIMEOUT: Duration = Duration::from_millis(1);
-
 /// LLM-assisted search using the Codex CLI.
 ///
 /// Each call to `search` invokes `codex exec` up to `LlmConfig.max_codex_calls`
@@ -182,7 +180,7 @@ impl SearchAlgorithm<crate::isa::AArch64> for LlmSearch {
             else {
                 if config.verbose {
                     eprintln!(
-                        "llm-search: timeout before verifying candidate on call {}",
+                        "llm-search: SMT disabled or budget exhausted before verifying candidate on call {}",
                         call_idx
                     );
                 }
@@ -311,9 +309,7 @@ fn verification_timeout_for_remaining(
     config: &SearchConfig,
     remaining: Duration,
 ) -> Option<Duration> {
-    let solver_timeout = config.solver_timeout();
-    let timeout = remaining.min(solver_timeout);
-    (timeout >= MIN_SMT_TIMEOUT).then_some(timeout)
+    config.solver_timeout_with_remaining_budget(remaining)
 }
 
 #[cfg(test)]
@@ -388,6 +384,16 @@ mod tests {
         assert_eq!(
             verification_timeout_for_remaining(&config, Duration::from_secs(10)),
             Some(Duration::from_millis(25))
+        );
+    }
+
+    #[test]
+    fn llm_zero_solver_timeout_skips_smt() {
+        let config = SearchConfig::default().with_solver_timeout(Duration::ZERO);
+
+        assert_eq!(
+            verification_timeout_for_remaining(&config, Duration::from_secs(10)),
+            None
         );
     }
 
