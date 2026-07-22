@@ -4189,10 +4189,6 @@ mod cli_helper_tests {
         assert_eq!(SearchMode::from(CliSearchMode::Binary), SearchMode::Binary);
     }
 
-    /// Locks in that the Capstone→IR converter covers every mnemonic the asm
-    /// parser supports and the docs capability matrix lists. If a mnemonic in
-    /// this list ever stops parsing, the binary path has silently broken; if
-    /// the docs source changes without a sample here, this test fails.
     #[test]
     fn convert_to_ir_returns_empty_for_pure_nop_window() {
         let cs = aarch64_test_capstone();

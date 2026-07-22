@@ -242,6 +242,10 @@ mod tests {
         }
     }
 
+    /// Locks in that the Capstone→IR converter covers every mnemonic the asm
+    /// parser supports and the docs capability matrix lists. If a mnemonic in
+    /// this list ever stops parsing, the binary path has silently broken; if
+    /// the docs source changes without a sample here, this test fails.
     #[test]
     fn convert_capstone_op_handles_all_supported_aarch64_mnemonics() {
         let cases = [
