@@ -14,7 +14,6 @@
 //!    d. Accept/reject based on Metropolis cost acceptance
 //! 4. Return best found optimization
 
-use crate::ir::{Instruction, Register};
 use crate::isa::{ISA, ISAMutator};
 use crate::search::config::SearchConfig;
 use crate::search::result::{SearchResultFor, SearchStatistics};
@@ -22,9 +21,6 @@ use crate::search::stochastic::acceptance::AcceptanceCriterion;
 use crate::search::stochastic::backend::StochasticBackend;
 use crate::search::{Algorithm, SearchAlgorithm};
 use crate::semantics::EquivalenceResult;
-use crate::semantics::concrete::{apply_sequence_concrete, states_equal_for_live_out};
-use crate::semantics::live_out::RegisterSet;
-use crate::semantics::state::ConcreteMachineState;
 use rand::{RngExt, SeedableRng};
 use rand_chacha::ChaCha8Rng;
 use std::marker::PhantomData;
@@ -216,21 +212,7 @@ where
 
             self.statistics.candidates_evaluated += 1;
 
-            let mut passes_tests = true;
-            for (input, target_output) in all_inputs.iter().zip(target_outputs.iter()) {
-                let proposal_output =
-                    <I as StochasticBackend<I>>::apply_sequence(input.clone(), &proposal);
-                if !<I as StochasticBackend<I>>::states_equal(
-                    &proposal_output,
-                    target_output,
-                    live_out,
-                ) {
-                    passes_tests = false;
-                    break;
-                }
-            }
-
-            if !passes_tests {
+            if !passes_concrete_tests::<I>(&proposal, &all_inputs, &target_outputs, live_out) {
                 continue;
             }
 
@@ -327,43 +309,45 @@ where
     }
 }
 
-/// Simplified cost function for MCMC that includes both cost and correctness
-/// Returns high cost for programs that fail tests
-pub fn evaluate_with_tests(
-    proposal: &[Instruction],
-    _target: &[Instruction],
-    test_inputs: &[ConcreteMachineState],
-    target_outputs: &[ConcreteMachineState],
-    live_out: &RegisterSet<Register>,
-) -> (u64, bool) {
-    let mut passes_all = true;
-
-    for (input, target_output) in test_inputs.iter().zip(target_outputs.iter()) {
-        let proposal_output = apply_sequence_concrete(input.clone(), proposal);
-        if !states_equal_for_live_out(&proposal_output, target_output, live_out, false) {
-            passes_all = false;
-            break;
-        }
-    }
-
-    let base_cost = proposal.len() as u64;
-    if passes_all {
-        (base_cost, true)
-    } else {
-        // High penalty for incorrect programs
-        (base_cost + 1000, false)
-    }
+/// Run the stochastic search's concrete fast-test prefilter for one candidate.
+///
+/// Applies `proposal` to every test input and compares its output against the
+/// target's precomputed output on the live-out contract, returning `true` only
+/// when the proposal agrees on every input. Routes through the
+/// `StochasticBackend<I>` seam (`apply_sequence` + `states_equal`) so it is the
+/// single source of truth for the prefilter: the `search` loop calls it, and
+/// the unit tests exercise it directly — a test can never validate a parallel
+/// copy that has drifted from the shipping path.
+fn passes_concrete_tests<I>(
+    proposal: &[I::Instruction],
+    inputs: &[<I as StochasticBackend<I>>::State],
+    target_outputs: &[<I as StochasticBackend<I>>::State],
+    live_out: &<I as StochasticBackend<I>>::LiveOut,
+) -> bool
+where
+    I: ISA + StochasticBackend<I>,
+    <I as StochasticBackend<I>>::State: Clone,
+{
+    inputs
+        .iter()
+        .zip(target_outputs.iter())
+        .all(|(input, target_output)| {
+            let proposal_output =
+                <I as StochasticBackend<I>>::apply_sequence(input.clone(), proposal);
+            <I as StochasticBackend<I>>::states_equal(&proposal_output, target_output, live_out)
+        })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ir::{Operand, Register};
+    use crate::ir::{Instruction, Operand, Register};
     use crate::isa::{AArch64, ISA, ISAMutator, U64};
     use crate::search::config::StochasticConfig;
+    use crate::semantics::concrete::apply_sequence_concrete;
     use crate::semantics::cost::CostMetric;
     use crate::semantics::live_out::LiveOut;
-    use crate::semantics::state::{ConcreteValue, ConditionFlags};
+    use crate::semantics::state::{ConcreteMachineState, ConcreteValue, ConditionFlags};
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering as AtomicOrdering};
     use std::sync::{Mutex as TestMutex, MutexGuard};
     use std::time::Duration;
@@ -892,7 +876,8 @@ mod tests {
     }
 
     #[test]
-    fn test_evaluate_with_tests_correct() {
+    fn passes_concrete_tests_accepts_equivalent_proposal() {
+        // EOR X0, X0, X0 zeroes X0, matching MOV X0, #0 on the live-out {X0}.
         let target = mov_zero_sequence();
         let proposal = vec![Instruction::Eor {
             rd: Register::X0,
@@ -903,38 +888,41 @@ mod tests {
 
         let input = ConcreteMachineState::new_zeroed();
         let target_output = apply_sequence_concrete(input.clone(), &target);
+        let live_out = LiveOut::from_registers(vec![Register::X0]);
 
-        let live_out = RegisterSet::<Register>::from_registers(vec![Register::X0]);
-        let (cost, passes) =
-            evaluate_with_tests(&proposal, &target, &[input], &[target_output], &live_out);
-
-        assert!(passes);
-        assert_eq!(cost, 1); // 1 instruction
+        assert!(passes_concrete_tests::<AArch64>(
+            &proposal,
+            &[input],
+            &[target_output],
+            &live_out,
+        ));
     }
 
     #[test]
-    fn test_evaluate_with_tests_incorrect() {
+    fn passes_concrete_tests_rejects_divergent_proposal() {
         let target = mov_zero_sequence();
         let proposal = vec![Instruction::MovImm {
             rd: Register::X0,
             imm: 1,
-        }]; // Wrong value!
+        }]; // Wrong value: X0 becomes 1, not 0.
 
         let input = ConcreteMachineState::new_zeroed();
         let target_output = apply_sequence_concrete(input.clone(), &target);
+        let live_out = LiveOut::from_registers(vec![Register::X0]);
 
-        let live_out = RegisterSet::<Register>::from_registers(vec![Register::X0]);
-        let (cost, passes) =
-            evaluate_with_tests(&proposal, &target, &[input], &[target_output], &live_out);
-
-        assert!(!passes);
-        assert!(cost > 100); // High penalty
+        assert!(!passes_concrete_tests::<AArch64>(
+            &proposal,
+            &[input],
+            &[target_output],
+            &live_out,
+        ));
     }
 
     #[test]
-    fn test_evaluate_with_tests_honors_flags_from_mask() {
-        let target = Vec::new();
-        let proposal = Vec::new();
+    fn passes_concrete_tests_honors_flag_liveness() {
+        // Empty sequences leave state untouched, so the proposal output equals
+        // the input; only the constructed target_output diverges on NZCV.
+        let proposal: Vec<Instruction> = Vec::new();
 
         let mut input = ConcreteMachineState::new_zeroed();
         input.set_register(Register::X0, ConcreteValue(42));
@@ -953,30 +941,38 @@ mod tests {
             v: false,
         });
 
-        // Mask without flag liveness: the divergent NZCV bits are ignored, so
-        // the proposal still passes.
-        let live_out_flags_dead = RegisterSet::<Register>::from_registers(vec![Register::X0]);
-        let (cost, passes) = evaluate_with_tests(
+        // Flags dead: divergent NZCV is ignored, so the register-only match passes.
+        let live_out_flags_dead = LiveOut::from_registers(vec![Register::X0]);
+        assert!(passes_concrete_tests::<AArch64>(
             &proposal,
-            &target,
             &[input.clone()],
             &[target_output.clone()],
             &live_out_flags_dead,
-        );
-        assert!(passes);
-        assert_eq!(cost, 0);
+        ));
 
-        // Mask with flag liveness: NZCV divergence now fails the proposal,
-        // matching the flag-honoring stochastic prefilter.
+        // Flags live: NZCV divergence now fails the proposal.
         let live_out_flags_live = live_out_flags_dead.with_flags(true);
-        let (_cost, passes) = evaluate_with_tests(
+        assert!(!passes_concrete_tests::<AArch64>(
             &proposal,
-            &target,
             &[input],
             &[target_output],
             &live_out_flags_live,
-        );
-        assert!(!passes);
+        ));
+    }
+
+    #[test]
+    fn passes_concrete_tests_vacuously_true_on_no_inputs() {
+        let proposal = vec![Instruction::MovImm {
+            rd: Register::X0,
+            imm: 7,
+        }];
+        let live_out = LiveOut::from_registers(vec![Register::X0]);
+        assert!(passes_concrete_tests::<AArch64>(
+            &proposal,
+            &[],
+            &[],
+            &live_out
+        ));
     }
 
     #[test]
