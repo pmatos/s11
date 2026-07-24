@@ -21,7 +21,6 @@ use s11::search::parallel::{ParallelConfig, run_parallel_search};
 use s11::search::{EnumerativeSearch, SearchAlgorithm, StochasticSearch, SymbolicSearch};
 use s11::semantics::LiveOut;
 use s11::semantics::cost::CostMetric;
-use s11::validation::downstream::{ScanStep, scan_flags_live, scan_regs_live};
 #[allow(unused_imports)]
 use s11::{assembler, elf_patcher, ir, isa, parser, search, semantics, validation};
 
@@ -769,7 +768,7 @@ impl ElfOptimizationBackend for AArch64OptimizationBackend {
             DownstreamLiveRegs::Unknown
         } else {
             let candidates = validation::live_out::compute_written_registers(prefix);
-            DownstreamLiveRegs::Aarch64(aarch64_downstream_regs_live_from_section(
+            DownstreamLiveRegs::Aarch64(validation::downstream::aarch64_downstream_regs_live(
                 patcher,
                 section,
                 end_addr,
@@ -778,7 +777,7 @@ impl ElfOptimizationBackend for AArch64OptimizationBackend {
             ))
         };
         OptimizationContext {
-            downstream_flags_live: aarch64_downstream_flags_live_from_section(
+            downstream_flags_live: validation::downstream::aarch64_downstream_flags_live(
                 patcher, section, end_addr, cs,
             ),
             downstream_live_regs,
@@ -958,7 +957,7 @@ impl ElfOptimizationBackend for X86OptimizationBackend {
             let candidates = semantics::live_out::RegisterSet::from_registers(
                 ir.iter().filter_map(|i| i.destination()).collect(),
             );
-            DownstreamLiveRegs::X86(x86_downstream_regs_live_from_section(
+            DownstreamLiveRegs::X86(validation::downstream::x86_downstream_regs_live(
                 self.arch(),
                 patcher,
                 section,
@@ -968,7 +967,7 @@ impl ElfOptimizationBackend for X86OptimizationBackend {
             ))
         };
         OptimizationContext {
-            downstream_flags_live: x86_downstream_flags_live_from_section(
+            downstream_flags_live: validation::downstream::x86_downstream_flags_live(
                 self.arch(),
                 patcher,
                 section,
@@ -2263,239 +2262,6 @@ fn convert_to_ir(instructions: &capstone::Instructions) -> Result<Vec<Instructio
     Ok(ir_instructions)
 }
 
-/// Resolve the in-section fall-through suffix after an optimization window
-/// ending at `end_addr`. `None` means there is no analyzable suffix — the
-/// window already reaches the section end, or the bytes are unavailable — in
-/// which case downstream liveness is unknown and the caller keeps every
-/// candidate live (the conservative default). The four `*_from_section`
-/// wrappers below all funnel through here rather than repeating the suffix math.
-fn fall_through_suffix(
-    patcher: &ElfPatcher,
-    section: &TextSection,
-    end_addr: u64,
-) -> Option<Vec<u8>> {
-    let section_end = section.virtual_addr + section.size;
-    if end_addr >= section_end {
-        return None;
-    }
-    let suffix_window = AddressWindow {
-        start: end_addr,
-        end: section_end,
-    };
-    patcher.get_instructions_in_window(&suffix_window).ok()
-}
-
-/// Decode one AArch64 Capstone `(mnemonic, op_str)` pair into a downstream scan
-/// step, reusing the shared Capstone→IR bridge so the fall-through scan honors
-/// exactly the same supported-mnemonic set as the optimizer.
-fn aarch64_scan_step(mnemonic: &str, op_str: &str) -> ScanStep<Instruction> {
-    match convert_capstone_op(mnemonic, op_str) {
-        ConvertOutcome::Instruction(instr) => ScanStep::Decoded(instr),
-        ConvertOutcome::Skip => ScanStep::Skipped,
-        ConvertOutcome::Unsupported(_) => ScanStep::Opaque,
-    }
-}
-
-fn aarch64_downstream_flags_live_from_bytes(cs: &Capstone, bytes: &[u8], start_addr: u64) -> bool {
-    scan_flags_live(
-        cs,
-        bytes,
-        start_addr,
-        aarch64_scan_step,
-        |instr: &Instruction| {
-            validation::live_out::flags_read_before_overwrite_after_window(std::slice::from_ref(
-                instr,
-            ))
-        },
-        |instr: &Instruction| instr.modifies_flags(),
-        |instr: &Instruction| instr.is_terminator(),
-    )
-}
-
-fn aarch64_downstream_flags_live_from_section(
-    patcher: &ElfPatcher,
-    section: &TextSection,
-    end_addr: u64,
-    cs: &Capstone,
-) -> bool {
-    match fall_through_suffix(patcher, section, end_addr) {
-        Some(bytes) => aarch64_downstream_flags_live_from_bytes(cs, &bytes, end_addr),
-        None => true,
-    }
-}
-
-/// Compute the subset of `candidates` (registers the window writes) that are
-/// provably *live* downstream of an AArch64 window, given the fall-through
-/// bytes that follow it.
-///
-/// This is the register counterpart to `aarch64_downstream_flags_live_from_bytes`
-/// and walks the suffix the same way: disassemble one instruction at a time,
-/// convert it to IR, and stop at the first uncertainty.
-///
-/// **Soundness discipline (the #224 bug class).** A candidate register stays in
-/// the live set unless the scan can *prove* it dead. Concretely, a candidate R
-/// is dropped from live-out only when, walking forward from the window, the
-/// first instruction that mentions R fully overwrites R *before reading it*
-/// (`DownstreamRegLiveness::Dead`). Every other situation keeps R live:
-/// * R is read by a later instruction before any full overwrite (`Read`);
-/// * the scan hits a terminator (which on AArch64 includes `B`/`BR`/`BL`/`RET`,
-///   so the call/ret ABI is covered — any window-written register may be
-///   observable across the transfer, so all still-undecided candidates are
-///   pinned live);
-/// * an instruction is unsupported by the optimization IR or fails to
-///   disassemble (we cannot reason about its reads/writes);
-/// * control leaves the analyzable region (handled by the caller, which passes
-///   only in-region bytes and treats an empty / out-of-range window as "all
-///   live").
-///
-/// `Skip` (NOP) instructions neither read nor write and are stepped over.
-fn aarch64_downstream_regs_live_from_bytes(
-    cs: &Capstone,
-    bytes: &[u8],
-    start_addr: u64,
-    candidates: &semantics::live_out::RegisterSet<Register>,
-) -> semantics::live_out::RegisterSet<Register> {
-    scan_regs_live(
-        cs,
-        bytes,
-        start_addr,
-        candidates,
-        aarch64_scan_step,
-        |instr: &Instruction| instr.is_terminator(),
-        |reg: Register, instr: &Instruction| {
-            validation::live_out::aarch64_reg_downstream_liveness(reg, std::slice::from_ref(instr))
-        },
-    )
-}
-
-/// Section wrapper for `aarch64_downstream_regs_live_from_bytes`. Returns all
-/// candidates live whenever the suffix is unavailable or the window already
-/// reaches the section end (the byte-scan default for an unanalyzable region).
-fn aarch64_downstream_regs_live_from_section(
-    patcher: &ElfPatcher,
-    section: &TextSection,
-    end_addr: u64,
-    cs: &Capstone,
-    candidates: &semantics::live_out::RegisterSet<Register>,
-) -> semantics::live_out::RegisterSet<Register> {
-    match fall_through_suffix(patcher, section, end_addr) {
-        Some(bytes) => aarch64_downstream_regs_live_from_bytes(cs, &bytes, end_addr, candidates),
-        None => candidates.clone(),
-    }
-}
-
-/// Decode one x86 Capstone `(mnemonic, op_str)` pair into a downstream scan
-/// step. `nop` carries no observable state and is stepped over; anything the
-/// shared x86 IR does not model (including `call`/`ret`) is opaque and pins the
-/// remaining state live.
-fn x86_scan_step(mnemonic: &str, op_str: &str) -> ScanStep<isa::x86::X86Instruction> {
-    match x86_ir_from_mnemonic(mnemonic, op_str) {
-        Ok(Some(instr)) => ScanStep::Decoded(instr),
-        Ok(None) if mnemonic.eq_ignore_ascii_case("nop") => ScanStep::Skipped,
-        Ok(None) => ScanStep::Opaque,
-        Err(_) => ScanStep::Opaque,
-    }
-}
-
-fn x86_downstream_flags_live_from_bytes<I>(cs: &Capstone, bytes: &[u8], start_addr: u64) -> bool
-where
-    I: isa::FlagsAnalysis<isa::x86::X86Instruction>,
-{
-    scan_flags_live(
-        cs,
-        bytes,
-        start_addr,
-        x86_scan_step,
-        |instr: &isa::x86::X86Instruction| {
-            <I as isa::FlagsAnalysis<isa::x86::X86Instruction>>::reads_flags(instr)
-        },
-        |instr: &isa::x86::X86Instruction| {
-            <I as isa::FlagsAnalysis<isa::x86::X86Instruction>>::modifies_flags(instr)
-        },
-        |instr: &isa::x86::X86Instruction| instr.is_terminator(),
-    )
-}
-
-fn x86_downstream_flags_live_from_section(
-    arch: DetectedArch,
-    patcher: &ElfPatcher,
-    section: &TextSection,
-    end_addr: u64,
-    cs: &Capstone,
-) -> bool {
-    let Some(bytes) = fall_through_suffix(patcher, section, end_addr) else {
-        return true;
-    };
-
-    match arch {
-        DetectedArch::X86_64 => {
-            x86_downstream_flags_live_from_bytes::<isa::X86_64>(cs, &bytes, end_addr)
-        }
-        DetectedArch::X86_32 => {
-            x86_downstream_flags_live_from_bytes::<isa::X86_32>(cs, &bytes, end_addr)
-        }
-        DetectedArch::Aarch64 => true,
-    }
-}
-
-/// Compute the subset of `candidates` (registers an x86 window writes) that are
-/// provably *live* downstream, given the fall-through bytes that follow.
-///
-/// Structurally identical to the AArch64 register scan. The x86 kill rule
-/// distinguishes full architectural writes (native or dword) from word and
-/// byte writes that preserve surrounding bits. An instruction that reads a
-/// candidate first keeps it live; an unsupported instruction — including
-/// `call`/`ret`, since neither is modelled in the x86 IR — a terminator, a
-/// disassembly failure, or the end of the in-region suffix conservatively
-/// pins every unresolved candidate live.
-///
-/// Unlike the flags scan, this needs no ISA-marker type parameter: register
-/// reads/kills are width-independent in the shared x86 IR, and the `cs`
-/// disassembler is already configured for the right mode by the caller.
-fn x86_downstream_regs_live_from_bytes(
-    cs: &Capstone,
-    bytes: &[u8],
-    start_addr: u64,
-    candidates: &semantics::live_out::RegisterSet<isa::x86::X86Register>,
-) -> semantics::live_out::RegisterSet<isa::x86::X86Register> {
-    scan_regs_live(
-        cs,
-        bytes,
-        start_addr,
-        candidates,
-        x86_scan_step,
-        |instr: &isa::x86::X86Instruction| instr.is_terminator(),
-        |reg: isa::x86::X86Register, instr: &isa::x86::X86Instruction| {
-            validation::live_out::x86_reg_downstream_liveness(reg, std::slice::from_ref(instr))
-        },
-    )
-}
-
-/// Section wrapper for `x86_downstream_regs_live_from_bytes`. Returns all
-/// candidates live whenever the suffix is unavailable, the window reaches the
-/// section end, or the arch is not an x86 mode.
-fn x86_downstream_regs_live_from_section(
-    arch: DetectedArch,
-    patcher: &ElfPatcher,
-    section: &TextSection,
-    end_addr: u64,
-    cs: &Capstone,
-    candidates: &semantics::live_out::RegisterSet<isa::x86::X86Register>,
-) -> semantics::live_out::RegisterSet<isa::x86::X86Register> {
-    let Some(bytes) = fall_through_suffix(patcher, section, end_addr) else {
-        return candidates.clone();
-    };
-
-    match arch {
-        // Register liveness is width-independent; the mode-configured `cs`
-        // already drives the correct x86-32/x86-64 disassembly.
-        DetectedArch::X86_64 | DetectedArch::X86_32 => {
-            x86_downstream_regs_live_from_bytes(cs, &bytes, end_addr, candidates)
-        }
-        DetectedArch::Aarch64 => candidates.clone(),
-    }
-}
-
 /// Flags-only context derivation, used as the trait default and by callers
 /// that do not have the window IR available to derive register liveness. The
 /// register-liveness narrowing (#621) needs the window's written set, so it is
@@ -2510,7 +2276,7 @@ fn optimization_context_for_backend(
 ) -> OptimizationContext {
     if arch == DetectedArch::Aarch64 {
         return OptimizationContext {
-            downstream_flags_live: aarch64_downstream_flags_live_from_section(
+            downstream_flags_live: validation::downstream::aarch64_downstream_flags_live(
                 patcher, section, end_addr, cs,
             ),
             downstream_live_regs: DownstreamLiveRegs::Unknown,
@@ -2519,7 +2285,7 @@ fn optimization_context_for_backend(
 
     if matches!(arch, DetectedArch::X86_64 | DetectedArch::X86_32) {
         return OptimizationContext {
-            downstream_flags_live: x86_downstream_flags_live_from_section(
+            downstream_flags_live: validation::downstream::x86_downstream_flags_live(
                 arch, patcher, section, end_addr, cs,
             ),
             downstream_live_regs: DownstreamLiveRegs::Unknown,
@@ -2558,7 +2324,7 @@ fn validate_basic_block(ir: &[Instruction]) -> Result<(), String> {
 // (`convert_to_x86_ir`) and the length-1 enumerator used by the
 // enumerative x86 pipeline.
 
-use parser::x86::{X86ParseMode, x86_ir_from_mnemonic, x86_ir_from_mnemonic_for_mode};
+use parser::x86::{X86ParseMode, x86_ir_from_mnemonic_for_mode};
 
 /// Reject any non-terminal Jcc in an x86 optimization window. The
 /// optimizer only special-cases a trailing Jcc (peeled by
@@ -4277,12 +4043,6 @@ mod cli_helper_tests {
             .expect("test capstone should build")
     }
 
-    fn assemble_x86_64_test_bytes(instructions: &[X86Instruction]) -> Vec<u8> {
-        assembler::x86::X86Assembler::new_64()
-            .assemble_instructions(instructions)
-            .expect("test instruction should assemble")
-    }
-
     fn x86_64_test_capstone() -> Capstone {
         Capstone::new()
             .x86()
@@ -4802,316 +4562,6 @@ mod cli_helper_tests {
         assert!(error.contains("x86-64 window 0x5000-0x5001"), "{error}");
         assert!(error.contains("decoded only 0 bytes"), "{error}");
         assert!(error.contains("first undecoded byte at 0x5000"), "{error}");
-    }
-
-    #[test]
-    fn downstream_flags_live_scan_marks_dead_when_first_flag_event_writes() {
-        let bytes = assemble_aarch64_test_bytes(&[
-            Instruction::Cmp {
-                rn: Register::X0,
-                rm: Operand::Immediate(0),
-            },
-            Instruction::Csel {
-                rd: Register::X1,
-                rn: Register::X2,
-                rm: Register::X3,
-                cond: s11::ir::Condition::EQ,
-            },
-        ]);
-        let cs = aarch64_test_capstone();
-
-        assert!(!aarch64_downstream_flags_live_from_bytes(
-            &cs, &bytes, 0x1000
-        ));
-    }
-
-    #[test]
-    fn downstream_flags_live_scan_marks_live_when_first_flag_event_reads() {
-        let bytes = assemble_aarch64_test_bytes(&[Instruction::Csel {
-            rd: Register::X1,
-            rn: Register::X2,
-            rm: Register::X3,
-            cond: s11::ir::Condition::EQ,
-        }]);
-        let cs = aarch64_test_capstone();
-
-        assert!(aarch64_downstream_flags_live_from_bytes(
-            &cs, &bytes, 0x1000
-        ));
-    }
-
-    #[test]
-    fn downstream_flags_live_scan_marks_dead_for_known_non_flag_suffix() {
-        let bytes = assemble_aarch64_test_bytes(&[Instruction::Add {
-            rd: Register::X1,
-            rn: Register::X2,
-            rm: Operand::Immediate(1),
-        }]);
-        let cs = aarch64_test_capstone();
-
-        assert!(!aarch64_downstream_flags_live_from_bytes(
-            &cs, &bytes, 0x1000
-        ));
-    }
-
-    #[test]
-    fn downstream_flags_live_scan_is_conservative_for_unknown_context() {
-        let cs = aarch64_test_capstone();
-
-        assert!(aarch64_downstream_flags_live_from_bytes(&cs, &[], 0x1000));
-        assert!(aarch64_downstream_flags_live_from_bytes(
-            &cs,
-            &[0xff],
-            0x1000
-        ));
-        // LDR literal decodes in Capstone but is intentionally unsupported by
-        // the AArch64 optimization IR parser.
-        assert!(aarch64_downstream_flags_live_from_bytes(
-            &cs,
-            &[0x00, 0x00, 0x00, 0x58],
-            0x1000
-        ));
-    }
-
-    #[test]
-    fn downstream_flags_live_scan_is_conservative_for_unanalysed_branch() {
-        let bytes = assemble_aarch64_test_bytes(&[Instruction::B {
-            target: s11::ir::LabelId(0x1000),
-        }]);
-        let cs = aarch64_test_capstone();
-
-        assert!(aarch64_downstream_flags_live_from_bytes(
-            &cs, &bytes, 0x1000
-        ));
-    }
-
-    #[test]
-    fn x86_downstream_flags_live_scan_marks_live_when_first_flag_event_reads() {
-        use isa::x86::X86Condition;
-
-        let bytes = assemble_x86_64_test_bytes(&[X86Instruction::Jcc {
-            cond: X86Condition::E,
-        }]);
-        let cs = x86_64_test_capstone();
-
-        assert!(x86_downstream_flags_live_from_bytes::<isa::X86_64>(
-            &cs, &bytes, 0x1000
-        ));
-    }
-
-    #[test]
-    fn x86_downstream_flags_live_scan_marks_dead_when_first_flag_event_writes() {
-        let bytes = assemble_x86_64_test_bytes(&[
-            X86Instruction::CmpReg {
-                rn: X86Register::RAX,
-                rs: X86Register::RBX,
-            },
-            X86Instruction::MovImm {
-                rd: X86Register::RAX,
-                imm: 0,
-            },
-        ]);
-        let cs = x86_64_test_capstone();
-
-        assert!(!x86_downstream_flags_live_from_bytes::<isa::X86_64>(
-            &cs, &bytes, 0x1000
-        ));
-    }
-
-    #[test]
-    fn x86_downstream_flags_live_scan_marks_dead_for_known_non_flag_suffix() {
-        let bytes = assemble_x86_64_test_bytes(&[X86Instruction::MovImm {
-            rd: X86Register::RAX,
-            imm: 0,
-        }]);
-        let cs = x86_64_test_capstone();
-
-        assert!(!x86_downstream_flags_live_from_bytes::<isa::X86_64>(
-            &cs, &bytes, 0x1000
-        ));
-    }
-
-    #[test]
-    fn x86_downstream_flags_live_scan_is_conservative_for_unknown_context() {
-        let cs = x86_64_test_capstone();
-
-        assert!(x86_downstream_flags_live_from_bytes::<isa::X86_64>(
-            &cs,
-            &[],
-            0x1000
-        ));
-        assert!(x86_downstream_flags_live_from_bytes::<isa::X86_64>(
-            &cs,
-            &[0xff],
-            0x1000
-        ));
-        assert!(x86_downstream_flags_live_from_bytes::<isa::X86_64>(
-            &cs,
-            &[0xc3],
-            0x1000
-        ));
-    }
-
-    // ---- downstream register-liveness byte scans (#621) ----
-
-    fn x86_64_regset(regs: &[X86Register]) -> semantics::live_out::RegisterSet<X86Register> {
-        semantics::live_out::RegisterSet::from_registers(regs.to_vec())
-    }
-
-    fn aarch64_regset(regs: &[Register]) -> semantics::live_out::RegisterSet<Register> {
-        semantics::live_out::RegisterSet::from_registers(regs.to_vec())
-    }
-
-    #[test]
-    fn downstream_regs_live_scan_marks_dead_when_later_full_overwrite_precedes_any_read() {
-        // Window wrote X0. Suffix `mov x0, x1` fully overwrites x0 before any
-        // read, so X0 is dead/optimizable.
-        let bytes = assemble_aarch64_test_bytes(&[Instruction::MovReg {
-            rd: Register::X0,
-            rn: Register::X1,
-        }]);
-        let cs = aarch64_test_capstone();
-        let live = aarch64_downstream_regs_live_from_bytes(
-            &cs,
-            &bytes,
-            0x1000,
-            &aarch64_regset(&[Register::X0]),
-        );
-        assert!(
-            !live.contains(Register::X0),
-            "x0 fully overwritten before any read must be dropped from live-out"
-        );
-    }
-
-    #[test]
-    fn downstream_regs_live_scan_marks_live_when_read_before_overwrite() {
-        // Window wrote RAX. Suffix `add x2, x0, #1` reads x0 before any
-        // redefinition — x0 must stay live.
-        let bytes = assemble_aarch64_test_bytes(&[Instruction::Add {
-            rd: Register::X2,
-            rn: Register::X0,
-            rm: Operand::Immediate(1),
-        }]);
-        let cs = aarch64_test_capstone();
-        let live = aarch64_downstream_regs_live_from_bytes(
-            &cs,
-            &bytes,
-            0x1000,
-            &aarch64_regset(&[Register::X0]),
-        );
-        assert!(
-            live.contains(Register::X0),
-            "x0 read before any overwrite must stay live"
-        );
-    }
-
-    #[test]
-    fn downstream_regs_live_scan_conservative_for_unknown_context() {
-        let cs = aarch64_test_capstone();
-        let candidates = aarch64_regset(&[Register::X0, Register::X1]);
-
-        // Empty suffix → both candidates live.
-        let empty = aarch64_downstream_regs_live_from_bytes(&cs, &[], 0x1000, &candidates);
-        assert!(empty.contains(Register::X0) && empty.contains(Register::X1));
-
-        // Undisassemblable byte → live.
-        let garbage = aarch64_downstream_regs_live_from_bytes(&cs, &[0xff], 0x1000, &candidates);
-        assert!(garbage.contains(Register::X0) && garbage.contains(Register::X1));
-
-        // LDR-literal decodes in Capstone but is unsupported by the IR → live.
-        let unsupported = aarch64_downstream_regs_live_from_bytes(
-            &cs,
-            &[0x00, 0x00, 0x00, 0x58],
-            0x1000,
-            &candidates,
-        );
-        assert!(unsupported.contains(Register::X0) && unsupported.contains(Register::X1));
-    }
-
-    #[test]
-    fn downstream_regs_live_scan_marks_live_across_call_ret() {
-        let cs = aarch64_test_capstone();
-        let candidates = aarch64_regset(&[Register::X0, Register::X1]);
-
-        // `bl #0` is a call terminator → every window register may be
-        // observable across the ABI; keep them all live.
-        let bl_bytes = assemble_aarch64_test_bytes(&[Instruction::Bl {
-            target: s11::ir::LabelId(0x1000),
-        }]);
-        let across_call =
-            aarch64_downstream_regs_live_from_bytes(&cs, &bl_bytes, 0x1000, &candidates);
-        assert!(across_call.contains(Register::X0) && across_call.contains(Register::X1));
-
-        // `ret` is a return terminator → same ABI-observable rule.
-        let ret_bytes = assemble_aarch64_test_bytes(&[Instruction::Ret { rn: Register::X30 }]);
-        let across_ret =
-            aarch64_downstream_regs_live_from_bytes(&cs, &ret_bytes, 0x1000, &candidates);
-        assert!(across_ret.contains(Register::X0) && across_ret.contains(Register::X1));
-    }
-
-    #[test]
-    fn x86_partial_write_does_not_kill() {
-        // Window wrote RAX. Suffix `mov al, 0` leaves the rest of RAX intact,
-        // so the downstream scan must not treat it as a full-register kill.
-        let bytes = assemble_x86_64_test_bytes(&[X86Instruction::MovImm {
-            rd: X86Register::AL,
-            imm: 0,
-        }]);
-        let cs = x86_64_test_capstone();
-        let live = x86_downstream_regs_live_from_bytes(
-            &cs,
-            &bytes,
-            0x1000,
-            &x86_64_regset(&[X86Register::RAX]),
-        );
-        assert!(
-            live.contains(X86Register::RAX),
-            "an AL write preserves upper RAX bits, so RAX stays live"
-        );
-    }
-
-    #[test]
-    fn x86_downstream_regs_live_scan_marks_live_when_read_before_overwrite() {
-        // `add rbx, rax` reads rax before any redefinition → rax stays live.
-        let bytes = assemble_x86_64_test_bytes(&[X86Instruction::AddReg {
-            rd: X86Register::RBX,
-            rs: X86Register::RAX,
-        }]);
-        let cs = x86_64_test_capstone();
-        let live = x86_downstream_regs_live_from_bytes(
-            &cs,
-            &bytes,
-            0x1000,
-            &x86_64_regset(&[X86Register::RAX]),
-        );
-        assert!(live.contains(X86Register::RAX));
-    }
-
-    #[test]
-    fn x86_downstream_regs_live_scan_conservative_across_call_ret_and_unknown() {
-        let cs = x86_64_test_capstone();
-        let candidates = x86_64_regset(&[X86Register::RAX]);
-
-        // Empty suffix → live.
-        assert!(
-            x86_downstream_regs_live_from_bytes(&cs, &[], 0x1000, &candidates)
-                .contains(X86Register::RAX)
-        );
-        // `ret` (0xc3) is not modelled in the x86 IR → unsupported → live.
-        assert!(
-            x86_downstream_regs_live_from_bytes(&cs, &[0xc3], 0x1000, &candidates)
-                .contains(X86Register::RAX)
-        );
-        // `call rel32` (e8 00 00 00 00) is likewise not modelled → live.
-        assert!(
-            x86_downstream_regs_live_from_bytes(
-                &cs,
-                &[0xe8, 0x00, 0x00, 0x00, 0x00],
-                0x1000,
-                &candidates
-            )
-            .contains(X86Register::RAX)
-        );
     }
 
     #[test]
