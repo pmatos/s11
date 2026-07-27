@@ -56,6 +56,55 @@ where
     unbounded_end.min(window_end)
 }
 
+/// Enumerate the candidate prefixes `search_at_length` walks for a given
+/// `length`, drawing instructions from `all`.
+///
+/// This is the pure combinatorial seam of the symbolic search: it owns the
+/// candidate space so the rules that define it are testable without Z3. The
+/// space matches the original hand-unrolled loops exactly:
+///
+/// - `length == 1`: one prefix per instruction (uncapped).
+/// - `length == 2`: the full `N × N` product, in nested order (uncapped).
+/// - `length >= 3` (and the unreached `length == 0`): the `N × N × N` product
+///   over the first three slots, with any remaining slots padded by `all[0]`,
+///   truncated to `sample_cap` candidates so the exponential space stays
+///   bounded.
+///
+/// The iterator is lazy — length-2 is uncapped, so materializing it eagerly
+/// would build `N²` candidates before the first is evaluated. On an empty
+/// `all` it yields nothing (the padding `all[0]` is only reached inside the
+/// product loops), matching the original loops, which never execute their
+/// body on an empty pool. Prefixes exclude any pinned terminator, which the
+/// caller reattaches.
+fn enumerate_prefixes<Insn: Copy>(
+    all: &[Insn],
+    length: usize,
+    sample_cap: usize,
+) -> Box<dyn Iterator<Item = Vec<Insn>> + '_> {
+    match length {
+        1 => Box::new(all.iter().map(|&instr| vec![instr])),
+        2 => Box::new(
+            all.iter()
+                .flat_map(move |&instr1| all.iter().map(move |&instr2| vec![instr1, instr2])),
+        ),
+        _ => Box::new(
+            all.iter()
+                .flat_map(move |&instr1| {
+                    all.iter().flat_map(move |&instr2| {
+                        all.iter().map(move |&instr3| {
+                            let mut seq = vec![instr1, instr2, instr3];
+                            while seq.len() < length {
+                                seq.push(all[0]);
+                            }
+                            seq
+                        })
+                    })
+                })
+                .take(sample_cap),
+        ),
+    }
+}
+
 /// Symbolic search using SMT-based synthesis, generic over ISA.
 ///
 /// Routes through `SymbolicBackend<I>` for every ISA-specific operation:
@@ -190,112 +239,39 @@ where
             seq
         };
 
-        if length == 1 {
-            // Single instruction search
-            for instr in all_instructions {
-                // Check timeout / cooperative-cancel flag.
-                if should_stop(ctx.config, ctx.start_time) {
-                    return best_at_length;
-                }
-
-                let candidate = with_term(vec![*instr]);
-                match self.evaluate_candidate(ctx, candidate, best_cost) {
-                    CandidateEval::Stopped => return best_at_length,
-                    CandidateEval::Rejected => {}
-                    CandidateEval::Improved { candidate, cost } => {
-                        best_at_length = Some(candidate);
-                        if ctx.config.verbose {
-                            println!("Found equivalent: {} (cost {})", instr, cost);
-                        }
-                    }
-                }
+        // Walk the candidate prefixes for this length. `enumerate_prefixes`
+        // owns the combinatorial rules (full product up to length 2, first-3
+        // slots × padding for length >= 3) and bounds the length>=3 space to
+        // `sample_size`; the cap does not apply to lengths 1 and 2.
+        let sample_size = 10000;
+        for core in enumerate_prefixes(all_instructions, length, sample_size) {
+            // Check timeout / cooperative-cancel flag before each candidate.
+            if should_stop(ctx.config, ctx.start_time) {
+                return best_at_length;
             }
-        } else if length == 2 {
-            // Two instruction search
-            for instr1 in all_instructions {
-                // Check timeout / cooperative-cancel flag periodically.
-                if should_stop(ctx.config, ctx.start_time) {
-                    return best_at_length;
-                }
 
-                for instr2 in all_instructions {
-                    if should_stop(ctx.config, ctx.start_time) {
-                        return best_at_length;
-                    }
-
-                    let candidate = with_term(vec![*instr1, *instr2]);
-                    match self.evaluate_candidate(ctx, candidate, best_cost) {
-                        CandidateEval::Stopped => return best_at_length,
-                        CandidateEval::Rejected => {}
-                        CandidateEval::Improved { candidate, cost } => {
-                            best_at_length = Some(candidate);
-                            if ctx.config.verbose {
-                                println!(
-                                    "Found equivalent: {}; {} (cost {})",
-                                    instr1, instr2, cost
-                                );
-                            }
+            let candidate = with_term(core);
+            match self.evaluate_candidate(ctx, candidate, best_cost) {
+                CandidateEval::Stopped => return best_at_length,
+                CandidateEval::Rejected => {}
+                CandidateEval::Improved { candidate, cost } => {
+                    if ctx.config.verbose {
+                        // Reconstruct the per-length report from the accepted
+                        // candidate: any pinned terminator is appended last, so
+                        // slots 0/1 are the enumerated instructions.
+                        match length {
+                            1 => println!("Found equivalent: {} (cost {})", candidate[0], cost),
+                            2 => println!(
+                                "Found equivalent: {}; {} (cost {})",
+                                candidate[0], candidate[1], cost
+                            ),
+                            _ => println!(
+                                "Found equivalent sequence of length {} (cost {})",
+                                length, cost
+                            ),
                         }
                     }
-                }
-            }
-        } else {
-            // For length >= 3, use iterative deepening with early termination
-            // This is a simplified version - full enumeration is exponential
-            let sample_size = 10000; // Limit candidates to sample
-            let mut count = 0;
-
-            for instr1 in all_instructions {
-                if count >= sample_size {
-                    break;
-                }
-                if should_stop(ctx.config, ctx.start_time) {
-                    return best_at_length;
-                }
-
-                for instr2 in all_instructions {
-                    if count >= sample_size {
-                        break;
-                    }
-                    if should_stop(ctx.config, ctx.start_time) {
-                        return best_at_length;
-                    }
-
-                    for instr3 in all_instructions {
-                        if count >= sample_size {
-                            break;
-                        }
-                        if should_stop(ctx.config, ctx.start_time) {
-                            return best_at_length;
-                        }
-
-                        let candidate = if length == 3 {
-                            with_term(vec![*instr1, *instr2, *instr3])
-                        } else {
-                            // For longer sequences, fill with first instruction
-                            let mut seq = vec![*instr1, *instr2, *instr3];
-                            while seq.len() < length {
-                                seq.push(all_instructions[0]);
-                            }
-                            with_term(seq)
-                        };
-
-                        match self.evaluate_candidate(ctx, candidate, best_cost) {
-                            CandidateEval::Stopped => return best_at_length,
-                            CandidateEval::Rejected => {}
-                            CandidateEval::Improved { candidate, cost } => {
-                                best_at_length = Some(candidate);
-                                if ctx.config.verbose {
-                                    println!(
-                                        "Found equivalent sequence of length {} (cost {})",
-                                        length, cost
-                                    );
-                                }
-                            }
-                        }
-
-                        count += 1;
-                    }
+                    best_at_length = Some(candidate);
                 }
             }
         }
@@ -1996,5 +1972,103 @@ mod tests {
         assert_eq!(search.statistics.improvements_found, 0);
         assert_eq!(best_cost, 5);
         assert_eq!(TEST_EQUIVALENCE_CHECKS.load(Ordering::SeqCst), 0);
+    }
+
+    // ---- enumerate_prefixes: the pure candidate-prefix seam ----
+    //
+    // These tests pin the candidate space `search_at_length` walks, using
+    // plain `u8` "instructions" so the enumeration contract is assertable
+    // without Z3 or a real search. Expected values are independent literals.
+
+    #[test]
+    fn enumerate_prefixes_length_one_yields_singletons() {
+        let all = [10u8, 20, 30];
+        let got: Vec<Vec<u8>> = enumerate_prefixes(&all, 1, 10_000).collect();
+        assert_eq!(got, vec![vec![10], vec![20], vec![30]]);
+    }
+
+    #[test]
+    fn enumerate_prefixes_length_two_yields_full_product_in_order() {
+        let all = [1u8, 2];
+        let got: Vec<Vec<u8>> = enumerate_prefixes(&all, 2, 10_000).collect();
+        assert_eq!(got, vec![vec![1, 1], vec![1, 2], vec![2, 1], vec![2, 2]],);
+    }
+
+    #[test]
+    fn enumerate_prefixes_length_two_is_uncapped() {
+        // Length-2 enumeration ignores the sample cap: N=50 must yield all
+        // 2500 pairs even with a cap of 10.
+        let all: Vec<u8> = (0..50).collect();
+        let count = enumerate_prefixes(&all, 2, 10).count();
+        assert_eq!(count, 2500);
+    }
+
+    #[test]
+    fn enumerate_prefixes_length_three_is_full_triple_product() {
+        let all = [1u8, 2];
+        let got: Vec<Vec<u8>> = enumerate_prefixes(&all, 3, 10_000).collect();
+        assert_eq!(
+            got,
+            vec![
+                vec![1, 1, 1],
+                vec![1, 1, 2],
+                vec![1, 2, 1],
+                vec![1, 2, 2],
+                vec![2, 1, 1],
+                vec![2, 1, 2],
+                vec![2, 2, 1],
+                vec![2, 2, 2],
+            ],
+        );
+    }
+
+    #[test]
+    fn enumerate_prefixes_length_four_pads_trailing_slots_with_first() {
+        // Only the first three slots vary; the rest are padded with all[0].
+        let all = [7u8, 9];
+        let got: Vec<Vec<u8>> = enumerate_prefixes(&all, 4, 10_000).collect();
+        assert_eq!(
+            got,
+            vec![
+                vec![7, 7, 7, 7],
+                vec![7, 7, 9, 7],
+                vec![7, 9, 7, 7],
+                vec![7, 9, 9, 7],
+                vec![9, 7, 7, 7],
+                vec![9, 7, 9, 7],
+                vec![9, 9, 7, 7],
+                vec![9, 9, 9, 7],
+            ],
+        );
+    }
+
+    #[test]
+    fn enumerate_prefixes_length_three_respects_sample_cap() {
+        // With N=10 the triple product is 1000; a cap of 5 truncates to the
+        // first five candidates in nested order.
+        let all: Vec<u8> = (0..10).collect();
+        let got: Vec<Vec<u8>> = enumerate_prefixes(&all, 3, 5).collect();
+        assert_eq!(
+            got,
+            vec![
+                vec![0, 0, 0],
+                vec![0, 0, 1],
+                vec![0, 0, 2],
+                vec![0, 0, 3],
+                vec![0, 0, 4],
+            ],
+        );
+    }
+
+    #[test]
+    fn enumerate_prefixes_empty_pool_yields_nothing_without_panicking() {
+        // The original nested loops never execute their body on an empty pool,
+        // so the padding `all[0]` is never reached. The enumerator must match:
+        // no panic, no candidates, at any length.
+        let all: [u8; 0] = [];
+        for length in [1usize, 2, 3, 5] {
+            let count = enumerate_prefixes(&all, length, 10_000).count();
+            assert_eq!(count, 0, "empty pool must yield nothing at length {length}");
+        }
     }
 }
