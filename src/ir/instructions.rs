@@ -4902,32 +4902,31 @@ mod tests {
             }
             .is_encodable_aarch64()
         );
-        for victim in [Register::XZR] {
-            assert!(
-                !Instruction::Add {
-                    rd: victim,
-                    rn: Register::X1,
-                    rm: Operand::ExtendedRegister {
-                        reg: Register::X2,
-                        kind: ExtendKind::Uxtb,
-                        shift: 0,
-                    },
-                }
-                .is_encodable_aarch64()
-            );
-            assert!(
-                !Instruction::Add {
-                    rd: Register::X0,
-                    rn: victim,
-                    rm: Operand::ExtendedRegister {
-                        reg: Register::X2,
-                        kind: ExtendKind::Uxtb,
-                        shift: 0,
-                    },
-                }
-                .is_encodable_aarch64()
-            );
-        }
+        let victim = Register::XZR;
+        assert!(
+            !Instruction::Add {
+                rd: victim,
+                rn: Register::X1,
+                rm: Operand::ExtendedRegister {
+                    reg: Register::X2,
+                    kind: ExtendKind::Uxtb,
+                    shift: 0,
+                },
+            }
+            .is_encodable_aarch64()
+        );
+        assert!(
+            !Instruction::Add {
+                rd: Register::X0,
+                rn: victim,
+                rm: Operand::ExtendedRegister {
+                    reg: Register::X2,
+                    kind: ExtendKind::Uxtb,
+                    shift: 0,
+                },
+            }
+            .is_encodable_aarch64()
+        );
         // Inner-reg slot: SP rejected, XZR allowed.
         assert!(
             !Instruction::Add {
