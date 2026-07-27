@@ -1,6 +1,7 @@
 pub mod assembler;
 pub mod bench_support;
 pub mod capstone_bridge;
+pub mod capstone_bridge_x86;
 pub mod docs_support;
 pub mod elf_patcher;
 pub mod ir;

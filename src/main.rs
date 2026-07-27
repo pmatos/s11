@@ -11,6 +11,7 @@ mod test_utils;
 
 use s11::assembler::AArch64Assembler;
 use s11::capstone_bridge::{ConvertOutcome, convert_capstone_op};
+use s11::capstone_bridge_x86::{convert_to_x86_ir, convert_x86_capstone_op_for_optimization};
 use s11::elf_patcher::{AddressWindow, DetectedArch, ElfPatcher, TextSection, parse_hex_address};
 use s11::ir::instructions::split_terminator;
 use s11::ir::{Instruction, Register};
@@ -2320,11 +2321,10 @@ fn validate_basic_block(ir: &[Instruction]) -> Result<(), String> {
 //
 // Text parsing helpers (`parse_x86_register`, `parse_x86_operand`,
 // `parse_x86_immediate`, `x86_ir_from_mnemonic`, `parse_x86_assembly_string`)
-// live in `parser::x86`. This file keeps only the Capstone bridge
-// (`convert_to_x86_ir`) and the length-1 enumerator used by the
-// enumerative x86 pipeline.
-
-use parser::x86::{X86ParseMode, x86_ir_from_mnemonic_for_mode};
+// live in `parser::x86`. The Capstone bridge (`convert_to_x86_ir`,
+// `convert_x86_capstone_op_for_optimization`) lives in `capstone_bridge_x86`.
+// This file keeps only the length-1 enumerator used by the enumerative x86
+// pipeline plus the window terminator/live-out helpers.
 
 /// Reject any non-terminal Jcc in an x86 optimization window. The
 /// optimizer only special-cases a trailing Jcc (peeled by
@@ -2347,51 +2347,6 @@ fn validate_x86_window_terminator_placement(ir: &[isa::x86::X86Instruction]) -> 
         }
     }
     Ok(())
-}
-
-fn convert_to_x86_ir(
-    instructions: &capstone::Instructions,
-    mode: X86ParseMode,
-) -> Result<Vec<isa::x86::X86Instruction>, String> {
-    let mut out = Vec::new();
-    for instruction in instructions.iter() {
-        let mn = instruction.mnemonic().unwrap_or("");
-        let ops = instruction.op_str().unwrap_or("");
-        out.push(convert_x86_capstone_op_for_optimization(
-            mn,
-            ops,
-            instruction.address(),
-            mode,
-        )?);
-    }
-    Ok(out)
-}
-
-fn convert_x86_capstone_op_for_optimization(
-    mnemonic: &str,
-    op_str: &str,
-    address: u64,
-    mode: X86ParseMode,
-) -> Result<isa::x86::X86Instruction, String> {
-    match x86_ir_from_mnemonic_for_mode(mnemonic, op_str, mode) {
-        Ok(Some(ir)) => Ok(ir),
-        Ok(None) => {
-            // Refusing the window is safer than silently dropping the
-            // unsupported instruction: the patcher overwrites the entire
-            // byte window with the reassembled IR, so a dropped `lea`,
-            // `call`, etc. would lose its side effect from the binary.
-            Err(format!(
-                "x86 window contains unsupported mnemonic '{} {}' at 0x{:x}; \
-                 narrow the --start-addr/--end-addr range \
-                 to exclude it, or add the mnemonic to the supported set.",
-                mnemonic, op_str, address
-            ))
-        }
-        Err(error) => Err(format!(
-            "failed to parse x86 instruction '{} {}' at 0x{:x}: {}",
-            mnemonic, op_str, address, error
-        )),
-    }
 }
 
 /// Candidate register pool for x86 search, drawn from the target's original
