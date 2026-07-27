@@ -501,27 +501,33 @@ mod tests {
 
     #[test]
     fn test_statistics_fast_pass_rate() {
-        let mut stats = SearchStatistics::default();
-        stats.candidates_evaluated = 100;
-        stats.candidates_passed_fast = 10;
+        let stats = SearchStatistics {
+            candidates_evaluated: 100,
+            candidates_passed_fast: 10,
+            ..Default::default()
+        };
 
         assert!((stats.fast_pass_rate() - 0.1).abs() < 1e-10);
     }
 
     #[test]
     fn test_statistics_smt_success_rate() {
-        let mut stats = SearchStatistics::default();
-        stats.smt_queries = 50;
-        stats.smt_equivalent = 5;
+        let stats = SearchStatistics {
+            smt_queries: 50,
+            smt_equivalent: 5,
+            ..Default::default()
+        };
 
         assert!((stats.smt_success_rate() - 0.1).abs() < 1e-10);
     }
 
     #[test]
     fn test_statistics_throughput() {
-        let mut stats = SearchStatistics::default();
-        stats.candidates_evaluated = 10000;
-        stats.elapsed_time = Duration::from_secs(10);
+        let stats = SearchStatistics {
+            candidates_evaluated: 10000,
+            elapsed_time: Duration::from_secs(10),
+            ..Default::default()
+        };
 
         assert!((stats.throughput() - 1000.0).abs() < 1e-10);
     }
