@@ -2345,7 +2345,7 @@ mod tests {
             (
                 Instruction::Cmn {
                     rn: Register::X0,
-                    rm: rm_reg.clone(),
+                    rm: rm_reg,
                 },
                 compute_flags_add(&x0, &x1, 64),
                 "CMN x0, x1",
@@ -2353,7 +2353,7 @@ mod tests {
             (
                 Instruction::Tst {
                     rn: Register::X0,
-                    rm: rm_reg.clone(),
+                    rm: rm_reg,
                     width: crate::ir::RegisterWidth::X64,
                 },
                 compute_flags_logical(&x0.bvand(&x1), 64),
@@ -2363,7 +2363,7 @@ mod tests {
                 Instruction::Adds {
                     rd: Register::X2,
                     rn: Register::X0,
-                    rm: rm_reg.clone(),
+                    rm: rm_reg,
                 },
                 compute_flags_add(&x0, &x1, 64),
                 "ADDS x2, x0, x1",
@@ -2372,7 +2372,7 @@ mod tests {
                 Instruction::Subs {
                     rd: Register::X2,
                     rn: Register::X0,
-                    rm: rm_reg.clone(),
+                    rm: rm_reg,
                 },
                 compute_flags_sub(&x0, &x1, 64),
                 "SUBS x2, x0, x1",
@@ -2381,7 +2381,7 @@ mod tests {
                 Instruction::Ands {
                     rd: Register::X2,
                     rn: Register::X0,
-                    rm: rm_reg.clone(),
+                    rm: rm_reg,
                     width: crate::ir::RegisterWidth::X64,
                 },
                 compute_flags_logical(&x0.bvand(&x1), 64),
@@ -2399,7 +2399,7 @@ mod tests {
                 Instruction::Bics {
                     rd: Register::X2,
                     rn: Register::X0,
-                    rm: rm_reg.clone(),
+                    rm: rm_reg,
                 },
                 compute_flags_logical(&x0.bvand(x1.bvnot()), 64),
                 "BICS x2, x0, x1",
@@ -2707,7 +2707,7 @@ mod tests {
         for &(reg, val) in pre_values {
             concrete_pre.set_register(reg, ConcreteValue::new(val));
         }
-        if let Some(flags) = pre_flags.clone() {
+        if let Some(flags) = pre_flags {
             concrete_pre.set_flags(flags);
         }
         let concrete_post = apply_instruction_concrete(concrete_pre, instr);
