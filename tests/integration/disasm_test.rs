@@ -56,7 +56,7 @@ fn test_disasm_simple_binary() {
                 && line
                     .split(':')
                     .nth(1)
-                    .map(|s| s.trim().split_whitespace().next())
+                    .map(|s| s.split_whitespace().next())
                     .and_then(|s| s)
                     .map(|s| s.len() == 8 && s.chars().all(|c| c.is_ascii_hexdigit()))
                     .unwrap_or(false)
