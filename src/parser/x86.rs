@@ -1356,9 +1356,7 @@ mod tests {
         // Display → parse round-trip for both forms.
         for instr in [reg, imm] {
             let text = instr.to_string();
-            let mut parts = text.splitn(2, char::is_whitespace);
-            let mnemonic = parts.next().unwrap();
-            let ops = parts.next().unwrap();
+            let (mnemonic, ops) = text.split_once(char::is_whitespace).unwrap();
             assert_eq!(
                 x86_ir_from_mnemonic(mnemonic, ops).unwrap().unwrap(),
                 instr,
