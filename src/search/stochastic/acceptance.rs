@@ -203,9 +203,9 @@ mod tests {
         assert!(p5 > p10);
 
         // All should be in [0, 1]
-        assert!(p1 >= 0.0 && p1 <= 1.0);
-        assert!(p5 >= 0.0 && p5 <= 1.0);
-        assert!(p10 >= 0.0 && p10 <= 1.0);
+        assert!((0.0..=1.0).contains(&p1));
+        assert!((0.0..=1.0).contains(&p5));
+        assert!((0.0..=1.0).contains(&p10));
     }
 
     #[test]
