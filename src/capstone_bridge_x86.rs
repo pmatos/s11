@@ -145,6 +145,21 @@ mod tests {
                 }
             }
         }
+
+        // Capstone renders the x86-64 full-width immediate-move encoding as
+        // `movabs`, which the parser accepts at the shared `"mov" | "movabs"`
+        // dispatch arm. The spelling never appears in 32-bit disassembly, so
+        // it is pinned Mode64-only here — outside the both-modes table and its
+        // set accounting, since `movabs` is a disassembler spelling of the
+        // documented `mov` family rather than a family of its own.
+        if let Err(err) = convert_x86_capstone_op_for_optimization(
+            "movabs",
+            "rax, 0x1122334455667788",
+            0x1000,
+            X86ParseMode::Mode64,
+        ) {
+            panic!("expected Ok for `movabs rax, 0x1122334455667788` in Mode64, got Err: {err}");
+        }
     }
 
     #[test]
