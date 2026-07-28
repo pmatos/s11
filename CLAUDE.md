@@ -176,6 +176,12 @@ The regression test `convert_capstone_op_handles_all_supported_aarch64_mnemonics
 
 For instructions with multiple destinations (LDP, pre/post-index writeback), use `Instruction::destinations() -> Vec<Register>` rather than the singleton `destination() -> Option<Register>`. Memory ops are non-terminator, do not modify NZCV, and have observable memory side effects — `has_side_effects()` and `EquivalenceConfig::memory_live` model the latter. See ADR-0007 for the design.
 
+### Adding a new x86 instruction
+
+x86 has the same two-entry-point structure as AArch64. Both the asm-text path (`parser::x86::parse_x86_assembly_string` → `x86_ir_from_mnemonic`) and the ELF/Capstone path (`src/capstone_bridge_x86.rs::convert_to_x86_ir` → `convert_x86_capstone_op_for_optimization` → `x86_ir_from_mnemonic_for_mode`) funnel through the single dispatch `x86_ir_from_mnemonic_impl` in `src/parser/x86.rs`. **Adding a mnemonic there covers both entry points**; the only per-path difference is mode-awareness (the Capstone path passes an `X86ParseMode`, the asm-text path does not).
+
+The regression test `convert_x86_capstone_op_handles_all_supported_x86_mnemonics` in `src/capstone_bridge_x86.rs` pins one canonical operand string per supported mnemonic for **both** Mode64 and Mode32, cross-checked against `docs_support::X86_REWRITABLE_MNEMONICS` and `docs_support::X86_FIXED_TERMINATORS`. Extend the test and the `docs_support` lists in lockstep when you add an opcode (mnemonics that are synthesizable-only from search but not liftable from machine code, like architectural byte SETcc, belong in `X86_SYNTHESIZABLE_ONLY_MNEMONICS` and stay out of the bridge test).
+
 ### Search Algorithms
 
 1. **Enumerative**: Exhaustively enumerate candidate sequences
