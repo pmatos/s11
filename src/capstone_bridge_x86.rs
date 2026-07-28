@@ -80,7 +80,9 @@ mod tests {
     fn convert_x86_capstone_op_handles_all_supported_x86_mnemonics() {
         // (mnemonic, Mode64 operands, Mode32 operands). MOVSX/MOVZX require a
         // mode-width destination (RAX in 64-bit, EAX in 32-bit); the remaining
-        // two-operand families share operands across modes.
+        // families share operands across modes. Shifts/rotates pin the
+        // immediate-count form (the CL register-count form is deferred) and
+        // `lea` pins the register-base + displacement form.
         let cases: &[(&str, &str, &str)] = &[
             ("mov", "eax, ebx", "eax, ebx"),
             ("movzx", "rax, bl", "eax, bl"),
@@ -91,28 +93,30 @@ mod tests {
             ("or", "eax, ebx", "eax, ebx"),
             ("xor", "eax, ebx", "eax, ebx"),
             ("cmp", "eax, ebx", "eax, ebx"),
+            ("test", "eax, ebx", "eax, ebx"),
+            ("neg", "eax", "eax"),
+            ("not", "eax", "eax"),
+            ("inc", "eax", "eax"),
+            ("dec", "eax", "eax"),
+            ("shl", "eax, 3", "eax, 3"),
+            ("sal", "eax, 3", "eax, 3"),
+            ("shr", "eax, 3", "eax, 3"),
+            ("sar", "eax, 3", "eax, 3"),
+            ("rol", "eax, 3", "eax, 3"),
+            ("ror", "eax, 3", "eax, 3"),
+            ("imul", "eax, ebx", "eax, ebx"),
+            ("lea", "eax, [ebx + 8]", "eax, [ebx + 8]"),
             ("cmovne", "eax, ebx", "eax, ebx"),
             ("jne", "0x1000", "0x1000"),
         ];
 
-        fn docs_mnemonic(mnemonic: &str) -> &'static str {
+        fn docs_mnemonic(mnemonic: &'static str) -> &'static str {
             if mnemonic.starts_with("cmov") {
                 "cmov<cond>"
             } else if mnemonic.starts_with('j') {
                 "j<cond>"
             } else {
-                match mnemonic {
-                    "mov" => "mov",
-                    "movzx" => "movzx",
-                    "movsx" => "movsx",
-                    "add" => "add",
-                    "sub" => "sub",
-                    "and" => "and",
-                    "or" => "or",
-                    "xor" => "xor",
-                    "cmp" => "cmp",
-                    other => panic!("unmapped mnemonic in test case: {other}"),
-                }
+                mnemonic
             }
         }
 
