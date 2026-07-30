@@ -10,6 +10,7 @@ use std::time::Duration;
 mod test_utils;
 
 use s11::assembler::AArch64Assembler;
+use s11::candidate_windows::{WindowInstruction, WindowRole, plan_candidate_windows};
 use s11::capstone_bridge::{ConvertOutcome, convert_capstone_op};
 use s11::capstone_bridge_x86::{convert_to_x86_ir, convert_x86_capstone_op_for_optimization};
 use s11::elf_patcher::{AddressWindow, DetectedArch, ElfPatcher, TextSection, parse_hex_address};
@@ -1217,10 +1218,12 @@ fn find_candidate_windows_with_backend<B: ElfOptimizationBackend>(
     // scope and are issue #619's soundness gate.
     let mut section_results = Vec::new();
     for (section, instructions) in decoded_sections {
-        let mut candidates = Vec::new();
-        let mut run_start = None;
-        let mut run_end = section.virtual_addr;
-
+        // Classify each decoded instruction into a lightweight descriptor, then
+        // hand the whole section to the pure `candidate_windows` planner. The
+        // Capstone group/operand inspection and the overflow-checked end
+        // computation stay here in the adapter; the soundness-critical
+        // run-splitting rules (ADR-0009 Decision 4/5) live behind the seam.
+        let mut planned = Vec::with_capacity(instructions.len());
         for instruction in instructions.iter() {
             let instruction_end = instruction
                 .address()
@@ -1236,16 +1239,6 @@ fn find_candidate_windows_with_backend<B: ElfOptimizationBackend>(
                     )
                 })?;
 
-            // Close the current run just before an interior branch target so
-            // the target begins a fresh window. Within a contiguous run
-            // `run_end` already equals this instruction's address, so the
-            // flushed window ends exactly where the target starts.
-            if run_start.is_some_and(|start| start != instruction.address())
-                && branch_targets.contains(&instruction.address())
-            {
-                flush_candidate_run(&mut candidates, &mut run_start, run_end);
-            }
-
             let detail = cs.insn_detail(instruction).map_err(|error| {
                 format!(
                     "failed to inspect instruction detail in executable section '{}' at 0x{:x}: {}",
@@ -1255,37 +1248,29 @@ fn find_candidate_windows_with_backend<B: ElfOptimizationBackend>(
                 )
             })?;
 
-            if capstone_detail_is_call(&detail) {
-                flush_candidate_run(&mut candidates, &mut run_start, run_end);
-                continue;
-            }
-            if backend.arch() == DetectedArch::X86_64
-                && capstone_detail_has_rip_relative_memory(&detail)
+            let role = if capstone_detail_is_call(&detail)
+                || (backend.arch() == DetectedArch::X86_64
+                    && capstone_detail_has_rip_relative_memory(&detail))
             {
-                flush_candidate_run(&mut candidates, &mut run_start, run_end);
-                continue;
-            }
+                WindowRole::Excluded
+            } else {
+                match backend.classify_candidate_instruction(instruction) {
+                    Ok(CandidateInstructionDisposition::StraightLine) => WindowRole::StraightLine,
+                    Ok(CandidateInstructionDisposition::Terminator) => WindowRole::Terminator,
+                    Err(_) => WindowRole::Excluded,
+                }
+            };
 
-            match backend.classify_candidate_instruction(instruction) {
-                Ok(CandidateInstructionDisposition::StraightLine) => {
-                    run_start.get_or_insert(instruction.address());
-                    run_end = instruction_end;
-                }
-                Ok(CandidateInstructionDisposition::Terminator) => {
-                    if run_start.is_some() {
-                        run_end = instruction_end;
-                    }
-                    flush_candidate_run(&mut candidates, &mut run_start, run_end);
-                }
-                Err(_) => {
-                    flush_candidate_run(&mut candidates, &mut run_start, run_end);
-                }
-            }
+            planned.push(WindowInstruction::new(
+                instruction.address(),
+                instruction_end,
+                role,
+            ));
         }
-        flush_candidate_run(&mut candidates, &mut run_start, run_end);
+
         section_results.push(SectionCandidateWindows {
+            candidates: plan_candidate_windows(&planned, &branch_targets),
             section,
-            candidates,
         });
     }
 
@@ -1363,20 +1348,6 @@ fn capstone_detail_direct_branch_targets(detail: &capstone::InsnDetail<'_>) -> V
             _ => None,
         })
         .collect()
-}
-
-#[cfg_attr(not(test), allow(dead_code))]
-fn flush_candidate_run(
-    candidates: &mut Vec<AddressWindow>,
-    run_start: &mut Option<u64>,
-    run_end: u64,
-) {
-    if let Some(start) = run_start.take() {
-        candidates.push(AddressWindow {
-            start,
-            end: run_end,
-        });
-    }
 }
 
 fn optimized_output_path(path: &Path) -> PathBuf {
