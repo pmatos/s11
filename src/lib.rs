@@ -7,6 +7,7 @@ pub mod elf_patcher;
 pub mod ir;
 pub mod isa;
 pub mod parser;
+pub mod report;
 pub mod search;
 pub mod semantics;
 pub mod validation;
