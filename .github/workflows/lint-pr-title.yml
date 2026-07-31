@@ -23,7 +23,7 @@ jobs:
         with:
           node-version: lts/*
       - name: Install commitlint
-        run: npm install --no-save @commitlint/cli@21 @commitlint/config-conventional@21
+        run: npm install --no-save @commitlint/cli@21 @commitlint/config-conventional@21 # zizmor: ignore[adhoc-packages]
       - name: Lint PR title
         env:
           PR_TITLE: ${{ github.event.pull_request.title }}
