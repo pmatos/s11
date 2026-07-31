@@ -38,8 +38,12 @@ jobs:
       - name: Install system build deps
         run: |
           sudo apt-get update
+          # libc6-dev-arm64-cross is a Recommends (not a hard Depends) of
+          # gcc-aarch64-linux-gnu, so --no-install-recommends silently drops
+          # it — but it ships the crt objects (Scrt1.o, crti.o) build_tests.sh
+          # needs to link the AArch64 test binaries. List it explicitly.
           sudo apt-get install -y --no-install-recommends \
-            libcapstone-dev gcc-aarch64-linux-gnu z3 libz3-dev
+            libcapstone-dev gcc-aarch64-linux-gnu libc6-dev-arm64-cross z3 libz3-dev
           curl --proto '=https' --tlsv1.2 -sSf https://just.systems/install.sh \
             | sudo bash -s -- --to /usr/local/bin
       - uses: dtolnay/rust-toolchain@stable
