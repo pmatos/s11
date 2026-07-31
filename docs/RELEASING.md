@@ -2,20 +2,22 @@
 
 Releases are cut automatically by [semantic-release](https://semantic-release.org/),
 driven by the [`Release`](../.github/workflows/release.yml) GitHub Actions
-workflow. It runs on **every push to `main`**, derives the next version from
-[Conventional Commit](https://www.conventionalcommits.org/en/v1.0.0/) types
-in the unreleased history, verifies the tree, builds a Linux release binary,
-tags the commit, and publishes a GitHub Release with generated notes and a
-`CHANGELOG.md` entry. There is no manual bump/draft/prerelease input — the
-version and whether a release happens at all are derived entirely from
-commit messages (see `.releaserc.json`).
+workflow. It runs on a **weekly schedule (Sundays 00:00 UTC)**, derives the
+next version from [Conventional Commit](https://www.conventionalcommits.org/en/v1.0.0/)
+types accumulated on `main` since the last release, verifies the tree,
+builds a Linux release binary, tags the commit, and publishes a GitHub
+Release with generated notes and a `CHANGELOG.md` entry. It is a no-op if
+nothing releasable landed that week. There is no manual bump/draft/prerelease
+input — the version and whether a release happens at all are derived
+entirely from commit messages (see `.releaserc.json`).
 
 ## Cutting a release
 
 1. Merge commits with Conventional Commit prefixes (`feat:`, `fix:`, `perf:`,
    `BREAKING CHANGE:` in the footer, etc.) to `main`. Non-release-worthy
    types (`chore:`, `docs:`, `ci:`, ...) don't trigger a release on their own.
-2. That push is all it takes — the `Release` workflow runs automatically.
+2. The `Release` workflow runs automatically the following Sunday, or dispatch
+   it manually (Actions → Release → Run workflow) to cut a release sooner.
 3. On success you get:
    - a `vX.Y.Z` tag and GitHub Release with generated notes and the build
      artifacts (`s11-vX.Y.Z-x86_64-unknown-linux-gnu.tar.gz`, `SHA256SUMS.txt`),
