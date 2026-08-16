@@ -118,6 +118,9 @@ pub fn aarch64_search_registers(target: &[Instruction]) -> Vec<Register> {
 /// sole control-flow instruction (if any) is its last: a branch anywhere else
 /// would be modelled as a data-state no-op and the equivalence check could
 /// accept a rewrite that silently drops or reorders the branch.
+///
+/// Accepted shapes: `[]`, `[i1, ..., ik]` (no branch), `[t]` (terminator
+/// only), `[i1, ..., ik, t]` (prefix + terminator).
 pub fn validate_basic_block(ir: &[Instruction]) -> Result<(), String> {
     let last_idx = ir.len().saturating_sub(1);
     for (i, instr) in ir.iter().enumerate() {
