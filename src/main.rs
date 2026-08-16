@@ -22,7 +22,11 @@ use s11::search::config::{
 };
 use s11::search::parallel::{ParallelConfig, run_parallel_search};
 use s11::search::{EnumerativeSearch, SearchAlgorithm, StochasticSearch, SymbolicSearch};
-use s11::semantics::LiveOut;
+use s11::search_inputs::{
+    aarch64_search_immediates, aarch64_search_registers, live_out_for_optimization_prefix,
+    x86_enumerative_immediates_from_target, x86_live_out_for_optimization,
+    x86_registers_from_target,
+};
 use s11::semantics::cost::CostMetric;
 #[allow(unused_imports)]
 use s11::{assembler, elf_patcher, ir, isa, parser, search, semantics, validation};
@@ -1610,45 +1614,6 @@ fn optimize_elf_binary_with_backend<B: ElfOptimizationBackend>(
 /// mirroring the `flags_live = if terminator.is_some() { true }` blanket. When
 /// a terminator is present we ignore `downstream_live` and keep every
 /// window-written register live.
-fn live_out_for_optimization_prefix(
-    prefix: &[Instruction],
-    terminator: Option<&Instruction>,
-    downstream_flags_live: bool,
-    downstream_live: Option<&semantics::live_out::RegisterSet<Register>>,
-) -> LiveOut {
-    // A terminator vetoes register narrowing (its other successor is unscanned).
-    let narrowing = if terminator.is_some() {
-        None
-    } else {
-        downstream_live
-    };
-
-    let mut live_registers: Vec<Register> = match narrowing {
-        // Narrow to (written ∩ proven-live). The downstream set is already a
-        // subset of the window-written registers (it is computed from exactly
-        // that candidate set), so iterating it is sufficient.
-        Some(live) => live.iter().copied().collect(),
-        // No downstream analysis (or vetoed by a terminator): keep every
-        // written register live.
-        None => prefix
-            .iter()
-            .flat_map(|instr| instr.destinations())
-            .collect(),
-    };
-
-    if let Some(terminator) = terminator {
-        live_registers.extend(terminator.source_registers());
-    }
-
-    let flags_live = if terminator.is_some() {
-        true
-    } else {
-        downstream_flags_live
-    };
-
-    LiveOut::from_registers(live_registers).with_flags(flags_live)
-}
-
 /// Shared base `SearchConfig` for the AArch64 stochastic/enumerative/hybrid/
 /// symbolic/LLM builders. Sets the fields every AArch64 algorithm configures
 /// identically — cost metric, overall and SMT solver timeouts, verbosity, and
@@ -1797,40 +1762,6 @@ fn build_x86_symbolic_search_config(
         .with_x86_same_count_code_size_allowed(same_count_code_size_allowed)
 }
 
-/// Build the AArch64 search register pool, preserving the historical X0..X7
-/// scalar policy while adding every vector register referenced by the target.
-/// A target-local vector pool avoids the 32^3 candidate explosion of enabling
-/// the entire SIMD register file for small enumerative searches.
-fn aarch64_search_registers(target: &[Instruction]) -> Vec<Register> {
-    let mut registers = vec![
-        Register::X0,
-        Register::X1,
-        Register::X2,
-        Register::X3,
-        Register::X4,
-        Register::X5,
-        Register::X6,
-        Register::X7,
-    ];
-
-    for register in target
-        .iter()
-        .flat_map(|instruction| instruction.source_registers().into_iter())
-        .chain(
-            target
-                .iter()
-                .flat_map(|instruction| instruction.destinations().into_iter()),
-        )
-        .filter(|register| register.vector().is_some())
-    {
-        if !registers.contains(&register) {
-            registers.push(register);
-        }
-    }
-    registers.sort_by_key(|register| register.sort_key());
-    registers
-}
-
 /// Run optimization using the selected algorithm.
 ///
 /// Issue #69: if `target` ends in a terminator (branch / control-flow
@@ -1858,9 +1789,7 @@ fn run_optimization(
     // Keep the historical scalar pool and add the target's vector registers
     // so every search backend can generate NEON candidates for NEON windows.
     let available_registers = aarch64_search_registers(prefix);
-    let available_immediates = vec![
-        0, 1, 2, 3, 4, 5, 7, 8, 10, 15, 16, 31, 32, 63, 64, 100, 255, 256, 1000, 4095,
-    ];
+    let available_immediates = aarch64_search_immediates();
 
     // Create live-out contract over the prefix (assume all modified registers
     // are live-out), plus any registers the fixed terminator reads after the
@@ -2202,88 +2131,6 @@ fn validate_x86_window_terminator_placement(ir: &[isa::x86::X86Instruction]) -> 
 /// writes. Falls back to the default pool only for an empty target; a non-empty
 /// target with no usable destinations returns an empty pool so search does not
 /// introduce unrelated writable registers.
-fn x86_registers_from_target(target: &[isa::x86::X86Instruction]) -> Vec<isa::x86::X86Register> {
-    let mut pool: Vec<isa::x86::X86Register> = Vec::new();
-    let referenced = target
-        .iter()
-        .filter_map(|instr| instr.destination_operand());
-    for reg in referenced {
-        if matches!(
-            reg.canonical(),
-            isa::x86::X86Register::RSP | isa::x86::X86Register::RBP
-        ) {
-            continue;
-        }
-        if !pool.contains(&reg) {
-            pool.push(reg);
-        }
-    }
-    if target.is_empty() {
-        return isa::x86::default_x86_registers();
-    }
-    pool
-}
-
-/// Candidate immediate pool for the x86 enumerative path: the target's own
-/// immediates plus `0`, `1`, and `-1`. The fixed `default_x86_immediates()`
-/// pool holds no negatives, so the trait refactor lost rewrites like
-/// `mov rax, -1; mov rax, -1` → `mov rax, -1`.
-fn x86_enumerative_immediates_from_target(target: &[isa::x86::X86Instruction]) -> Vec<i64> {
-    use isa::x86::X86Instruction;
-    let mut imms = vec![0i64, 1, -1];
-    let referenced = target.iter().filter_map(|instr| match instr {
-        X86Instruction::MovImm { imm, .. }
-        | X86Instruction::AddImm { imm, .. }
-        | X86Instruction::SubImm { imm, .. }
-        | X86Instruction::AndImm { imm, .. }
-        | X86Instruction::OrImm { imm, .. }
-        | X86Instruction::XorImm { imm, .. }
-        | X86Instruction::CmpImm { imm, .. } => Some(*imm),
-        _ => None,
-    });
-    for imm in referenced {
-        if !imms.contains(&imm) {
-            imms.push(imm);
-        }
-    }
-    imms
-}
-
-/// Build the per-window x86 live-out contract.
-///
-/// EFLAGS liveness folds in the downstream flags scan (pre-existing). For
-/// registers (issue #621): when `downstream_live` is `Some(set)`, the
-/// window-written live-out set is narrowed to that proven-live subset;
-/// when `None` every written register stays live (the pre-#621 default).
-///
-/// **Conditional/branch soundness gate (defense in depth).** Like the AArch64
-/// builder, register narrowing applies only when the window has no terminator:
-/// the downstream scan follows only the linear fall-through successor, so a
-/// trailing Jcc (with its unscanned branch-taken target) vetoes narrowing.
-/// The backend already withholds the narrowed set in that case; this is a
-/// second, local guard so the function is sound regardless of caller.
-fn x86_live_out_for_optimization(
-    target: &[isa::x86::X86Instruction],
-    downstream_flags_live: bool,
-    downstream_live: Option<&semantics::live_out::RegisterSet<isa::x86::X86Register>>,
-) -> semantics::live_out::X86LiveOut {
-    let live_out = validation::live_out::x86_live_out_from_target(target);
-    let flags_live = live_out.flags_live() || downstream_flags_live;
-    let has_terminator = target.last().is_some_and(|i| i.is_terminator());
-    let narrowing = if has_terminator {
-        None
-    } else {
-        downstream_live
-    };
-    let narrowed = match narrowing {
-        Some(live) => {
-            semantics::live_out::RegisterSet::from_registers(live.iter().copied().collect())
-        }
-        None => live_out,
-    };
-    narrowed.with_flags(flags_live)
-}
-
 /// Build the search config for the x86 *enumerative* path. Like stochastic and
 /// symbolic search, enumerative search draws candidates from the target's own
 /// registers via the shared x86 base; it additionally derives immediates from
@@ -4617,184 +4464,6 @@ mod cli_helper_tests {
     }
 
     #[test]
-    fn x86_live_out_for_optimization_includes_downstream_flags() {
-        let mov_only = [X86Instruction::MovImm {
-            rd: X86Register::RAX,
-            imm: 0,
-        }];
-
-        assert!(!x86_live_out_for_optimization(&mov_only, false, None).flags_live());
-        assert!(x86_live_out_for_optimization(&mov_only, true, None).flags_live());
-
-        let flag_writer = [X86Instruction::XorReg {
-            rd: X86Register::RAX,
-            rs: X86Register::RAX,
-        }];
-        assert!(x86_live_out_for_optimization(&flag_writer, false, None).flags_live());
-    }
-
-    #[test]
-    fn x86_live_out_for_optimization_narrows_to_downstream_live_regs() {
-        use semantics::live_out::RegisterSet;
-
-        // Window writes RAX and RBX.
-        let window = [
-            X86Instruction::MovImm {
-                rd: X86Register::RAX,
-                imm: 0,
-            },
-            X86Instruction::MovImm {
-                rd: X86Register::RBX,
-                imm: 0,
-            },
-        ];
-
-        // Default (no downstream analysis): both written registers stay live.
-        let default = x86_live_out_for_optimization(&window, false, None);
-        assert!(default.contains(X86Register::RAX));
-        assert!(default.contains(X86Register::RBX));
-
-        // Downstream scan proved only RBX live (RAX dead). The contract must
-        // drop RAX and pin RBX.
-        let downstream_live = RegisterSet::from_registers(vec![X86Register::RBX]);
-        let narrowed = x86_live_out_for_optimization(&window, false, Some(&downstream_live));
-        assert!(
-            !narrowed.contains(X86Register::RAX),
-            "a provably-dead window register must be dropped from live-out"
-        );
-        assert!(
-            narrowed.contains(X86Register::RBX),
-            "a downstream-read window register must stay pinned"
-        );
-    }
-
-    #[test]
-    fn live_out_for_optimization_prefix_narrows_to_downstream_live_regs() {
-        // Prefix writes x0 and x1.
-        let prefix = [
-            Instruction::MovImm {
-                rd: Register::X0,
-                imm: 0,
-            },
-            Instruction::MovImm {
-                rd: Register::X1,
-                imm: 0,
-            },
-        ];
-
-        // Default (no downstream analysis): both written registers stay live.
-        let default = live_out_for_optimization_prefix(&prefix, None, false, None);
-        assert!(default.contains(Register::X0));
-        assert!(default.contains(Register::X1));
-
-        // Downstream scan proved only x1 live (x0 dead): drop x0, pin x1.
-        let downstream_live = semantics::live_out::RegisterSet::from_registers(vec![Register::X1]);
-        let narrowed =
-            live_out_for_optimization_prefix(&prefix, None, false, Some(&downstream_live));
-        assert!(
-            !narrowed.contains(Register::X0),
-            "a provably-dead window register must be dropped from live-out"
-        );
-        assert!(
-            narrowed.contains(Register::X1),
-            "a downstream-live window register must stay pinned"
-        );
-    }
-
-    /// Soundness regression: a window whose held-fixed terminator is a
-    /// CONDITIONAL branch must NOT narrow window-written registers, even if the
-    /// linear fall-through suffix proved one dead. The downstream-regs scan only
-    /// follows the fall-through successor; the branch-TAKEN successor is never
-    /// inspected and may read the register's window value.
-    ///
-    /// Counterexample being guarded against:
-    ///   window:       mov x0, #7 ; b.eq TARGET
-    ///   fall-through: mov x0, #0 ; ret           (kills x0 -> scan says Dead)
-    ///   elsewhere:    TARGET: add x9, x0, #1     (READS x0 on the taken path)
-    /// If x0 were narrowed to dead, `mov x0, #7` could be deleted and the
-    /// b.eq-taken path would read a stale x0. `BCond::source_registers()` is
-    /// empty, so the terminator does not re-pin x0 either — the only correct
-    /// fix is to not narrow at all when a terminator is present.
-    #[test]
-    fn live_out_for_optimization_prefix_does_not_narrow_with_conditional_terminator() {
-        let prefix = [Instruction::MovImm {
-            rd: Register::X0,
-            imm: 7,
-        }];
-        let b_eq = Instruction::BCond {
-            target: s11::ir::LabelId(0x2000),
-            cond: s11::ir::Condition::EQ,
-        };
-
-        // The fall-through scan "proved" x0 dead (empty proven-live set).
-        let downstream_live_fall_through = semantics::live_out::RegisterSet::<Register>::empty();
-
-        let live_out = live_out_for_optimization_prefix(
-            &prefix,
-            Some(&b_eq),
-            false,
-            Some(&downstream_live_fall_through),
-        );
-
-        assert!(
-            live_out.contains(Register::X0),
-            "x0 must stay live: a conditional terminator has a branch-taken successor \
-             the fall-through scan never inspected, so register narrowing must not apply"
-        );
-    }
-
-    /// x86 sibling of the conditional-terminator soundness gate: a target
-    /// ending in a Jcc must not narrow even if the proven-live set excludes a
-    /// written register.
-    #[test]
-    fn x86_live_out_for_optimization_does_not_narrow_with_trailing_jcc() {
-        use isa::x86::X86Condition;
-        let target = [
-            X86Instruction::MovImm {
-                rd: X86Register::RAX,
-                imm: 7,
-            },
-            X86Instruction::Jcc {
-                cond: X86Condition::E,
-            },
-        ];
-        // Pretend the fall-through scan proved RAX dead (empty set).
-        let dead = semantics::live_out::RegisterSet::<X86Register>::empty();
-        let live_out = x86_live_out_for_optimization(&target, false, Some(&dead));
-        assert!(
-            live_out.contains(X86Register::RAX),
-            "RAX must stay live: a trailing Jcc has an unscanned branch-taken successor, \
-             so register narrowing must not apply"
-        );
-    }
-
-    /// Same soundness gate for unconditional terminators: the instruction at
-    /// `end_addr` is not the real/only successor, so narrowing must not apply.
-    #[test]
-    fn live_out_for_optimization_prefix_does_not_narrow_with_unconditional_terminator() {
-        let prefix = [Instruction::MovImm {
-            rd: Register::X0,
-            imm: 7,
-        }];
-        let cases = [
-            Instruction::B {
-                target: s11::ir::LabelId(0x2000),
-            },
-            Instruction::Ret { rn: Register::X30 },
-        ];
-        let dead = semantics::live_out::RegisterSet::<Register>::empty();
-        for terminator in cases {
-            let live_out =
-                live_out_for_optimization_prefix(&prefix, Some(&terminator), false, Some(&dead));
-            assert!(
-                live_out.contains(Register::X0),
-                "x0 must stay live with a {:?} terminator: narrowing must not apply",
-                terminator
-            );
-        }
-    }
-
-    #[test]
     fn x86_symbolic_code_size_preserves_downstream_flags_live() {
         let mut opts = options_for(Algorithm::Symbolic);
         opts.timeout = Some(Duration::from_secs(5));
@@ -5221,63 +4890,6 @@ mod cli_helper_tests {
         assert_single_r10_rewrite(&optimized);
     }
 
-    #[test]
-    fn x86_register_pool_is_destination_derived_and_empty_falls_back() {
-        let target = vec![
-            X86Instruction::CmpReg {
-                rn: X86Register::RSP,
-                rs: X86Register::R11,
-            },
-            X86Instruction::CmpReg {
-                rn: X86Register::RBP,
-                rs: X86Register::R12,
-            },
-            X86Instruction::MovReg {
-                rd: X86Register::R11,
-                rs: X86Register::R10,
-            },
-            X86Instruction::AddReg {
-                rd: X86Register::R12,
-                rs: X86Register::RSP,
-            },
-        ];
-
-        assert_eq!(
-            x86_registers_from_target(&target),
-            vec![X86Register::R11, X86Register::R12]
-        );
-        assert_eq!(
-            x86_registers_from_target(&[]),
-            isa::x86::default_x86_registers()
-        );
-        assert_eq!(
-            x86_registers_from_target(&[
-                X86Instruction::CmpImm {
-                    rn: X86Register::R10,
-                    imm: 1,
-                },
-                X86Instruction::CmpImm {
-                    rn: X86Register::R10,
-                    imm: 1,
-                },
-            ]),
-            Vec::<X86Register>::new()
-        );
-        assert_eq!(
-            x86_registers_from_target(&[
-                X86Instruction::CmpImm {
-                    rn: X86Register::RSP,
-                    imm: 1,
-                },
-                X86Instruction::CmpReg {
-                    rn: X86Register::RBP,
-                    rs: X86Register::RBP,
-                },
-            ]),
-            Vec::<X86Register>::new()
-        );
-    }
-
     /// Regression (PR #384): the enumerative config must be target-derived and
     /// must thread `--cores` (the trait-backed search is rayon-parallel and
     /// honours `config.cores`, but the old builder left it `None`).
@@ -5492,36 +5104,6 @@ mod cli_helper_tests {
         assert_eq!(config.available_immediates, imms);
         // No algorithm layer applied: cores is left at the SearchConfig default.
         assert_eq!(config.cores, SearchConfig::default().cores);
-    }
-
-    #[test]
-    fn aarch64_search_registers_include_vectors_used_by_target() {
-        let target = [
-            Instruction::VectorAdd {
-                vd: ir::VectorRegister::V0,
-                vn: ir::VectorRegister::V1,
-                vm: ir::VectorRegister::V2,
-                arrangement: ir::VectorArrangement::TwoD,
-            },
-            Instruction::MovFromVectorLane {
-                rd: Register::X0,
-                vn: ir::VectorRegister::V0,
-                lane: 0,
-            },
-        ];
-
-        let registers = aarch64_search_registers(&target);
-
-        assert!(registers.contains(&Register::Vector(ir::VectorRegister::V0)));
-        assert!(registers.contains(&Register::Vector(ir::VectorRegister::V1)));
-        assert!(registers.contains(&Register::Vector(ir::VectorRegister::V2)));
-        assert_eq!(
-            registers
-                .iter()
-                .filter(|reg| reg.vector().is_some())
-                .count(),
-            3
-        );
     }
 
     /// Regression for issue #243, generalised: every AArch64 algorithm builder
@@ -5871,78 +5453,6 @@ mod cli_helper_tests {
         let (prefix, term) = split_terminator(&seq);
         assert_eq!(prefix.len(), 1);
         assert_eq!(term, Some(&Instruction::Ret { rn: Register::X30 }));
-    }
-
-    #[test]
-    fn live_out_for_optimization_prefix_includes_registers_read_by_terminator() {
-        let prefix = [Instruction::MovImm {
-            rd: Register::X1,
-            imm: 1,
-        }];
-        let cases = [
-            (
-                Instruction::Cbz {
-                    rn: Register::X0,
-                    target: s11::ir::LabelId(0x1000),
-                },
-                Register::X0,
-            ),
-            (
-                Instruction::Tbz {
-                    rt: Register::X2,
-                    bit: 5,
-                    target: s11::ir::LabelId(0x1000),
-                },
-                Register::X2,
-            ),
-            (Instruction::Br { rn: Register::X16 }, Register::X16),
-            (Instruction::Ret { rn: Register::X30 }, Register::X30),
-        ];
-
-        for (terminator, source) in cases {
-            let live_out =
-                live_out_for_optimization_prefix(&prefix, Some(&terminator), false, None);
-            assert!(live_out.contains_register(Register::X1));
-            assert!(
-                live_out.contains_register(source),
-                "{:?} must keep {:?} live for the reattached terminator",
-                terminator,
-                source
-            );
-        }
-    }
-
-    #[test]
-    fn live_out_for_optimization_prefix_uses_downstream_flags_without_terminator() {
-        let prefix = [Instruction::MovImm {
-            rd: Register::X1,
-            imm: 1,
-        }];
-
-        let flags_dead = live_out_for_optimization_prefix(&prefix, None, false, None);
-        assert!(!flags_dead.flags_live());
-
-        let flags_live = live_out_for_optimization_prefix(&prefix, None, true, None);
-        assert!(flags_live.flags_live());
-    }
-
-    #[test]
-    fn live_out_for_optimization_prefix_keeps_flags_live_for_terminators() {
-        let prefix = [Instruction::MovImm {
-            rd: Register::X1,
-            imm: 1,
-        }];
-
-        let b_cond = Instruction::BCond {
-            target: s11::ir::LabelId(0x1000),
-            cond: s11::ir::Condition::EQ,
-        };
-        let live_out = live_out_for_optimization_prefix(&prefix, Some(&b_cond), false, None);
-        assert!(live_out.flags_live());
-
-        let ret = Instruction::Ret { rn: Register::X30 };
-        let live_out = live_out_for_optimization_prefix(&prefix, Some(&ret), false, None);
-        assert!(live_out.flags_live());
     }
 
     // (The standalone `find_shorter_equivalent_preserves_terminator_bit_identical`
