@@ -12,6 +12,7 @@ pub mod report;
 pub mod search;
 pub mod semantics;
 pub mod validation;
+pub mod x86_search_inputs;
 
 #[cfg(test)]
 #[path = "test_utils.rs"]
