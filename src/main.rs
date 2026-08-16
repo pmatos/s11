@@ -25,7 +25,9 @@ use s11::search::{EnumerativeSearch, SearchAlgorithm, StochasticSearch, Symbolic
 use s11::semantics::LiveOut;
 use s11::semantics::cost::CostMetric;
 #[allow(unused_imports)]
-use s11::{assembler, elf_patcher, ir, isa, parser, search, semantics, validation};
+use s11::{
+    assembler, elf_patcher, ir, isa, parser, search, semantics, validation, x86_search_inputs,
+};
 
 // --- Command Line Arguments ---
 
@@ -934,7 +936,7 @@ impl ElfOptimizationBackend for X86OptimizationBackend {
     }
 
     fn validate_window_ir(&self, ir: &[Self::Instruction]) -> Result<(), String> {
-        validate_x86_window_terminator_placement(ir)
+        x86_search_inputs::validate_terminator_placement(ir)
     }
 
     fn optimization_context(
@@ -1766,7 +1768,7 @@ fn build_x86_base_search_config(
         .with_solver_timeout(options.solver_timeout)
         .with_timeout_option(options.timeout)
         .with_verbose(options.verbose)
-        .with_x86_registers(x86_registers_from_target(target))
+        .with_x86_registers(x86_search_inputs::registers_from_target(target))
         .with_immediates(isa::x86::default_x86_immediates())
 }
 
@@ -2167,122 +2169,9 @@ fn validate_basic_block(ir: &[Instruction]) -> Result<(), String> {
 // live in `parser::x86`. The Capstone bridge (`convert_to_x86_ir`,
 // `convert_x86_capstone_op_for_optimization`) lives in `capstone_bridge_x86`.
 // This file keeps only the length-1 enumerator used by the enumerative x86
-// pipeline plus the window terminator/live-out helpers.
-
-/// Reject any non-terminal Jcc in an x86 optimization window. The
-/// optimizer only special-cases a trailing Jcc (peeled by
-/// `split_terminator_x86`, displacement preserved by
-/// `reassemble_x86_prefix_with_pinned_terminator`). A Jcc anywhere
-/// else in the window would be modelled as a data-state no-op by
-/// both the concrete and SMT executors, so the equivalence check
-/// could accept a rewrite that silently drops or rewrites the branch.
-fn validate_x86_window_terminator_placement(ir: &[isa::x86::X86Instruction]) -> Result<(), String> {
-    for (idx, instr) in ir.iter().enumerate() {
-        if matches!(instr, isa::x86::X86Instruction::Jcc { .. }) && idx != ir.len() - 1 {
-            return Err(format!(
-                "x86 window contains a non-terminal conditional branch at position {} \
-                 (last position is {}). The optimizer only supports Jcc as the trailing \
-                 terminator of a window. Narrow --start-addr/--end-addr to exclude the \
-                 mid-window branch.",
-                idx,
-                ir.len() - 1
-            ));
-        }
-    }
-    Ok(())
-}
-
-/// Candidate register pool for x86 search, drawn from the target's original
-/// destinations. The trait refactor regressed coverage by defaulting to the
-/// fixed `default_x86_registers()` pool, so a window over R10-R15 had no
-/// representable rewrite. Source-only registers are deliberately excluded: the
-/// single candidate pool can place registers in writable positions, while
-/// live-out tracking only makes original destinations plus EFLAGS observable.
-/// `RSP` and `RBP` are also excluded so search never synthesizes stack/frame
-/// writes. Falls back to the default pool only for an empty target; a non-empty
-/// target with no usable destinations returns an empty pool so search does not
-/// introduce unrelated writable registers.
-fn x86_registers_from_target(target: &[isa::x86::X86Instruction]) -> Vec<isa::x86::X86Register> {
-    let mut pool: Vec<isa::x86::X86Register> = Vec::new();
-    let referenced = target
-        .iter()
-        .filter_map(|instr| instr.destination_operand());
-    for reg in referenced {
-        if matches!(
-            reg.canonical(),
-            isa::x86::X86Register::RSP | isa::x86::X86Register::RBP
-        ) {
-            continue;
-        }
-        if !pool.contains(&reg) {
-            pool.push(reg);
-        }
-    }
-    if target.is_empty() {
-        return isa::x86::default_x86_registers();
-    }
-    pool
-}
-
-/// Candidate immediate pool for the x86 enumerative path: the target's own
-/// immediates plus `0`, `1`, and `-1`. The fixed `default_x86_immediates()`
-/// pool holds no negatives, so the trait refactor lost rewrites like
-/// `mov rax, -1; mov rax, -1` → `mov rax, -1`.
-fn x86_enumerative_immediates_from_target(target: &[isa::x86::X86Instruction]) -> Vec<i64> {
-    use isa::x86::X86Instruction;
-    let mut imms = vec![0i64, 1, -1];
-    let referenced = target.iter().filter_map(|instr| match instr {
-        X86Instruction::MovImm { imm, .. }
-        | X86Instruction::AddImm { imm, .. }
-        | X86Instruction::SubImm { imm, .. }
-        | X86Instruction::AndImm { imm, .. }
-        | X86Instruction::OrImm { imm, .. }
-        | X86Instruction::XorImm { imm, .. }
-        | X86Instruction::CmpImm { imm, .. } => Some(*imm),
-        _ => None,
-    });
-    for imm in referenced {
-        if !imms.contains(&imm) {
-            imms.push(imm);
-        }
-    }
-    imms
-}
-
-/// Build the per-window x86 live-out contract.
-///
-/// EFLAGS liveness folds in the downstream flags scan (pre-existing). For
-/// registers (issue #621): when `downstream_live` is `Some(set)`, the
-/// window-written live-out set is narrowed to that proven-live subset;
-/// when `None` every written register stays live (the pre-#621 default).
-///
-/// **Conditional/branch soundness gate (defense in depth).** Like the AArch64
-/// builder, register narrowing applies only when the window has no terminator:
-/// the downstream scan follows only the linear fall-through successor, so a
-/// trailing Jcc (with its unscanned branch-taken target) vetoes narrowing.
-/// The backend already withholds the narrowed set in that case; this is a
-/// second, local guard so the function is sound regardless of caller.
-fn x86_live_out_for_optimization(
-    target: &[isa::x86::X86Instruction],
-    downstream_flags_live: bool,
-    downstream_live: Option<&semantics::live_out::RegisterSet<isa::x86::X86Register>>,
-) -> semantics::live_out::X86LiveOut {
-    let live_out = validation::live_out::x86_live_out_from_target(target);
-    let flags_live = live_out.flags_live() || downstream_flags_live;
-    let has_terminator = target.last().is_some_and(|i| i.is_terminator());
-    let narrowing = if has_terminator {
-        None
-    } else {
-        downstream_live
-    };
-    let narrowed = match narrowing {
-        Some(live) => {
-            semantics::live_out::RegisterSet::from_registers(live.iter().copied().collect())
-        }
-        None => live_out,
-    };
-    narrowed.with_flags(flags_live)
-}
+// pipeline. The per-window search inputs — candidate register/immediate pools,
+// the live-out contract, and the terminator-placement admissibility gate — live
+// in `x86_search_inputs`.
 
 /// Build the search config for the x86 *enumerative* path. Like stochastic and
 /// symbolic search, enumerative search draws candidates from the target's own
@@ -2295,7 +2184,9 @@ fn build_x86_enumerative_search_config(
     options: &OptimizationOptions,
 ) -> SearchConfig {
     build_x86_stochastic_search_config(target, options)
-        .with_immediates(x86_enumerative_immediates_from_target(target))
+        .with_immediates(x86_search_inputs::enumerative_immediates_from_target(
+            target,
+        ))
         .with_cores(options.cores)
 }
 
@@ -2310,7 +2201,11 @@ fn run_x86_enumerative(
     use search::SearchAlgorithm;
 
     let config = build_x86_enumerative_search_config(target, options);
-    let live_out = x86_live_out_for_optimization(target, downstream_flags_live, downstream_live);
+    let live_out = x86_search_inputs::live_out_for_optimization(
+        target,
+        downstream_flags_live,
+        downstream_live,
+    );
 
     let (optimized, statistics) = if width == 32 {
         let mut search: EnumerativeSearch<isa::X86_32> = EnumerativeSearch::new();
@@ -2356,7 +2251,11 @@ fn run_x86_stochastic(
     if config.x86_available_registers.is_empty() {
         return None;
     }
-    let live_out = x86_live_out_for_optimization(target, downstream_flags_live, downstream_live);
+    let live_out = x86_search_inputs::live_out_for_optimization(
+        target,
+        downstream_flags_live,
+        downstream_live,
+    );
 
     // Extract (optimized, statistics) in each width branch separately:
     // the two `SearchResultFor<X86_64>` / `SearchResultFor<X86_32>`
@@ -2401,7 +2300,11 @@ fn run_x86_symbolic(
     use search::symbolic::SymbolicSearch;
 
     let config = build_x86_symbolic_search_config(target, options, same_count_code_size_allowed);
-    let live_out = x86_live_out_for_optimization(target, downstream_flags_live, downstream_live);
+    let live_out = x86_search_inputs::live_out_for_optimization(
+        target,
+        downstream_flags_live,
+        downstream_live,
+    );
 
     let (optimized, statistics) = if width == 32 {
         let mut search: SymbolicSearch<isa::X86_32> = SymbolicSearch::new();
@@ -4617,58 +4520,6 @@ mod cli_helper_tests {
     }
 
     #[test]
-    fn x86_live_out_for_optimization_includes_downstream_flags() {
-        let mov_only = [X86Instruction::MovImm {
-            rd: X86Register::RAX,
-            imm: 0,
-        }];
-
-        assert!(!x86_live_out_for_optimization(&mov_only, false, None).flags_live());
-        assert!(x86_live_out_for_optimization(&mov_only, true, None).flags_live());
-
-        let flag_writer = [X86Instruction::XorReg {
-            rd: X86Register::RAX,
-            rs: X86Register::RAX,
-        }];
-        assert!(x86_live_out_for_optimization(&flag_writer, false, None).flags_live());
-    }
-
-    #[test]
-    fn x86_live_out_for_optimization_narrows_to_downstream_live_regs() {
-        use semantics::live_out::RegisterSet;
-
-        // Window writes RAX and RBX.
-        let window = [
-            X86Instruction::MovImm {
-                rd: X86Register::RAX,
-                imm: 0,
-            },
-            X86Instruction::MovImm {
-                rd: X86Register::RBX,
-                imm: 0,
-            },
-        ];
-
-        // Default (no downstream analysis): both written registers stay live.
-        let default = x86_live_out_for_optimization(&window, false, None);
-        assert!(default.contains(X86Register::RAX));
-        assert!(default.contains(X86Register::RBX));
-
-        // Downstream scan proved only RBX live (RAX dead). The contract must
-        // drop RAX and pin RBX.
-        let downstream_live = RegisterSet::from_registers(vec![X86Register::RBX]);
-        let narrowed = x86_live_out_for_optimization(&window, false, Some(&downstream_live));
-        assert!(
-            !narrowed.contains(X86Register::RAX),
-            "a provably-dead window register must be dropped from live-out"
-        );
-        assert!(
-            narrowed.contains(X86Register::RBX),
-            "a downstream-read window register must stay pinned"
-        );
-    }
-
-    #[test]
     fn live_out_for_optimization_prefix_narrows_to_downstream_live_regs() {
         // Prefix writes x0 and x1.
         let prefix = [
@@ -4740,31 +4591,6 @@ mod cli_helper_tests {
             live_out.contains(Register::X0),
             "x0 must stay live: a conditional terminator has a branch-taken successor \
              the fall-through scan never inspected, so register narrowing must not apply"
-        );
-    }
-
-    /// x86 sibling of the conditional-terminator soundness gate: a target
-    /// ending in a Jcc must not narrow even if the proven-live set excludes a
-    /// written register.
-    #[test]
-    fn x86_live_out_for_optimization_does_not_narrow_with_trailing_jcc() {
-        use isa::x86::X86Condition;
-        let target = [
-            X86Instruction::MovImm {
-                rd: X86Register::RAX,
-                imm: 7,
-            },
-            X86Instruction::Jcc {
-                cond: X86Condition::E,
-            },
-        ];
-        // Pretend the fall-through scan proved RAX dead (empty set).
-        let dead = semantics::live_out::RegisterSet::<X86Register>::empty();
-        let live_out = x86_live_out_for_optimization(&target, false, Some(&dead));
-        assert!(
-            live_out.contains(X86Register::RAX),
-            "RAX must stay live: a trailing Jcc has an unscanned branch-taken successor, \
-             so register narrowing must not apply"
         );
     }
 
@@ -5006,56 +4832,6 @@ mod cli_helper_tests {
         }
     }
 
-    #[test]
-    fn validate_x86_window_rejects_mid_window_jcc() {
-        use isa::x86::{X86Condition, X86Instruction, X86Register};
-        let ir = vec![
-            X86Instruction::CmpReg {
-                rn: X86Register::RAX,
-                rs: X86Register::RBX,
-            },
-            X86Instruction::Jcc {
-                cond: X86Condition::E,
-            },
-            X86Instruction::MovImm {
-                rd: X86Register::RAX,
-                imm: 0,
-            },
-        ];
-        let err = validate_x86_window_terminator_placement(&ir)
-            .expect_err("mid-window Jcc must be rejected");
-        assert!(
-            err.contains("non-terminal conditional branch") && err.contains("position 1"),
-            "unhelpful error: {}",
-            err
-        );
-    }
-
-    #[test]
-    fn validate_x86_window_accepts_trailing_jcc() {
-        use isa::x86::{X86Condition, X86Instruction, X86Register};
-        let ir = vec![
-            X86Instruction::CmpReg {
-                rn: X86Register::RAX,
-                rs: X86Register::RBX,
-            },
-            X86Instruction::Jcc {
-                cond: X86Condition::E,
-            },
-        ];
-        validate_x86_window_terminator_placement(&ir).expect("trailing Jcc must be accepted");
-    }
-
-    #[test]
-    fn validate_x86_window_accepts_no_jcc() {
-        use isa::x86::{X86Instruction, X86Register};
-        let ir = vec![X86Instruction::MovImm {
-            rd: X86Register::RAX,
-            imm: 0,
-        }];
-        validate_x86_window_terminator_placement(&ir).expect("Jcc-free window must be accepted");
-    }
-
     /// Regression: x86 enumerative search must preserve a trailing Jcc while
     /// optimizing the straight-line prefix.
     #[test]
@@ -5219,63 +4995,6 @@ mod cli_helper_tests {
             .expect("two identical R10 zeroing writes must collapse to one");
 
         assert_single_r10_rewrite(&optimized);
-    }
-
-    #[test]
-    fn x86_register_pool_is_destination_derived_and_empty_falls_back() {
-        let target = vec![
-            X86Instruction::CmpReg {
-                rn: X86Register::RSP,
-                rs: X86Register::R11,
-            },
-            X86Instruction::CmpReg {
-                rn: X86Register::RBP,
-                rs: X86Register::R12,
-            },
-            X86Instruction::MovReg {
-                rd: X86Register::R11,
-                rs: X86Register::R10,
-            },
-            X86Instruction::AddReg {
-                rd: X86Register::R12,
-                rs: X86Register::RSP,
-            },
-        ];
-
-        assert_eq!(
-            x86_registers_from_target(&target),
-            vec![X86Register::R11, X86Register::R12]
-        );
-        assert_eq!(
-            x86_registers_from_target(&[]),
-            isa::x86::default_x86_registers()
-        );
-        assert_eq!(
-            x86_registers_from_target(&[
-                X86Instruction::CmpImm {
-                    rn: X86Register::R10,
-                    imm: 1,
-                },
-                X86Instruction::CmpImm {
-                    rn: X86Register::R10,
-                    imm: 1,
-                },
-            ]),
-            Vec::<X86Register>::new()
-        );
-        assert_eq!(
-            x86_registers_from_target(&[
-                X86Instruction::CmpImm {
-                    rn: X86Register::RSP,
-                    imm: 1,
-                },
-                X86Instruction::CmpReg {
-                    rn: X86Register::RBP,
-                    rs: X86Register::RBP,
-                },
-            ]),
-            Vec::<X86Register>::new()
-        );
     }
 
     /// Regression (PR #384): the enumerative config must be target-derived and
