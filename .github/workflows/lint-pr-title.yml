@@ -19,11 +19,13 @@ jobs:
     name: Validate PR title
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/setup-node@v7.0.0
+      # Tag-pinned, not hash-pinned: this repo's policy is tag pins kept current by
+      # Dependabot rather than SHA pins.
+      - uses: actions/setup-node@v7.0.0 # zizmor: ignore[unpinned-uses]
         with:
           node-version: lts/*
       - name: Install commitlint
-        run: npm install --no-save @commitlint/cli@21 @commitlint/config-conventional@21
+        run: npm install --no-save @commitlint/cli@21 @commitlint/config-conventional@21 # zizmor: ignore[adhoc-packages]
       - name: Lint PR title
         env:
           PR_TITLE: ${{ github.event.pull_request.title }}

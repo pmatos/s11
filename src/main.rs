@@ -24,12 +24,12 @@ use s11::search::parallel::{ParallelConfig, run_parallel_search};
 use s11::search::{EnumerativeSearch, SearchAlgorithm, StochasticSearch, SymbolicSearch};
 use s11::search_inputs::{
     aarch64_search_immediates, aarch64_search_registers, live_out_for_optimization_prefix,
-    x86_enumerative_immediates_from_target, x86_live_out_for_optimization,
-    x86_registers_from_target,
 };
 use s11::semantics::cost::CostMetric;
 #[allow(unused_imports)]
-use s11::{assembler, elf_patcher, ir, isa, parser, search, semantics, validation};
+use s11::{
+    assembler, elf_patcher, ir, isa, parser, search, semantics, validation, x86_search_inputs,
+};
 
 // --- Command Line Arguments ---
 
@@ -938,7 +938,7 @@ impl ElfOptimizationBackend for X86OptimizationBackend {
     }
 
     fn validate_window_ir(&self, ir: &[Self::Instruction]) -> Result<(), String> {
-        validate_x86_window_terminator_placement(ir)
+        x86_search_inputs::validate_terminator_placement(ir)
     }
 
     fn optimization_context(
@@ -1731,7 +1731,7 @@ fn build_x86_base_search_config(
         .with_solver_timeout(options.solver_timeout)
         .with_timeout_option(options.timeout)
         .with_verbose(options.verbose)
-        .with_x86_registers(x86_registers_from_target(target))
+        .with_x86_registers(x86_search_inputs::registers_from_target(target))
         .with_immediates(isa::x86::default_x86_immediates())
 }
 
@@ -2096,41 +2096,10 @@ fn validate_basic_block(ir: &[Instruction]) -> Result<(), String> {
 // live in `parser::x86`. The Capstone bridge (`convert_to_x86_ir`,
 // `convert_x86_capstone_op_for_optimization`) lives in `capstone_bridge_x86`.
 // This file keeps only the length-1 enumerator used by the enumerative x86
-// pipeline plus the window terminator/live-out helpers.
+// pipeline. The per-window search inputs — candidate register/immediate pools,
+// the live-out contract, and the terminator-placement admissibility gate — live
+// in `x86_search_inputs`.
 
-/// Reject any non-terminal Jcc in an x86 optimization window. The
-/// optimizer only special-cases a trailing Jcc (peeled by
-/// `split_terminator_x86`, displacement preserved by
-/// `reassemble_x86_prefix_with_pinned_terminator`). A Jcc anywhere
-/// else in the window would be modelled as a data-state no-op by
-/// both the concrete and SMT executors, so the equivalence check
-/// could accept a rewrite that silently drops or rewrites the branch.
-fn validate_x86_window_terminator_placement(ir: &[isa::x86::X86Instruction]) -> Result<(), String> {
-    for (idx, instr) in ir.iter().enumerate() {
-        if matches!(instr, isa::x86::X86Instruction::Jcc { .. }) && idx != ir.len() - 1 {
-            return Err(format!(
-                "x86 window contains a non-terminal conditional branch at position {} \
-                 (last position is {}). The optimizer only supports Jcc as the trailing \
-                 terminator of a window. Narrow --start-addr/--end-addr to exclude the \
-                 mid-window branch.",
-                idx,
-                ir.len() - 1
-            ));
-        }
-    }
-    Ok(())
-}
-
-/// Candidate register pool for x86 search, drawn from the target's original
-/// destinations. The trait refactor regressed coverage by defaulting to the
-/// fixed `default_x86_registers()` pool, so a window over R10-R15 had no
-/// representable rewrite. Source-only registers are deliberately excluded: the
-/// single candidate pool can place registers in writable positions, while
-/// live-out tracking only makes original destinations plus EFLAGS observable.
-/// `RSP` and `RBP` are also excluded so search never synthesizes stack/frame
-/// writes. Falls back to the default pool only for an empty target; a non-empty
-/// target with no usable destinations returns an empty pool so search does not
-/// introduce unrelated writable registers.
 /// Build the search config for the x86 *enumerative* path. Like stochastic and
 /// symbolic search, enumerative search draws candidates from the target's own
 /// registers via the shared x86 base; it additionally derives immediates from
@@ -2142,7 +2111,9 @@ fn build_x86_enumerative_search_config(
     options: &OptimizationOptions,
 ) -> SearchConfig {
     build_x86_stochastic_search_config(target, options)
-        .with_immediates(x86_enumerative_immediates_from_target(target))
+        .with_immediates(x86_search_inputs::enumerative_immediates_from_target(
+            target,
+        ))
         .with_cores(options.cores)
 }
 
@@ -2157,7 +2128,11 @@ fn run_x86_enumerative(
     use search::SearchAlgorithm;
 
     let config = build_x86_enumerative_search_config(target, options);
-    let live_out = x86_live_out_for_optimization(target, downstream_flags_live, downstream_live);
+    let live_out = x86_search_inputs::live_out_for_optimization(
+        target,
+        downstream_flags_live,
+        downstream_live,
+    );
 
     let (optimized, statistics) = if width == 32 {
         let mut search: EnumerativeSearch<isa::X86_32> = EnumerativeSearch::new();
@@ -2203,7 +2178,11 @@ fn run_x86_stochastic(
     if config.x86_available_registers.is_empty() {
         return None;
     }
-    let live_out = x86_live_out_for_optimization(target, downstream_flags_live, downstream_live);
+    let live_out = x86_search_inputs::live_out_for_optimization(
+        target,
+        downstream_flags_live,
+        downstream_live,
+    );
 
     // Extract (optimized, statistics) in each width branch separately:
     // the two `SearchResultFor<X86_64>` / `SearchResultFor<X86_32>`
@@ -2248,7 +2227,11 @@ fn run_x86_symbolic(
     use search::symbolic::SymbolicSearch;
 
     let config = build_x86_symbolic_search_config(target, options, same_count_code_size_allowed);
-    let live_out = x86_live_out_for_optimization(target, downstream_flags_live, downstream_live);
+    let live_out = x86_search_inputs::live_out_for_optimization(
+        target,
+        downstream_flags_live,
+        downstream_live,
+    );
 
     let (optimized, statistics) = if width == 32 {
         let mut search: SymbolicSearch<isa::X86_32> = SymbolicSearch::new();
@@ -4673,56 +4656,6 @@ mod cli_helper_tests {
                 err
             );
         }
-    }
-
-    #[test]
-    fn validate_x86_window_rejects_mid_window_jcc() {
-        use isa::x86::{X86Condition, X86Instruction, X86Register};
-        let ir = vec![
-            X86Instruction::CmpReg {
-                rn: X86Register::RAX,
-                rs: X86Register::RBX,
-            },
-            X86Instruction::Jcc {
-                cond: X86Condition::E,
-            },
-            X86Instruction::MovImm {
-                rd: X86Register::RAX,
-                imm: 0,
-            },
-        ];
-        let err = validate_x86_window_terminator_placement(&ir)
-            .expect_err("mid-window Jcc must be rejected");
-        assert!(
-            err.contains("non-terminal conditional branch") && err.contains("position 1"),
-            "unhelpful error: {}",
-            err
-        );
-    }
-
-    #[test]
-    fn validate_x86_window_accepts_trailing_jcc() {
-        use isa::x86::{X86Condition, X86Instruction, X86Register};
-        let ir = vec![
-            X86Instruction::CmpReg {
-                rn: X86Register::RAX,
-                rs: X86Register::RBX,
-            },
-            X86Instruction::Jcc {
-                cond: X86Condition::E,
-            },
-        ];
-        validate_x86_window_terminator_placement(&ir).expect("trailing Jcc must be accepted");
-    }
-
-    #[test]
-    fn validate_x86_window_accepts_no_jcc() {
-        use isa::x86::{X86Instruction, X86Register};
-        let ir = vec![X86Instruction::MovImm {
-            rd: X86Register::RAX,
-            imm: 0,
-        }];
-        validate_x86_window_terminator_placement(&ir).expect("Jcc-free window must be accepted");
     }
 
     /// Regression: x86 enumerative search must preserve a trailing Jcc while

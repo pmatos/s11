@@ -1,5 +1,4 @@
-//! Per-target search-input derivation — a pure seam shared by the AArch64 and
-//! x86 optimization drivers.
+//! Per-target search-input derivation for the AArch64 optimization driver.
 //!
 //! Before a search runs it needs three things derived from the *target* (see
 //! `CONTEXT.md`): the **register pool** and **immediate pool** candidates may be
@@ -9,8 +8,6 @@
 //! * the historical X0..X7 scalar pool, widened only by the target's own vector
 //!   registers, keeps small enumerative searches from exploding over the full
 //!   SIMD register file;
-//! * the x86 pool excludes the stack pointer / frame pointer and falls back to a
-//!   default pool for an empty target;
 //! * the live-out contract narrows to a proven-live downstream set **only when no
 //!   held-fixed terminator is present** — a terminator has an unscanned
 //!   branch-taken successor, so narrowing there would be unsound (ADR-0006 /
@@ -21,11 +18,12 @@
 //! own `cli_helper_tests`. Lifting them into this library module — the
 //! search-input analogue of [`crate::candidate_windows`] — makes every rule a
 //! fixture-free unit test at a public seam, and lets `main.rs` shrink toward a
-//! thin adapter.
+//! thin adapter. The x86 sibling of this module is
+//! [`crate::x86_search_inputs`].
 
 use crate::ir::{Instruction, Register};
 use crate::semantics::LiveOut;
-use crate::semantics::live_out::{RegisterSet, X86LiveOut};
+use crate::semantics::live_out::RegisterSet;
 
 /// Build the per-window AArch64 live-out contract over the optimized prefix.
 ///
@@ -75,36 +73,6 @@ pub fn live_out_for_optimization_prefix(
     LiveOut::from_registers(live_registers).with_flags(flags_live)
 }
 
-/// Build the per-window x86 live-out contract.
-///
-/// EFLAGS liveness folds in the downstream flags scan. For registers: when
-/// `downstream_live` is `Some(set)`, the window-written live-out set is narrowed
-/// to that proven-live subset; when `None` every written register stays live.
-///
-/// **Conditional/branch soundness gate (defense in depth).** Like the AArch64
-/// builder, register narrowing applies only when the window has no terminator:
-/// the downstream scan follows only the linear fall-through successor, so a
-/// trailing Jcc (with its unscanned branch-taken target) vetoes narrowing.
-pub fn x86_live_out_for_optimization(
-    target: &[crate::isa::x86::X86Instruction],
-    downstream_flags_live: bool,
-    downstream_live: Option<&RegisterSet<crate::isa::x86::X86Register>>,
-) -> X86LiveOut {
-    let live_out = crate::validation::live_out::x86_live_out_from_target(target);
-    let flags_live = live_out.flags_live() || downstream_flags_live;
-    let has_terminator = target.last().is_some_and(|i| i.is_terminator());
-    let narrowing = if has_terminator {
-        None
-    } else {
-        downstream_live
-    };
-    let narrowed = match narrowing {
-        Some(live) => RegisterSet::from_registers(live.iter().copied().collect()),
-        None => live_out,
-    };
-    narrowed.with_flags(flags_live)
-}
-
 /// Build the AArch64 search register pool, preserving the historical X0..X7
 /// scalar policy while adding every vector register referenced by the target.
 /// A target-local vector pool avoids the 32^3 candidate explosion of enabling
@@ -142,67 +110,13 @@ pub fn aarch64_search_registers(target: &[Instruction]) -> Vec<Register> {
 /// The default AArch64 candidate immediate pool. A small, hand-picked set that
 /// covers common small constants, power-of-two boundaries, and `4095` — the
 /// largest value an unshifted imm12 field can encode. Mirrors
-/// [`x86_enumerative_immediates_from_target`]'s role for the x86 path (which
-/// additionally seeds from the target); the AArch64 pool is target-independent.
+/// [`crate::x86_search_inputs::enumerative_immediates_from_target`]'s role for
+/// the x86 path (which additionally seeds from the target); the AArch64 pool
+/// is target-independent.
 pub fn aarch64_search_immediates() -> Vec<i64> {
     vec![
         0, 1, 2, 3, 4, 5, 7, 8, 10, 15, 16, 31, 32, 63, 64, 100, 255, 256, 1000, 4095,
     ]
-}
-
-/// Build the x86 search register pool from the target's own destination
-/// registers, excluding the stack and frame pointers. An *empty* target falls
-/// back to the default pool; a *non-empty* target whose instructions have no
-/// destination operands (e.g. only `cmp`s) deliberately yields an **empty**
-/// pool — the empty-target check runs after the derivation loop, so it does not
-/// fire here.
-pub fn x86_registers_from_target(
-    target: &[crate::isa::x86::X86Instruction],
-) -> Vec<crate::isa::x86::X86Register> {
-    use crate::isa::x86::X86Register;
-    let mut pool: Vec<X86Register> = Vec::new();
-    let referenced = target
-        .iter()
-        .filter_map(|instr| instr.destination_operand());
-    for reg in referenced {
-        if matches!(reg.canonical(), X86Register::RSP | X86Register::RBP) {
-            continue;
-        }
-        if !pool.contains(&reg) {
-            pool.push(reg);
-        }
-    }
-    if target.is_empty() {
-        return crate::isa::x86::default_x86_registers();
-    }
-    pool
-}
-
-/// Candidate immediate pool for the x86 enumerative path: the target's own
-/// immediates plus `0`, `1`, and `-1`. The fixed `default_x86_immediates()`
-/// pool holds no negatives, so the trait refactor lost rewrites like
-/// `mov rax, -1; mov rax, -1` → `mov rax, -1`.
-pub fn x86_enumerative_immediates_from_target(
-    target: &[crate::isa::x86::X86Instruction],
-) -> Vec<i64> {
-    use crate::isa::x86::X86Instruction;
-    let mut imms = vec![0i64, 1, -1];
-    let referenced = target.iter().filter_map(|instr| match instr {
-        X86Instruction::MovImm { imm, .. }
-        | X86Instruction::AddImm { imm, .. }
-        | X86Instruction::SubImm { imm, .. }
-        | X86Instruction::AndImm { imm, .. }
-        | X86Instruction::OrImm { imm, .. }
-        | X86Instruction::XorImm { imm, .. }
-        | X86Instruction::CmpImm { imm, .. } => Some(*imm),
-        _ => None,
-    });
-    for imm in referenced {
-        if !imms.contains(&imm) {
-            imms.push(imm);
-        }
-    }
-    imms
 }
 
 #[cfg(test)]
@@ -275,61 +189,6 @@ mod tests {
         );
     }
 
-    use crate::isa::x86::{X86Instruction, X86Register, default_x86_registers};
-
-    #[test]
-    fn x86_pool_excludes_a_narrow_stack_pointer_view() {
-        // ESP is the dword view of the stack pointer (reg 4). The filter checks
-        // `canonical()`, so the narrow view is excluded just like RSP. (Broader
-        // destination-derivation and empty-fallback behaviour is pinned by the
-        // relocated `x86_register_pool_is_destination_derived_and_empty_falls_back`
-        // regression below.)
-        let target = [X86Instruction::MovImm {
-            rd: X86Register::ESP,
-            imm: 0,
-        }];
-        let pool = x86_registers_from_target(&target);
-        assert!(!pool.contains(&X86Register::ESP));
-        assert!(!pool.contains(&X86Register::RSP));
-    }
-
-    #[test]
-    fn x86_enumerative_immediates_always_seed_zero_one_and_minus_one() {
-        assert_eq!(x86_enumerative_immediates_from_target(&[]), vec![0, 1, -1]);
-    }
-
-    #[test]
-    fn x86_enumerative_immediates_dedup_a_target_value_already_in_the_seed() {
-        // The doc-comment regression: `mov rax, -1; mov rax, -1`. -1 is already a
-        // seed, so it must not be appended twice.
-        let target = [
-            X86Instruction::MovImm {
-                rd: X86Register::RAX,
-                imm: -1,
-            },
-            X86Instruction::MovImm {
-                rd: X86Register::RAX,
-                imm: -1,
-            },
-        ];
-        assert_eq!(
-            x86_enumerative_immediates_from_target(&target),
-            vec![0, 1, -1],
-        );
-    }
-
-    #[test]
-    fn x86_enumerative_immediates_append_novel_target_values_after_the_seed() {
-        let target = [X86Instruction::AddImm {
-            rd: X86Register::RAX,
-            imm: 42,
-        }];
-        assert_eq!(
-            x86_enumerative_immediates_from_target(&target),
-            vec![0, 1, -1, 42],
-        );
-    }
-
     #[test]
     fn aarch64_immediate_pool_spans_zero_to_the_imm12_ceiling() {
         let imms = aarch64_search_immediates();
@@ -344,56 +203,6 @@ mod tests {
 
     // --- Live-out contract regressions (relocated intact from the binary's
     // cli_helper_tests; ADR-0006 / ADR-0008 soundness gates). ---
-
-    #[test]
-    fn x86_live_out_for_optimization_includes_downstream_flags() {
-        let mov_only = [X86Instruction::MovImm {
-            rd: X86Register::RAX,
-            imm: 0,
-        }];
-
-        assert!(!x86_live_out_for_optimization(&mov_only, false, None).flags_live());
-        assert!(x86_live_out_for_optimization(&mov_only, true, None).flags_live());
-
-        let flag_writer = [X86Instruction::XorReg {
-            rd: X86Register::RAX,
-            rs: X86Register::RAX,
-        }];
-        assert!(x86_live_out_for_optimization(&flag_writer, false, None).flags_live());
-    }
-
-    #[test]
-    fn x86_live_out_for_optimization_narrows_to_downstream_live_regs() {
-        // Window writes RAX and RBX.
-        let window = [
-            X86Instruction::MovImm {
-                rd: X86Register::RAX,
-                imm: 0,
-            },
-            X86Instruction::MovImm {
-                rd: X86Register::RBX,
-                imm: 0,
-            },
-        ];
-
-        // Default (no downstream analysis): both written registers stay live.
-        let default = x86_live_out_for_optimization(&window, false, None);
-        assert!(default.contains(X86Register::RAX));
-        assert!(default.contains(X86Register::RBX));
-
-        // Downstream scan proved only RBX live (RAX dead). The contract must
-        // drop RAX and pin RBX.
-        let downstream_live = RegisterSet::from_registers(vec![X86Register::RBX]);
-        let narrowed = x86_live_out_for_optimization(&window, false, Some(&downstream_live));
-        assert!(
-            !narrowed.contains(X86Register::RAX),
-            "a provably-dead window register must be dropped from live-out"
-        );
-        assert!(
-            narrowed.contains(X86Register::RBX),
-            "a downstream-read window register must stay pinned"
-        );
-    }
 
     #[test]
     fn live_out_for_optimization_prefix_narrows_to_downstream_live_regs() {
@@ -470,31 +279,6 @@ mod tests {
         );
     }
 
-    /// x86 sibling of the conditional-terminator soundness gate: a target
-    /// ending in a Jcc must not narrow even if the proven-live set excludes a
-    /// written register.
-    #[test]
-    fn x86_live_out_for_optimization_does_not_narrow_with_trailing_jcc() {
-        use crate::isa::x86::X86Condition;
-        let target = [
-            X86Instruction::MovImm {
-                rd: X86Register::RAX,
-                imm: 7,
-            },
-            X86Instruction::Jcc {
-                cond: X86Condition::E,
-            },
-        ];
-        // Pretend the fall-through scan proved RAX dead (empty set).
-        let dead = RegisterSet::<X86Register>::empty();
-        let live_out = x86_live_out_for_optimization(&target, false, Some(&dead));
-        assert!(
-            live_out.contains(X86Register::RAX),
-            "RAX must stay live: a trailing Jcc has an unscanned branch-taken successor, \
-             so register narrowing must not apply"
-        );
-    }
-
     /// Same soundness gate for unconditional terminators: the instruction at
     /// `end_addr` is not the real/only successor, so narrowing must not apply.
     #[test]
@@ -519,60 +303,6 @@ mod tests {
                 terminator
             );
         }
-    }
-
-    #[test]
-    fn x86_register_pool_is_destination_derived_and_empty_falls_back() {
-        let target = vec![
-            X86Instruction::CmpReg {
-                rn: X86Register::RSP,
-                rs: X86Register::R11,
-            },
-            X86Instruction::CmpReg {
-                rn: X86Register::RBP,
-                rs: X86Register::R12,
-            },
-            X86Instruction::MovReg {
-                rd: X86Register::R11,
-                rs: X86Register::R10,
-            },
-            X86Instruction::AddReg {
-                rd: X86Register::R12,
-                rs: X86Register::RSP,
-            },
-        ];
-
-        assert_eq!(
-            x86_registers_from_target(&target),
-            vec![X86Register::R11, X86Register::R12]
-        );
-        assert_eq!(x86_registers_from_target(&[]), default_x86_registers());
-        assert_eq!(
-            x86_registers_from_target(&[
-                X86Instruction::CmpImm {
-                    rn: X86Register::R10,
-                    imm: 1,
-                },
-                X86Instruction::CmpImm {
-                    rn: X86Register::R10,
-                    imm: 1,
-                },
-            ]),
-            Vec::<X86Register>::new()
-        );
-        assert_eq!(
-            x86_registers_from_target(&[
-                X86Instruction::CmpImm {
-                    rn: X86Register::RSP,
-                    imm: 1,
-                },
-                X86Instruction::CmpReg {
-                    rn: X86Register::RBP,
-                    rs: X86Register::RBP,
-                },
-            ]),
-            Vec::<X86Register>::new()
-        );
     }
 
     #[test]
