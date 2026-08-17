@@ -14,6 +14,7 @@ pub mod search;
 pub mod semantics;
 pub mod validation;
 pub mod x86_search_inputs;
+pub mod x86_window_reassembly;
 
 #[cfg(test)]
 #[path = "test_utils.rs"]
