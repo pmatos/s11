@@ -257,6 +257,19 @@ mod tests {
         );
     }
 
+    #[test]
+    fn register_pool_excludes_a_narrow_stack_pointer_view() {
+        // ESP is the dword view of the stack pointer (reg 4). The filter checks
+        // `canonical()`, so the narrow view is excluded just like RSP.
+        let target = [X86Instruction::MovImm {
+            rd: X86Register::ESP,
+            imm: 0,
+        }];
+        let pool = registers_from_target(&target);
+        assert!(!pool.contains(&X86Register::ESP));
+        assert!(!pool.contains(&X86Register::RSP));
+    }
+
     // ===== validate_terminator_placement (carried from main.rs) =====
 
     #[test]

@@ -166,7 +166,33 @@ mod tests {
         );
     }
 
+    #[test]
+    fn default_immediates_span_zero_to_the_imm12_ceiling() {
+        let imms = default_immediates();
+        assert!(imms.contains(&0));
+        assert!(imms.contains(&1));
+        // 4095 = 0xFFF is the largest value an unshifted imm12 can encode; the
+        // pool must reach it (cf. #720's imm12 sampling contract) and never
+        // exceed it, since a larger literal is not directly encodable.
+        assert_eq!(imms.iter().copied().max(), Some(4095));
+        assert!(imms.iter().all(|&imm| (0..=4095).contains(&imm)));
+    }
+
     // ===== registers_from_target (new coverage + carried from main.rs) =====
+
+    #[test]
+    fn registers_from_target_does_not_admit_scalar_registers_beyond_x7() {
+        // Deliberate policy: a scalar register the target references above X7 is
+        // NOT added — only the fixed X0..X7 scalars plus target vector registers
+        // seed the pool. Pin it so it does not read as an omission bug.
+        let target = [Instruction::MovImm {
+            rd: Register::X9,
+            imm: 0,
+        }];
+        let pool = registers_from_target(&target);
+        assert!(!pool.contains(&Register::X9));
+        assert_eq!(pool.len(), 8);
+    }
 
     #[test]
     fn registers_from_target_seeds_scalar_x0_through_x7_sorted() {
