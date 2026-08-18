@@ -16,6 +16,8 @@
 // reference. Keep the uppercase names and silence the lint module-wide.
 #![allow(clippy::upper_case_acronyms)]
 
+mod encoding;
+
 use crate::isa::traits::{ISA, InstructionGenerator, InstructionType, OperandType, RegisterType};
 use rand::{Rng, RngExt};
 use std::fmt;
@@ -1027,96 +1029,15 @@ pub fn x86_reads_flags(instr: &X86Instruction) -> bool {
     )
 }
 
-fn x86_signed_imm32_ok(imm: i64) -> bool {
-    i32::try_from(imm).is_ok()
-}
-
-/// A shift count encodes as `imm8`, so it must fit `0..=255`. x86 masks the
-/// count to the operand width at execution time, but the *encoding* still
-/// only carries a single byte, so any negative or >255 count is unencodable
-/// and must be rejected before the search proposes it.
-fn x86_shift_count_imm8_ok(imm: i64) -> bool {
-    u8::try_from(imm).is_ok()
-}
-
-fn x86_imm32_bitpattern_ok(imm: i64) -> bool {
-    x86_signed_imm32_ok(imm) || u32::try_from(imm).is_ok()
-}
-
-fn x86_imm16_bitpattern_ok(imm: i64) -> bool {
-    i16::try_from(imm).is_ok() || u16::try_from(imm).is_ok()
-}
-
-fn x86_imm8_bitpattern_ok(imm: i64) -> bool {
-    i8::try_from(imm).is_ok() || u8::try_from(imm).is_ok()
-}
-
-fn x86_register_ok(reg: X86Register, mode_width: u32) -> bool {
-    reg.index().is_some_and(|index| {
-        index < if mode_width == 32 { 8 } else { 16 }
-            && !(mode_width == 32 && reg.view() == X86RegisterView::LowByte && index >= 4)
-    })
-}
-
-fn x86_register_pair_ok(lhs: X86Register, rhs: X86Register, mode_width: u32) -> bool {
-    x86_register_ok(lhs, mode_width)
-        && x86_register_ok(rhs, mode_width)
-        && lhs.effective_width(mode_width) == rhs.effective_width(mode_width)
-        && (!(lhs.is_high_byte() || rhs.is_high_byte())
-            || (lhs.index().is_some_and(|index| index < 4)
-                && rhs.index().is_some_and(|index| index < 4)))
-}
-
-fn x86_operand_immediate_ok(reg: X86Register, imm: i64, mode_width: u32) -> bool {
-    match reg.effective_width(mode_width) {
-        64 => x86_signed_imm32_ok(imm),
-        32 => x86_imm32_bitpattern_ok(imm),
-        16 => x86_imm16_bitpattern_ok(imm),
-        8 => x86_imm8_bitpattern_ok(imm),
-        _ => false,
-    }
-}
-
-fn x86_mov_operand_immediate_ok(reg: X86Register, imm: i64, mode_width: u32) -> bool {
-    match reg.effective_width(mode_width) {
-        64 => true,
-        32 => x86_imm32_bitpattern_ok(imm),
-        16 => x86_imm16_bitpattern_ok(imm),
-        8 => x86_imm8_bitpattern_ok(imm),
-        _ => false,
-    }
-}
-
-fn x86_mov_imm_ok(mode: crate::assembler::x86::X86Mode, imm: i64) -> bool {
-    match mode {
-        crate::assembler::x86::X86Mode::Mode64 => true,
-        crate::assembler::x86::X86Mode::Mode32 => x86_imm32_bitpattern_ok(imm),
-    }
-}
-
-fn x86_non_mov_imm_ok(mode: crate::assembler::x86::X86Mode, imm: i64) -> bool {
-    match mode {
-        crate::assembler::x86::X86Mode::Mode64 => x86_signed_imm32_ok(imm),
-        crate::assembler::x86::X86Mode::Mode32 => x86_imm32_bitpattern_ok(imm),
-    }
-}
-
-fn x86_extension_source_ok(
-    mode: crate::assembler::x86::X86Mode,
-    reg: X86Register,
-    src_width: u32,
-) -> bool {
-    if !reg.is_native() || !matches!(src_width, 8 | 16) {
-        return false;
-    }
-    let Some(index) = reg.index() else {
-        return false;
-    };
-    match mode {
-        crate::assembler::x86::X86Mode::Mode64 => true,
-        crate::assembler::x86::X86Mode::Mode32 => index < 8 && (src_width == 16 || index < 4),
-    }
-}
+// The mode-width encodability ruleset lives in `encoding`. These are the
+// predicates the mutator, generator, and `Assembler::can_assemble` prefilter
+// share; the `imm{8,16,32}` bit-pattern helpers they are built from stay
+// private to that module.
+use encoding::{
+    x86_can_assemble_instruction, x86_extension_source_ok, x86_mov_imm_ok,
+    x86_mov_operand_immediate_ok, x86_non_mov_imm_ok, x86_operand_immediate_ok, x86_register_ok,
+    x86_register_pair_ok, x86_shift_count_imm8_ok,
+};
 
 impl crate::isa::traits::FlagsAnalysis<X86Instruction> for X86_64 {
     fn modifies_flags(instr: &X86Instruction) -> bool {
@@ -1268,81 +1189,6 @@ impl crate::isa::traits::CostModel<X86Instruction> for X86_32 {
         metric: &crate::semantics::cost::CostMetric,
     ) -> u64 {
         crate::semantics::cost_x86::sequence_cost(instructions, metric, 32)
-    }
-}
-
-fn x86_can_assemble_instruction(instruction: &X86Instruction, mode_width: u32) -> bool {
-    match instruction {
-        X86Instruction::MovReg { rd, rs }
-        | X86Instruction::AddReg { rd, rs }
-        | X86Instruction::SubReg { rd, rs }
-        | X86Instruction::AndReg { rd, rs }
-        | X86Instruction::OrReg { rd, rs }
-        | X86Instruction::XorReg { rd, rs } => x86_register_pair_ok(*rd, *rs, mode_width),
-        X86Instruction::Movzx { rd, rs, src_width }
-        | X86Instruction::Movsx { rd, rs, src_width } => {
-            let mode = if mode_width == 64 {
-                crate::assembler::x86::X86Mode::Mode64
-            } else {
-                crate::assembler::x86::X86Mode::Mode32
-            };
-            rd.is_native()
-                && x86_register_ok(*rd, mode_width)
-                && x86_extension_source_ok(mode, *rs, *src_width)
-        }
-        X86Instruction::CmpReg { rn, rs } | X86Instruction::TestReg { rn, rs } => {
-            x86_register_pair_ok(*rn, *rs, mode_width)
-        }
-        X86Instruction::ImulReg { rd, rs } => {
-            x86_register_pair_ok(*rd, *rs, mode_width) && !rd.is_byte()
-        }
-        X86Instruction::ImulRegImm { rd, rs, imm } => {
-            x86_register_pair_ok(*rd, *rs, mode_width)
-                && !rd.is_byte()
-                && x86_operand_immediate_ok(*rd, *imm, mode_width)
-        }
-        X86Instruction::Lea { rd, base, disp } => {
-            x86_register_ok(*rd, mode_width)
-                && !rd.is_byte()
-                && x86_register_ok(*base, mode_width)
-                && base.effective_width(mode_width) == mode_width
-                && x86_signed_imm32_ok(*disp)
-        }
-        X86Instruction::MovImm { rd, imm } => {
-            x86_register_ok(*rd, mode_width) && x86_mov_operand_immediate_ok(*rd, *imm, mode_width)
-        }
-        X86Instruction::AddImm { rd, imm }
-        | X86Instruction::SubImm { rd, imm }
-        | X86Instruction::AndImm { rd, imm }
-        | X86Instruction::OrImm { rd, imm }
-        | X86Instruction::XorImm { rd, imm } => {
-            x86_register_ok(*rd, mode_width) && x86_operand_immediate_ok(*rd, *imm, mode_width)
-        }
-        X86Instruction::CmpImm { rn, imm } | X86Instruction::TestImm { rn, imm } => {
-            x86_register_ok(*rn, mode_width) && x86_operand_immediate_ok(*rn, *imm, mode_width)
-        }
-        X86Instruction::Shl { rd, imm }
-        | X86Instruction::Shr { rd, imm }
-        | X86Instruction::Sar { rd, imm }
-        | X86Instruction::Rol { rd, imm }
-        | X86Instruction::Ror { rd, imm } => {
-            x86_register_ok(*rd, mode_width) && x86_shift_count_imm8_ok(*imm)
-        }
-        X86Instruction::Neg { rd }
-        | X86Instruction::Not { rd }
-        | X86Instruction::Inc { rd }
-        | X86Instruction::Dec { rd } => x86_register_ok(*rd, mode_width),
-        X86Instruction::Cmov { rd, rs, .. } => {
-            x86_register_pair_ok(*rd, *rs, mode_width) && !rd.is_byte()
-        }
-        // SETcc is a full-width pseudo-op. In x86-32 only EAX..EBX
-        // (slots 0..=3) name a low byte without a REX prefix, so restrict the
-        // native destination there.
-        X86Instruction::Setcc { rd, .. } => {
-            rd.view() == X86RegisterView::Native
-                && (mode_width == 64 || rd.index().is_some_and(|index| index < 4))
-        }
-        X86Instruction::Jcc { .. } => true,
     }
 }
 
