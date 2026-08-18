@@ -53,6 +53,17 @@ A `SearchAlgorithm` impl that delegates candidate generation to the OpenAI Codex
 ### Flags-live-out (LLM-flow exclusion)
 AArch64 condition state (NZCV) is part of the equivalence contract via `LiveOut.flags_live` (set from the `;nzcv` suffix to `equiv --live-out` per ADR-0006). The fast and SMT equivalence paths both consume the bit. *Separately*, the LLM-assisted search flow statically refuses targets whose final state includes flag liveness (any flag-writing instruction in the sequence — see `flags_live_out` in `src/validation/live_out.rs`) and bails before invoking Codex. This is a conservative policy choice, not a soundness workaround, and is the only remaining surface on which ADR-0002 is authoritative. See ADR-0002 (as amended) and ADR-0006.
 
+### Disassembly listing
+The textual output of the `disasm` command: one
+`0x{addr}: {bytes} {mnemonic} {operands}` line per instruction, over every
+executable section of an ELF. The rules for *which* sections are disassembled
+(`section_is_executable`) and *how* each line renders (`format_disassembly`)
+live behind the pure `src/disassembly.rs` seam; the `disassemble_elf_binary`
+driver in `src/main.rs` is a thin adapter that parses the ELF and decodes each
+section with Capstone. This is distinct from the optimizer's result rendering (search
+statistics, LLM timings, equivalence counterexamples), which lives in
+`src/report.rs`.
+
 ### Subset hint (intentionally absent)
 The LLM prompt does **not** enumerate the maintained AArch64 subset s11's parser accepts (see [docs/capability.md](docs/capability.md)). The model is invited to use any AArch64 mnemonic it knows. Outputs that use unsupported instructions are recorded as a research signal (which mnemonics the model "wanted" to reach for), not treated as wasted calls. See ADR-0003.
 
