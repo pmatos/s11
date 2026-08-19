@@ -13,6 +13,7 @@ use s11::assembler::AArch64Assembler;
 use s11::candidate_windows::{WindowInstruction, WindowRole, plan_candidate_windows};
 use s11::capstone_bridge::{ConvertOutcome, convert_capstone_op};
 use s11::capstone_bridge_x86::{convert_to_x86_ir, convert_x86_capstone_op_for_optimization};
+use s11::disassembly::{self, DisassembledInstruction};
 use s11::elf_patcher::{AddressWindow, DetectedArch, ElfPatcher, TextSection, parse_hex_address};
 use s11::ir::instructions::split_terminator;
 use s11::ir::{Instruction, Register};
@@ -138,14 +139,6 @@ impl SupportedArch {
             elf::abi::EM_X86_64 => Ok(Self::X86_64),
             elf::abi::EM_386 => Ok(Self::X86_32),
             m => Err(format!("Unsupported architecture (e_machine: {})", m).into()),
-        }
-    }
-
-    fn display_name(self) -> &'static str {
-        match self {
-            Self::Aarch64 => "AArch64",
-            Self::X86_64 => "x86-64",
-            Self::X86_32 => "x86-32",
         }
     }
 
@@ -453,19 +446,22 @@ fn resolve_opt_target(
     Ok(supported)
 }
 
-fn analyze_elf_binary(
+/// Disassemble every executable section of an ELF and print the `disasm`
+/// listing (one `0x{addr}: {bytes} {mnemonic} {operands}` line per instruction).
+///
+/// Architecture is auto-detected from `e_machine`; an explicit `expected_arch`
+/// (from `--arch`) is cross-checked and a mismatch is rejected before any
+/// disassembly. This is a thin adapter: ELF parsing and Capstone decoding stay
+/// here, while the executable-section rule and the listing format live behind
+/// the pure [`disassembly`](s11::disassembly) seam, so both are unit-testable
+/// without driving the command or scraping stdout. Sections are printed as they
+/// decode, so a decode failure in a later section still surfaces the listings
+/// already produced for earlier ones.
+fn disassemble_elf_binary(
     path: &Path,
-    disasm_mode: bool,
     expected_arch: Option<SupportedArch>,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    if !disasm_mode {
-        println!("Analyzing ELF binary: {}", path.display());
-    }
-
-    // Read the file
     let file_data = fs::read(path)?;
-
-    // Parse ELF
     let elf = ElfBytes::<AnyEndian>::minimal_parse(&file_data)?;
 
     // Detect architecture; reject anything outside the supported set.
@@ -482,89 +478,37 @@ fn analyze_elf_binary(
         )
         .into());
     }
-    let arch = detected_arch.display_name();
-
-    if !disasm_mode {
-        println!("ELF Header:");
-        println!("  Architecture: {}", arch);
-        println!("  Entry point: 0x{:x}", elf.ehdr.e_entry);
-        println!(
-            "  Type: {}",
-            match elf.ehdr.e_type {
-                elf::abi::ET_EXEC => "Executable",
-                elf::abi::ET_DYN => "Shared object",
-                elf::abi::ET_REL => "Relocatable",
-                _ => "Other",
-            }
-        );
-    }
 
     // Initialize Capstone disassembler per architecture.
     let cs = detected_arch.build_capstone()?;
 
-    // Find and disassemble .text sections
     let section_headers = elf
         .section_headers()
         .ok_or("Failed to get section headers")?;
-    let (_, string_table) = elf.section_headers_with_strtab()?;
-    let string_table = string_table.ok_or("Failed to get string table")?;
-
-    if !disasm_mode {
-        println!("\nText sections:");
-    }
 
     for section_header in section_headers.iter() {
-        let section_name = string_table.get(section_header.sh_name as usize)?;
+        if !disassembly::section_is_executable(section_header.sh_flags, section_header.sh_size) {
+            continue;
+        }
 
-        // Look for executable sections (typically .text, .init, .fini, etc.)
-        if section_header.sh_flags & elf::abi::SHF_EXECINSTR as u64 != 0
-            && section_header.sh_size > 0
-        {
-            if !disasm_mode {
-                println!(
-                    "\nSection: {} (offset: 0x{:x}, size: {} bytes)",
-                    section_name, section_header.sh_offset, section_header.sh_size
-                );
-            }
+        let (data, _) = elf.section_data(&section_header)?;
+        if data.is_empty() {
+            continue;
+        }
 
-            // Get section data
-            let section_data = elf.section_data(&section_header)?;
-            let (data, _) = section_data;
+        let instructions = cs.disasm_all(data, section_header.sh_addr)?;
+        let decoded: Vec<DisassembledInstruction> = instructions
+            .iter()
+            .map(|instruction| DisassembledInstruction {
+                address: instruction.address(),
+                bytes: instruction.bytes().to_vec(),
+                mnemonic: instruction.mnemonic().unwrap_or("???").to_string(),
+                operands: instruction.op_str().unwrap_or("").to_string(),
+            })
+            .collect();
 
-            if !data.is_empty() {
-                if !disasm_mode {
-                    println!("Disassembly:");
-                }
-
-                // Disassemble the section
-                let instructions = cs.disasm_all(data, section_header.sh_addr)?;
-
-                for instruction in instructions.iter() {
-                    if disasm_mode {
-                        // Format: address: bytes  mnemonic operands
-                        let bytes = instruction.bytes();
-                        let hex_bytes: String = bytes
-                            .iter()
-                            .map(|b| format!("{:02x}", b))
-                            .collect::<Vec<_>>()
-                            .join("");
-                        println!(
-                            "0x{:x}: {:8} {} {}",
-                            instruction.address(),
-                            hex_bytes,
-                            instruction.mnemonic().unwrap_or("???"),
-                            instruction.op_str().unwrap_or("")
-                        );
-                    } else {
-                        println!(
-                            "  0x{:08x}: {}\t{}",
-                            instruction.address(),
-                            instruction.mnemonic().unwrap_or("???"),
-                            instruction.op_str().unwrap_or("")
-                        );
-                    }
-                }
-            }
+        for line in disassembly::format_disassembly(&decoded) {
+            println!("{line}");
         }
     }
 
@@ -2357,11 +2301,11 @@ fn main() {
 
     match args.command {
         Commands::Disasm { binary, arch } => {
-            // Disassemble mode. `analyze_elf_binary` auto-detects the
+            // Disassemble mode. `disassemble_elf_binary` auto-detects the
             // architecture from e_machine and picks the right Capstone
             // backend. The optional `--arch` still early-rejects RISC-V, but
-            // supported hints are cross-checked inside the analyzer after its
-            // single ELF read/parse.
+            // supported hints are cross-checked inside the disassembler after
+            // its single ELF read/parse.
             let arch = match arch.map(SupportedArch::try_from).transpose() {
                 Ok(arch) => arch,
                 Err(message) => {
@@ -2369,7 +2313,7 @@ fn main() {
                     std::process::exit(1);
                 }
             };
-            match analyze_elf_binary(&binary, true, arch) {
+            match disassemble_elf_binary(&binary, arch) {
                 Ok(()) => {}
                 Err(e) => {
                     let message = e.to_string();
@@ -3007,11 +2951,11 @@ mod cli_helper_tests {
     }
 
     #[test]
-    fn analyze_elf_binary_rejects_expected_arch_mismatch() {
+    fn disassemble_elf_binary_rejects_expected_arch_mismatch() {
         let elf_bytes = build_minimal_elf64(&[0xc3], 0x1000, elf::abi::EM_X86_64);
         let input = TempFile::new_bytes("s11-disasm-mismatch", "elf", &elf_bytes);
 
-        let err = analyze_elf_binary(input.path(), true, Some(SupportedArch::Aarch64))
+        let err = disassemble_elf_binary(input.path(), Some(SupportedArch::Aarch64))
             .expect_err("mismatched expected architecture should fail");
 
         let message = err.to_string();
@@ -3026,20 +2970,20 @@ mod cli_helper_tests {
     }
 
     #[test]
-    fn analyze_elf_binary_accepts_matching_expected_arch() {
+    fn disassemble_elf_binary_accepts_matching_expected_arch() {
         let elf_bytes = build_minimal_elf64(&[0xc3], 0x1000, elf::abi::EM_X86_64);
         let input = TempFile::new_bytes("s11-disasm-match", "elf", &elf_bytes);
 
-        analyze_elf_binary(input.path(), true, Some(SupportedArch::X86_64))
+        disassemble_elf_binary(input.path(), Some(SupportedArch::X86_64))
             .expect("matching expected architecture should disassemble");
     }
 
     #[test]
-    fn analyze_elf_binary_rejects_riscv_machine() {
+    fn disassemble_elf_binary_rejects_riscv_machine() {
         let elf_bytes = build_minimal_elf64(&[0x13, 0x00, 0x00, 0x00], 0x1000, elf::abi::EM_RISCV);
         let input = TempFile::new_bytes("s11-disasm-riscv", "elf", &elf_bytes);
 
-        let err = analyze_elf_binary(input.path(), true, None)
+        let err = disassemble_elf_binary(input.path(), None)
             .expect_err("RISC-V ELF disassembly should not be supported yet");
 
         assert_eq!(
