@@ -17,6 +17,7 @@ use s11::disassembly::{self, DisassembledInstruction};
 use s11::elf_patcher::{AddressWindow, DetectedArch, ElfPatcher, TextSection, parse_hex_address};
 use s11::ir::instructions::split_terminator;
 use s11::ir::{Instruction, Register};
+use s11::output_path::resolve_output_path;
 use s11::report;
 use s11::search::config::{
     Algorithm, LlmConfig, SearchConfig, SearchMode, StochasticConfig, SymbolicConfig,
@@ -1284,75 +1285,6 @@ fn capstone_detail_direct_branch_targets(detail: &capstone::InsnDetail<'_>) -> V
             _ => None,
         })
         .collect()
-}
-
-fn optimized_output_path(path: &Path) -> PathBuf {
-    let mut new_path = path.to_path_buf();
-    let stem = new_path.file_stem().unwrap().to_str().unwrap();
-    let extension = new_path.extension().map(|e| e.to_str().unwrap());
-
-    let new_name = if let Some(ext) = extension {
-        format!("{}_optimized.{}", stem, ext)
-    } else {
-        format!("{}_optimized", stem)
-    };
-
-    new_path.set_file_name(new_name);
-    new_path
-}
-
-/// Resolve where an `opt` run writes its result.
-///
-/// With no explicit `-o/--output` the derived `<stem>_optimized.<ext>` sibling
-/// is preserved verbatim (the pre-#616 single-window behaviour). An explicit
-/// output is honoured, except when it resolves to the input binary itself: the
-/// driver never rewrites the input in place, so that request is rejected rather
-/// than silently clobbering the source.
-fn resolve_output_path(input: &Path, output: Option<&Path>) -> Result<PathBuf, String> {
-    match output {
-        Some(out) => {
-            if paths_point_to_same_file(input, out) {
-                Err(format!(
-                    "output path '{}' resolves to the input binary; refusing to optimize in place (choose a different -o/--output)",
-                    out.display()
-                ))
-            } else {
-                Ok(out.to_path_buf())
-            }
-        }
-        None => Ok(optimized_output_path(input)),
-    }
-}
-
-/// Whether `a` and `b` are the same file on disk.
-///
-/// On Unix this compares the `(device, inode)` pair, the only check that catches
-/// a **hard link**: two hard links to one inode are distinct directory entries
-/// with distinct canonical paths, so a canonical-path comparison would miss them
-/// and let an `-o` hard link to the input slip through the in-place guard and get
-/// truncated by `create_patched_copy`. `metadata` follows symlinks and requires
-/// the path to exist, so it subsumes the symlink and `./bin` vs `bin` cases too;
-/// a `-o` target that does not exist yet cannot alias the already-present input,
-/// so a failed stat means "different". Off Unix, fall back to comparing canonical
-/// paths (then literal paths when canonicalization fails, which only happens for
-/// a not-yet-created output that therefore cannot be the input).
-fn paths_point_to_same_file(a: &Path, b: &Path) -> bool {
-    #[cfg(unix)]
-    fn same_file(a: &Path, b: &Path) -> bool {
-        use std::os::unix::fs::MetadataExt;
-        match (std::fs::metadata(a), std::fs::metadata(b)) {
-            (Ok(ma), Ok(mb)) => ma.dev() == mb.dev() && ma.ino() == mb.ino(),
-            _ => false,
-        }
-    }
-    #[cfg(not(unix))]
-    fn same_file(a: &Path, b: &Path) -> bool {
-        match (std::fs::canonicalize(a), std::fs::canonicalize(b)) {
-            (Ok(ca), Ok(cb)) => ca == cb,
-            _ => a == b,
-        }
-    }
-    same_file(a, b)
 }
 
 /// Whole-binary `--auto` driver entry point.
@@ -3212,62 +3144,6 @@ mod cli_helper_tests {
     }
 
     #[test]
-    fn resolve_output_path_falls_back_to_derived_path() {
-        let input = Path::new("/some/dir/prog.elf");
-        assert_eq!(
-            resolve_output_path(input, None).unwrap(),
-            optimized_output_path(input)
-        );
-    }
-
-    #[test]
-    fn resolve_output_path_honors_explicit_output() {
-        let input = Path::new("/some/dir/prog.elf");
-        let out = Path::new("/other/place/out.bin");
-        assert_eq!(
-            resolve_output_path(input, Some(out)).unwrap(),
-            out.to_path_buf()
-        );
-    }
-
-    #[test]
-    fn resolve_output_path_rejects_in_place_output() {
-        // The same existing file addressed two ways (a `.` component): on Unix
-        // the guard fires via the (dev, ino) identity check, off-Unix via
-        // canonicalization — either way, not literal string comparison.
-        let input = TempFile::new_bytes("s11-resolve-inplace", "elf", &[0u8; 4]);
-        let aliased = input
-            .path()
-            .parent()
-            .unwrap()
-            .join(".")
-            .join(input.path().file_name().unwrap());
-        let err = resolve_output_path(input.path(), Some(&aliased))
-            .expect_err("output resolving to the input binary must be rejected");
-        assert!(
-            err.contains("refusing to optimize in place"),
-            "unexpected error: {err}"
-        );
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn resolve_output_path_rejects_hard_link_to_input() {
-        // A hard link shares the input's inode but has a distinct canonical
-        // path, so only a (dev, ino) comparison — not canonicalize — catches it.
-        let input = TempFile::new_bytes("s11-resolve-hardlink", "elf", &[0u8; 8]);
-        let link = input.path().with_extension("hardlink");
-        std::fs::hard_link(input.path(), &link).expect("create hard link to input");
-        let result = resolve_output_path(input.path(), Some(&link));
-        let _ = std::fs::remove_file(&link);
-        let err = result.expect_err("a hard link to the input binary must be rejected");
-        assert!(
-            err.contains("refusing to optimize in place"),
-            "unexpected error: {err}"
-        );
-    }
-
-    #[test]
     fn run_auto_optimization_is_not_yet_implemented() {
         let elf = build_minimal_elf64(&[0x90], 0x1000, elf::abi::EM_X86_64);
         let input = TempFile::new_bytes("s11-auto-guard", "elf", &elf);
@@ -4104,7 +3980,7 @@ mod cli_helper_tests {
         opts.timeout = Some(Duration::from_secs(5));
         opts.cost_metric = CostMetric::CodeSize;
 
-        let output = optimized_output_path(input.path());
+        let output = resolve_output_path(input.path(), None).unwrap();
         optimize_elf_binary(&patcher, input.path(), 0x1000, 0x100a, &output, &opts)
             .expect("narrow register aliases should reach search");
     }
@@ -4212,7 +4088,7 @@ mod cli_helper_tests {
         opts.timeout = Some(Duration::from_secs(5));
         opts.cost_metric = CostMetric::CodeSize;
 
-        let output = optimized_output_path(input.path());
+        let output = resolve_output_path(input.path(), None).unwrap();
         let err = optimize_elf_binary(&patcher, input.path(), 0x1000, 0x1006, &output, &opts)
             .expect_err("architectural byte SETcc should be rejected before search");
         let msg = err.to_string();
