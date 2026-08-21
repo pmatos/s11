@@ -23,10 +23,12 @@ print_status() {
     fi
 }
 
-# 1. Check the tracked Claude Code permission policy
-echo "1. Checking Claude settings policy..."
-python3 -m unittest discover -s scripts -p 'test_claude_settings_policy.py'
-print_status "Claude settings policy"
+# 1. Check repository CI policies and their shell regressions
+echo "1. Checking repository CI policy..."
+python3 -m unittest discover -s scripts -p 'test_*_policy.py'
+print_status "Repository CI policy"
+./scripts/test_test_all.sh
+print_status "Analyzer script regressions"
 echo
 
 # 2. Check formatting
