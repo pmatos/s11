@@ -13,6 +13,8 @@ POLICY_DISCOVERY_COMMAND = (
     "python3 -m unittest discover -s scripts -p 'test_*_policy.py'"
 )
 SHELL_REGRESSION_COMMAND = "./scripts/test_test_all.sh"
+MUTANTS_REGRESSION_COMMAND = "./scripts/test_run_mutants.sh"
+MUTANTS_WORKFLOW_STEP = "Check mutation-wrapper command construction"
 
 
 def has_required_command(contents: str, command: str) -> bool:
@@ -74,10 +76,27 @@ class TestCiPolicy(unittest.TestCase):
                     f"repository CI policy step must run {command!r}",
                 )
 
+    def test_mutation_wrapper_regression_is_a_required_gate(self):
+        workflow = TEST_WORKFLOW_PATH.read_text(encoding="utf-8")
+        try:
+            wrapper_step = workflow_step(workflow, MUTANTS_WORKFLOW_STEP)
+        except ValueError as error:
+            self.fail(str(error))
+
+        self.assertTrue(
+            has_required_command(wrapper_step, MUTANTS_REGRESSION_COMMAND),
+            f"{MUTANTS_WORKFLOW_STEP!r} must run "
+            f"{MUTANTS_REGRESSION_COMMAND!r} without failure masking",
+        )
+
     def test_local_ci_gate_runs_all_regressions(self):
         ci_check = CI_CHECK_PATH.read_text(encoding="utf-8")
 
-        for command in (POLICY_DISCOVERY_COMMAND, SHELL_REGRESSION_COMMAND):
+        for command in (
+            POLICY_DISCOVERY_COMMAND,
+            SHELL_REGRESSION_COMMAND,
+            MUTANTS_REGRESSION_COMMAND,
+        ):
             with self.subTest(command=command):
                 self.assertTrue(
                     has_required_command(ci_check, command),

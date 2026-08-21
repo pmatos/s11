@@ -49,11 +49,13 @@ Standard Cargo commands also work:
 
 **IMPORTANT**: Before committing and pushing, always run `./ci_check.sh` to ensure your code will pass CI. This script runs:
 1. Repository CI-policy checks (`python3 -m unittest discover -s scripts -p 'test_*_policy.py'` and `./scripts/test_test_all.sh`)
-2. Code formatting check (`cargo fmt -- --check`)
-3. Project build
-4. Test binary builds
-5. Unit and integration tests
-6. Full test suite
+2. Mutation-wrapper invocation regression (`./scripts/test_mutants_invocation.sh`)
+3. Mutation-wrapper command regression (`./scripts/test_run_mutants.sh`)
+4. Code formatting check (`cargo fmt -- --check`)
+5. Project build
+6. Test binary builds
+7. Unit and integration tests
+8. Full test suite
 
 This prevents pushing code that will fail CI checks.
 
@@ -109,7 +111,17 @@ Mutation testing runs via [cargo-mutants](https://mutants.rs/) and is **informat
 - `just mutants` — full run via `scripts/run-mutants.sh` (slow; expect >30 min).
 - `just mutants --diff` — mutants only on the local diff vs `origin/main`.
 - `just mutants --shard 0/8` — one shard of an 8-way split for parallel local runs.
-- Configuration lives in `.cargo/mutants.toml` (cargo-mutants reads this path automatically).
+- `just mutants --timeout 45` — override the wrapper's default 180-second
+  per-mutant timeout.
+- Wrapper flags are written bare; only arguments after `--` are forwarded to
+  cargo-mutants (`just mutants -- --foo`). `just` passes a literal `--` through
+  to the recipe, so a leading separator forwards the flag after it to
+  cargo-mutants instead of enabling the wrapper's mode of the same name.
+- The wrapper uses `--in-place` (mutants are applied to the working tree, not a
+  copy) and `--baseline=skip`. With no baseline run there is nothing for
+  `.cargo/mutants.toml`'s `timeout_multiplier` to scale, so it applies only to
+  direct `cargo mutants` runs that measure a baseline. Shared configuration such
+  as `additional_cargo_test_args` still applies.
 - The wrapper prints a caught/missed/timeout/unviable summary via `scripts/mutants_summary.py`.
 
 ## Dependencies

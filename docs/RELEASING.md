@@ -49,8 +49,9 @@ prepares that release.
    - `@semantic-release/exec` runs [`.github/semantic-release/prepare.sh`](../.github/semantic-release/prepare.sh),
      which bumps `Cargo.toml`/`Cargo.lock` via
      [`scripts/bump-version.sh`](../scripts/bump-version.sh), runs the full
-     [`ci_check.sh`](../ci_check.sh) gate (fmt check, build, `build_tests.sh`,
-     `cargo test`, `test_all.sh`) to verify the tree, then builds the release
+     [`ci_check.sh`](../ci_check.sh) gate (repository policy + shell
+     regressions, fmt check, build, `build_tests.sh`, `cargo test`,
+     `test_all.sh`) to verify the tree, then builds the release
      binary and stages the tarball + `SHA256SUMS.txt`.
    - `@semantic-release/github` creates the GitHub Release and attaches the
      staged artifacts.

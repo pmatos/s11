@@ -79,8 +79,9 @@ llm-demo: build
     ./tests/data/llm_demo/run_demo.sh
 
 # Run cargo-mutants locally (slow; expect >30 min on a full run).
-# Thin wrapper around scripts/run-mutants.sh; pass `--diff` or `--shard`
-# arguments through with `just mutants --diff`.
+# Thin wrapper around scripts/run-mutants.sh; wrapper flags go through bare
+# (`just mutants --diff`, `just mutants --timeout 45`) and anything after `--`
+# is forwarded to cargo-mutants (`just mutants -- --foo`).
 mutants *ARGS:
     ./scripts/run-mutants.sh {{ARGS}}
 

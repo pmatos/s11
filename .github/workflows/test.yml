@@ -32,6 +32,10 @@ jobs:
         python3 -m unittest discover -s scripts -p 'test_*_policy.py'
         ./scripts/test_test_all.sh
 
+    - name: Check mutation-wrapper command construction
+      run: |
+        ./scripts/test_run_mutants.sh
+
     - name: Install dependencies
       run: |
         sudo apt-get update

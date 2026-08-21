@@ -5,18 +5,17 @@
 # exclude_re_in_file once the first nightly identifies modules dominated by
 # I/O / CLI plumbing or known infinite-loop-prone code.
 
-# Allow each mutant 5x the baseline test runtime before declaring timeout.
-# Integration tests take ~1-2 min and some mutants intentionally cause
-# unbounded loops (e.g. mutating loop bounds in src/search/).
+# Allow each mutant 5x the baseline test runtime for direct `cargo mutants`
+# invocations that actually measure a baseline. Some mutants intentionally
+# cause unbounded loops (e.g. mutating loop bounds in src/search/).
 #
-# Note: the CI workflows pass `--timeout 180` explicitly, which overrides
-# this multiplier in CI. The multiplier still governs `just mutants` and any
-# other invocation that doesn't pass `--timeout`.
+# This setting cannot govern `just mutants`: the official wrapper deliberately
+# runs with `--in-place` and `--baseline=skip`, so there is no baseline runtime
+# to multiply, and it defaults to an explicit 180-second timeout instead.
+# Override that policy with `just mutants --timeout SECONDS`.
 timeout_multiplier = 5.0
 
-# Match the baseline (`cargo test --bins`) used in CI and `just mutants`. The
-# integration tests under tests/integration/ are flaky in our CI environment
-# (test.yml runs them with `|| true`), so including them in per-mutant runs
-# would mark every mutant as caught by the pre-existing flake instead of by
-# the mutation itself.
+# Match the unit-test baseline (`cargo test --bins`) used by `just mutants`.
+# Integration tests remain part of the normal quality gate; excluding them from
+# every per-mutant run keeps local informational mutation testing tractable.
 additional_cargo_test_args = ["--bins"]

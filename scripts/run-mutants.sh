@@ -3,13 +3,13 @@
 # PR cargo-mutants CI workflows; mutation testing is now run on demand
 # from a developer machine to avoid eating GitHub Actions minutes.
 #
-# Configuration (timeout multiplier, --bins) lives in .cargo/mutants.toml.
-# The per-mutant timeout is forced to 180s here to match the previous CI
-# behaviour and keep wall-clock predictable. The baseline runs unit tests
-# only (`cargo test --bins`), matching the gating policy in
-# .github/workflows/test.yml which lets integration tests fail. Including
-# them would mark every mutant as "caught" by a pre-existing flake instead
-# of by the mutation itself.
+# Shared cargo-mutants configuration (including --bins) lives in
+# .cargo/mutants.toml. This wrapper runs with --in-place and --baseline=skip,
+# so there is no baseline run for timeout_multiplier to scale; it therefore
+# defaults each mutant to 180s and takes --timeout SECONDS to override. Its
+# baseline and per-mutant runs use unit tests only (`cargo test --bins`);
+# integration tests remain in the normal project quality gate rather than
+# every local mutation run.
 
 set -euo pipefail
 
@@ -20,6 +20,7 @@ Usage:
   scripts/run-mutants.sh --diff          # only mutants in `git diff origin/main...`
   scripts/run-mutants.sh --diff main     # diff vs an explicit base ref
   scripts/run-mutants.sh --shard 0/8     # one shard of an 8-way split
+  scripts/run-mutants.sh --timeout 45    # per-mutant timeout in seconds (default 180)
   scripts/run-mutants.sh -- --foo --bar  # forward extra flags to cargo-mutants
   scripts/run-mutants.sh -h | --help     # print this message
 EOF
@@ -30,6 +31,7 @@ cd "$(dirname "$0")/.."
 mode="full"
 diff_base="origin/main"
 shard=""
+timeout_seconds="180"
 extra=()
 
 while [[ $# -gt 0 ]]; do
@@ -52,6 +54,18 @@ while [[ $# -gt 0 ]]; do
                 exit 2
             fi
             shard="$2"
+            shift 2
+            ;;
+        --timeout)
+            if [[ $# -lt 2 ]]; then
+                echo "error: --timeout requires an argument (e.g. --timeout 180)" >&2
+                exit 2
+            fi
+            if [[ ! "$2" =~ ^[0-9]+(\.[0-9]+)?$ ]]; then
+                echo "error: --timeout argument must be a number of seconds (e.g. --timeout 180)" >&2
+                exit 2
+            fi
+            timeout_seconds="$2"
             shift 2
             ;;
         --)
@@ -84,7 +98,7 @@ echo "==> Baseline build + unit tests"
 cargo build
 cargo test --bins
 
-args=(--baseline=skip --timeout 180 --in-place -vV)
+args=(--baseline=skip --timeout "$timeout_seconds" --in-place -vV)
 
 case "$mode" in
     diff)
