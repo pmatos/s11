@@ -48,7 +48,7 @@ Standard Cargo commands also work:
 ### CI Checks
 
 **IMPORTANT**: Before committing and pushing, always run `./ci_check.sh` to ensure your code will pass CI. This script runs:
-1. Repository Claude permission-policy check (`python3 -m unittest discover -s scripts -p 'test_claude_settings_policy.py'`)
+1. Repository CI-policy checks (`python3 -m unittest discover -s scripts -p 'test_*_policy.py'` and `./scripts/test_test_all.sh`)
 2. Code formatting check (`cargo fmt -- --check`)
 3. Project build
 4. Test binary builds
@@ -120,7 +120,7 @@ The project requires:
 - Capstone engine (usually installed via system package manager) — auto-detects x86 and arm64 modes
 - Z3 SMT solver and development libraries (for semantic equivalence checking)
 - `just` command runner for running build tasks (required by test_all.sh)
-- Python 3 (standard library only, for the repository Claude permission-policy check)
+- Python 3 (standard library only, for the repository CI-policy checks)
 - For building x86 test binaries via `build_tests.sh`:
   - Host `gcc` for x86-64 (produced into `binaries/x86_64/`)
   - `gcc -m32` for x86-32 (requires `gcc-multilib`; gracefully skipped if absent)
