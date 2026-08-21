@@ -48,7 +48,8 @@ just fmt           # cargo fmt
 ```
 
 Before pushing, run `./ci_check.sh` to mirror the test workflow locally:
-fmt check, build, AArch64 test binaries, full test suite.
+wrapper regression checks, fmt check, build, AArch64 test binaries, and the
+full test suite.
 
 ## Using it
 
@@ -173,13 +174,18 @@ just mutants                     # full run, expect >30 min
 just mutants -- --diff           # only mutants in the local diff vs origin/main
 just mutants -- --diff main      # diff vs an explicit base ref
 just mutants -- --shard 0/8      # one shard of an 8-way split
+just mutants --timeout 45        # override the 180-second per-mutant timeout
 just mutants -- -- --foo         # forward extra flags to cargo-mutants
 ```
 
 The wrapper lives at `scripts/run-mutants.sh` and prints a
 caught/missed/timeout/unviable summary at the end via
-`scripts/mutants_summary.py`. Configuration lives in
-`.cargo/mutants.toml`.
+`scripts/mutants_summary.py`. It runs cargo-mutants with `--baseline=skip` and
+`--in-place`, so it owns the timeout policy: 180 seconds per mutant by default,
+overridable with `--timeout SECONDS`. The `timeout_multiplier` in
+`.cargo/mutants.toml` applies only to compatible direct `cargo mutants` runs;
+shared settings such as `additional_cargo_test_args` still apply to the
+wrapper.
 
 ## License
 
