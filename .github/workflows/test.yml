@@ -38,6 +38,9 @@ jobs:
         sudo apt-get install -y libcapstone-dev gcc-aarch64-linux-gnu z3 libz3-dev
         curl --proto '=https' --tlsv1.2 -sSf https://just.systems/install.sh | sudo bash -s -- --to /usr/local/bin
 
+    - name: Check mutation-test wrapper invocations
+      run: ./scripts/test_mutants_invocation.sh
+
     - name: Setup Rust
       run: |
         curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal --default-toolchain stable --component rustfmt

@@ -170,10 +170,10 @@ minutes than the project can afford.
 cargo install --locked cargo-mutants
 
 just mutants                     # full run, expect >30 min
-just mutants -- --diff           # only mutants in the local diff vs origin/main
-just mutants -- --diff main      # diff vs an explicit base ref
-just mutants -- --shard 0/8      # one shard of an 8-way split
-just mutants -- -- --foo         # forward extra flags to cargo-mutants
+just mutants --diff              # only mutants in the local diff vs origin/main
+just mutants --diff main         # diff vs an explicit base ref
+just mutants --shard 0/8         # one shard of an 8-way split
+just mutants -- --foo            # forward extra flags to cargo-mutants
 ```
 
 The wrapper lives at `scripts/run-mutants.sh` and prints a

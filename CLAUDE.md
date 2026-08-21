@@ -107,8 +107,8 @@ and how to add a fixture.
 Mutation testing runs via [cargo-mutants](https://mutants.rs/) and is **informational only** — it does not gate merges. It is **not** wired into CI to keep GitHub Actions minutes for the test/clippy/CodeQL workflows.
 
 - `just mutants` — full run via `scripts/run-mutants.sh` (slow; expect >30 min).
-- `just mutants -- --diff` — mutants only on the local diff vs `origin/main`.
-- `just mutants -- --shard 0/8` — one shard of an 8-way split for parallel local runs.
+- `just mutants --diff` — mutants only on the local diff vs `origin/main`.
+- `just mutants --shard 0/8` — one shard of an 8-way split for parallel local runs.
 - Configuration lives in `.cargo/mutants.toml` (cargo-mutants reads this path automatically).
 - The wrapper prints a caught/missed/timeout/unviable summary via `scripts/mutants_summary.py`.
 
