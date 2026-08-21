@@ -26,16 +26,25 @@ chmod +x \
 # The --diff branch shells out to git, so the fixture needs a real repository
 # with a base ref that differs from HEAD. `git diff BASE...` is commit-to-commit,
 # so the log files written here later do not perturb it.
-git init -q -b main "$FIXTURE"
-git -C "$FIXTURE" config user.name "s11 mutants regression"
-git -C "$FIXTURE" config user.email "mutants-regression@example.invalid"
-git -C "$FIXTURE" add -A
-git -C "$FIXTURE" -c commit.gpgsign=false commit -qm "fixture base"
-git -C "$FIXTURE" branch base
-git -C "$FIXTURE" update-ref refs/remotes/origin/main HEAD
+# Ambient global/system git config (core.hooksPath, init.templateDir,
+# commit.gpgsign) must not leak into the fixture repository.
+fixture_git() {
+    GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null \
+        git -C "$FIXTURE" \
+        -c user.name="s11 mutants regression" \
+        -c user.email="mutants-regression@example.invalid" \
+        "$@"
+}
+
+GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null \
+    git init -q -b main "$FIXTURE"
+fixture_git add -A
+fixture_git commit -qm "fixture base"
+fixture_git branch base
+fixture_git update-ref refs/remotes/origin/main HEAD
 printf 'mutated\n' > "$FIXTURE/changed.txt"
-git -C "$FIXTURE" add changed.txt
-git -C "$FIXTURE" -c commit.gpgsign=false commit -qm "fixture change"
+fixture_git add changed.txt
+fixture_git commit -qm "fixture change"
 
 run_wrapper() {
     local log_file="$1"
@@ -149,6 +158,14 @@ run_wrapper "$explicit_base_log" --diff base
 assert_mutants_command \
     "$explicit_base_log" \
     'cargo <mutants> <--baseline=skip> <--timeout> <180> <--in-place> <-vV> <--in-diff> <DIFF>'
+
+# Everything after `--` is forwarded verbatim to cargo-mutants, after the
+# wrapper's own flags.
+passthrough_log="$FIXTURE/passthrough.log"
+run_wrapper "$passthrough_log" --timeout 45 -- --foo --bar
+assert_mutants_command \
+    "$passthrough_log" \
+    'cargo <mutants> <--baseline=skip> <--timeout> <45> <--in-place> <-vV> <--foo> <--bar>'
 
 # The optional base ref must not swallow a following wrapper flag.
 diff_then_flag_log="$FIXTURE/diff-then-flag.log"
