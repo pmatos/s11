@@ -180,8 +180,8 @@ just mutants -- --foo            # forward extra flags to cargo-mutants
 
 Bare flags are interpreted by the wrapper; everything after `--` is forwarded
 verbatim to cargo-mutants. `just` passes a literal `--` straight through to the
-recipe, so writing `just mutants -- --diff` forwards `--diff` to cargo-mutants
-instead of enabling the wrapper's diff mode.
+recipe, so a leading separator forwards the flag after it to cargo-mutants
+instead of enabling the wrapper's mode of the same name.
 
 The wrapper lives at `scripts/run-mutants.sh` and prints a
 caught/missed/timeout/unviable summary at the end via

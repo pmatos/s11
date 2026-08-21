@@ -114,8 +114,8 @@ Mutation testing runs via [cargo-mutants](https://mutants.rs/) and is **informat
   per-mutant timeout.
 - Wrapper flags are written bare; only arguments after `--` are forwarded to
   cargo-mutants (`just mutants -- --foo`). `just` passes a literal `--` through
-  to the recipe, so `just mutants -- --diff` forwards `--diff` to cargo-mutants
-  instead of enabling the wrapper's diff mode.
+  to the recipe, so a leading separator forwards the flag after it to
+  cargo-mutants instead of enabling the wrapper's mode of the same name.
 - The wrapper uses `--in-place` (mutants are applied to the working tree, not a
   copy) and `--baseline=skip`. With no baseline run there is nothing for
   `.cargo/mutants.toml`'s `timeout_multiplier` to scale, so it applies only to
