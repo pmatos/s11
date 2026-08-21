@@ -8,7 +8,7 @@
 # suite is the only one that runs; x86 tests live in the unit tests
 # inside concrete_x86.rs / smt_x86.rs / cost_x86.rs / the x86 trait
 # impls in src/isa/x86.rs.
-set -e
+set -euo pipefail
 
 echo "=== s11 Test Suite ==="
 echo
@@ -29,6 +29,8 @@ echo
 run_test() {
     local binary="$1"
     local name="$2"
+    local instructions
+    local output
     
     echo "=== Testing $name ==="
     echo "Binary: $binary"
@@ -36,9 +38,17 @@ run_test() {
     # Run the disassembler and show the last ~20 instructions of .text
     # (usually contains main). `s11 disasm` prints one
     # "addr: bytes mnemonic" line per instruction with no header.
-    cargo run -- disasm "$binary" 2>/dev/null | \
-        grep -E "0x[0-9a-f]+:" | \
-        tail -20
+    if ! output=$(cargo run -- disasm "$binary"); then
+        echo "Failed to analyze $name ($binary)." >&2
+        return 1
+    fi
+
+    if ! instructions=$(grep -E "0x[0-9a-f]+:" <<<"$output"); then
+        echo "No disassembly instructions found for $name ($binary)." >&2
+        return 1
+    fi
+
+    printf '%s\n' "$instructions" | tail -20
     echo
 }
 
