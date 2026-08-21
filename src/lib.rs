@@ -9,6 +9,7 @@ pub mod docs_support;
 pub mod elf_patcher;
 pub mod ir;
 pub mod isa;
+pub mod output_path;
 pub mod parser;
 pub mod report;
 pub mod search;
