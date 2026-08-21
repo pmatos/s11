@@ -23,6 +23,20 @@ chmod +x \
     "$FIXTURE/bin/cargo" \
     "$FIXTURE/scripts/run-mutants.sh"
 
+# The --diff branch shells out to git, so the fixture needs a real repository
+# with a base ref that differs from HEAD. `git diff BASE...` is commit-to-commit,
+# so the log files written here later do not perturb it.
+git init -q -b main "$FIXTURE"
+git -C "$FIXTURE" config user.name "s11 mutants regression"
+git -C "$FIXTURE" config user.email "mutants-regression@example.invalid"
+git -C "$FIXTURE" add -A
+git -C "$FIXTURE" -c commit.gpgsign=false commit -qm "fixture base"
+git -C "$FIXTURE" branch base
+git -C "$FIXTURE" update-ref refs/remotes/origin/main HEAD
+printf 'mutated\n' > "$FIXTURE/changed.txt"
+git -C "$FIXTURE" add changed.txt
+git -C "$FIXTURE" -c commit.gpgsign=false commit -qm "fixture change"
+
 run_wrapper() {
     local log_file="$1"
     shift
@@ -43,6 +57,10 @@ assert_logged_command() {
         cat "$log_file" >&2
         exit 1
     fi
+
+    # --diff mode passes a mktemp path; normalise it so assertions pin the
+    # flag rather than the random filename.
+    actual="$(printf '%s\n' "$actual" | sed -E 's|(<--in-diff> )<[^>]*>|\1<DIFF>|')"
 
     if [[ "$actual" != "$expected" ]]; then
         diff -u <(printf '%s\n' "$expected") <(printf '%s\n' "$actual")
@@ -118,8 +136,27 @@ assert_mutants_command \
     "$shard_log" \
     'cargo <mutants> <--baseline=skip> <--timeout> <45> <--in-place> <-vV> <--no-shuffle> <--shard> <0/8> <--sharding> <round-robin>'
 
-# The --diff branch needs a real git repository, so it is exercised by
-# `just mutants --diff` rather than by this fixture.
+diff_log="$FIXTURE/diff.log"
+run_wrapper "$diff_log" --diff
+assert_mutants_command \
+    "$diff_log" \
+    'cargo <mutants> <--baseline=skip> <--timeout> <180> <--in-place> <-vV> <--in-diff> <DIFF>'
+
+# An explicit base ref must be consumed as the base, not rejected as an
+# unknown argument.
+explicit_base_log="$FIXTURE/diff-base.log"
+run_wrapper "$explicit_base_log" --diff base
+assert_mutants_command \
+    "$explicit_base_log" \
+    'cargo <mutants> <--baseline=skip> <--timeout> <180> <--in-place> <-vV> <--in-diff> <DIFF>'
+
+# The optional base ref must not swallow a following wrapper flag.
+diff_then_flag_log="$FIXTURE/diff-then-flag.log"
+run_wrapper "$diff_then_flag_log" --diff --timeout 45
+assert_mutants_command \
+    "$diff_then_flag_log" \
+    'cargo <mutants> <--baseline=skip> <--timeout> <45> <--in-place> <-vV> <--in-diff> <DIFF>'
+
 
 assert_rejected \
     'error: --timeout requires an argument (e.g. --timeout 180)' \
