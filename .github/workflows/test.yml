@@ -27,6 +27,9 @@ jobs:
     steps:
     - uses: actions/checkout@v7
 
+    - name: Check Claude settings policy
+      run: python3 -m unittest discover -s scripts -p 'test_claude_settings_policy.py'
+
     - name: Install dependencies
       run: |
         sudo apt-get update
