@@ -49,12 +49,13 @@ Standard Cargo commands also work:
 
 **IMPORTANT**: Before committing and pushing, always run `./ci_check.sh` to ensure your code will pass CI. This script runs:
 1. Repository CI-policy checks (`python3 -m unittest discover -s scripts -p 'test_*_policy.py'` and `./scripts/test_test_all.sh`)
-2. Mutation-wrapper command regression (`./scripts/test_run_mutants.sh`)
-3. Code formatting check (`cargo fmt -- --check`)
-4. Project build
-5. Test binary builds
-6. Unit and integration tests
-7. Full test suite
+2. Mutation-wrapper invocation regression (`./scripts/test_mutants_invocation.sh`)
+3. Mutation-wrapper command regression (`./scripts/test_run_mutants.sh`)
+4. Code formatting check (`cargo fmt -- --check`)
+5. Project build
+6. Test binary builds
+7. Unit and integration tests
+8. Full test suite
 
 This prevents pushing code that will fail CI checks.
 
