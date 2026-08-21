@@ -108,14 +108,19 @@ and how to add a fixture.
 Mutation testing runs via [cargo-mutants](https://mutants.rs/) and is **informational only** — it does not gate merges. It is **not** wired into CI to keep GitHub Actions minutes for the test/clippy/CodeQL workflows.
 
 - `just mutants` — full run via `scripts/run-mutants.sh` (slow; expect >30 min).
-- `just mutants -- --diff` — mutants only on the local diff vs `origin/main`.
-- `just mutants -- --shard 0/8` — one shard of an 8-way split for parallel local runs.
+- `just mutants --diff` — mutants only on the local diff vs `origin/main`.
+- `just mutants --shard 0/8` — one shard of an 8-way split for parallel local runs.
 - `just mutants --timeout 45` — override the wrapper's default 180-second
   per-mutant timeout.
-- The wrapper uses `--baseline=skip` and `--in-place`, so
-  `.cargo/mutants.toml`'s `timeout_multiplier` applies only to compatible direct
-  `cargo mutants` runs; shared configuration such as
-  `additional_cargo_test_args` still applies.
+- Wrapper flags are written bare; only arguments after `--` are forwarded to
+  cargo-mutants (`just mutants -- --foo`). `just` passes a literal `--` through
+  to the recipe, so `just mutants -- --diff` forwards `--diff` to cargo-mutants
+  instead of enabling the wrapper's diff mode.
+- The wrapper uses `--in-place` (mutants are applied to the working tree, not a
+  copy) and `--baseline=skip`. With no baseline run there is nothing for
+  `.cargo/mutants.toml`'s `timeout_multiplier` to scale, so it applies only to
+  direct `cargo mutants` runs that measure a baseline. Shared configuration such
+  as `additional_cargo_test_args` still applies.
 - The wrapper prints a caught/missed/timeout/unviable summary via `scripts/mutants_summary.py`.
 
 ## Dependencies

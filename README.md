@@ -171,21 +171,27 @@ minutes than the project can afford.
 cargo install --locked cargo-mutants
 
 just mutants                     # full run, expect >30 min
-just mutants -- --diff           # only mutants in the local diff vs origin/main
-just mutants -- --diff main      # diff vs an explicit base ref
-just mutants -- --shard 0/8      # one shard of an 8-way split
+just mutants --diff              # only mutants in the local diff vs origin/main
+just mutants --diff main         # diff vs an explicit base ref
+just mutants --shard 0/8         # one shard of an 8-way split
 just mutants --timeout 45        # override the 180-second per-mutant timeout
-just mutants -- -- --foo         # forward extra flags to cargo-mutants
+just mutants -- --foo            # forward extra flags to cargo-mutants
 ```
+
+Bare flags are interpreted by the wrapper; everything after `--` is forwarded
+verbatim to cargo-mutants. `just` passes a literal `--` straight through to the
+recipe, so writing `just mutants -- --diff` forwards `--diff` to cargo-mutants
+instead of enabling the wrapper's diff mode.
 
 The wrapper lives at `scripts/run-mutants.sh` and prints a
 caught/missed/timeout/unviable summary at the end via
-`scripts/mutants_summary.py`. It runs cargo-mutants with `--baseline=skip` and
-`--in-place`, so it owns the timeout policy: 180 seconds per mutant by default,
-overridable with `--timeout SECONDS`. The `timeout_multiplier` in
-`.cargo/mutants.toml` applies only to compatible direct `cargo mutants` runs;
-shared settings such as `additional_cargo_test_args` still apply to the
-wrapper.
+`scripts/mutants_summary.py`. It runs cargo-mutants with `--in-place` (mutating
+the working tree rather than a copy) and `--baseline=skip`; because there is no
+baseline run, `.cargo/mutants.toml`'s `timeout_multiplier` has nothing to scale,
+so the wrapper owns the timeout policy: 180 seconds per mutant by default,
+overridable with `--timeout SECONDS`. The multiplier applies only to direct
+`cargo mutants` runs that do measure a baseline; shared settings such as
+`additional_cargo_test_args` still apply to the wrapper.
 
 ## License
 
