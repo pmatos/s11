@@ -1079,8 +1079,9 @@ fn find_candidate_windows_with_backend<B: ElfOptimizationBackend>(
 
 /// Owned facts reduced from one borrowed Capstone detail inspection.
 ///
-/// Keeping only planning inputs lets the two finder phases share the result
-/// without extending `InsnDetail`'s borrow across section processing.
+/// Every planning input the window adapter needs is read from a single
+/// `InsnDetail`, so one inspection per instruction serves both the global
+/// branch-target scan and the per-instruction role classification.
 #[derive(Debug)]
 struct CapstoneInstructionFacts {
     direct_branch_targets: Vec<u64>,
@@ -1093,9 +1094,14 @@ fn inspect_capstone_instruction_detail(
     instruction: &capstone::Insn<'_>,
     section_name: &str,
 ) -> Result<CapstoneInstructionFacts, Box<dyn std::error::Error>> {
-    let detail = cs
-        .insn_detail(instruction)
-        .map_err(|error| instruction_detail_error(section_name, instruction.address(), error))?;
+    let detail = cs.insn_detail(instruction).map_err(|error| {
+        format!(
+            "failed to inspect instruction detail in executable section '{}' at 0x{:x}: {}",
+            section_name,
+            instruction.address(),
+            error
+        )
+    })?;
     Ok(CapstoneInstructionFacts {
         direct_branch_targets: capstone_detail_direct_branch_targets(&detail),
         is_call: capstone_detail_is_call(&detail),
@@ -1103,18 +1109,6 @@ fn inspect_capstone_instruction_detail(
     })
 }
 
-fn instruction_detail_error(
-    section_name: &str,
-    instruction_address: u64,
-    error: capstone::Error,
-) -> String {
-    format!(
-        "failed to inspect instruction detail in executable section '{}' at 0x{:x}: {}",
-        section_name, instruction_address, error
-    )
-}
-
-#[cfg_attr(not(test), allow(dead_code))]
 fn find_candidate_windows_with_detail_provider<B, F>(
     backend: B,
     patcher: &ElfPatcher,
