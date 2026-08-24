@@ -1734,12 +1734,11 @@ mod tests {
             shared.stop.load(Ordering::Relaxed),
             "nested product loop should set stop after the timeout expires"
         );
-        // The deadline starts before Rayon dispatch and recursive polling, so zero calls is valid.
         let cost_calls = INNER_TIMEOUT_COST_CALLS.load(Ordering::Relaxed);
+        // The deadline starts before Rayon dispatch and recursive polling, so zero calls is valid.
         assert!(
             cost_calls < 2,
-            "nested timeout should prevent evaluating a second product candidate; saw \
-             {cost_calls} cost calls"
+            "nested timeout should prevent evaluating a second product candidate; saw {cost_calls} cost calls"
         );
     }
 
