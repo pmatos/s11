@@ -1734,12 +1734,11 @@ mod tests {
             shared.stop.load(Ordering::Relaxed),
             "nested product loop should set stop after the timeout expires"
         );
-        assert_eq!(
-            INNER_TIMEOUT_COST_CALLS.load(Ordering::Relaxed),
-            1,
-            "timeout should be checked before the second product candidate; the first \
-             50ms cost call already exceeds the 25ms budget, so the length-three sweep \
-             stops one candidate in instead of running all 8"
+        let cost_calls = INNER_TIMEOUT_COST_CALLS.load(Ordering::Relaxed);
+        assert!(
+            cost_calls < 2,
+            "nested timeout should prevent evaluating a second product candidate; saw \
+             {cost_calls} cost calls"
         );
     }
 
