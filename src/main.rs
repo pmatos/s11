@@ -1073,17 +1073,18 @@ fn find_candidate_windows_with_backend<B: ElfOptimizationBackend>(
     let cs = backend.disassembler()?;
     let indirect_targets = patcher.indirect_control_flow_targets()?;
 
-    // Phase 1: disassemble every executable section once, fail closed on any
-    // partial decode, and accumulate every direct branch/call target across the
-    // whole binary into one set. The set must be global and complete before any
-    // window is built: a branch (backward, or in another section) can name an
-    // address inside a run we have not yet seen, so a single forward pass cannot
-    // know all targets in time to split correctly (ADR-0009 Decision 4/5).
+    // Phase 1: disassemble every executable section's complete-instruction
+    // prefix once, fail closed on any partial decode within that prefix, and
+    // accumulate every direct branch/call target across the whole binary into
+    // one set. The set must be global and complete before any window is built:
+    // a branch (backward, or in another section) can name an address inside a
+    // run we have not yet seen, so a single forward pass cannot know all targets
+    // in time to split correctly (ADR-0009 Decision 4/5).
     let mut decoded_sections = Vec::new();
     let mut branch_targets = std::collections::HashSet::new();
 
     for section in patcher.get_text_sections()? {
-        let section_end = section
+        let raw_section_end = section
             .virtual_addr
             .checked_add(section.size)
             .ok_or_else(|| {
@@ -1092,16 +1093,48 @@ fn find_candidate_windows_with_backend<B: ElfOptimizationBackend>(
                     section.name, section.virtual_addr, section.size
                 )
             })?;
+        let instruction_alignment = backend.arch().instruction_alignment();
+        if !section.virtual_addr.is_multiple_of(instruction_alignment) {
+            return Err(format!(
+                "failed to read executable section '{}' with raw range 0x{:x}-0x{:x}: section start 0x{:x} must be {}-byte aligned for {:?} instructions",
+                section.name,
+                section.virtual_addr,
+                raw_section_end,
+                section.virtual_addr,
+                instruction_alignment,
+                backend.arch(),
+            )
+            .into());
+        }
+        let trailing_bytes = section.size % instruction_alignment;
+        let disassembly_end = raw_section_end - trailing_bytes;
+        if trailing_bytes > 0 {
+            println!(
+                "{}",
+                incomplete_executable_section_tail_log(
+                    &section.name,
+                    section.virtual_addr,
+                    raw_section_end,
+                    disassembly_end,
+                    instruction_alignment,
+                    trailing_bytes,
+                )
+            );
+        }
+        if disassembly_end == section.virtual_addr {
+            decoded_sections.push((section, None));
+            continue;
+        }
         let section_window = AddressWindow {
             start: section.virtual_addr,
-            end: section_end,
+            end: disassembly_end,
         };
         let bytes = patcher
             .get_instructions_in_window(&section_window)
             .map_err(|error| {
                 format!(
                     "failed to read executable section '{}' at 0x{:x}-0x{:x}: {}",
-                    section.name, section.virtual_addr, section_end, error
+                    section.name, section.virtual_addr, disassembly_end, error
                 )
             })?;
         let instructions = cs
@@ -1109,7 +1142,7 @@ fn find_candidate_windows_with_backend<B: ElfOptimizationBackend>(
             .map_err(|error| {
                 format!(
                     "failed to disassemble executable section '{}' at 0x{:x}-0x{:x}: {}",
-                    section.name, section.virtual_addr, section_end, error
+                    section.name, section.virtual_addr, disassembly_end, error
                 )
             })?;
         let decoded_bytes = instructions.iter().try_fold(0usize, |total, instruction| {
@@ -1118,7 +1151,7 @@ fn find_candidate_windows_with_backend<B: ElfOptimizationBackend>(
         let decoded_bytes = decoded_bytes.ok_or_else(|| {
             format!(
                 "decoded byte count overflowed for executable section '{}' at 0x{:x}-0x{:x}",
-                section.name, section.virtual_addr, section_end
+                section.name, section.virtual_addr, disassembly_end
             )
         })?;
         ensure_window_fully_decoded_for_arch(
@@ -1126,7 +1159,7 @@ fn find_candidate_windows_with_backend<B: ElfOptimizationBackend>(
             decoded_bytes,
             bytes.len(),
             section.virtual_addr,
-            section_end,
+            disassembly_end,
         )
         .map_err(|error| format!("executable section '{}': {}", section.name, error))?;
 
@@ -1142,7 +1175,7 @@ fn find_candidate_windows_with_backend<B: ElfOptimizationBackend>(
             branch_targets.extend(capstone_detail_direct_branch_targets(&detail));
         }
 
-        decoded_sections.push((section, instructions));
+        decoded_sections.push((section, Some(instructions)));
     }
 
     // Phase 2: build maximal supported straight-line runs, splitting a run
@@ -1164,8 +1197,13 @@ fn find_candidate_windows_with_backend<B: ElfOptimizationBackend>(
         // Capstone group/operand inspection and the overflow-checked end
         // computation stay here in the adapter; the soundness-critical
         // run-splitting rules (ADR-0009 Decision 4/5) live behind the seam.
-        let mut planned = Vec::with_capacity(instructions.len());
-        for instruction in instructions.iter() {
+        let mut planned =
+            Vec::with_capacity(instructions.as_ref().map_or(0, |decoded| decoded.len()));
+        for instruction in instructions
+            .as_ref()
+            .into_iter()
+            .flat_map(|decoded| decoded.iter())
+        {
             let instruction_end = instruction
                 .address()
                 .checked_add(
@@ -1232,6 +1270,19 @@ fn find_candidate_windows_with_backend<B: ElfOptimizationBackend>(
 fn indirect_target_refusal_log(refused: usize) -> String {
     format!(
         "Auto candidate discovery: refused {refused} window(s) because indirect targets from relocations or .rodata/.data.rel.ro pointers fell inside them."
+    )
+}
+
+fn incomplete_executable_section_tail_log(
+    section_name: &str,
+    raw_start: u64,
+    raw_end: u64,
+    disassembly_end: u64,
+    instruction_alignment: u64,
+    trailing_bytes: u64,
+) -> String {
+    format!(
+        "Auto candidate discovery: executable section '{section_name}' has raw range 0x{raw_start:x}-0x{raw_end:x}; scanning complete {instruction_alignment}-byte-aligned instruction prefix 0x{raw_start:x}-0x{disassembly_end:x} and ignoring {trailing_bytes} trailing byte(s)."
     )
 }
 
@@ -2746,6 +2797,14 @@ mod cli_helper_tests {
     }
 
     #[test]
+    fn incomplete_executable_section_tail_log_reports_ignored_range() {
+        assert_eq!(
+            incomplete_executable_section_tail_log(".text", 0x1000, 0x100b, 0x1008, 4, 3),
+            "Auto candidate discovery: executable section '.text' has raw range 0x1000-0x100b; scanning complete 4-byte-aligned instruction prefix 0x1000-0x1008 and ignoring 3 trailing byte(s)."
+        );
+    }
+
+    #[test]
     fn supported_arch_from_e_machine_rejects_riscv() {
         assert_eq!(
             SupportedArch::from_e_machine(elf::abi::EM_AARCH64).unwrap(),
@@ -3479,6 +3538,92 @@ mod cli_helper_tests {
         assert_eq!(sections[0].candidates[0].end, 0x1004);
         assert_eq!(sections[0].candidates[1].start, 0x1008);
         assert_eq!(sections[0].candidates[1].end, 0x100c);
+    }
+
+    #[test]
+    fn candidate_windows_scan_complete_aarch64_prefix_before_short_tail() {
+        let complete_prefix = assemble_aarch64_test_bytes(&[
+            Instruction::Add {
+                rd: Register::X0,
+                rn: Register::X0,
+                rm: Operand::Immediate(1),
+            },
+            Instruction::Sub {
+                rd: Register::X1,
+                rn: Register::X1,
+                rm: Operand::Immediate(1),
+            },
+        ]);
+
+        for tail_len in 1..=3 {
+            let mut section_bytes = complete_prefix.clone();
+            section_bytes.extend(std::iter::repeat_n(0xff, tail_len));
+            let elf_bytes = build_minimal_elf64(&section_bytes, 0x1000, elf::abi::EM_AARCH64);
+            let input = TempFile::new_bytes("s11-candidate-a64-short-tail", "elf", &elf_bytes);
+            let patcher = ElfPatcher::new(input.path()).expect("AArch64 ELF should parse");
+
+            let sections = find_candidate_windows(&patcher).unwrap_or_else(|error| {
+                panic!("candidate discovery should ignore a {tail_len}-byte tail: {error}")
+            });
+
+            assert_eq!(sections.len(), 1);
+            assert_eq!(sections[0].section.size, 8 + tail_len as u64);
+            assert_eq!(sections[0].candidates.len(), 1);
+            assert_eq!(sections[0].candidates[0].start, 0x1000);
+            assert_eq!(
+                sections[0].candidates[0].end, 0x1008,
+                "an incomplete {tail_len}-byte tail must not enter a candidate"
+            );
+        }
+    }
+
+    #[test]
+    fn candidate_windows_keep_tail_only_aarch64_sections_as_empty_results() {
+        for tail_len in 1..=3 {
+            let section_bytes = vec![0xff; tail_len];
+            let elf_bytes = build_minimal_elf64(&section_bytes, 0x1000, elf::abi::EM_AARCH64);
+            let input = TempFile::new_bytes("s11-candidate-a64-tail-only", "elf", &elf_bytes);
+            let patcher = ElfPatcher::new(input.path()).expect("AArch64 ELF should parse");
+
+            let sections = find_candidate_windows(&patcher).unwrap_or_else(|error| {
+                panic!("a {tail_len}-byte tail-only section should be empty: {error}")
+            });
+
+            assert_eq!(sections.len(), 1);
+            assert_eq!(sections[0].section.name, ".text");
+            assert_eq!(sections[0].section.size, tail_len as u64);
+            assert!(sections[0].candidates.is_empty());
+            assert_eq!(sections[0].indirect_target_refusals, 0);
+        }
+    }
+
+    #[test]
+    fn candidate_windows_reject_misaligned_aarch64_section_starts() {
+        let full_instruction = assemble_aarch64_test_bytes(&[Instruction::Add {
+            rd: Register::X0,
+            rn: Register::X0,
+            rm: Operand::Immediate(1),
+        }]);
+        let tail_only = [0xff];
+
+        for (description, section_bytes) in [
+            ("full-instruction", full_instruction.as_slice()),
+            ("tail-only", tail_only.as_slice()),
+        ] {
+            let elf_bytes = build_minimal_elf64(section_bytes, 0x1002, elf::abi::EM_AARCH64);
+            let input =
+                TempFile::new_bytes("s11-candidate-a64-misaligned-start", "elf", &elf_bytes);
+            let patcher = ElfPatcher::new(input.path()).expect("AArch64 ELF should parse");
+
+            let error = find_candidate_windows(&patcher)
+                .expect_err(&format!(
+                    "a misaligned {description} section must fail closed"
+                ))
+                .to_string();
+
+            assert!(error.contains("executable section '.text'"), "{error}");
+            assert!(error.contains("4-byte aligned"), "{error}");
+        }
     }
 
     #[test]
