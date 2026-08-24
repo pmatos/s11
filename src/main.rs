@@ -4992,11 +4992,11 @@ mod cli_helper_tests {
     fn run_optimization_uses_downstream_flags_dead_context() {
         let target = [
             Instruction::Cmp {
-                rn: Register::X0,
+                rn: Register::X1,
                 rm: Operand::Immediate(0),
             },
             Instruction::MovImm {
-                rd: Register::X1,
+                rd: Register::X0,
                 imm: 7,
             },
         ];
