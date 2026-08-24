@@ -80,24 +80,26 @@ pub fn generate_all_instructions(registers: &[Register], immediates: &[i64]) -> 
                 instrs.push(Instruction::AddW { rd, rn, rm: rm_op });
                 instrs.push(Instruction::Sub { rd, rn, rm: rm_op });
                 instrs.push(Instruction::SubW { rd, rn, rm: rm_op });
-                instrs.push(Instruction::And {
-                    rd,
-                    rn,
-                    rm: rm_op,
-                    width: RegisterWidth::X64,
-                });
-                instrs.push(Instruction::Orr {
-                    rd,
-                    rn,
-                    rm: rm_op,
-                    width: RegisterWidth::X64,
-                });
-                instrs.push(Instruction::Eor {
-                    rd,
-                    rn,
-                    rm: rm_op,
-                    width: RegisterWidth::X64,
-                });
+                for width in [RegisterWidth::X64, RegisterWidth::W32] {
+                    instrs.push(Instruction::And {
+                        rd,
+                        rn,
+                        rm: rm_op,
+                        width,
+                    });
+                    instrs.push(Instruction::Orr {
+                        rd,
+                        rn,
+                        rm: rm_op,
+                        width,
+                    });
+                    instrs.push(Instruction::Eor {
+                        rd,
+                        rn,
+                        rm: rm_op,
+                        width,
+                    });
+                }
                 instrs.push(Instruction::Lsl {
                     rd,
                     rn,
@@ -1648,6 +1650,38 @@ mod tests {
                 rm: Operand::Immediate(1)
             }
         )));
+        assert!(instrs.iter().all(Instruction::is_encodable_aarch64));
+    }
+
+    #[test]
+    fn generate_encodable_instructions_contains_w_logical_register_forms() {
+        let instrs = generate_all_encodable_instructions(
+            &[Register::X0, Register::X1, Register::X2],
+            &[],
+        );
+
+        for expected in [
+            Instruction::And {
+                rd: Register::X0,
+                rn: Register::X1,
+                rm: Operand::Register(Register::X2),
+                width: RegisterWidth::W32,
+            },
+            Instruction::Orr {
+                rd: Register::X0,
+                rn: Register::X1,
+                rm: Operand::Register(Register::X2),
+                width: RegisterWidth::W32,
+            },
+            Instruction::Eor {
+                rd: Register::X0,
+                rn: Register::X1,
+                rm: Operand::Register(Register::X2),
+                width: RegisterWidth::W32,
+            },
+        ] {
+            assert!(instrs.contains(&expected), "missing candidate: {expected}");
+        }
         assert!(instrs.iter().all(Instruction::is_encodable_aarch64));
     }
 
