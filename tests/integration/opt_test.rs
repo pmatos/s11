@@ -388,6 +388,19 @@ fn test_opt_rejects_unwritable_output_parent_before_search() {
     fs::create_dir(&read_only_dir).expect("create output parent");
     fs::set_permissions(&read_only_dir, fs::Permissions::from_mode(0o555))
         .expect("make output parent read-only");
+
+    // Root ignores the 0o555 mode, so the precondition this test needs does not
+    // hold there (containerized local runs are commonly root). Probe rather
+    // than assert a guard that cannot fire.
+    let probe = read_only_dir.join(".writability-probe");
+    if fs::File::create(&probe).is_ok() {
+        let _ = fs::remove_file(&probe);
+        eprintln!(
+            "Skipping unwritable-parent opt test: read-only mode not enforced (running as root?)"
+        );
+        return;
+    }
+
     let output_path = read_only_dir.join("output.elf");
 
     let output = Command::new(&binary)
@@ -432,6 +445,14 @@ fn test_opt_basic_functionality() {
     // parser-supported, straight-line multi-instruction optimization window.
     let (start_addr, end_addr) = find_supported_aarch64_instruction_window(&test_elf, 4);
 
+    // The derived sibling lives in the shared `binaries/` fixture directory and
+    // an existing output is now refused without --force, so a leftover from an
+    // aborted run would fail every later run with an unrelated diagnostic.
+    let optimized_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("binaries")
+        .join("arrays_debug_optimized");
+    let _ = fs::remove_file(&optimized_path);
+
     let output = Command::new(binary)
         .arg("opt")
         .arg(&test_elf)
@@ -449,11 +470,6 @@ fn test_opt_basic_functionality() {
         .arg(format!("0x{end_addr:x}"))
         .output()
         .expect("Failed to execute s11");
-
-    // Check that optimized binary was created first, before other assertions
-    let optimized_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("binaries")
-        .join("arrays_debug_optimized");
 
     if !output.status.success() {
         // Clean up in case of failure and print debug info

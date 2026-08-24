@@ -237,9 +237,10 @@ enum Commands {
             "result file; when omitted the result is written next to the input as ",
             "<stem>_optimized.<ext>.\n\n",
             "Output policy: Existing output files are refused unless --force is passed; ",
-            "--force never permits replacing the input itself. A successful run always ",
-            "writes the result file, copying the input unchanged when no improvement is ",
-            "found.\n\n",
+            "--force never permits replacing the input itself, and a symlink or directory ",
+            "at the output path is always refused. A successful run always writes the ",
+            "result file; when no improvement is found the result is a byte copy of the ",
+            "input on x86, and a re-encoding of the searched window on AArch64.\n\n",
             "Note: enumerative search scales with the generated instruction families ",
             "in its candidate pool. At the default AArch64 8-register CLI scope, ",
             "multiply-accumulate and high-half multiply add 9,728 candidates per ",
@@ -3298,6 +3299,11 @@ mod cli_helper_tests {
         assert!(
             opt_help.contains("A successful run always writes the result file"),
             "opt help should document no-improvement copy-through:\n{opt_help}"
+        );
+        assert!(
+            opt_help.contains("a re-encoding of the searched window on AArch64"),
+            "opt help must not promise a byte copy on AArch64, whose no-improvement \
+             path re-assembles the window:\n{opt_help}"
         );
     }
 

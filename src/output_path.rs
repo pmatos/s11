@@ -6,6 +6,12 @@
 //! permits an output that aliases the input. Parent existence and writability
 //! are checked before search so a bad target fails cheaply.
 //!
+//! An output that already exists as a **symlink** or a **directory** is refused
+//! outright, with or without `--force`: following a symlink would truncate a
+//! file at a path the user never named (the clobber this seam exists to
+//! prevent), and a directory can never become the result file, so advertising
+//! `--force` for either would be a dead end.
+//!
 //! [`resolve_output_path`] returns a [`ResolvedOutput`] that carries the policy
 //! into the final write. Default writes use exclusive creation, closing the
 //! race where another file appears during a long search; forced writes reopen
@@ -45,9 +51,23 @@ impl ResolvedOutput {
             options.create_new(true);
         }
 
-        let mut file = options.open(&self.path)?;
+        // The search that produced `bytes` may have run for hours, so an open
+        // failure here has to name the path and the way out — the bare
+        // `File exists (os error 17)` an unwrapped `create_new` yields tells
+        // the user neither.
+        let mut file = options.open(&self.path).map_err(|error| {
+            let context = if error.kind() == io::ErrorKind::AlreadyExists {
+                format!(
+                    "output path '{}' appeared while the search was running; refusing to replace it (pass --force to replace it)",
+                    self.path.display()
+                )
+            } else {
+                format!("cannot write output path '{}': {error}", self.path.display())
+            };
+            io::Error::new(error.kind(), context)
+        })?;
         if self.overwrite {
-            if opened_file_points_to_path(&file, &self.input, &self.path) {
+            if self.opened_target_aliases_input(&file) {
                 return Err(io::Error::new(
                     io::ErrorKind::PermissionDenied,
                     format!(
@@ -60,15 +80,34 @@ impl ResolvedOutput {
         }
         file.write_all(bytes)
     }
+
+    /// Whether the file just opened at [`Self::path`] is the input binary.
+    ///
+    /// Re-checked at write time because the preflight identity guard in
+    /// [`resolve_output_path`] runs before a potentially long search: a hard
+    /// link to the input can appear at the output path in between.
+    #[cfg(unix)]
+    fn opened_target_aliases_input(&self, file: &File) -> bool {
+        match (file.metadata(), std::fs::metadata(&self.input)) {
+            (Ok(target), Ok(input)) => same_file_ids(&target, &input),
+            _ => false,
+        }
+    }
+
+    #[cfg(not(unix))]
+    fn opened_target_aliases_input(&self, _file: &File) -> bool {
+        paths_point_to_same_file(&self.input, &self.path)
+    }
 }
 
 /// Resolve where an `opt` run writes its result.
 ///
 /// With no explicit `-o/--output`, derive the
-/// `<stem>_optimized.<ext>` sibling. Unless `force` is true, any existing target
-/// is rejected; even with force, an output resolving to the input binary is
-/// always rejected. The parent directory must already exist and be writable.
-/// A stem-less or non-UTF-8 input name yields an error instead of panicking.
+/// `<stem>_optimized.<ext>` sibling. Unless `force` is true, an existing regular
+/// file at the target is rejected; even with force, an output resolving to the
+/// input binary — or to a symlink or directory — is always rejected. The parent
+/// directory must already exist and be writable. A stem-less or non-UTF-8 input
+/// name yields an error instead of panicking.
 pub fn resolve_output_path(
     input: &Path,
     output: Option<&Path>,
@@ -80,55 +119,74 @@ pub fn resolve_output_path(
     };
 
     if paths_point_to_same_file(input, &output) {
-        Err(format!(
+        return Err(format!(
             "output path '{}' resolves to the input binary; refusing to optimize in place (choose a different -o/--output)",
             output.display()
-        ))
-    } else if std::fs::symlink_metadata(&output).is_ok() && !force {
-        Err(format!(
+        ));
+    }
+
+    // One stat decides the whole existing-target policy; the branches below
+    // must not re-derive it, or the diagnostic and the check can disagree.
+    match std::fs::symlink_metadata(&output) {
+        Ok(existing) => validate_existing_output(&output, &existing, force)?,
+        Err(_) => validate_output_parent(&output)?,
+    }
+
+    Ok(ResolvedOutput {
+        input: input.to_path_buf(),
+        path: output,
+        overwrite: force,
+    })
+}
+
+/// Decide whether an already-present `output` may become the result file.
+///
+/// Symlinks and directories are refused with or without `--force`: opening a
+/// symlink for writing truncates its *target*, a path the user never named, and
+/// a directory can never be replaced by a file — so neither may advertise
+/// `--force` as the way forward.
+fn validate_existing_output(
+    output: &Path,
+    existing: &std::fs::Metadata,
+    force: bool,
+) -> Result<(), String> {
+    let file_type = existing.file_type();
+    if file_type.is_symlink() {
+        return Err(match std::fs::read_link(output) {
+            Ok(target) => format!(
+                "output path '{}' is a symlink to '{}'; refusing to write through it (pass -o '{}' or remove the link)",
+                output.display(),
+                target.display(),
+                target.display()
+            ),
+            Err(_) => format!(
+                "output path '{}' is a symlink; refusing to write through it (remove the link or choose a different -o/--output)",
+                output.display()
+            ),
+        });
+    }
+    if file_type.is_dir() {
+        return Err(format!(
+            "output path '{}' is an existing directory; choose a file path with -o/--output",
+            output.display()
+        ));
+    }
+    if !force {
+        return Err(format!(
             "output path already exists: '{}' (pass --force to replace it)",
             output.display()
-        ))
-    } else {
-        validate_output_writable(&output)?;
-        Ok(ResolvedOutput {
-            input: input.to_path_buf(),
-            path: output,
-            overwrite: force,
-        })
+        ));
     }
-}
-
-#[cfg(unix)]
-fn opened_file_points_to_path(file: &File, input: &Path, _output: &Path) -> bool {
-    use std::os::unix::fs::MetadataExt;
-
-    match (file.metadata(), std::fs::metadata(input)) {
-        (Ok(output), Ok(input)) => output.dev() == input.dev() && output.ino() == input.ino(),
-        _ => false,
-    }
-}
-
-#[cfg(not(unix))]
-fn opened_file_points_to_path(_file: &File, input: &Path, output: &Path) -> bool {
-    paths_point_to_same_file(input, output)
-}
-
-fn validate_output_writable(output: &Path) -> Result<(), String> {
-    if std::fs::symlink_metadata(output).is_ok() {
-        std::fs::OpenOptions::new()
-            .write(true)
-            .open(output)
-            .map_err(|error| {
-                format!(
-                    "output path '{}' is not writable: {error}",
-                    output.display()
-                )
-            })?;
-        Ok(())
-    } else {
-        validate_output_parent(output)
-    }
+    OpenOptions::new()
+        .write(true)
+        .open(output)
+        .map_err(|error| {
+            format!(
+                "output path '{}' is not writable: {error}",
+                output.display()
+            )
+        })?;
+    Ok(())
 }
 
 fn validate_output_parent(output: &Path) -> Result<(), String> {
@@ -209,9 +267,8 @@ fn optimized_output_path(path: &Path) -> Result<PathBuf, String> {
 fn paths_point_to_same_file(a: &Path, b: &Path) -> bool {
     #[cfg(unix)]
     fn same_file(a: &Path, b: &Path) -> bool {
-        use std::os::unix::fs::MetadataExt;
         match (std::fs::metadata(a), std::fs::metadata(b)) {
-            (Ok(ma), Ok(mb)) => ma.dev() == mb.dev() && ma.ino() == mb.ino(),
+            (Ok(ma), Ok(mb)) => same_file_ids(&ma, &mb),
             _ => false,
         }
     }
@@ -223,6 +280,14 @@ fn paths_point_to_same_file(a: &Path, b: &Path) -> bool {
         }
     }
     same_file(a, b)
+}
+
+/// The single `(device, inode)` identity rule, shared by the preflight guard
+/// and the write-time recheck so the two can never drift apart.
+#[cfg(unix)]
+fn same_file_ids(a: &std::fs::Metadata, b: &std::fs::Metadata) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    a.dev() == b.dev() && a.ino() == b.ino()
 }
 
 #[cfg(test)]
@@ -335,10 +400,102 @@ mod tests {
             .expect_err("default writer must refuse the racing output");
 
         assert_eq!(error.kind(), std::io::ErrorKind::AlreadyExists);
+        assert!(
+            error.to_string().contains("output.elf") && error.to_string().contains("--force"),
+            "racing-output diagnostic must name the path and the override: {error}"
+        );
         assert_eq!(
             std::fs::read(&output).expect("read racing output"),
             sentinel,
             "racing output must remain unchanged"
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn forced_write_refuses_hard_link_to_input_created_after_preflight() {
+        // The write-time identity recheck is the only thing standing between a
+        // `--force` run and a truncated input when a hard link appears at the
+        // output path during the search.
+        let dir = tempfile::tempdir().expect("create output directory");
+        let input = dir.path().join("input.elf");
+        let output = dir.path().join("output.elf");
+        let input_bytes = b"original input binary";
+        std::fs::write(&input, input_bytes).expect("seed input");
+        std::fs::write(&output, b"stale output").expect("seed output");
+
+        let resolved =
+            resolve_output_path(&input, Some(&output), true).expect("forced output resolves");
+
+        std::fs::remove_file(&output).expect("remove resolved output");
+        std::fs::hard_link(&input, &output).expect("race a hard link into the output path");
+
+        let error = resolved
+            .write(b"optimized ELF")
+            .expect_err("forced writer must refuse a hard link to the input");
+
+        assert!(
+            error.to_string().contains("refusing to optimize in place"),
+            "unexpected error: {error}"
+        );
+        assert_eq!(
+            std::fs::read(&input).expect("read input"),
+            input_bytes,
+            "input binary must survive the refused forced write"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn resolve_output_path_refuses_symlink_output_even_with_force() {
+        // Opening a symlink for writing truncates its target — a path the user
+        // never named — so neither the default nor the forced policy may follow
+        // one. Regression for the clobber this seam exists to prevent.
+        let dir = tempfile::tempdir().expect("create output directory");
+        let input = dir.path().join("input.elf");
+        std::fs::write(&input, b"input").expect("seed input");
+        let victim = dir.path().join("unrelated.txt");
+        let victim_bytes = b"unrelated file contents";
+        std::fs::write(&victim, victim_bytes).expect("seed unrelated file");
+        let link = dir.path().join("out.elf");
+        std::os::unix::fs::symlink(&victim, &link).expect("create symlink output");
+
+        for force in [false, true] {
+            let err = resolve_output_path(&input, Some(&link), force)
+                .expect_err("a symlink output must be rejected");
+            assert!(
+                err.contains("is a symlink") && err.contains("unrelated.txt"),
+                "diagnostic should name the symlink target with force={force}: {err}"
+            );
+        }
+        assert_eq!(
+            std::fs::read(&victim).expect("read unrelated file"),
+            victim_bytes,
+            "the symlink target must be untouched"
+        );
+    }
+
+    #[test]
+    fn resolve_output_path_refuses_directory_output_without_advertising_force() {
+        // `--force` can never turn a directory into the result file, so the
+        // diagnostic must not send the user down that dead end.
+        let dir = tempfile::tempdir().expect("create output directory");
+        let input = dir.path().join("input.elf");
+        std::fs::write(&input, b"input").expect("seed input");
+        let output_dir = dir.path().join("out.d");
+        std::fs::create_dir(&output_dir).expect("create directory output");
+
+        for force in [false, true] {
+            let err = resolve_output_path(&input, Some(&output_dir), force)
+                .expect_err("a directory output must be rejected");
+            assert!(
+                err.contains("is an existing directory"),
+                "unexpected error with force={force}: {err}"
+            );
+            assert!(
+                !err.contains("--force"),
+                "directory diagnostic must not advertise --force: {err}"
+            );
+        }
     }
 }
