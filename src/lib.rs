@@ -1,5 +1,6 @@
 pub mod aarch64_search_inputs;
 pub mod assembler;
+pub mod auto_driver;
 pub mod bench_support;
 pub mod candidate_windows;
 pub mod capstone_bridge;
