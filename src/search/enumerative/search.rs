@@ -1735,9 +1735,9 @@ mod tests {
             shared.stop.load(Ordering::Relaxed),
             "nested product loop should set stop after the timeout expires"
         );
-        assert!(
-            cost_calls < 8,
-            "timeout should stop before the full length-three product sweep; saw {cost_calls} cost calls"
+        assert_eq!(
+            cost_calls, 1,
+            "timeout should stop after exactly 1 cost call; saw {cost_calls}"
         );
     }
 
