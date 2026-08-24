@@ -1582,6 +1582,12 @@ fn run_auto_optimization(
     options: &OptimizationOptions,
     max_windows: usize,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    if image.elf_type() == elf::abi::ET_REL {
+        return Err(
+            "--auto does not support relocatable ELF objects (ET_REL), whose executable sections can share virtual addresses"
+                .into(),
+        );
+    }
     let output_path = resolve_output_path(binary, output)?;
     let arch = image.arch();
     match arch {
@@ -3837,6 +3843,29 @@ mod cli_helper_tests {
             std::fs::read(output.path()).expect("read auto output"),
             elf,
             "zero search budget must materialize an unchanged image",
+        );
+    }
+
+    #[test]
+    fn run_auto_optimization_rejects_relocatable_elf_before_writing_output() {
+        let mut elf = build_minimal_elf64(&[0x90], 0, elf::abi::EM_X86_64);
+        elf[16..18].copy_from_slice(&elf::abi::ET_REL.to_le_bytes());
+        let input = TempFile::new_bytes("s11-auto-relocatable-in", "o", &elf);
+        let output = TempFile::new_bytes("s11-auto-relocatable-out", "elf", &[]);
+        let patcher = ElfPatcher::new(input.path()).expect("relocatable ELF should parse");
+        let opts = options_for(Algorithm::Enumerative);
+
+        let error = run_auto_optimization(patcher, input.path(), Some(output.path()), &opts, 0)
+            .expect_err("auto mode must reject address-ambiguous relocatable objects");
+
+        assert!(
+            error.to_string().contains("relocatable ELF"),
+            "unexpected error: {error}"
+        );
+        assert_eq!(
+            std::fs::read(output.path()).expect("read untouched output placeholder"),
+            Vec::<u8>::new(),
+            "rejection must happen before the auto driver writes an output image",
         );
     }
 

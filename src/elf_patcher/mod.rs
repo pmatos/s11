@@ -110,6 +110,7 @@ impl DetectedArch {
 pub struct ElfPatcher {
     file_data: Vec<u8>,
     arch: DetectedArch,
+    elf_type: u16,
 }
 
 #[derive(Debug, Clone)]
@@ -136,11 +137,20 @@ impl ElfPatcher {
                 elf.ehdr.e_machine
             )
         })?;
-        Ok(Self { file_data, arch })
+        let elf_type = elf.ehdr.e_type;
+        Ok(Self {
+            file_data,
+            arch,
+            elf_type,
+        })
     }
 
     pub fn arch(&self) -> DetectedArch {
         self.arch
+    }
+
+    pub fn elf_type(&self) -> u16 {
+        self.elf_type
     }
 
     pub fn get_text_sections(&self) -> Result<Vec<TextSection>, Box<dyn std::error::Error>> {

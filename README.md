@@ -87,6 +87,10 @@ code pointer in `.rodata`/`.data.rel.ro`) is conservatively refused, and the
 refused count is reported so suppressed coverage is never silent. A cheaper
 sequence that nonetheless encodes to more bytes than its window is refused for
 that window alone — the rest of the run continues.
+Auto mode rejects relocatable ELF objects (`ET_REL`): their executable
+sections can share virtual addresses, while the v1 worklist identifies patch
+windows by virtual address. Link the object to an executable or shared object
+before running `--auto`.
 
 Useful flags on `opt`:
 

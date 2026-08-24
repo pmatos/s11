@@ -84,7 +84,11 @@ can reconstruct *why* the window-selection rules are as conservative as they are
    (near line 1637) without rejection. The driver does not maintain a second
    mnemonic allow-list — drift between the driver and the search is thereby
    impossible, mirroring the parser-is-the-single-source-of-truth rule in
-   `CLAUDE.md`. For a fixed-width ISA, discovery scans the largest complete,
+   `CLAUDE.md`. The v1 address-only worklist accepts executable and shared-object
+   ELFs (`ET_EXEC` / `ET_DYN`) but rejects relocatable objects (`ET_REL`):
+   multiple executable sections in a relocatable object may all have
+   `sh_addr == 0`, so an `AddressWindow` cannot identify which section to read
+   or patch. For a fixed-width ISA, discovery scans the largest complete,
    instruction-aligned prefix of each executable section. ELF does not require
    `SHF_EXECINSTR` section sizes to be a multiple of the ISA's instruction
    width, so a shorter trailing suffix is ignored and reported rather than
