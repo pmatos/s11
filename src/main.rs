@@ -1070,16 +1070,75 @@ fn find_candidate_windows_with_backend<B: ElfOptimizationBackend>(
     backend: B,
     patcher: &ElfPatcher,
 ) -> Result<Vec<SectionCandidateWindows>, Box<dyn std::error::Error>> {
+    find_candidate_windows_with_detail_provider(
+        backend,
+        patcher,
+        inspect_capstone_instruction_detail,
+    )
+}
+
+/// Owned facts reduced from one borrowed Capstone detail inspection.
+///
+/// Keeping only planning inputs lets the two finder phases share the result
+/// without extending `InsnDetail`'s borrow across section processing.
+#[derive(Debug)]
+struct CapstoneInstructionFacts {
+    direct_branch_targets: Vec<u64>,
+    is_call: bool,
+    has_rip_relative_memory: bool,
+}
+
+fn inspect_capstone_instruction_detail(
+    cs: &Capstone,
+    instruction: &capstone::Insn<'_>,
+    section_name: &str,
+) -> Result<CapstoneInstructionFacts, Box<dyn std::error::Error>> {
+    let detail = cs
+        .insn_detail(instruction)
+        .map_err(|error| instruction_detail_error(section_name, instruction.address(), error))?;
+    Ok(CapstoneInstructionFacts {
+        direct_branch_targets: capstone_detail_direct_branch_targets(&detail),
+        is_call: capstone_detail_is_call(&detail),
+        has_rip_relative_memory: capstone_detail_has_rip_relative_memory(&detail),
+    })
+}
+
+fn instruction_detail_error(
+    section_name: &str,
+    instruction_address: u64,
+    error: capstone::Error,
+) -> String {
+    format!(
+        "failed to inspect instruction detail in executable section '{}' at 0x{:x}: {}",
+        section_name, instruction_address, error
+    )
+}
+
+#[cfg_attr(not(test), allow(dead_code))]
+fn find_candidate_windows_with_detail_provider<B, F>(
+    backend: B,
+    patcher: &ElfPatcher,
+    mut inspect_detail: F,
+) -> Result<Vec<SectionCandidateWindows>, Box<dyn std::error::Error>>
+where
+    B: ElfOptimizationBackend,
+    F: FnMut(
+        &Capstone,
+        &capstone::Insn<'_>,
+        &str,
+    ) -> Result<CapstoneInstructionFacts, Box<dyn std::error::Error>>,
+{
     let cs = backend.disassembler()?;
     let indirect_targets = patcher.indirect_control_flow_targets()?;
 
     // Phase 1: disassemble every executable section's complete-instruction
-    // prefix once, fail closed on any partial decode within that prefix, and
-    // accumulate every direct branch/call target across the whole binary into
-    // one set. The set must be global and complete before any window is built:
-    // a branch (backward, or in another section) can name an address inside a
-    // run we have not yet seen, so a single forward pass cannot know all targets
-    // in time to split correctly (ADR-0009 Decision 4/5).
+    // prefix once, fail closed on any partial decode within that prefix, inspect
+    // each instruction's detail once, and reduce it to an owned planning
+    // descriptor while accumulating every direct branch/call target across the
+    // whole binary into one set. The set must be global and complete before any
+    // window is built: a branch (backward, or in another section) can name an
+    // address inside a run we have not yet seen, so a single forward pass cannot
+    // know all targets in time to split correctly (ADR-0009 Decision 4/5).
     let mut decoded_sections = Vec::new();
     let mut branch_targets = std::collections::HashSet::new();
 
@@ -1122,7 +1181,7 @@ fn find_candidate_windows_with_backend<B: ElfOptimizationBackend>(
             );
         }
         if disassembly_end == section.virtual_addr {
-            decoded_sections.push((section, None));
+            decoded_sections.push((section, Vec::new()));
             continue;
         }
         let section_window = AddressWindow {
@@ -1163,47 +1222,11 @@ fn find_candidate_windows_with_backend<B: ElfOptimizationBackend>(
         )
         .map_err(|error| format!("executable section '{}': {}", section.name, error))?;
 
+        let mut planned = Vec::with_capacity(instructions.len());
         for instruction in instructions.iter() {
-            let detail = cs.insn_detail(instruction).map_err(|error| {
-                format!(
-                    "failed to inspect instruction detail in executable section '{}' at 0x{:x}: {}",
-                    section.name,
-                    instruction.address(),
-                    error
-                )
-            })?;
-            branch_targets.extend(capstone_detail_direct_branch_targets(&detail));
-        }
+            let facts = inspect_detail(&cs, instruction, &section.name)?;
+            branch_targets.extend(facts.direct_branch_targets);
 
-        decoded_sections.push((section, Some(instructions)));
-    }
-
-    // Phase 2: build maximal supported straight-line runs, splitting a run
-    // whenever an instruction other than the run's first sits at a collected
-    // branch target. In-place patching pins the window *end* but moves interior
-    // instruction addresses, so a target inside a rewritten window would be
-    // jumped into mid-instruction; a window may *begin* at a target (that
-    // address is fixed) but must not contain one past its first instruction.
-    //
-    // Splitting on instruction boundaries is sound for direct branches: linear
-    // disassembly always places a direct target on an instruction start, so a
-    // collected target that lands inside a run coincides with a boundary in
-    // that run. Mid-instruction, overlapping, and indirect targets are out of
-    // scope and are issue #619's soundness gate.
-    let mut section_results = Vec::new();
-    for (section, instructions) in decoded_sections {
-        // Classify each decoded instruction into a lightweight descriptor, then
-        // hand the whole section to the pure `candidate_windows` planner. The
-        // Capstone group/operand inspection and the overflow-checked end
-        // computation stay here in the adapter; the soundness-critical
-        // run-splitting rules (ADR-0009 Decision 4/5) live behind the seam.
-        let mut planned =
-            Vec::with_capacity(instructions.as_ref().map_or(0, |decoded| decoded.len()));
-        for instruction in instructions
-            .as_ref()
-            .into_iter()
-            .flat_map(|decoded| decoded.iter())
-        {
             let instruction_end = instruction
                 .address()
                 .checked_add(
@@ -1217,19 +1240,8 @@ fn find_candidate_windows_with_backend<B: ElfOptimizationBackend>(
                         instruction.address()
                     )
                 })?;
-
-            let detail = cs.insn_detail(instruction).map_err(|error| {
-                format!(
-                    "failed to inspect instruction detail in executable section '{}' at 0x{:x}: {}",
-                    section.name,
-                    instruction.address(),
-                    error
-                )
-            })?;
-
-            let role = if capstone_detail_is_call(&detail)
-                || (backend.arch() == DetectedArch::X86_64
-                    && capstone_detail_has_rip_relative_memory(&detail))
+            let role = if facts.is_call
+                || (backend.arch() == DetectedArch::X86_64 && facts.has_rip_relative_memory)
             {
                 WindowRole::Excluded
             } else {
@@ -1239,7 +1251,6 @@ fn find_candidate_windows_with_backend<B: ElfOptimizationBackend>(
                     Err(_) => WindowRole::Excluded,
                 }
             };
-
             planned.push(WindowInstruction::new(
                 instruction.address(),
                 instruction_end,
@@ -1247,6 +1258,24 @@ fn find_candidate_windows_with_backend<B: ElfOptimizationBackend>(
             ));
         }
 
+        decoded_sections.push((section, planned));
+    }
+
+    // Phase 2: build maximal supported straight-line runs from the cached owned
+    // descriptors, splitting a run whenever an instruction other than the run's
+    // first sits at a collected branch target. In-place patching pins the window
+    // *end* but moves interior instruction addresses, so a target inside a
+    // rewritten window would be jumped into mid-instruction; a window may
+    // *begin* at a target (that address is fixed) but must not contain one past
+    // its first instruction.
+    //
+    // Splitting on instruction boundaries is sound for direct branches: linear
+    // disassembly always places a direct target on an instruction start, so a
+    // collected target that lands inside a run coincides with a boundary in
+    // that run. Mid-instruction, overlapping, and indirect targets are out of
+    // scope and are issue #619's soundness gate.
+    let mut section_results = Vec::new();
+    for (section, planned) in decoded_sections {
         let filtered = refuse_windows_with_interior_targets(
             plan_candidate_windows(&planned, &branch_targets),
             &indirect_targets,
@@ -3692,6 +3721,40 @@ mod cli_helper_tests {
         assert_eq!(sections[0].candidates[0].end, 0x1004);
         assert_eq!(sections[0].candidates[1].start, 0x100b);
         assert_eq!(sections[0].candidates[1].end, 0x100f);
+    }
+
+    #[test]
+    fn candidate_windows_inspect_detail_once_per_decoded_instruction() {
+        // add rax, 1; call next; lea rax, [rip]; sub rbx, 1
+        let bytes = [
+            0x48, 0x83, 0xc0, 0x01, 0xe8, 0x00, 0x00, 0x00, 0x00, 0x48, 0x8d, 0x05, 0x00, 0x00,
+            0x00, 0x00, 0x48, 0x83, 0xeb, 0x01,
+        ];
+        let elf_bytes = build_minimal_elf64(&bytes, 0x1000, elf::abi::EM_X86_64);
+        let input = TempFile::new_bytes("s11-candidate-detail-cache", "elf", &elf_bytes);
+        let patcher = ElfPatcher::new(input.path()).expect("x86-64 ELF should parse");
+        let mut detail_inspections = 0usize;
+
+        let sections = find_candidate_windows_with_detail_provider(
+            X86OptimizationBackend::new(X86Arch::X86_64),
+            &patcher,
+            |cs, instruction, section_name| {
+                detail_inspections += 1;
+                inspect_capstone_instruction_detail(cs, instruction, section_name)
+            },
+        )
+        .expect("candidate discovery should succeed");
+
+        assert_eq!(
+            detail_inspections, 4,
+            "detail extraction should run once for each of the four decoded instructions"
+        );
+        assert_eq!(sections.len(), 1);
+        assert_eq!(sections[0].candidates.len(), 2);
+        assert_eq!(sections[0].candidates[0].start, 0x1000);
+        assert_eq!(sections[0].candidates[0].end, 0x1004);
+        assert_eq!(sections[0].candidates[1].start, 0x1010);
+        assert_eq!(sections[0].candidates[1].end, 0x1014);
     }
 
     #[test]
