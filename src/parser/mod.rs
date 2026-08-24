@@ -2636,6 +2636,14 @@ mod tests {
     }
 
     #[test]
+    fn parse_line_skips_inline_label_before_directive() {
+        assert!(matches!(
+            parse_line("_start: .text").unwrap(),
+            LineResult::Skip
+        ));
+    }
+
+    #[test]
     fn parse_line_accepts_multiple_inline_labels_before_instruction() {
         assert!(matches!(
             parse_line("outer: inner:").unwrap(),
