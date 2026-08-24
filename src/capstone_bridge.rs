@@ -192,7 +192,7 @@ pub fn convert_capstone_op(mnemonic: &str, op_str: &str) -> ConvertOutcome {
 #[cfg(test)]
 mod tests {
     use super::{ConvertOutcome, convert_capstone_op};
-    use crate::ir::{self, Instruction, Register};
+    use crate::ir::{self, Instruction, Operand, Register};
 
     #[test]
     fn convert_capstone_op_reencodes_wide_immediate_mov_as_movz() {
@@ -220,6 +220,27 @@ mod tests {
             match convert_capstone_op("mov", ops) {
                 ConvertOutcome::Instruction(instr) => assert_eq!(instr, expected),
                 other => panic!("expected MovZ for `mov {ops}`, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn convert_capstone_op_normalizes_mov_sp_aliases_as_add_zero() {
+        for (ops, rd, rn) in [
+            ("x29, sp", Register::X29, Register::SP),
+            ("sp, x0", Register::SP, Register::X0),
+            ("sp, sp", Register::SP, Register::SP),
+        ] {
+            match convert_capstone_op("mov", ops) {
+                ConvertOutcome::Instruction(instr) => assert_eq!(
+                    instr,
+                    Instruction::Add {
+                        rd,
+                        rn,
+                        rm: Operand::Immediate(0),
+                    }
+                ),
+                other => panic!("expected Add for `mov {ops}`, got {other:?}"),
             }
         }
     }

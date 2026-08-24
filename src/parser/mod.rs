@@ -406,7 +406,12 @@ fn split_operands(operands_str: &str) -> Vec<&str> {
     parts
 }
 
-/// Parse a MOV instruction
+/// Parse a MOV instruction.
+///
+/// The architectural register move uses an ORR encoding whose register slots
+/// do not admit SP. GNU/LLVM spell moves to or from SP as `mov` aliases for
+/// `add <Xd|SP>, <Xn|SP>, #0`, so lower those aliases before the encodability
+/// gate sees them.
 fn parse_mov(operands: &[&str]) -> Result<Instruction, String> {
     if operands.len() != 2 {
         return Err(format!("mov requires 2 operands, got {}", operands.len()));
@@ -441,6 +446,11 @@ fn parse_mov(operands: &[&str]) -> Result<Instruction, String> {
     let src = parse_operand(operands[1])?;
 
     match src {
+        Operand::Register(rn) if rd == Register::SP || rn == Register::SP => Ok(Instruction::Add {
+            rd,
+            rn,
+            rm: Operand::Immediate(0),
+        }),
         Operand::Register(rn) => Ok(Instruction::MovReg { rd, rn }),
         Operand::Immediate(imm) => Ok(Instruction::MovImm { rd, imm }),
         Operand::ShiftedRegister { .. } | Operand::ExtendedRegister { .. } => {
@@ -2574,6 +2584,21 @@ mod tests {
                 assert_eq!(imm, 42);
             }
             _ => panic!("expected MovImm"),
+        }
+    }
+
+    #[test]
+    fn parse_mov_to_sp_as_add_zero() {
+        match parse_line("mov sp, x0").unwrap() {
+            LineResult::Instruction(instr) => assert_eq!(
+                instr,
+                Instruction::Add {
+                    rd: Register::SP,
+                    rn: Register::X0,
+                    rm: Operand::Immediate(0),
+                }
+            ),
+            other => panic!("expected Add for `mov sp, x0`, got {other:?}"),
         }
     }
 
