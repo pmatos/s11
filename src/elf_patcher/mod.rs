@@ -258,6 +258,15 @@ impl ElfPatcher {
         let offset_in_section = window.start - section.virtual_addr;
         let file_offset = (section.file_offset + offset_in_section) as usize;
 
+        // A section header may name a range past the end of the file. Fail
+        // closed rather than panicking on the slice below.
+        let window_file_end = file_offset
+            .checked_add(window_size)
+            .ok_or("Address window extends beyond file")?;
+        if window_file_end > self.file_data.len() {
+            return Err("Address window extends beyond file".into());
+        }
+
         // Apply the patch
         let patch_end = file_offset + new_code.len();
         self.file_data[file_offset..patch_end].copy_from_slice(new_code);

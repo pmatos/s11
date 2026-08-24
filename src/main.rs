@@ -1078,6 +1078,10 @@ impl ElfOptimizationBackend for X86OptimizationBackend {
 struct SectionCandidateWindows {
     section: TextSection,
     candidates: Vec<AddressWindow>,
+    /// Addresses in this section whose control-transfer target Capstone cannot
+    /// resolve statically. Non-empty means the whole-binary driver must refuse
+    /// the section until indirect target recovery (issue #619) lands.
+    indirect_control_flow: Vec<u64>,
 }
 
 #[cfg_attr(not(test), allow(dead_code))]
@@ -1158,6 +1162,7 @@ fn find_candidate_windows_with_backend<B: ElfOptimizationBackend>(
         )
         .map_err(|error| format!("executable section '{}': {}", section.name, error))?;
 
+        let mut indirect_control_flow = Vec::new();
         for instruction in instructions.iter() {
             let detail = cs.insn_detail(instruction).map_err(|error| {
                 format!(
@@ -1168,9 +1173,12 @@ fn find_candidate_windows_with_backend<B: ElfOptimizationBackend>(
                 )
             })?;
             branch_targets.extend(capstone_detail_direct_branch_targets(&detail));
+            if capstone_detail_is_indirect_control_flow(&detail) {
+                indirect_control_flow.push(instruction.address());
+            }
         }
 
-        decoded_sections.push((section, instructions));
+        decoded_sections.push((section, instructions, indirect_control_flow));
     }
 
     // Phase 2: build maximal supported straight-line runs, splitting a run
@@ -1186,7 +1194,7 @@ fn find_candidate_windows_with_backend<B: ElfOptimizationBackend>(
     // that run. Mid-instruction, overlapping, and indirect targets are out of
     // scope and are issue #619's soundness gate.
     let mut section_results = Vec::new();
-    for (section, instructions) in decoded_sections {
+    for (section, instructions, indirect_control_flow) in decoded_sections {
         // Classify each decoded instruction into a lightweight descriptor, then
         // hand the whole section to the pure `candidate_windows` planner. The
         // Capstone group/operand inspection and the overflow-checked end
@@ -1240,6 +1248,7 @@ fn find_candidate_windows_with_backend<B: ElfOptimizationBackend>(
         section_results.push(SectionCandidateWindows {
             candidates: plan_candidate_windows(&planned, &branch_targets),
             section,
+            indirect_control_flow,
         });
     }
 
@@ -1287,7 +1296,6 @@ fn capstone_detail_has_rip_relative_memory(detail: &capstone::InsnDetail<'_>) ->
 /// over-collected: an extra target can only cause an extra window split, never
 /// an unsound admit, and a 0..=63 bit index never coincides with a real
 /// in-section code address.
-#[cfg_attr(not(test), allow(dead_code))]
 fn capstone_detail_direct_branch_targets(detail: &capstone::InsnDetail<'_>) -> Vec<u64> {
     let jump =
         capstone::InsnGroupId(capstone::InsnGroupType::CS_GRP_JUMP as capstone::InsnGroupIdInt);
@@ -1329,41 +1337,19 @@ fn capstone_detail_is_indirect_control_flow(detail: &capstone::InsnDetail<'_>) -
     transfers_control && capstone_detail_direct_branch_targets(detail).is_empty()
 }
 
-fn indirect_control_flow_addresses(
-    patcher: &ElfPatcher,
-    section: &TextSection,
-    cs: &Capstone,
-) -> Result<Vec<u64>, String> {
-    let end = section
-        .virtual_addr
-        .checked_add(section.size)
-        .ok_or_else(|| format!("executable section '{}' range overflows", section.name))?;
-    let bytes = patcher
-        .get_instructions_in_window(&AddressWindow {
-            start: section.virtual_addr,
-            end,
-        })
-        .map_err(|error| error.to_string())?;
-    let instructions = cs
-        .disasm_all(&bytes, section.virtual_addr)
-        .map_err(|error| error.to_string())?;
-    let mut addresses = Vec::new();
-    for instruction in instructions.iter() {
-        let detail = cs
-            .insn_detail(instruction)
-            .map_err(|error| error.to_string())?;
-        if capstone_detail_is_indirect_control_flow(&detail) {
-            addresses.push(instruction.address());
-        }
-    }
-    Ok(addresses)
-}
-
 struct ElfAutoOptimizationAdapter<'a, B> {
     backend: B,
     patcher: &'a mut ElfPatcher,
     binary: &'a Path,
     options: &'a OptimizationOptions,
+    /// Sections already reported as refused. Discovery reruns after every
+    /// accepted rewrite, so without this the same refusal would be logged once
+    /// per pass.
+    reported_refusals: std::collections::HashSet<String>,
+    /// Candidate windows the most recent discovery pass refused. Read after the
+    /// loop so the run summary never claims a fixpoint over a binary whose
+    /// coverage was incomplete.
+    refused_windows: usize,
 }
 
 impl<B: ElfOptimizationBackend> AutoOptimizationAdapter for ElfAutoOptimizationAdapter<'_, B> {
@@ -1375,20 +1361,24 @@ impl<B: ElfOptimizationBackend> AutoOptimizationAdapter for ElfAutoOptimizationA
             .disassembler()
             .map_err(|error| error.to_string())?;
         let mut work = Vec::new();
+        self.refused_windows = 0;
 
         for section in discovered {
-            let indirect = indirect_control_flow_addresses(self.patcher, &section.section, &cs)?;
-            if !indirect.is_empty() {
-                eprintln!(
-                    "Auto mode refused executable section '{}' because indirect control flow at {} may have hidden targets; skipped {} candidate window(s) until issue #619 is implemented.",
-                    section.section.name,
-                    indirect
-                        .iter()
-                        .map(|address| format!("0x{address:x}"))
-                        .collect::<Vec<_>>()
-                        .join(", "),
-                    section.candidates.len(),
-                );
+            if !section.indirect_control_flow.is_empty() {
+                self.refused_windows += section.candidates.len();
+                if self.reported_refusals.insert(section.section.name.clone()) {
+                    eprintln!(
+                        "Auto mode refused executable section '{}' because indirect control flow at {} may have hidden targets; skipped {} candidate window(s) until issue #619 is implemented.",
+                        section.section.name,
+                        section
+                            .indirect_control_flow
+                            .iter()
+                            .map(|address| format!("0x{address:x}"))
+                            .collect::<Vec<_>>()
+                            .join(", "),
+                        section.candidates.len(),
+                    );
+                }
                 continue;
             }
             for window in section.candidates {
@@ -1491,15 +1481,16 @@ fn run_auto_optimization_with_backend<B: ElfOptimizationBackend>(
     println!("Algorithm: {:?}", options.algorithm);
     println!("Global window-search budget: {}", options.max_windows);
 
-    let summary = {
-        let mut adapter = ElfAutoOptimizationAdapter {
-            backend,
-            patcher: image,
-            binary,
-            options,
-        };
-        drive_auto_optimization(&mut adapter, options.max_windows)?
+    let mut adapter = ElfAutoOptimizationAdapter {
+        backend,
+        patcher: image,
+        binary,
+        options,
+        reported_refusals: std::collections::HashSet::new(),
+        refused_windows: 0,
     };
+    let summary = drive_auto_optimization(&mut adapter, options.max_windows)?;
+    let refused_windows = adapter.refused_windows;
 
     image.write_to(output_path)?;
     println!("Created optimized binary: {}", output_path.display());
@@ -1512,7 +1503,14 @@ fn run_auto_optimization_with_backend<B: ElfOptimizationBackend>(
             "Auto window budget exhausted; skipped {} candidate window(s) due to budget.",
             summary.budget_skipped,
         );
-    } else if summary.fixpoint_reached {
+    }
+    if refused_windows > 0 {
+        println!(
+            "Auto coverage is incomplete: refused {} candidate window(s) in executable section(s) with indirect control flow.",
+            refused_windows,
+        );
+    }
+    if summary.fixpoint_reached && refused_windows == 0 {
         println!("Auto optimization reached a fixpoint (zero rewrites in the final pass).");
     }
 
@@ -2944,6 +2942,8 @@ mod cli_helper_tests {
             patcher: &mut patcher,
             binary: input.path(),
             options: &options,
+            reported_refusals: std::collections::HashSet::new(),
+            refused_windows: 0,
         };
 
         let candidates = adapter
@@ -2953,6 +2953,10 @@ mod cli_helper_tests {
         assert!(
             candidates.is_empty(),
             "all windows in an indirect-flow section must be refused"
+        );
+        assert!(
+            adapter.refused_windows > 0,
+            "refused coverage must be accounted for, not silently dropped"
         );
     }
 
