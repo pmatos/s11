@@ -255,11 +255,16 @@ impl ElfPatcher {
         }
 
         // Calculate file offset for the patch
+        // A section header may name a range past the end of the file, and
+        // `sh_offset` is attacker-controlled. Keep every step checked so a
+        // crafted header fails closed rather than wrapping into a valid-looking
+        // offset or panicking on the slice below.
         let offset_in_section = window.start - section.virtual_addr;
-        let file_offset = (section.file_offset + offset_in_section) as usize;
-
-        // A section header may name a range past the end of the file. Fail
-        // closed rather than panicking on the slice below.
+        let file_offset = section
+            .file_offset
+            .checked_add(offset_in_section)
+            .and_then(|offset| usize::try_from(offset).ok())
+            .ok_or("Address window extends beyond file")?;
         let window_file_end = file_offset
             .checked_add(window_size)
             .ok_or("Address window extends beyond file")?;
