@@ -3882,8 +3882,20 @@ mod cli_helper_tests {
 
     #[test]
     fn direct_branch_targets_overcollect_aarch64_tbz_tbnz_bit_positions() {
+        // The bit-position immediate is *tolerated* conservatively, not required:
+        // see `capstone_detail_direct_branch_targets` for why an extra target is
+        // harmless. Narrowing the scan is allowed; this only pins today's shape.
         let cs = aarch64_test_capstone();
         for (mnemonic, instruction, bit) in [
+            (
+                "tbz",
+                Instruction::Tbz {
+                    rt: Register::X0,
+                    bit: 0,
+                    target: s11::ir::LabelId(0x1100),
+                },
+                0,
+            ),
             (
                 "tbz",
                 Instruction::Tbz {
@@ -3907,12 +3919,22 @@ mod cli_helper_tests {
             let disassembly = cs
                 .disasm_all(&bytes, 0x1000)
                 .unwrap_or_else(|_| panic!("{mnemonic} fixture should disassemble"));
-            let instruction = disassembly
+            assert_eq!(
+                disassembly.len(),
+                1,
+                "{mnemonic} fixture should decode to exactly one instruction"
+            );
+            let decoded = disassembly
                 .iter()
                 .next()
                 .unwrap_or_else(|| panic!("fixture should contain {mnemonic}"));
+            assert_eq!(
+                decoded.mnemonic(),
+                Some(mnemonic),
+                "fixture must decode as {mnemonic}, not the sibling test-branch form"
+            );
             let detail = cs
-                .insn_detail(instruction)
+                .insn_detail(decoded)
                 .unwrap_or_else(|_| panic!("{mnemonic} detail should be available"));
 
             assert_eq!(
