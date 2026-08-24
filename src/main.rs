@@ -1203,7 +1203,7 @@ fn instruction_detail_error(
 
 #[cfg_attr(not(test), allow(dead_code))]
 fn find_candidate_windows_with_detail_provider<B, F>(
-    backend: B,
+    backend: &B,
     patcher: &ElfPatcher,
     mut inspect_detail: F,
 ) -> Result<Vec<SectionCandidateWindows>, Box<dyn std::error::Error>>
@@ -4250,7 +4250,7 @@ mod cli_helper_tests {
         let mut detail_inspections = 0usize;
 
         let sections = find_candidate_windows_with_detail_provider(
-            X86OptimizationBackend::new(X86Arch::X86_64),
+            &X86OptimizationBackend::new(X86Arch::X86_64),
             &patcher,
             |cs, instruction, section_name| {
                 detail_inspections += 1;
