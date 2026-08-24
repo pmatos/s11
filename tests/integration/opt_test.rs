@@ -371,6 +371,23 @@ fn test_opt_rejects_missing_output_parent_before_search() {
     assert!(!output_path.exists(), "bad output must not be created");
 }
 
+#[test]
+fn test_opt_rejects_trailing_separator_output_before_search() {
+    let binary = get_binary_path();
+    let temp_dir = tempfile::tempdir().expect("create fixture directory");
+    let mut output_arg = temp_dir.path().join("result").into_os_string();
+    output_arg.push(std::path::MAIN_SEPARATOR_STR);
+    let output_path = PathBuf::from(output_arg);
+
+    assert_opt_output_rejected_before_search(
+        &binary,
+        Some(&output_path),
+        &["output path", "must name a file"],
+    );
+
+    assert!(!output_path.exists(), "bad output must not be created");
+}
+
 #[cfg(unix)]
 #[test]
 fn test_opt_rejects_unwritable_output_parent_before_search() {
@@ -1443,6 +1460,25 @@ fn test_opt_custom_output_copies_input_when_no_improvement_is_found() {
         fs::read(&test_elf).expect("read input"),
         "no-improvement output should exactly copy the input ELF"
     );
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+
+        let input_mode = fs::metadata(&test_elf)
+            .expect("stat input")
+            .permissions()
+            .mode()
+            & 0o7777;
+        let output_mode = fs::metadata(&custom_output)
+            .expect("stat unchanged output")
+            .permissions()
+            .mode()
+            & 0o7777;
+        assert_eq!(
+            output_mode, input_mode,
+            "no-improvement output should preserve executable permissions"
+        );
+    }
     assert!(
         !derived_output.exists(),
         "explicit -o must not also create the derived sibling"

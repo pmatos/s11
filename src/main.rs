@@ -237,8 +237,9 @@ enum Commands {
             "result file; when omitted the result is written next to the input as ",
             "<stem>_optimized.<ext>.\n\n",
             "Output policy: Existing output files are refused unless --force is passed; ",
-            "--force never permits replacing the input itself, and a symlink or directory ",
-            "at the output path is always refused. A successful run always writes the ",
+            "--force never permits replacing the input itself. Any non-regular filesystem entry ",
+            "(including a symlink or directory) at the output path is always refused. ",
+            "A successful run always writes the ",
             "result file; when no improvement is found the result is a byte copy of the ",
             "input on x86, and a re-encoding of the searched window on AArch64.\n\n",
             "Note: enumerative search scales with the generated instruction families ",
@@ -3295,6 +3296,10 @@ mod cli_helper_tests {
         assert!(
             opt_help.contains("Existing output files are refused unless --force is passed"),
             "opt help should document the overwrite policy:\n{opt_help}"
+        );
+        assert!(
+            opt_help.contains("Any non-regular filesystem entry"),
+            "opt help should document rejection of special output files:\n{opt_help}"
         );
         assert!(
             opt_help.contains("A successful run always writes the result file"),
