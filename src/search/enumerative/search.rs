@@ -1207,6 +1207,43 @@ mod tests {
     }
 
     #[test]
+    fn empty_instruction_set_returns_no_optimization_without_evaluating_candidates() {
+        use crate::isa::{RiscV64, RiscVInstruction, RiscVRegister};
+
+        let target = vec![
+            RiscVInstruction::Addi {
+                rd: RiscVRegister::X1,
+                rs1: RiscVRegister::X1,
+                imm: 1,
+            },
+            RiscVInstruction::Addi {
+                rd: RiscVRegister::X2,
+                rs1: RiscVRegister::X2,
+                imm: 1,
+            },
+        ];
+        let config = SearchConfig::default().with_timeout_option(None);
+        let mut search = EnumerativeSearch::<RiscV64>::new();
+
+        assert!(
+            search.candidate_pool_for_config(&config).is_empty(),
+            "precondition: the test RISC-V backend must generate no candidate instructions"
+        );
+
+        let result = search.search(&target, &(), &config);
+
+        assert!(!result.found_optimization);
+        assert!(result.optimized_sequence.is_none());
+        assert_eq!(result.original_sequence, target);
+        assert_eq!(result.statistics.candidates_evaluated, 0);
+        assert_eq!(result.statistics.smt_queries, 0);
+        assert_eq!(
+            result.statistics.best_cost_found,
+            result.statistics.original_cost
+        );
+    }
+
+    #[test]
     fn statistics_aggregate_smt_elapsed() {
         // Reuse the same length-2 target as `collapses_mov_add_into_single_add`:
         // it reaches the equivalent `add x0, x1, #1` candidate promptly while
