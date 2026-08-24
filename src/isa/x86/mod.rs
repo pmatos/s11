@@ -18,6 +18,7 @@
 
 mod encoding;
 mod stochastic;
+pub(crate) use encoding::x86_extension_source_ok;
 pub use stochastic::{
     X86InstructionGenerator, X86Mutator, default_x86_immediates, default_x86_registers,
 };
@@ -391,19 +392,20 @@ impl X86Register {
         base.canonical().with_view(self.view)
     }
 
-    /// True when this GPR can be named as an operand while assembling in
-    /// `mode`. The extended registers R8..R15 require a REX prefix that does
-    /// not exist in 32-bit mode, so only the eight legacy GPRs are addressable
-    /// there; all sixteen are addressable in 64-bit mode. This is the shared
-    /// source of truth for the x86-32 register-legality constraint that the
-    /// search backends' register pools filter through; the assembler
-    /// `can_assemble` prefilter enforces the same rule via the width-aware
-    /// `x86_register_ok`.
+    /// True when this individual GPR view has an encoding in `mode`.
+    ///
+    /// In 32-bit mode, indices 0..=7 are available, but low-byte views are
+    /// limited to the legacy AL/CL/DL/BL encodings at indices 0..=3. In 64-bit
+    /// mode, all sixteen GPRs and the REX-only low-byte views SPL/BPL/SIL/DIL
+    /// are available. Whole-instruction constraints, such as pairing a legacy
+    /// high-byte register with a REX-requiring operand, remain the encoding
+    /// prefilter's responsibility.
     pub fn is_available_in(self, mode: crate::assembler::x86::X86Mode) -> bool {
-        match mode {
-            crate::assembler::x86::X86Mode::Mode64 => true,
-            crate::assembler::x86::X86Mode::Mode32 => self.index().is_some_and(|i| i < 8),
-        }
+        let mode_width = match mode {
+            crate::assembler::x86::X86Mode::Mode64 => 64,
+            crate::assembler::x86::X86Mode::Mode32 => 32,
+        };
+        encoding::x86_register_ok(self, mode_width)
     }
 }
 
@@ -2033,12 +2035,17 @@ mod tests {
     fn x86_register_availability_by_mode() {
         use crate::assembler::x86::X86Mode;
 
-        // 64-bit mode addresses all sixteen GPRs, including the extended file.
+        // 64-bit mode addresses all sixteen GPRs, including the extended file
+        // and the REX-only low-byte views.
         for r in [
             X86Register::RAX,
             X86Register::RDI,
             X86Register::R8,
             X86Register::R15,
+            X86Register::SPL,
+            X86Register::BPL,
+            X86Register::SIL,
+            X86Register::DIL,
         ] {
             assert!(
                 r.is_available_in(X86Mode::Mode64),
@@ -2047,9 +2054,18 @@ mod tests {
             );
         }
 
-        // 32-bit mode has no encoding for the extended registers R8..R15, but
-        // the eight legacy GPRs remain addressable.
-        for r in [X86Register::RAX, X86Register::RSP, X86Register::RDI] {
+        // 32-bit mode has no encoding for the extended registers R8..R15 or
+        // the REX-only low-byte views SPL/BPL/SIL/DIL. Native views of the
+        // eight legacy GPRs and the legacy low-byte views remain addressable.
+        for r in [
+            X86Register::RAX,
+            X86Register::RSP,
+            X86Register::RDI,
+            X86Register::AL,
+            X86Register::CL,
+            X86Register::DL,
+            X86Register::BL,
+        ] {
             assert!(
                 r.is_available_in(X86Mode::Mode32),
                 "{:?} must be available in 32-bit mode",
@@ -2061,6 +2077,10 @@ mod tests {
             X86Register::R9,
             X86Register::R12,
             X86Register::R15,
+            X86Register::SPL,
+            X86Register::BPL,
+            X86Register::SIL,
+            X86Register::DIL,
         ] {
             assert!(
                 !r.is_available_in(X86Mode::Mode32),
