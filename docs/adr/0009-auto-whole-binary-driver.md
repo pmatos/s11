@@ -84,7 +84,14 @@ can reconstruct *why* the window-selection rules are as conservative as they are
    (near line 1637) without rejection. The driver does not maintain a second
    mnemonic allow-list — drift between the driver and the search is thereby
    impossible, mirroring the parser-is-the-single-source-of-truth rule in
-   `CLAUDE.md`.
+   `CLAUDE.md`. For a fixed-width ISA, discovery scans the largest complete,
+   instruction-aligned prefix of each executable section. ELF does not require
+   `SHF_EXECINSTR` section sizes to be a multiple of the ISA's instruction
+   width, so a shorter trailing suffix is ignored and reported rather than
+   aborting discovery for the valid prefix. Section starts and every actual
+   candidate window remain instruction-aligned, and the scanned prefix must
+   still be fully decoded; variable-width ISAs continue to scan through the
+   section's true end and fail closed on a partial final instruction.
 
 4. **A window is admissible only if no instruction in its interior is a branch
    target.** The window *end* is pinned by NOP padding, but interior instruction

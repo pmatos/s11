@@ -81,9 +81,10 @@ s11 opt --auto path/to/binary -o path/to/optimized \
 
 Auto mode applies accepted rewrites to an in-memory image and writes it once at
 the end. Each rewrite must strictly lower `--cost-metric`; discovery restarts
-after a rewrite and stops at a rewrite-free pass. Until indirect target recovery
-in issue #619 lands, an executable section containing indirect control flow is
-conservatively skipped and reported.
+after a rewrite and stops at a rewrite-free pass. A candidate window whose
+interior contains an indirect target (named by a relocation, or stored as a
+code pointer in `.rodata`/`.data.rel.ro`) is conservatively refused, and the
+refused count is reported so suppressed coverage is never silent.
 
 Useful flags on `opt`:
 

@@ -129,6 +129,44 @@ pub fn plan_candidate_windows(
     candidates
 }
 
+/// Result of applying ADR-0009's conservative indirect-target refusal rule to
+/// already-planned candidate windows.
+#[derive(Debug)]
+pub struct IndirectTargetFilterResult {
+    /// Candidate windows that contain no indirect target in their interior.
+    pub admitted: Vec<AddressWindow>,
+    /// Number of complete windows suppressed for indirect-target reasons.
+    pub refused: usize,
+}
+
+/// Refuse every candidate whose strict interior contains an indirect target.
+///
+/// Direct targets split runs at known instruction boundaries. Indirect targets
+/// are deliberately different: ADR-0009 Decision 5 requires conservative
+/// refusal, so the entire candidate is dropped rather than split. A target at
+/// `window.start` is safe because that address remains fixed; a target at the
+/// exclusive `window.end` is outside the window.
+pub fn refuse_windows_with_interior_targets(
+    candidates: Vec<AddressWindow>,
+    indirect_targets: &HashSet<u64>,
+) -> IndirectTargetFilterResult {
+    let mut admitted = Vec::with_capacity(candidates.len());
+    let mut refused = 0usize;
+
+    for candidate in candidates {
+        let contains_indirect_target = indirect_targets
+            .iter()
+            .any(|target| candidate.start < *target && *target < candidate.end);
+        if contains_indirect_target {
+            refused += 1;
+        } else {
+            admitted.push(candidate);
+        }
+    }
+
+    IndirectTargetFilterResult { admitted, refused }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -242,5 +280,24 @@ mod tests {
             bounds(&plan_candidate_windows(&stream, &targets(&[]))),
             vec![(0x1000, 0x1008), (0x100c, 0x1014), (0x1018, 0x101c)],
         );
+    }
+
+    #[test]
+    fn indirect_interior_target_refuses_whole_window_and_counts_it() {
+        let candidates = vec![
+            AddressWindow {
+                start: 0x1000,
+                end: 0x1010,
+            },
+            AddressWindow {
+                start: 0x2000,
+                end: 0x2010,
+            },
+        ];
+
+        let result = refuse_windows_with_interior_targets(candidates, &targets(&[0x1004, 0x2000]));
+
+        assert_eq!(result.refused, 1);
+        assert_eq!(bounds(&result.admitted), vec![(0x2000, 0x2010)]);
     }
 }

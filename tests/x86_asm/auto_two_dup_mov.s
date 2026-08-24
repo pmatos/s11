@@ -2,8 +2,8 @@
 //
 // `push rbx` is deliberately outside s11's x86 IR subset, so candidate
 // discovery splits the two duplicate-MOV pairs into distinct windows without
-// introducing indirect control flow (which auto mode conservatively gates
-// until issue #619 lands).
+// introducing indirect control flow (whose targets ADR-0009 Decision 5 makes
+// auto mode refuse conservatively).
 .intel_syntax noprefix
 .text
 .globl _start
