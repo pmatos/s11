@@ -39,6 +39,11 @@ pub trait AutoOptimizationAdapter {
 }
 
 /// Why a whole-binary run stopped.
+///
+/// `Fixpoint` is the `Default` only so `AutoRunSummary` can derive it for a
+/// zero-work run; it is the optimistic variant, so every return path in
+/// [`drive_auto_optimization`] sets this field explicitly rather than relying
+/// on the default to be right.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum AutoTermination {
     /// A pass accepted no rewrite, so the image is at a fixpoint.

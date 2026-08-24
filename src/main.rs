@@ -544,8 +544,6 @@ struct OptimizationOptions {
     // LLM options
     llm_max_calls: u32,
     llm_model: String,
-    // Whole-binary driver options
-    max_windows: usize,
 }
 
 // --- Optimization Function ---
@@ -1466,6 +1464,7 @@ fn run_auto_optimization(
     binary: &Path,
     output: Option<&Path>,
     options: &OptimizationOptions,
+    max_windows: usize,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let output_path = resolve_output_path(binary, output)?;
     let mut image = patcher.clone();
@@ -1476,6 +1475,7 @@ fn run_auto_optimization(
             binary,
             &output_path,
             options,
+            max_windows,
         ),
         DetectedArch::X86_64 | DetectedArch::X86_32 => run_auto_optimization_with_backend(
             X86OptimizationBackend::new(X86Arch::try_from(patcher.arch())?),
@@ -1483,6 +1483,7 @@ fn run_auto_optimization(
             binary,
             &output_path,
             options,
+            max_windows,
         ),
     }
 }
@@ -1493,11 +1494,12 @@ fn run_auto_optimization_with_backend<B: ElfOptimizationBackend>(
     binary: &Path,
     output_path: &Path,
     options: &OptimizationOptions,
+    max_windows: usize,
 ) -> Result<(), Box<dyn std::error::Error>> {
     println!("Auto-optimizing ELF binary: {}", binary.display());
     println!("Detected: {}", backend.arch_description());
     println!("Algorithm: {:?}", options.algorithm);
-    println!("Global window-search budget: {}", options.max_windows);
+    println!("Global window-search budget: {max_windows}");
 
     let mut adapter = ElfAutoOptimizationAdapter {
         backend,
@@ -1506,7 +1508,7 @@ fn run_auto_optimization_with_backend<B: ElfOptimizationBackend>(
         reported_refusals: std::collections::HashSet::new(),
         refused_windows: 0,
     };
-    let summary = drive_auto_optimization(&mut adapter, options.max_windows)?;
+    let summary = drive_auto_optimization(&mut adapter, max_windows)?;
     let refused_windows = adapter.refused_windows;
 
     image.write_to(output_path)?;
@@ -2611,13 +2613,12 @@ fn main() {
                 no_symbolic,
                 llm_max_calls,
                 llm_model,
-                max_windows,
             };
 
             let result = if auto {
                 // Whole-binary driver. clap already guaranteed --start-addr /
                 // --end-addr are absent (conflicts_with_all).
-                run_auto_optimization(&patcher, &binary, output.as_deref(), &options)
+                run_auto_optimization(&patcher, &binary, output.as_deref(), &options, max_windows)
             } else {
                 // Single-window path. clap's required_unless_present guarantees
                 // both addresses are present here; guard defensively rather than
@@ -2728,7 +2729,6 @@ mod cli_helper_tests {
             no_symbolic: true,
             llm_max_calls: 0,
             llm_model: "test-model".to_string(),
-            max_windows: s11::auto_driver::DEFAULT_MAX_WINDOWS,
         }
     }
 
@@ -3487,10 +3487,9 @@ mod cli_helper_tests {
         let input = TempFile::new_bytes("s11-auto-zero-budget-in", "elf", &elf);
         let output = TempFile::new_bytes("s11-auto-zero-budget-out", "elf", &[]);
         let patcher = ElfPatcher::new(input.path()).expect("synthetic ELF should parse");
-        let mut opts = options_for(Algorithm::Enumerative);
-        opts.max_windows = 0;
+        let opts = options_for(Algorithm::Enumerative);
 
-        run_auto_optimization(&patcher, input.path(), Some(output.path()), &opts)
+        run_auto_optimization(&patcher, input.path(), Some(output.path()), &opts, 0)
             .expect("zero-budget auto run should succeed");
 
         assert_eq!(

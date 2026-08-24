@@ -196,6 +196,33 @@ impl ElfPatcher {
         ))
     }
 
+    /// File-data range backing an already-validated address window.
+    ///
+    /// A section header may name a range past the end of the file, and
+    /// `sh_offset` is attacker-controlled. Keep every step checked so a crafted
+    /// header fails closed rather than wrapping into a valid-looking offset or
+    /// panicking on the slices below.
+    fn window_file_range(
+        &self,
+        window: &AddressWindow,
+        section: &TextSection,
+    ) -> Result<std::ops::Range<usize>, Box<dyn std::error::Error>> {
+        let offset_in_section = window.start - section.virtual_addr;
+        let start = section
+            .file_offset
+            .checked_add(offset_in_section)
+            .and_then(|offset| usize::try_from(offset).ok())
+            .ok_or("Address window extends beyond file")?;
+        let end = usize::try_from(window.end - window.start)
+            .ok()
+            .and_then(|length| start.checked_add(length))
+            .ok_or("Address window extends beyond file")?;
+        if end > self.file_data.len() {
+            return Err("Address window extends beyond file".into());
+        }
+        Ok(start..end)
+    }
+
     pub fn get_instructions_in_window(
         &self,
         window: &AddressWindow,
@@ -204,17 +231,7 @@ impl ElfPatcher {
             .validate_address_window(window)
             .map_err(|e| format!("Invalid address window: {}", e))?;
 
-        let offset_in_section = window.start - section.virtual_addr;
-        let length = window.end - window.start;
-
-        let file_start = section.file_offset + offset_in_section;
-        let file_end = file_start + length;
-
-        if file_end > self.file_data.len() as u64 {
-            return Err("Address window extends beyond file".into());
-        }
-
-        Ok(self.file_data[file_start as usize..file_end as usize].to_vec())
+        Ok(self.file_data[self.window_file_range(window, &section)?].to_vec())
     }
 
     pub fn create_patched_copy(
@@ -254,32 +271,16 @@ impl ElfPatcher {
             .into());
         }
 
-        // Calculate file offset for the patch
-        // A section header may name a range past the end of the file, and
-        // `sh_offset` is attacker-controlled. Keep every step checked so a
-        // crafted header fails closed rather than wrapping into a valid-looking
-        // offset or panicking on the slice below.
-        let offset_in_section = window.start - section.virtual_addr;
-        let file_offset = section
-            .file_offset
-            .checked_add(offset_in_section)
-            .and_then(|offset| usize::try_from(offset).ok())
-            .ok_or("Address window extends beyond file")?;
-        let window_file_end = file_offset
-            .checked_add(window_size)
-            .ok_or("Address window extends beyond file")?;
-        if window_file_end > self.file_data.len() {
-            return Err("Address window extends beyond file".into());
-        }
+        let window_file_range = self.window_file_range(window, &section)?;
 
         // Apply the patch
-        let patch_end = file_offset + new_code.len();
-        self.file_data[file_offset..patch_end].copy_from_slice(new_code);
+        let patch_end = window_file_range.start + new_code.len();
+        self.file_data[window_file_range.start..patch_end].copy_from_slice(new_code);
 
         // If new code is smaller than window, pad with arch-appropriate NOPs.
         if new_code.len() < window_size {
             let mut cursor = patch_end;
-            let gap_end = file_offset + window_size;
+            let gap_end = window_file_range.end;
             while cursor < gap_end {
                 let nop = self.arch.nop_sequence(gap_end - cursor);
                 debug_assert!(
