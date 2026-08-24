@@ -3881,6 +3881,49 @@ mod cli_helper_tests {
     }
 
     #[test]
+    fn direct_branch_targets_overcollect_aarch64_tbz_tbnz_bit_positions() {
+        let cs = aarch64_test_capstone();
+        for (mnemonic, instruction, bit) in [
+            (
+                "tbz",
+                Instruction::Tbz {
+                    rt: Register::X0,
+                    bit: 5,
+                    target: s11::ir::LabelId(0x1100),
+                },
+                5,
+            ),
+            (
+                "tbnz",
+                Instruction::Tbnz {
+                    rt: Register::X0,
+                    bit: 40,
+                    target: s11::ir::LabelId(0x1100),
+                },
+                40,
+            ),
+        ] {
+            let bytes = assemble_aarch64_test_bytes(&[instruction]);
+            let disassembly = cs
+                .disasm_all(&bytes, 0x1000)
+                .unwrap_or_else(|_| panic!("{mnemonic} fixture should disassemble"));
+            let instruction = disassembly
+                .iter()
+                .next()
+                .unwrap_or_else(|| panic!("fixture should contain {mnemonic}"));
+            let detail = cs
+                .insn_detail(instruction)
+                .unwrap_or_else(|_| panic!("{mnemonic} detail should be available"));
+
+            assert_eq!(
+                capstone_detail_direct_branch_targets(&detail),
+                vec![bit, 0x1100],
+                "{mnemonic} bit position and absolute branch target must both be collected"
+            );
+        }
+    }
+
+    #[test]
     fn candidate_windows_split_at_interior_direct_branch_target() {
         // add rax,1 (0x1000); add rax,1 (0x1004); add rax,1 (0x1008);
         // jne 0x1004 (0x100c). Without the target split this is one window
