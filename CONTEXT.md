@@ -75,12 +75,14 @@ check a canonical-path comparison would miss, re-run at write time because the
 search runs in between), existing targets require `--force`, a symlink or
 any other non-regular filesystem entry at the output path is refused outright,
 and a successful run always writes a result file — a byte copy of the input on
-x86 when nothing better is found. The complete result is staged in the output's
-parent, given the input ELF's permissions, and then published with no-clobber or
-atomic-replace semantics, so a raced final-component symlink is never followed
-and a partial executable is never exposed. Deriving the sibling name is
-fallible: an empty or separator-terminated explicit path, or a stem-less or
-non-UTF-8 derived name, yields an error the driver reports rather than a panic.
+x86 when nothing better is found. `ElfPatcher` retains the exact input handle it
+read, and the complete result is staged in the output's parent, given that
+handle's permissions, and then published with no-clobber or atomic-replace
+semantics. There is no destructive open of the final path, so a raced
+final-component symlink is never followed and a partial executable is never
+exposed. Deriving the sibling name is fallible: an empty or
+separator-terminated explicit path, or a stem-less or non-UTF-8 derived name,
+yields an error the driver reports rather than a panic.
 
 ### Subset hint (intentionally absent)
 The LLM prompt does **not** enumerate the maintained AArch64 subset s11's parser accepts (see [docs/capability.md](docs/capability.md)). The model is invited to use any AArch64 mnemonic it knows. Outputs that use unsupported instructions are recorded as a research signal (which mnemonics the model "wanted" to reach for), not treated as wasted calls. See ADR-0003.

@@ -5,8 +5,10 @@ use elf::parse::ParseAt;
 use elf::relocation::{Rel, Rela};
 use elf::section::{SectionHeader, SectionHeaderTable};
 use elf::symbol::{Symbol, SymbolTable};
+use same_file::Handle;
 use std::collections::HashSet;
-use std::fs;
+use std::fs::File;
+use std::io::Read;
 use std::path::Path;
 
 use crate::output_path::ResolvedOutput;
@@ -111,6 +113,7 @@ impl DetectedArch {
 pub struct ElfPatcher {
     file_data: Vec<u8>,
     arch: DetectedArch,
+    input_handle: Handle,
 }
 
 #[derive(Debug, Clone)]
@@ -129,7 +132,9 @@ pub struct TextSection {
 
 impl ElfPatcher {
     pub fn new(path: &Path) -> Result<Self, Box<dyn std::error::Error>> {
-        let file_data = fs::read(path)?;
+        let input_handle = Handle::from_file(File::open(path)?)?;
+        let mut file_data = Vec::new();
+        input_handle.as_file().read_to_end(&mut file_data)?;
         let elf = ElfBytes::<AnyEndian>::minimal_parse(&file_data)?;
         let arch = DetectedArch::from_e_machine(elf.ehdr.e_machine).ok_or_else(|| {
             format!(
@@ -137,7 +142,11 @@ impl ElfPatcher {
                 elf.ehdr.e_machine
             )
         })?;
-        Ok(Self { file_data, arch })
+        Ok(Self {
+            file_data,
+            arch,
+            input_handle,
+        })
     }
 
     pub fn arch(&self) -> DetectedArch {
@@ -400,8 +409,8 @@ impl ElfPatcher {
             }
         }
 
-        // Write the patched file
-        output.write(&patched_data)?;
+        let input_permissions = self.input_handle.as_file().metadata()?.permissions();
+        output.write_with_permissions(&patched_data, input_permissions)?;
 
         Ok(())
     }
@@ -410,7 +419,8 @@ impl ElfPatcher {
         &self,
         output: &ResolvedOutput,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        output.write(&self.file_data)?;
+        let input_permissions = self.input_handle.as_file().metadata()?.permissions();
+        output.write_with_permissions(&self.file_data, input_permissions)?;
 
         Ok(())
     }
@@ -1317,6 +1327,42 @@ mod tests {
 
         assert!(targets.contains(&0x1000), "direct RELR address is named");
         assert!(targets.contains(&0x1008), "RELR bitmap address is named");
+    }
+
+    #[cfg(any(unix, windows))]
+    #[test]
+    fn create_patched_copy_refuses_output_replaced_by_hard_link_to_input() {
+        let text_vaddr = 0x100000;
+        let text_bytes = [0xc3u8; 8];
+        let elf_bytes = build_minimal_x86_64_elf(&text_bytes, text_vaddr);
+        let temp = tempfile::tempdir().expect("temporary directory should be created");
+        let input = temp.path().join("input.elf");
+        let requested_output = temp.path().join("output.elf");
+        std::fs::write(&input, &elf_bytes).expect("input ELF should be written");
+
+        let patcher = ElfPatcher::new(&input).expect("patcher should accept minimal ELF");
+        let output = crate::output_path::resolve_output_path(&input, Some(&requested_output), true)
+            .expect("nonexistent output should pass the early in-place guard");
+
+        std::fs::hard_link(&input, output.path())
+            .expect("output should be replaceable with a hard link to the input");
+
+        let window = AddressWindow {
+            start: text_vaddr,
+            end: text_vaddr + text_bytes.len() as u64,
+        };
+        let result = patcher.create_patched_copy(&output, &window, &[0x90]);
+
+        let err = result.expect_err("late output alias must be refused before writing");
+        assert!(
+            err.to_string().contains("refusing to optimize in place"),
+            "unexpected error: {err}"
+        );
+        assert_eq!(
+            std::fs::read(&input).expect("input should remain readable"),
+            elf_bytes,
+            "refusing the late alias must leave the input byte-for-byte unchanged"
+        );
     }
 
     #[test]

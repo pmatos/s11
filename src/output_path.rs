@@ -40,16 +40,8 @@ impl ResolvedOutput {
         &self.path
     }
 
+    #[cfg(test)]
     pub(crate) fn write(&self, bytes: &[u8]) -> io::Result<()> {
-        // Build the complete result privately in the destination directory, so
-        // publishing it is a same-filesystem rename rather than a destructive
-        // open of the final path.
-        let parent = output_parent(&self.path);
-        let mut staged =
-            tempfile::NamedTempFile::new_in(parent).map_err(|error| self.write_error(&error))?;
-        staged
-            .write_all(bytes)
-            .map_err(|error| self.write_error(&error))?;
         let input_permissions = std::fs::metadata(&self.input)
             .map_err(|error| {
                 io::Error::new(
@@ -61,6 +53,23 @@ impl ResolvedOutput {
                 )
             })?
             .permissions();
+        self.write_with_permissions(bytes, input_permissions)
+    }
+
+    pub(crate) fn write_with_permissions(
+        &self,
+        bytes: &[u8],
+        input_permissions: std::fs::Permissions,
+    ) -> io::Result<()> {
+        // Build the complete result privately in the destination directory, so
+        // publishing it is a same-filesystem rename rather than a destructive
+        // open of the final path.
+        let parent = output_parent(&self.path);
+        let mut staged =
+            tempfile::NamedTempFile::new_in(parent).map_err(|error| self.write_error(&error))?;
+        staged
+            .write_all(bytes)
+            .map_err(|error| self.write_error(&error))?;
         staged
             .as_file()
             .set_permissions(input_permissions)
