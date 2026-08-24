@@ -10,7 +10,9 @@ use std::time::Duration;
 mod test_utils;
 
 use s11::assembler::AArch64Assembler;
-use s11::candidate_windows::{WindowInstruction, WindowRole, plan_candidate_windows};
+use s11::candidate_windows::{
+    WindowInstruction, WindowRole, plan_candidate_windows, refuse_windows_with_interior_targets,
+};
 use s11::capstone_bridge::{ConvertOutcome, convert_capstone_op};
 use s11::capstone_bridge_x86::{convert_to_x86_ir, convert_x86_capstone_op_for_optimization};
 use s11::disassembly::{self, DisassembledInstruction};
@@ -1045,6 +1047,7 @@ impl ElfOptimizationBackend for X86OptimizationBackend {
 struct SectionCandidateWindows {
     section: TextSection,
     candidates: Vec<AddressWindow>,
+    indirect_target_refusals: usize,
 }
 
 #[cfg_attr(not(test), allow(dead_code))]
@@ -1068,6 +1071,7 @@ fn find_candidate_windows_with_backend<B: ElfOptimizationBackend>(
     patcher: &ElfPatcher,
 ) -> Result<Vec<SectionCandidateWindows>, Box<dyn std::error::Error>> {
     let cs = backend.disassembler()?;
+    let indirect_targets = patcher.indirect_control_flow_targets()?;
 
     // Phase 1: disassemble every executable section once, fail closed on any
     // partial decode, and accumulate every direct branch/call target across the
@@ -1205,13 +1209,30 @@ fn find_candidate_windows_with_backend<B: ElfOptimizationBackend>(
             ));
         }
 
+        let filtered = refuse_windows_with_interior_targets(
+            plan_candidate_windows(&planned, &branch_targets),
+            &indirect_targets,
+        );
         section_results.push(SectionCandidateWindows {
-            candidates: plan_candidate_windows(&planned, &branch_targets),
+            candidates: filtered.admitted,
+            indirect_target_refusals: filtered.refused,
             section,
         });
     }
 
+    let refused = section_results
+        .iter()
+        .map(|section| section.indirect_target_refusals)
+        .sum();
+    println!("{}", indirect_target_refusal_log(refused));
+
     Ok(section_results)
+}
+
+fn indirect_target_refusal_log(refused: usize) -> String {
+    format!(
+        "Auto candidate discovery: refused {refused} window(s) because indirect targets from relocations or .rodata/.data.rel.ro pointers fell inside them."
+    )
 }
 
 fn capstone_detail_is_call(detail: &capstone::InsnDetail<'_>) -> bool {
@@ -2490,10 +2511,7 @@ mod cli_helper_tests {
         assert_eq!(optimized[0].destination(), Some(X86Register::R10));
     }
 
-    fn build_elf64_with_executable_sections(
-        sections: &[(&str, &[u8], u64)],
-        machine: u16,
-    ) -> Vec<u8> {
+    fn build_elf64_with_sections(sections: &[(&str, &[u8], u64, u64)], machine: u16) -> Vec<u8> {
         let elf_header_size = 64usize;
         let shentsize = 64usize;
         let shnum = sections.len() + 2;
@@ -2501,7 +2519,7 @@ mod cli_helper_tests {
         let mut shstrtab = vec![0u8];
         let section_name_offsets: Vec<usize> = sections
             .iter()
-            .map(|(name, _, _)| {
+            .map(|(name, _, _, _)| {
                 let offset = shstrtab.len();
                 shstrtab.extend_from_slice(name.as_bytes());
                 shstrtab.push(0);
@@ -2514,7 +2532,7 @@ mod cli_helper_tests {
         let mut next_offset = elf_header_size;
         let section_file_offsets: Vec<usize> = sections
             .iter()
-            .map(|(_, bytes, _)| {
+            .map(|(_, bytes, _, _)| {
                 let offset = next_offset;
                 next_offset += bytes.len();
                 offset
@@ -2547,7 +2565,7 @@ mod cli_helper_tests {
                 .to_le_bytes(),
         );
 
-        for ((_, bytes, _), offset) in sections.iter().zip(&section_file_offsets) {
+        for ((_, bytes, _, _), offset) in sections.iter().zip(&section_file_offsets) {
             buf[*offset..*offset + bytes.len()].copy_from_slice(bytes);
         }
         buf[shstrtab_offset..shstrtab_offset + shstrtab.len()].copy_from_slice(&shstrtab);
@@ -2567,7 +2585,7 @@ mod cli_helper_tests {
         };
         write_shdr(0, [0; 10]);
 
-        for (index, (((_, bytes, virtual_addr), name_offset), file_offset)) in sections
+        for (index, (((_, bytes, virtual_addr, flags), name_offset), file_offset)) in sections
             .iter()
             .zip(&section_name_offsets)
             .zip(&section_file_offsets)
@@ -2578,7 +2596,7 @@ mod cli_helper_tests {
                 [
                     *name_offset as u64,
                     elf::abi::SHT_PROGBITS as u64,
-                    (elf::abi::SHF_ALLOC | elf::abi::SHF_EXECINSTR) as u64,
+                    *flags,
                     *virtual_addr,
                     *file_offset as u64,
                     bytes.len() as u64,
@@ -2606,6 +2624,24 @@ mod cli_helper_tests {
         );
 
         buf
+    }
+
+    fn build_elf64_with_executable_sections(
+        sections: &[(&str, &[u8], u64)],
+        machine: u16,
+    ) -> Vec<u8> {
+        let sections = sections
+            .iter()
+            .map(|(name, bytes, virtual_addr)| {
+                (
+                    *name,
+                    *bytes,
+                    *virtual_addr,
+                    (elf::abi::SHF_ALLOC | elf::abi::SHF_EXECINSTR) as u64,
+                )
+            })
+            .collect::<Vec<_>>();
+        build_elf64_with_sections(&sections, machine)
     }
 
     fn build_minimal_elf64(text_bytes: &[u8], text_vaddr: u64, machine: u16) -> Vec<u8> {
@@ -2662,6 +2698,51 @@ mod cli_helper_tests {
         assert_eq!(sections[0].candidates[0].end, 0x1004);
         assert_eq!(sections[0].candidates[1].start, 0x1005);
         assert_eq!(sections[0].candidates[1].end, 0x1009);
+    }
+
+    #[test]
+    fn candidate_window_straddling_switch_table_target_is_refused() {
+        // Three supported instructions form one candidate; the trailing
+        // register-indirect jump models switch dispatch and closes that run.
+        // The table's 0x1004 entry names the second instruction, so the whole
+        // [0x1000,0x100c) candidate must be refused rather than rewritten
+        // across an entry point that linear direct-branch scanning cannot see.
+        let text = [
+            0x48, 0x83, 0xc0, 0x01, // add rax, 1 @0x1000
+            0x48, 0x83, 0xc0, 0x01, // add rax, 1 @0x1004 <- table target
+            0x48, 0x83, 0xc0, 0x01, // add rax, 1 @0x1008
+            0xff, 0xe0, // jmp rax (indirect dispatch; excluded separator)
+        ];
+        let rodata = 0x1004u64.to_le_bytes();
+        let elf_bytes = build_elf64_with_sections(
+            &[
+                (
+                    ".text",
+                    &text,
+                    0x1000,
+                    (elf::abi::SHF_ALLOC | elf::abi::SHF_EXECINSTR) as u64,
+                ),
+                (".rodata", &rodata, 0x2000, elf::abi::SHF_ALLOC as u64),
+            ],
+            elf::abi::EM_X86_64,
+        );
+        let input = TempFile::new_bytes("s11-candidate-switch-table", "elf", &elf_bytes);
+        let patcher = ElfPatcher::new(input.path()).expect("x86-64 ELF should parse");
+
+        let sections =
+            find_candidate_windows(&patcher).expect("candidate discovery should succeed");
+
+        assert_eq!(sections.len(), 1);
+        assert!(sections[0].candidates.is_empty());
+        assert_eq!(sections[0].indirect_target_refusals, 1);
+    }
+
+    #[test]
+    fn indirect_target_refusal_log_reports_suppressed_window_count() {
+        assert_eq!(
+            indirect_target_refusal_log(7),
+            "Auto candidate discovery: refused 7 window(s) because indirect targets from relocations or .rodata/.data.rel.ro pointers fell inside them."
+        );
     }
 
     #[test]
