@@ -65,16 +65,10 @@ statistics, LLM timings, equivalence counterexamples), which lives in
 `src/report.rs`.
 
 ### Output-path resolution
-Where an `opt` run writes its result. With no explicit `-o/--output` the driver
-derives a `<stem>_optimized.<ext>` sibling of the input; an explicit output is
-honoured unless it resolves to the input binary itself, which is refused so the
-run never rewrites the source in place (the hard-link case is caught by a
-`(device, inode)` identity check a canonical-path comparison would miss). These
-rules live behind the pure `src/output_path.rs` seam, whose single entry point is
-`resolve_output_path`; the `opt` driver in `src/main.rs` is a thin adapter that
-passes the input path and optional `-o` through it. Deriving the sibling name is
-fallible — a stem-less or non-UTF-8 input yields an error the driver reports
-rather than a panic.
+Where an `opt` run materializes its result: either the explicit `-o/--output`
+target or a derived `<stem>_optimized.<ext>` sibling. The input itself is never
+an output, existing targets require `--force`, and a successful run with no
+improvement still produces an unchanged copy.
 
 ### Subset hint (intentionally absent)
 The LLM prompt does **not** enumerate the maintained AArch64 subset s11's parser accepts (see [docs/capability.md](docs/capability.md)). The model is invited to use any AArch64 mnemonic it knows. Outputs that use unsupported instructions are recorded as a research signal (which mnemonics the model "wanted" to reach for), not treated as wasted calls. See ADR-0003.

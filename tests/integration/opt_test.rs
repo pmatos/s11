@@ -271,6 +271,155 @@ fn assert_opt_arch_mismatch_rejected(test_elf: &Path, arch: &str, detected_arch:
 }
 
 #[test]
+fn test_opt_refuses_existing_explicit_output_before_search() {
+    let binary = get_binary_path();
+    let existing_output = tempfile::NamedTempFile::new().expect("create existing output");
+    let sentinel = b"unrelated file contents";
+    fs::write(existing_output.path(), sentinel).expect("seed existing output");
+
+    let output = Command::new(&binary)
+        .arg("opt")
+        .arg(&binary)
+        .arg("--start-addr")
+        .arg("0x0")
+        .arg("--end-addr")
+        .arg("0x1")
+        .arg("-o")
+        .arg(existing_output.path())
+        .output()
+        .expect("execute s11 opt");
+
+    assert!(!output.status.success(), "existing output must be refused");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("output path already exists") && stderr.contains("--force"),
+        "diagnostic should explain the safe override; stderr: {stderr}"
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        !stdout.contains("Optimizing ELF binary"),
+        "collision must fail before search; stdout: {stdout}"
+    );
+    assert_eq!(
+        fs::read(existing_output.path()).expect("read refused output"),
+        sentinel,
+        "refused output must remain unchanged"
+    );
+}
+
+#[test]
+fn test_opt_refuses_existing_derived_output_before_search() {
+    let binary = get_binary_path();
+    let temp_dir = tempfile::tempdir().expect("create fixture directory");
+    let input = temp_dir.path().join("program");
+    fs::copy(&binary, &input).expect("copy input ELF");
+    let derived_output = temp_dir.path().join("program_optimized");
+    let sentinel = b"previous optimization result";
+    fs::write(&derived_output, sentinel).expect("seed derived output");
+
+    let output = Command::new(&binary)
+        .arg("opt")
+        .arg(&input)
+        .arg("--start-addr")
+        .arg("0x0")
+        .arg("--end-addr")
+        .arg("0x1")
+        .output()
+        .expect("execute s11 opt");
+
+    assert!(!output.status.success(), "existing output must be refused");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("output path already exists") && stderr.contains("--force"),
+        "diagnostic should explain the safe override; stderr: {stderr}"
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        !stdout.contains("Optimizing ELF binary"),
+        "collision must fail before search; stdout: {stdout}"
+    );
+    assert_eq!(
+        fs::read(&derived_output).expect("read refused output"),
+        sentinel,
+        "refused derived output must remain unchanged"
+    );
+}
+
+#[test]
+fn test_opt_rejects_missing_output_parent_before_search() {
+    let binary = get_binary_path();
+    let temp_dir = tempfile::tempdir().expect("create fixture directory");
+    let output_path = temp_dir.path().join("missing").join("output.elf");
+
+    let output = Command::new(&binary)
+        .arg("opt")
+        .arg(&binary)
+        .arg("--start-addr")
+        .arg("0x0")
+        .arg("--end-addr")
+        .arg("0x1")
+        .arg("-o")
+        .arg(&output_path)
+        .output()
+        .expect("execute s11 opt");
+
+    assert!(!output.status.success(), "missing parent must be rejected");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("output parent directory") && stderr.contains("does not exist"),
+        "diagnostic should identify the missing parent; stderr: {stderr}"
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        !stdout.contains("Optimizing ELF binary"),
+        "bad output must fail before search; stdout: {stdout}"
+    );
+    assert!(!output_path.exists(), "bad output must not be created");
+}
+
+#[cfg(unix)]
+#[test]
+fn test_opt_rejects_unwritable_output_parent_before_search() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let binary = get_binary_path();
+    let temp_dir = tempfile::tempdir().expect("create fixture directory");
+    let read_only_dir = temp_dir.path().join("read-only");
+    fs::create_dir(&read_only_dir).expect("create output parent");
+    fs::set_permissions(&read_only_dir, fs::Permissions::from_mode(0o555))
+        .expect("make output parent read-only");
+    let output_path = read_only_dir.join("output.elf");
+
+    let output = Command::new(&binary)
+        .arg("opt")
+        .arg(&binary)
+        .arg("--start-addr")
+        .arg("0x0")
+        .arg("--end-addr")
+        .arg("0x1")
+        .arg("-o")
+        .arg(&output_path)
+        .output()
+        .expect("execute s11 opt");
+
+    assert!(
+        !output.status.success(),
+        "unwritable parent must be rejected"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("output parent directory") && stderr.contains("not writable"),
+        "diagnostic should identify the unwritable parent; stderr: {stderr}"
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        !stdout.contains("Optimizing ELF binary"),
+        "bad output must fail before search; stdout: {stdout}"
+    );
+    assert!(!output_path.exists(), "bad output must not be created");
+}
+
+#[test]
 fn test_opt_basic_functionality() {
     let binary = get_binary_path();
     let test_elf = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -1131,12 +1280,13 @@ fn test_opt_x86_64_known_shortening() {
     let start_addr = x86_find_byte_sequence(&source_elf, &pair);
     let end_addr = start_addr + pair.len() as u64;
 
-    // Copy to a unique tempdir so concurrent `cargo test` runs don't collide
-    // on the `<input>_optimized` artifact the binary always writes.
+    // Copy to a unique tempdir and use an explicit output so this also pins the
+    // end-to-end `-o` write path requested by issue #685.
     let tmp_dir = tempfile::tempdir().expect("create temp fixture dir");
     let test_elf = tmp_dir.path().join("dup_mov_imm");
     fs::copy(&source_elf, &test_elf).expect("copy x86-64 fixture to tmp");
-    let optimized_path = tmp_dir.path().join("dup_mov_imm_optimized");
+    let optimized_path = tmp_dir.path().join("custom-optimized.elf");
+    let derived_path = tmp_dir.path().join("dup_mov_imm_optimized");
 
     let output = Command::new(&binary)
         .arg("opt")
@@ -1151,6 +1301,8 @@ fn test_opt_x86_64_known_shortening() {
         .arg(format!("0x{start_addr:x}"))
         .arg("--end-addr")
         .arg(format!("0x{end_addr:x}"))
+        .arg("-o")
+        .arg(&optimized_path)
         .output()
         .expect("Failed to execute s11");
 
@@ -1187,6 +1339,152 @@ fn test_opt_x86_64_known_shortening() {
         optimized_path.exists(),
         "optimized binary should be created at {:?}",
         optimized_path,
+    );
+    assert!(
+        !derived_path.exists(),
+        "explicit -o must not also create the derived sibling"
+    );
+}
+
+#[test]
+fn test_opt_force_overwrites_existing_custom_output() {
+    let binary = get_binary_path();
+    let source_elf = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("binaries")
+        .join("x86_64")
+        .join("dup_mov_imm");
+    if !source_elf.exists() {
+        eprintln!(
+            "Skipping x86-64 forced-output opt test: {:?} not present (run build_tests.sh)",
+            source_elf
+        );
+        return;
+    }
+
+    let mov_rax_5: [u8; 7] = [0x48, 0xc7, 0xc0, 0x05, 0x00, 0x00, 0x00];
+    let pair: Vec<u8> = mov_rax_5.iter().chain(mov_rax_5.iter()).copied().collect();
+    let start_addr = x86_find_byte_sequence(&source_elf, &pair);
+    let end_addr = start_addr + pair.len() as u64;
+
+    let tmp_dir = tempfile::tempdir().expect("create temp fixture dir");
+    let test_elf = tmp_dir.path().join("dup_mov_imm");
+    fs::copy(&source_elf, &test_elf).expect("copy x86-64 fixture to tmp");
+    let custom_output = tmp_dir.path().join("custom-output.elf");
+    fs::write(&custom_output, b"unrelated file contents").expect("seed existing output");
+    let derived_output = tmp_dir.path().join("dup_mov_imm_optimized");
+
+    let output = Command::new(&binary)
+        .arg("opt")
+        .arg(&test_elf)
+        .arg("--arch")
+        .arg("x86-64")
+        .arg("--algorithm")
+        .arg("enumerative")
+        .arg("--timeout")
+        .arg("30")
+        .arg("--start-addr")
+        .arg(format!("0x{start_addr:x}"))
+        .arg("--end-addr")
+        .arg(format!("0x{end_addr:x}"))
+        .arg("--force")
+        .arg("-o")
+        .arg(&custom_output)
+        .output()
+        .expect("execute s11 opt");
+
+    assert!(
+        output.status.success(),
+        "forced custom output should succeed.\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr),
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("Optimized to 1 instructions")
+            && stdout.contains(&custom_output.display().to_string()),
+        "known shortening should be written to the requested path; stdout: {stdout}"
+    );
+    let patched = fs::read(&custom_output).expect("read custom output");
+    assert_eq!(
+        patched.len(),
+        fs::metadata(&test_elf).expect("stat input").len() as usize,
+        "custom output should be a complete ELF copy"
+    );
+    assert_ne!(
+        patched,
+        fs::read(&test_elf).expect("read input"),
+        "known shortening should patch the custom output"
+    );
+    assert!(
+        !derived_output.exists(),
+        "explicit -o must not also create the derived sibling"
+    );
+}
+
+#[test]
+fn test_opt_custom_output_copies_input_when_no_improvement_is_found() {
+    let binary = get_binary_path();
+    let source_elf = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("binaries")
+        .join("x86_64")
+        .join("dup_mov_imm");
+    if !source_elf.exists() {
+        eprintln!(
+            "Skipping x86-64 no-improvement output test: {:?} not present (run build_tests.sh)",
+            source_elf
+        );
+        return;
+    }
+
+    let mov_rax_5: [u8; 7] = [0x48, 0xc7, 0xc0, 0x05, 0x00, 0x00, 0x00];
+    let start_addr = x86_find_byte_sequence(&source_elf, &mov_rax_5);
+    let end_addr = start_addr + mov_rax_5.len() as u64;
+
+    let tmp_dir = tempfile::tempdir().expect("create temp fixture dir");
+    let test_elf = tmp_dir.path().join("dup_mov_imm");
+    fs::copy(&source_elf, &test_elf).expect("copy x86-64 fixture to tmp");
+    let custom_output = tmp_dir.path().join("unchanged-output.elf");
+    let derived_output = tmp_dir.path().join("dup_mov_imm_optimized");
+
+    let output = Command::new(&binary)
+        .arg("opt")
+        .arg(&test_elf)
+        .arg("--arch")
+        .arg("x86-64")
+        .arg("--algorithm")
+        .arg("enumerative")
+        .arg("--timeout")
+        .arg("30")
+        .arg("--start-addr")
+        .arg(format!("0x{start_addr:x}"))
+        .arg("--end-addr")
+        .arg(format!("0x{end_addr:x}"))
+        .arg("-o")
+        .arg(&custom_output)
+        .output()
+        .expect("execute s11 opt");
+
+    assert!(
+        output.status.success(),
+        "no-improvement custom output should succeed.\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr),
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("No optimization found")
+            && stdout.contains("Created unchanged binary")
+            && stdout.contains(&custom_output.display().to_string()),
+        "success should report the unchanged output artifact; stdout: {stdout}"
+    );
+    assert_eq!(
+        fs::read(&custom_output).expect("read unchanged output"),
+        fs::read(&test_elf).expect("read input"),
+        "no-improvement output should exactly copy the input ELF"
+    );
+    assert!(
+        !derived_output.exists(),
+        "explicit -o must not also create the derived sibling"
     );
 }
 

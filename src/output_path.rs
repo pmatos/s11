@@ -1,49 +1,160 @@
-//! Output-path resolution — the pure seam deciding where an `opt` run writes.
+//! Output-path resolution — the seam deciding and enforcing where `opt` writes.
 //!
 //! `s11 opt` never rewrites the input binary in place: with no explicit
-//! `-o/--output` it writes a derived `<stem>_optimized.<ext>` sibling, and an
-//! explicit output that resolves to the input itself is rejected rather than
-//! silently clobbering the source. Those rules — deriving the sibling name and
-//! the in-place guard (including the hard-link identity check that a
-//! canonical-path comparison would miss) — used to live inline in the driver
-//! (`main`'s `opt` arm), a shallow arrangement where the only way to exercise
-//! "a hard link to the input is refused" or "a stem-less input yields an error"
-//! was to drive the whole command.
+//! `-o/--output` it derives a `<stem>_optimized.<ext>` sibling. Existing explicit
+//! or derived targets are refused unless `--force` was passed, but force never
+//! permits an output that aliases the input. Parent existence and writability
+//! are checked before search so a bad target fails cheaply.
 //!
-//! This module lifts those rules into a pure seam: paths in, a resolved
-//! `PathBuf` or an error message out, with a single public entry point
-//! ([`resolve_output_path`]). The derive step is fallible — a caller-supplied
-//! path with no usable (UTF-8) file name yields an `Err` the driver reports,
-//! never a panic. The two helpers behind the seam
-//! (`optimized_output_path`, `paths_point_to_same_file`) stay private because
-//! the whole point of the module is that callers only need the one decision.
-//! See the `CONTEXT.md` glossary for the domain terms.
+//! [`resolve_output_path`] returns a [`ResolvedOutput`] that carries the policy
+//! into the final write. Default writes use exclusive creation, closing the
+//! race where another file appears during a long search; forced writes reopen
+//! without truncation, recheck the input identity, and only then replace the
+//! target. Deriving a sibling remains fallible for stem-less or non-UTF-8 input
+//! names. See the `CONTEXT.md` glossary for the domain term.
 
+use std::fs::{File, OpenOptions};
+use std::io::{self, Write};
 use std::path::{Path, PathBuf};
+
+/// A validated `opt` output target together with its overwrite policy.
+///
+/// Callers resolve this once before starting a potentially long search, then
+/// pass it to the ELF writer. The final write repeats the safety policy:
+/// default writes use exclusive creation, while forced writes may truncate a
+/// distinct existing target but still refuse an alias of the input binary.
+#[derive(Debug)]
+pub struct ResolvedOutput {
+    input: PathBuf,
+    path: PathBuf,
+    overwrite: bool,
+}
+
+impl ResolvedOutput {
+    /// The path where the result will be materialized.
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+
+    pub(crate) fn write(&self, bytes: &[u8]) -> io::Result<()> {
+        let mut options = OpenOptions::new();
+        options.write(true);
+        if self.overwrite {
+            options.create(true);
+        } else {
+            options.create_new(true);
+        }
+
+        let mut file = options.open(&self.path)?;
+        if self.overwrite {
+            if opened_file_points_to_path(&file, &self.input, &self.path) {
+                return Err(io::Error::new(
+                    io::ErrorKind::PermissionDenied,
+                    format!(
+                        "output path '{}' resolves to the input binary; refusing to optimize in place",
+                        self.path.display()
+                    ),
+                ));
+            }
+            file.set_len(0)?;
+        }
+        file.write_all(bytes)
+    }
+}
 
 /// Resolve where an `opt` run writes its result.
 ///
-/// With no explicit `-o/--output` the derived `<stem>_optimized.<ext>` sibling
-/// is preserved verbatim (the pre-#616 single-window behaviour). An explicit
-/// output is honoured, except when it resolves to the input binary itself: the
-/// driver never rewrites the input in place, so that request is rejected rather
-/// than silently clobbering the source. A `None` output over an input with no
-/// usable file name (a stem-less or non-UTF-8 path) yields an error instead of
-/// panicking, so the driver can report it and exit cleanly.
-pub fn resolve_output_path(input: &Path, output: Option<&Path>) -> Result<PathBuf, String> {
-    match output {
-        Some(out) => {
-            if paths_point_to_same_file(input, out) {
-                Err(format!(
-                    "output path '{}' resolves to the input binary; refusing to optimize in place (choose a different -o/--output)",
-                    out.display()
-                ))
-            } else {
-                Ok(out.to_path_buf())
-            }
-        }
-        None => optimized_output_path(input),
+/// With no explicit `-o/--output`, derive the
+/// `<stem>_optimized.<ext>` sibling. Unless `force` is true, any existing target
+/// is rejected; even with force, an output resolving to the input binary is
+/// always rejected. The parent directory must already exist and be writable.
+/// A stem-less or non-UTF-8 input name yields an error instead of panicking.
+pub fn resolve_output_path(
+    input: &Path,
+    output: Option<&Path>,
+    force: bool,
+) -> Result<ResolvedOutput, String> {
+    let output = match output {
+        Some(out) => out.to_path_buf(),
+        None => optimized_output_path(input)?,
+    };
+
+    if paths_point_to_same_file(input, &output) {
+        Err(format!(
+            "output path '{}' resolves to the input binary; refusing to optimize in place (choose a different -o/--output)",
+            output.display()
+        ))
+    } else if std::fs::symlink_metadata(&output).is_ok() && !force {
+        Err(format!(
+            "output path already exists: '{}' (pass --force to replace it)",
+            output.display()
+        ))
+    } else {
+        validate_output_writable(&output)?;
+        Ok(ResolvedOutput {
+            input: input.to_path_buf(),
+            path: output,
+            overwrite: force,
+        })
     }
+}
+
+#[cfg(unix)]
+fn opened_file_points_to_path(file: &File, input: &Path, _output: &Path) -> bool {
+    use std::os::unix::fs::MetadataExt;
+
+    match (file.metadata(), std::fs::metadata(input)) {
+        (Ok(output), Ok(input)) => output.dev() == input.dev() && output.ino() == input.ino(),
+        _ => false,
+    }
+}
+
+#[cfg(not(unix))]
+fn opened_file_points_to_path(_file: &File, input: &Path, output: &Path) -> bool {
+    paths_point_to_same_file(input, output)
+}
+
+fn validate_output_writable(output: &Path) -> Result<(), String> {
+    if std::fs::symlink_metadata(output).is_ok() {
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(output)
+            .map_err(|error| {
+                format!(
+                    "output path '{}' is not writable: {error}",
+                    output.display()
+                )
+            })?;
+        Ok(())
+    } else {
+        validate_output_parent(output)
+    }
+}
+
+fn validate_output_parent(output: &Path) -> Result<(), String> {
+    let parent = output
+        .parent()
+        .filter(|path| !path.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    if !parent.exists() {
+        return Err(format!(
+            "output parent directory '{}' does not exist",
+            parent.display()
+        ));
+    }
+    if !parent.is_dir() {
+        return Err(format!(
+            "output parent path '{}' is not a directory",
+            parent.display()
+        ));
+    }
+    tempfile::tempfile_in(parent).map_err(|error| {
+        format!(
+            "output parent directory '{}' is not writable: {error}",
+            parent.display()
+        )
+    })?;
+    Ok(())
 }
 
 /// Derive the default `<stem>_optimized.<ext>` sibling for `path`.
@@ -121,20 +232,24 @@ mod tests {
 
     #[test]
     fn resolve_output_path_falls_back_to_derived_path() {
-        let input = Path::new("/some/dir/prog.elf");
+        let dir = tempfile::tempdir().expect("create output directory");
+        let input = dir.path().join("prog.elf");
         assert_eq!(
-            resolve_output_path(input, None).unwrap(),
-            optimized_output_path(input).unwrap()
+            resolve_output_path(&input, None, false).unwrap().path(),
+            dir.path().join("prog_optimized.elf")
         );
     }
 
     #[test]
     fn resolve_output_path_honors_explicit_output() {
-        let input = Path::new("/some/dir/prog.elf");
-        let out = Path::new("/other/place/out.bin");
+        let dir = tempfile::tempdir().expect("create output directory");
+        let input = dir.path().join("prog.elf");
+        let out = dir.path().join("out.bin");
         assert_eq!(
-            resolve_output_path(input, Some(out)).unwrap(),
-            out.to_path_buf()
+            resolve_output_path(&input, Some(&out), false)
+                .unwrap()
+                .path(),
+            out
         );
     }
 
@@ -150,12 +265,14 @@ mod tests {
             .unwrap()
             .join(".")
             .join(input.path().file_name().unwrap());
-        let err = resolve_output_path(input.path(), Some(&aliased))
-            .expect_err("output resolving to the input binary must be rejected");
-        assert!(
-            err.contains("refusing to optimize in place"),
-            "unexpected error: {err}"
-        );
+        for force in [false, true] {
+            let err = resolve_output_path(input.path(), Some(&aliased), force)
+                .expect_err("output resolving to the input binary must be rejected");
+            assert!(
+                err.contains("refusing to optimize in place"),
+                "unexpected error with force={force}: {err}"
+            );
+        }
     }
 
     #[cfg(unix)]
@@ -166,13 +283,15 @@ mod tests {
         let input = TempFile::new_bytes("s11-resolve-hardlink", "elf", &[0u8; 8]);
         let link = input.path().with_extension("hardlink");
         std::fs::hard_link(input.path(), &link).expect("create hard link to input");
-        let result = resolve_output_path(input.path(), Some(&link));
+        for force in [false, true] {
+            let err = resolve_output_path(input.path(), Some(&link), force)
+                .expect_err("a hard link to the input binary must be rejected");
+            assert!(
+                err.contains("refusing to optimize in place"),
+                "unexpected error with force={force}: {err}"
+            );
+        }
         let _ = std::fs::remove_file(&link);
-        let err = result.expect_err("a hard link to the input binary must be rejected");
-        assert!(
-            err.contains("refusing to optimize in place"),
-            "unexpected error: {err}"
-        );
     }
 
     #[test]
@@ -180,7 +299,7 @@ mod tests {
         // `..` / `/` have no file stem; the derived-name step must surface an
         // error the driver can report, not panic on an `unwrap`.
         for input in [Path::new(".."), Path::new("/")] {
-            let err = resolve_output_path(input, None)
+            let err = resolve_output_path(input, None, false)
                 .expect_err("an input path with no file stem must yield an error, not a panic");
             assert!(
                 err.contains("output path"),
@@ -196,8 +315,30 @@ mod tests {
         // when the driver derives `<stem>_optimized`.
         use std::os::unix::ffi::OsStrExt;
         let input = std::path::PathBuf::from(std::ffi::OsStr::from_bytes(b"bin\xffname"));
-        let err = resolve_output_path(&input, None)
+        let err = resolve_output_path(&input, None, false)
             .expect_err("a non-UTF-8 input path must yield an error, not a panic");
         assert!(err.contains("output path"), "unexpected error: {err}");
+    }
+
+    #[test]
+    fn resolved_output_refuses_target_created_after_preflight() {
+        let dir = tempfile::tempdir().expect("create output directory");
+        let input = dir.path().join("input.elf");
+        let output = dir.path().join("output.elf");
+        let resolved = resolve_output_path(&input, Some(&output), false)
+            .expect("missing output should pass preflight");
+        let sentinel = b"file created while optimization was running";
+        std::fs::write(&output, sentinel).expect("create racing output");
+
+        let error = resolved
+            .write(b"optimized ELF")
+            .expect_err("default writer must refuse the racing output");
+
+        assert_eq!(error.kind(), std::io::ErrorKind::AlreadyExists);
+        assert_eq!(
+            std::fs::read(&output).expect("read racing output"),
+            sentinel,
+            "racing output must remain unchanged"
+        );
     }
 }
