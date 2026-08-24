@@ -84,7 +84,9 @@ the end. Each rewrite must strictly lower `--cost-metric`; discovery restarts
 after a rewrite and stops at a rewrite-free pass. A candidate window whose
 interior contains an indirect target (named by a relocation, or stored as a
 code pointer in `.rodata`/`.data.rel.ro`) is conservatively refused, and the
-refused count is reported so suppressed coverage is never silent.
+refused count is reported so suppressed coverage is never silent. A cheaper
+sequence that nonetheless encodes to more bytes than its window is refused for
+that window alone — the rest of the run continues.
 
 Useful flags on `opt`:
 

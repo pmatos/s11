@@ -559,8 +559,8 @@ enum ElfWindowOptimization {
     NoImprovement {
         /// The window reassembled from its original IR, when the backend
         /// produced one. Single-window mode writes it so a search miss still
-        /// materializes a copy; auto mode discards it and writes its in-memory
-        /// image once at the end.
+        /// materializes a copy; auto mode never asks for it and writes its
+        /// in-memory image once at the end.
         reassembled: Option<Vec<u8>>,
     },
     Improved {
@@ -568,6 +568,23 @@ enum ElfWindowOptimization {
         original_cost: u64,
         optimized_cost: u64,
     },
+}
+
+impl ElfWindowOptimization {
+    /// Whether this outcome can actually be written back into a window of
+    /// `window_len` bytes.
+    ///
+    /// A search that lowers the selected cost metric does **not** guarantee a
+    /// shorter encoding: under `instruction-count` or `latency` a
+    /// variable-length x86 replacement can encode to more bytes than the window
+    /// it must occupy. Callers that patch in place must check this rather than
+    /// let `ElfPatcher::apply_patch` reject the replacement.
+    fn fits_window(&self, window_len: usize) -> bool {
+        match self {
+            ElfWindowOptimization::Improved { replacement, .. } => replacement.len() <= window_len,
+            ElfWindowOptimization::NoImprovement { .. } => true,
+        }
+    }
 }
 
 impl From<ElfWindowOptimization> for WindowSearchResult {
@@ -1478,15 +1495,37 @@ impl<B: ElfOptimizationBackend> AutoOptimizationAdapter for ElfAutoOptimizationA
     }
 
     fn optimize_window(&mut self, candidate: &AutoWindow) -> Result<WindowSearchResult, String> {
-        optimize_elf_window_with_backend(
+        let outcome = optimize_elf_window_with_backend(
             &self.backend,
             self.patcher,
             candidate.window.start,
             candidate.window.end,
             self.options,
+            false,
         )
-        .map(WindowSearchResult::from)
-        .map_err(|error| error.to_string())
+        .map_err(|error| {
+            format!(
+                "window 0x{:x}-0x{:x}: {}",
+                candidate.window.start, candidate.window.end, error
+            )
+        })?;
+
+        // `apply_patch` would reject an oversized replacement, and that error
+        // would abort the whole run and discard every rewrite accepted so far.
+        // Refuse just this window instead, and report it so it is not silent.
+        // Gate on the window's own extent — the same number `apply_patch`
+        // validates against — rather than on the byte snapshot discovery took.
+        let window_len = usize::try_from(candidate.window.end - candidate.window.start)
+            .map_err(|_| "candidate window length does not fit in usize".to_string())?;
+        if !outcome.fits_window(window_len) {
+            println!(
+                "Auto driver: refusing rewrite at 0x{:x}-0x{:x}: the replacement does not fit the {window_len}-byte window.",
+                candidate.window.start, candidate.window.end,
+            );
+            return Ok(WindowSearchResult::NoImprovement);
+        }
+
+        Ok(WindowSearchResult::from(outcome))
     }
 
     fn apply_optimization(
@@ -1627,6 +1666,7 @@ fn optimize_elf_window_with_backend<B: ElfOptimizationBackend>(
     start_addr: u64,
     end_addr: u64,
     options: &OptimizationOptions,
+    reassemble_on_miss: bool,
 ) -> Result<ElfWindowOptimization, Box<dyn std::error::Error>> {
     println!("Address window: 0x{:x} - 0x{:x}", start_addr, end_addr);
     println!("Algorithm: {:?}", options.algorithm);
@@ -1711,20 +1751,27 @@ fn optimize_elf_window_with_backend<B: ElfOptimizationBackend>(
     }
 
     // Reassemble the instructions
-    let assembled_bytes = backend.assemble_window(
-        &ir_instructions,
-        final_instructions,
-        optimized_instructions.is_some(),
-        &instructions,
-        &original_bytes,
-        start_addr,
-    )?;
-    let assembled_bytes = match assembled_bytes {
-        OptimizedWindowBytes::Patch(bytes) => {
-            println!("Reassembled to {} bytes", bytes.len());
-            Some(bytes)
+    // Reassembling a search miss is only useful to a caller that will write the
+    // bytes. The auto driver discards them, so skipping the work there also
+    // removes an encoder-failure surface that would otherwise abort a
+    // whole-binary run over a window nothing was going to patch.
+    let assembled_bytes = if optimized_instructions.is_none() && !reassemble_on_miss {
+        None
+    } else {
+        match backend.assemble_window(
+            &ir_instructions,
+            final_instructions,
+            optimized_instructions.is_some(),
+            &instructions,
+            &original_bytes,
+            start_addr,
+        )? {
+            OptimizedWindowBytes::Patch(bytes) => {
+                println!("Reassembled to {} bytes", bytes.len());
+                Some(bytes)
+            }
+            OptimizedWindowBytes::LeaveInputUnchanged => None,
         }
-        OptimizedWindowBytes::LeaveInputUnchanged => None,
     };
     match (optimized_instructions.as_ref(), assembled_bytes) {
         (Some(optimized), Some(replacement)) => Ok(ElfWindowOptimization::Improved {
@@ -1757,11 +1804,12 @@ fn optimize_elf_binary_with_backend<B: ElfOptimizationBackend>(
     };
     // Single-window mode materializes a copy even when search misses, so a
     // reassembled miss is written just like an accepted rewrite.
-    let bytes =
-        match optimize_elf_window_with_backend(&backend, patcher, start_addr, end_addr, options)? {
-            ElfWindowOptimization::Improved { replacement, .. } => Some(replacement),
-            ElfWindowOptimization::NoImprovement { reassembled } => reassembled,
-        };
+    let bytes = match optimize_elf_window_with_backend(
+        &backend, patcher, start_addr, end_addr, options, true,
+    )? {
+        ElfWindowOptimization::Improved { replacement, .. } => Some(replacement),
+        ElfWindowOptimization::NoImprovement { reassembled } => reassembled,
+    };
     let Some(bytes) = bytes else {
         return Ok(());
     };
@@ -3044,6 +3092,74 @@ mod cli_helper_tests {
         assert_eq!(
             incomplete_executable_section_tail_log(".text", 0x1000, 0x100b, 0x1008, 4, 3),
             "Auto candidate discovery: executable section '.text' has raw range 0x1000-0x100b; scanning complete 4-byte-aligned instruction prefix 0x1000-0x1008 and ignoring 3 trailing byte(s)."
+        );
+    }
+
+    #[test]
+    fn oversized_replacement_does_not_fit_its_window() {
+        // Lower cost under `instruction-count` does not imply a shorter
+        // encoding on a variable-length ISA. The auto driver must catch that
+        // here rather than let `apply_patch` reject it and abort the whole run.
+        let improved = ElfWindowOptimization::Improved {
+            replacement: vec![0x83, 0xc0, 0x02],
+            original_cost: 2,
+            optimized_cost: 1,
+        };
+        assert!(!improved.fits_window(2));
+        assert!(improved.fits_window(3));
+        assert!(improved.fits_window(4));
+        assert!(
+            ElfWindowOptimization::NoImprovement { reassembled: None }.fits_window(0),
+            "a miss patches nothing and always fits"
+        );
+    }
+
+    #[test]
+    fn auto_mode_skips_reassembling_a_search_miss() {
+        // AArch64 `assemble_window` re-encodes the original IR even on a miss.
+        // Auto mode discards those bytes, so asking for them is pure work and
+        // an extra encoder-failure surface that would abort a whole-binary run
+        // over a window nothing was going to patch.
+        let text = 0x8b02_0020u32.to_le_bytes(); // add x0, x1, x2
+        let elf_bytes = build_minimal_elf64(&text, 0x1000, elf::abi::EM_AARCH64);
+        let input = TempFile::new_bytes("s11-auto-miss-reassembly", "elf", &elf_bytes);
+        let patcher = ElfPatcher::new(input.path()).expect("synthetic ELF should parse");
+        let options = options_for(Algorithm::Enumerative);
+
+        let skipped = optimize_elf_window_with_backend(
+            &AArch64OptimizationBackend,
+            &patcher,
+            0x1000,
+            0x1004,
+            &options,
+            false,
+        )
+        .expect("single-instruction window should search cleanly");
+        assert!(
+            matches!(
+                skipped,
+                ElfWindowOptimization::NoImprovement { reassembled: None }
+            ),
+            "auto mode must not pay for reassembly it discards"
+        );
+
+        let reassembled = optimize_elf_window_with_backend(
+            &AArch64OptimizationBackend,
+            &patcher,
+            0x1000,
+            0x1004,
+            &options,
+            true,
+        )
+        .expect("single-instruction window should search cleanly");
+        assert!(
+            matches!(
+                reassembled,
+                ElfWindowOptimization::NoImprovement {
+                    reassembled: Some(ref bytes),
+                } if bytes.as_slice() == text
+            ),
+            "single-window mode still materializes the reassembled miss"
         );
     }
 

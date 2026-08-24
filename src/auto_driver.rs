@@ -86,7 +86,7 @@ pub fn drive_auto_optimization<A: AutoOptimizationAdapter>(
                 summary.cache_hits += 1;
                 continue;
             }
-            if summary.searches == max_windows {
+            if summary.searches >= max_windows {
                 summary.termination = AutoTermination::BudgetExhausted {
                     skipped: candidates[index..]
                         .iter()
