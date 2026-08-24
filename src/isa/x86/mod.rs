@@ -18,6 +18,7 @@
 
 mod encoding;
 mod stochastic;
+pub(crate) use encoding::x86_extension_source_ok;
 pub use stochastic::{
     X86InstructionGenerator, X86Mutator, default_x86_immediates, default_x86_registers,
 };

@@ -10,7 +10,10 @@
 
 #![allow(dead_code)]
 
-use crate::isa::x86::{X86Condition, X86Instruction, X86Operand, X86Register};
+use crate::assembler::x86::X86Mode;
+use crate::isa::x86::{
+    X86Condition, X86Instruction, X86Operand, X86Register, x86_extension_source_ok,
+};
 use crate::parser::ParseError;
 
 /// Parse a condition-code suffix from a SETcc / CMOVcc / Jcc mnemonic. Accepts
@@ -575,7 +578,9 @@ fn x86_ir_from_mnemonic_impl(
                 mnemonic, parts[1]
             ));
         }
-        if mode == Some(X86ParseMode::Mode32) {
+        if mode == Some(X86ParseMode::Mode32)
+            && !x86_extension_source_ok(X86Mode::Mode32, rs.canonical(), src_width)
+        {
             let index = rs.index().expect("all x86 GPRs have an index");
             if index >= 8 {
                 return Err(format!(
@@ -584,13 +589,11 @@ fn x86_ir_from_mnemonic_impl(
                     parts[1]
                 ));
             }
-            if src_width == 8 && index >= 4 {
-                return Err(format!(
-                    "unsupported x86-32 8-bit register alias: '{}' requires a REX prefix, \
-                     which is unavailable in x86-32",
-                    parts[1]
-                ));
-            }
+            return Err(format!(
+                "unsupported x86-32 8-bit register alias: '{}' requires a REX prefix, \
+                 which is unavailable in x86-32",
+                parts[1]
+            ));
         }
 
         let rd = rd.canonical();
@@ -1103,6 +1106,63 @@ mod tests {
         );
         assert!(x86_ir_from_mnemonic("movsx", "rax, 1").is_err());
         assert!(x86_ir_from_mnemonic("movzx", "rax, ah").is_err());
+    }
+
+    #[test]
+    fn movzx_movsx_mode32_parser_matches_shared_extension_source_rule() {
+        use crate::assembler::x86::X86Mode as AssemblerMode;
+        use crate::isa::x86::x86_extension_source_ok as extension_source_ok;
+
+        let cases = [
+            ("bl", X86Register::RBX, 8, None),
+            ("si", X86Register::RSI, 16, None),
+            (
+                "spl",
+                X86Register::RSP,
+                8,
+                Some(
+                    "unsupported x86-32 8-bit register alias: 'spl' requires a REX prefix, \
+                     which is unavailable in x86-32",
+                ),
+            ),
+            (
+                "r8b",
+                X86Register::R8,
+                8,
+                Some(
+                    "unsupported x86-32 register alias: 'r8b' names an extended register, \
+                     which is not encodable in x86-32",
+                ),
+            ),
+            (
+                "r8w",
+                X86Register::R8,
+                16,
+                Some(
+                    "unsupported x86-32 register alias: 'r8w' names an extended register, \
+                     which is not encodable in x86-32",
+                ),
+            ),
+        ];
+
+        for mnemonic in ["movzx", "movsx"] {
+            for (source_alias, source, source_width, expected_error) in cases {
+                let operands = format!("eax, {source_alias}");
+                let parsed =
+                    x86_ir_from_mnemonic_for_mode(mnemonic, &operands, X86ParseMode::Mode32);
+                let source_is_encodable =
+                    extension_source_ok(AssemblerMode::Mode32, source, source_width);
+
+                assert_eq!(
+                    matches!(parsed, Ok(Some(_))),
+                    source_is_encodable,
+                    "parser/helper mismatch for {mnemonic} {operands}"
+                );
+                if let Some(expected_error) = expected_error {
+                    assert_eq!(parsed.unwrap_err(), expected_error);
+                }
+            }
+        }
     }
 
     #[test]
