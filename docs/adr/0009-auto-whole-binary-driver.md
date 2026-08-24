@@ -150,7 +150,15 @@ can reconstruct *why* the window-selection rules are as conservative as they are
    collisions cannot cause false misses. Discovery restarts immediately after an
    accepted patch; a pass that accepts zero rewrites terminates the loop. Per-window search time is bounded by the existing `--timeout`, because
    superoptimizing every window of a binary the size of `/bin/ls` is otherwise
-   unbounded.
+   unbounded. Whatever goes wrong for one window stays scoped to that window:
+   nothing reaches disk until the run's final write, so a search or reassembly
+   failure — or a cheaper sequence that nonetheless encodes to more bytes than
+   its window — is refused, counted, and the run continues, rather than
+   unwinding and discarding every rewrite already accepted in memory. This is
+   the fourth way coverage can be incomplete, alongside the indirect-target
+   (Decision 5), RIP-relative (Decision 6), and budget (Decision 9) refusals;
+   like those, it is reported, and any of them qualifies the reported fixpoint
+   as one over admitted windows rather than over the whole binary.
 
 9. **Window selection is prioritized, not exhaustive-by-default.** The driver
    orders admissible runs by decoded instruction count, then by repeated exact
