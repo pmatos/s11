@@ -155,6 +155,11 @@ pub fn generate_all_instructions(registers: &[Register], immediates: &[i64]) -> 
             for &rm in registers {
                 if shifted_register_allows_rd_rn && rm != Register::SP {
                     for &amount in SHIFTED_OP_AMOUNTS {
+                        let logical_widths: &[RegisterWidth] = if amount <= 31 {
+                            &[RegisterWidth::X64, RegisterWidth::W32]
+                        } else {
+                            &[RegisterWidth::X64]
+                        };
                         for kind in [ShiftKind::Lsl, ShiftKind::Lsr, ShiftKind::Asr] {
                             let sr = Operand::ShiftedRegister {
                                 reg: rm,
@@ -169,24 +174,26 @@ pub fn generate_all_instructions(registers: &[Register], immediates: &[i64]) -> 
                             if amount <= 31 {
                                 instrs.push(Instruction::SubW { rd, rn, rm: sr });
                             }
-                            instrs.push(Instruction::And {
-                                rd,
-                                rn,
-                                rm: sr,
-                                width: RegisterWidth::X64,
-                            });
-                            instrs.push(Instruction::Orr {
-                                rd,
-                                rn,
-                                rm: sr,
-                                width: RegisterWidth::X64,
-                            });
-                            instrs.push(Instruction::Eor {
-                                rd,
-                                rn,
-                                rm: sr,
-                                width: RegisterWidth::X64,
-                            });
+                            for &width in logical_widths {
+                                instrs.push(Instruction::And {
+                                    rd,
+                                    rn,
+                                    rm: sr,
+                                    width,
+                                });
+                                instrs.push(Instruction::Orr {
+                                    rd,
+                                    rn,
+                                    rm: sr,
+                                    width,
+                                });
+                                instrs.push(Instruction::Eor {
+                                    rd,
+                                    rn,
+                                    rm: sr,
+                                    width,
+                                });
+                            }
                         }
                         // ROR — logical only.
                         let sr_ror = Operand::ShiftedRegister {
@@ -194,24 +201,26 @@ pub fn generate_all_instructions(registers: &[Register], immediates: &[i64]) -> 
                             kind: ShiftKind::Ror,
                             amount,
                         };
-                        instrs.push(Instruction::And {
-                            rd,
-                            rn,
-                            rm: sr_ror,
-                            width: RegisterWidth::X64,
-                        });
-                        instrs.push(Instruction::Orr {
-                            rd,
-                            rn,
-                            rm: sr_ror,
-                            width: RegisterWidth::X64,
-                        });
-                        instrs.push(Instruction::Eor {
-                            rd,
-                            rn,
-                            rm: sr_ror,
-                            width: RegisterWidth::X64,
-                        });
+                        for &width in logical_widths {
+                            instrs.push(Instruction::And {
+                                rd,
+                                rn,
+                                rm: sr_ror,
+                                width,
+                            });
+                            instrs.push(Instruction::Orr {
+                                rd,
+                                rn,
+                                rm: sr_ror,
+                                width,
+                            });
+                            instrs.push(Instruction::Eor {
+                                rd,
+                                rn,
+                                rm: sr_ror,
+                                width,
+                            });
+                        }
                     }
                 }
                 // Issue #60: extended-register form for ADD/SUB. Cmp/Cmn
@@ -1655,10 +1664,8 @@ mod tests {
 
     #[test]
     fn generate_encodable_instructions_contains_w_logical_register_forms() {
-        let instrs = generate_all_encodable_instructions(
-            &[Register::X0, Register::X1, Register::X2],
-            &[],
-        );
+        let instrs =
+            generate_all_encodable_instructions(&[Register::X0, Register::X1, Register::X2], &[]);
 
         for expected in [
             Instruction::And {
@@ -2555,28 +2562,48 @@ mod tests {
     }
 
     #[test]
-    fn test_generate_all_instructions_includes_all_shifted_kinds_for_logical() {
-        let instrs = generate_all_instructions(&default_registers(), &default_immediates());
-        for kind in [
-            crate::ir::ShiftKind::Lsl,
-            crate::ir::ShiftKind::Lsr,
-            crate::ir::ShiftKind::Asr,
-            crate::ir::ShiftKind::Ror,
-        ] {
-            let has = instrs.iter().any(|i| {
-                matches!(
-                    i,
+    fn generate_encodable_instructions_contains_w_logical_shifted_register_forms() {
+        let instrs =
+            generate_all_encodable_instructions(&[Register::X0, Register::X1, Register::X2], &[]);
+
+        for width in [RegisterWidth::X64, RegisterWidth::W32] {
+            for kind in [
+                crate::ir::ShiftKind::Lsl,
+                crate::ir::ShiftKind::Lsr,
+                crate::ir::ShiftKind::Asr,
+                crate::ir::ShiftKind::Ror,
+            ] {
+                let rm = Operand::ShiftedRegister {
+                    reg: Register::X2,
+                    kind,
+                    amount: 1,
+                };
+                for expected in [
+                    Instruction::And {
+                        rd: Register::X0,
+                        rn: Register::X1,
+                        rm,
+                        width,
+                    },
                     Instruction::Orr {
-                        rm: Operand::ShiftedRegister { kind: k, .. }, ..
-                    } if *k == kind
-                )
-            });
-            assert!(
-                has,
-                "ORR must enumerate shifted-register form with {:?}",
-                kind
-            );
+                        rd: Register::X0,
+                        rn: Register::X1,
+                        rm,
+                        width,
+                    },
+                    Instruction::Eor {
+                        rd: Register::X0,
+                        rn: Register::X1,
+                        rm,
+                        width,
+                    },
+                ] {
+                    assert!(instrs.contains(&expected), "missing candidate: {expected}");
+                }
+            }
         }
+
+        assert!(instrs.iter().all(Instruction::is_encodable_aarch64));
     }
 
     #[test]
@@ -2661,10 +2688,27 @@ mod tests {
             }
         }
 
-        // 2 non-SP choices for each of rd/rn/rm, with 162 shifted-register
+        assert!(!instrs.iter().any(|instr| matches!(
+            instr,
+            Instruction::And {
+                rm: Operand::ShiftedRegister { amount: 32, .. },
+                width: RegisterWidth::W32,
+                ..
+            } | Instruction::Orr {
+                rm: Operand::ShiftedRegister { amount: 32, .. },
+                width: RegisterWidth::W32,
+                ..
+            } | Instruction::Eor {
+                rm: Operand::ShiftedRegister { amount: 32, .. },
+                width: RegisterWidth::W32,
+                ..
+            }
+        )));
+
+        // 2 non-SP choices for each of rd/rn/rm, with 234 shifted-register
         // binary candidates per tuple from the current AArch64 candidate matrix.
         assert_eq!(
-            shifted_count, 1296,
+            shifted_count, 1872,
             "enumeration must retain the expected shifted-register candidate count"
         );
     }
