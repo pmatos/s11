@@ -41,6 +41,8 @@ Rewritable straight-line mnemonics accepted by the parser and Capstone bridge:
 - Data movement and aliases: `mov`, `mvn`, `neg`, `negs`, `movn`, `movz`,
   `movk`
   - Register `mov` supports both 64-bit `X` and 32-bit `W` forms.
+  - The 64-bit `mov <Xd|SP>, <Xn|SP>` aliases with an SP operand are
+    normalized to their encodable `add <Xd|SP>, <Xn|SP>, #0` form.
 - First NEON/SIMD vertical slice: `movi` with `Vn.2d|4s, #0`, lane-wise
   wrapping `add Vd.2d|4s, Vn.2d|4s, Vm.2d|4s`, and
   `mov Xd, Vn.d[0|1]`.
