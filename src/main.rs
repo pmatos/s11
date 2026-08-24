@@ -963,6 +963,9 @@ impl ElfOptimizationBackend for X86OptimizationBackend {
                 options,
                 context.downstream_flags_live,
                 downstream_live.as_ref(),
+                // See docs/adr/0010-x86-register-views.md#decision: operand
+                // views remain precise through execution, costing, and
+                // assembly, so same-count code-size rewrites are safe here.
                 true,
             ),
             Algorithm::Hybrid | Algorithm::Llm => {

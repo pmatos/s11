@@ -201,21 +201,32 @@ mod tests {
     // the REX-only low bytes, while AL/CL/DL/BL remain addressable without REX.
     #[test]
     fn register_legality_tracks_rex_availability_per_mode() {
-        assert!(
-            !x86_register_ok(X86Register::R8, 32),
-            "R8 needs a REX prefix unavailable in 32-bit mode"
-        );
-        assert!(x86_register_ok(X86Register::R8, 64));
-        assert!(
-            !x86_register_ok(X86Register::SPL, 32),
-            "SPL is a REX-only low byte"
-        );
-        assert!(x86_register_ok(X86Register::SPL, 64));
-        assert!(
-            x86_register_ok(X86Register::AL, 32),
-            "AL is a legacy low byte, no REX required"
-        );
-        assert!(x86_register_ok(X86Register::RAX, 32));
+        for reg in [X86Register::R8, X86Register::R8D, X86Register::R8B] {
+            assert!(
+                !x86_register_ok(reg, 32),
+                "{reg} needs a REX prefix unavailable in 32-bit mode"
+            );
+            assert!(x86_register_ok(reg, 64), "{reg} is available in x86-64");
+        }
+        for reg in [
+            X86Register::SPL,
+            X86Register::BPL,
+            X86Register::SIL,
+            X86Register::DIL,
+        ] {
+            assert!(!x86_register_ok(reg, 32), "{reg} is a REX-only low byte");
+            assert!(x86_register_ok(reg, 64), "{reg} is available in x86-64");
+        }
+        for reg in [
+            X86Register::RAX,
+            X86Register::EAX,
+            X86Register::AX,
+            X86Register::AL,
+            X86Register::AH,
+        ] {
+            assert!(x86_register_ok(reg, 32), "{reg} is available without REX");
+            assert!(x86_register_ok(reg, 64), "{reg} is available in x86-64");
+        }
     }
 
     // A register pair must share an operand width and cannot mix a legacy high
@@ -230,6 +241,12 @@ mod tests {
         assert!(
             !x86_register_pair_ok(X86Register::R8, X86Register::RAX, 32),
             "an extended register drags the whole pair out of 32-bit legality"
+        );
+        assert!(x86_register_pair_ok(X86Register::AX, X86Register::BX, 32));
+        assert!(x86_register_pair_ok(X86Register::AL, X86Register::AH, 64));
+        assert!(
+            !x86_register_pair_ok(X86Register::EAX, X86Register::AX, 64),
+            "dword and word views cannot pair"
         );
     }
 
