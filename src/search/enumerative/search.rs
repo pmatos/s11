@@ -1737,7 +1737,9 @@ mod tests {
         );
         assert_eq!(
             cost_calls, 1,
-            "timeout should stop after exactly 1 cost call; saw {cost_calls}"
+            "timeout should be checked before the second product candidate; the first \
+             50ms cost call already exceeds the 25ms budget, so the length-three sweep \
+             stops one candidate in instead of running all 8"
         );
     }
 
