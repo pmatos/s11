@@ -2610,6 +2610,7 @@ mod tests {
                 width,
             },
         ];
+        // No LDRSX exists, so signed loads cannot use the extended width.
         if width != AccessWidth::Extended {
             instructions.push(Instruction::Ldrs {
                 rt: Register::X0,
