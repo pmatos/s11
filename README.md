@@ -72,6 +72,19 @@ s11 opt path/to/binary \
     --cores 8 --timeout 60
 ```
 
+To discover and optimize supported windows across an ELF automatically:
+
+```
+s11 opt --auto path/to/binary -o path/to/optimized \
+    --max-windows 100 --timeout 30
+```
+
+Auto mode applies accepted rewrites to an in-memory image and writes it once at
+the end. Each rewrite must strictly lower `--cost-metric`; discovery restarts
+after a rewrite and stops at a rewrite-free pass. Until indirect target recovery
+in issue #619 lands, an executable section containing indirect control flow is
+conservatively skipped and reported.
+
 Useful flags on `opt`:
 
 | flag | meaning |
@@ -79,7 +92,10 @@ Useful flags on `opt`:
 | `--algorithm enumerative\|stochastic\|symbolic\|hybrid\|llm` | search strategy (default: `enumerative`) |
 | `--cost-metric instruction-count\|latency\|code-size` | what to minimize (default: `instruction-count`) |
 | `--cores N` | worker threads for `hybrid` |
-| `--timeout SECS` | wall-clock budget for the search |
+| `--timeout SECS` | wall-clock budget for one search (per window in `--auto`) |
+| `--auto` | discover and optimize windows across the whole ELF |
+| `-o, --output PATH` | output path (otherwise derive `<stem>_optimized.<ext>`) |
+| `--max-windows N` | global auto-mode search budget (default: `100`; cache hits do not spend it) |
 | `--beta`, `--iterations`, `--seed` | MCMC tuning for `stochastic` |
 | `--search-mode linear\|binary` | SMT synthesis search tuning |
 | `--solver-timeout SECS` | per-query SMT timeout; `0` disables SMT queries (never unbounded) |

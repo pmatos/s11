@@ -134,16 +134,22 @@ can reconstruct *why* the window-selection rules are as conservative as they are
    rewrite strictly lowers the chosen cost metric, so progress is monotone. To
    avoid re-proving the same window across passes and across overlaps, the driver
    caches "no improvement found" keyed by a hash of the window's instruction
-   bytes; a window whose bytes are unchanged since a prior miss is skipped. A
-   pass that accepts zero rewrites terminates the loop. Per-window search time is
-   bounded by the existing `--timeout`, because superoptimizing every window of a
-   binary the size of `/bin/ls` is otherwise unbounded.
+   bytes; a window whose bytes are unchanged since a prior miss is skipped. The
+   v1 cache is process-local and stores the exact byte vector in a hash set, so
+   hash collisions cannot cause false misses. Discovery restarts immediately
+   after an accepted patch; a pass that accepts zero rewrites terminates the
+   loop. Per-window search time is bounded by the existing `--timeout`, because
+   superoptimizing every window of a binary the size of `/bin/ls` is otherwise
+   unbounded.
 
 9. **Window selection is prioritized, not exhaustive-by-default.** The driver
-   prefers longer admissible runs and windows with apparent redundancy, and
-   honours a global budget (time and/or window count). When the budget bounds
-   coverage, the driver `log()`s what it skipped — a silent top-N would read as
-   "the whole binary was optimized" when it was not.
+   orders admissible runs by decoded instruction count, then by repeated exact
+   instruction encodings as an apparent-redundancy tie-breaker, then by address
+   for deterministic ties. `--max-windows N` bounds actual search attempts
+   across all passes (default 100); cache hits do not spend it. When the budget
+   bounds coverage, the driver logs the exact number of currently admissible
+   windows it skipped — a silent top-N would read as "the whole binary was
+   optimized" when it was not.
 
 10. **"Improvement" means lower cost under the selected `--cost-metric`, and the
     on-disk file never shrinks regardless of metric.** Because freed bytes become
@@ -217,11 +223,10 @@ maintenance cost, deleting the `--auto` arm leaves the rest of the tool intact.
 - **ADR-0001** (live-in derivation): unchanged; per-window live-in continues to
   flow from `source_registers()` / `destinations()`.
 
-## Open questions (resolved during implementation, not by this ADR)
+## Open questions
 
-- Exact priority function for window selection (Decision 9).
-- Whether the no-improvement cache persists across process runs or is in-memory
-  only (Decision 8) — in-memory is the v1 default.
+- Whether a future persistent no-improvement cache should supplement the v1
+  process-local cache (Decision 8).
 - Whether `--auto` should accept a section filter (e.g. only `.text`) or always
   sweep every executable section.
 - **Cost-model fidelity is the precondition for honestly calling this a speed
