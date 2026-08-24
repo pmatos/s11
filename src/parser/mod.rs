@@ -4137,9 +4137,13 @@ mod tests {
             ("ldrsh w0, [x1]", "ldrsh"),
             ("ldrsw w0, [x1]", "ldrsw"),
             ("ldrsb w0, [x1, #1]!", "ldrsb"),
+            ("ldrsw w0, [x1, #4]!", "ldrsw"),
             ("ldrsh w0, [x1], #2", "ldrsh"),
+            ("ldrsw w0, [x1], #4", "ldrsw"),
             ("ldrsb w0, [x1, x2]", "ldrsb"),
+            ("ldrsw w0, [x1, x2]", "ldrsw"),
             ("ldrsb w0, [x1, w2, sxtw]", "ldrsb"),
+            ("ldrsw w0, [x1, w2, sxtw #2]", "ldrsw"),
         ] {
             match parse_line(line) {
                 Err(ParseLineError::Other(msg)) => {
