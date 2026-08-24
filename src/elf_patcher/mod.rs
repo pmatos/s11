@@ -95,6 +95,7 @@ impl DetectedArch {
     }
 }
 
+#[derive(Clone)]
 pub struct ElfPatcher {
     file_data: Vec<u8>,
     arch: DetectedArch,
@@ -222,6 +223,22 @@ impl ElfPatcher {
         window: &AddressWindow,
         new_code: &[u8],
     ) -> Result<(), Box<dyn std::error::Error>> {
+        let mut patched = self.clone();
+        patched.apply_patch(window, new_code)?;
+        patched.write_to(output_path)
+    }
+
+    /// Apply one replacement to the in-memory ELF image.
+    ///
+    /// The replacement may be shorter than the selected address window; the
+    /// remainder is filled with architecture-canonical NOPs. It may never be
+    /// longer, so bytes following the window retain both their contents and
+    /// virtual addresses. No filesystem write occurs until [`Self::write_to`].
+    pub fn apply_patch(
+        &mut self,
+        window: &AddressWindow,
+        new_code: &[u8],
+    ) -> Result<(), Box<dyn std::error::Error>> {
         let section = self
             .validate_address_window(window)
             .map_err(|e| format!("Invalid address window: {}", e))?;
@@ -237,16 +254,13 @@ impl ElfPatcher {
             .into());
         }
 
-        // Create a copy of the original file data
-        let mut patched_data = self.file_data.clone();
-
         // Calculate file offset for the patch
         let offset_in_section = window.start - section.virtual_addr;
         let file_offset = (section.file_offset + offset_in_section) as usize;
 
         // Apply the patch
         let patch_end = file_offset + new_code.len();
-        patched_data[file_offset..patch_end].copy_from_slice(new_code);
+        self.file_data[file_offset..patch_end].copy_from_slice(new_code);
 
         // If new code is smaller than window, pad with arch-appropriate NOPs.
         if new_code.len() < window_size {
@@ -259,14 +273,17 @@ impl ElfPatcher {
                     "nop_sequence returned empty slice with {} bytes remaining",
                     gap_end - cursor
                 );
-                patched_data[cursor..cursor + nop.len()].copy_from_slice(nop);
+                self.file_data[cursor..cursor + nop.len()].copy_from_slice(nop);
                 cursor += nop.len();
             }
         }
 
-        // Write the patched file
-        fs::write(output_path, patched_data)?;
+        Ok(())
+    }
 
+    /// Materialize the current in-memory ELF image at `output_path`.
+    pub fn write_to(&self, output_path: &Path) -> Result<(), Box<dyn std::error::Error>> {
+        fs::write(output_path, &self.file_data)?;
         Ok(())
     }
 }
@@ -545,6 +562,50 @@ mod tests {
             &[0x0f, 0x1f, 0x44, 0x00, 0x00][..],
             "padding should be the canonical 5-byte Intel NOP",
         );
+    }
+
+    #[test]
+    fn in_memory_patch_preserves_source_and_downstream_bytes_until_final_write() {
+        use crate::test_utils::TempFile;
+
+        let text_vaddr = 0x100000;
+        let text_bytes = [0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xaa, 0xbb, 0xcc];
+        let elf_bytes = build_minimal_x86_64_elf(&text_bytes, text_vaddr);
+        let input = TempFile::new_bytes("s11-elf-in-memory-in", "elf", &elf_bytes);
+        let output = TempFile::new_bytes("s11-elf-in-memory-out", "elf", &[]);
+        let source_before = std::fs::read(input.path()).expect("read source before patch");
+
+        let mut patcher = ElfPatcher::new(input.path()).expect("minimal ELF should parse");
+        let window = AddressWindow {
+            start: text_vaddr,
+            end: text_vaddr + 5,
+        };
+        patcher
+            .apply_patch(&window, &[0x90])
+            .expect("in-memory patch should succeed");
+
+        assert_eq!(
+            patcher
+                .get_instructions_in_window(&AddressWindow {
+                    start: text_vaddr,
+                    end: text_vaddr + text_bytes.len() as u64,
+                })
+                .expect("read in-memory text"),
+            [0x90, 0x0f, 0x1f, 0x40, 0x00, 0xaa, 0xbb, 0xcc],
+            "the selected range is NOP-padded and downstream bytes are untouched",
+        );
+        assert_eq!(
+            std::fs::read(input.path()).expect("read source after patch"),
+            source_before,
+            "in-memory mutation must not rewrite the input file",
+        );
+
+        patcher
+            .write_to(output.path())
+            .expect("final image write should succeed");
+        let written = std::fs::read(output.path()).expect("read final image");
+        assert_eq!(written.len(), source_before.len());
+        assert_ne!(written, source_before);
     }
 
     #[test]
