@@ -1201,7 +1201,6 @@ fn instruction_detail_error(
     )
 }
 
-#[cfg_attr(not(test), allow(dead_code))]
 fn find_candidate_windows_with_detail_provider<B, F>(
     backend: &B,
     patcher: &ElfPatcher,
@@ -1490,6 +1489,25 @@ struct ElfAutoOptimizationAdapter<'a, B> {
     /// the run summary never claims an unqualified fixpoint over a binary whose
     /// coverage was incomplete.
     refused_windows: usize,
+    /// Windows whose rewrite this run declined to apply after searching them —
+    /// a search or reassembly failure, or a replacement that does not fit.
+    /// Same reason as `refused_windows`: suppressed coverage must not be
+    /// silent, and a fixpoint reached over it is only a fixpoint over what was
+    /// actually admitted.
+    refused_rewrites: usize,
+}
+
+impl<B: ElfOptimizationBackend> ElfAutoOptimizationAdapter<'_, B> {
+    /// Drop one window from this run without failing it, and account for the
+    /// drop so the summary can qualify its fixpoint.
+    fn refuse_rewrite(&mut self, candidate: &AutoWindow, reason: &str) -> WindowSearchResult {
+        self.refused_rewrites += 1;
+        println!(
+            "Auto driver: refusing rewrite at 0x{:x}-0x{:x}: {reason}.",
+            candidate.window.start, candidate.window.end,
+        );
+        WindowSearchResult::NoImprovement
+    }
 }
 
 impl<B: ElfOptimizationBackend> AutoOptimizationAdapter for ElfAutoOptimizationAdapter<'_, B> {
@@ -1530,34 +1548,37 @@ impl<B: ElfOptimizationBackend> AutoOptimizationAdapter for ElfAutoOptimizationA
     }
 
     fn optimize_window(&mut self, candidate: &AutoWindow) -> Result<WindowSearchResult, String> {
-        let outcome = optimize_elf_window_with_backend(
+        // Gate on the window's own extent — the same number `apply_patch`
+        // validates against — rather than on the byte snapshot discovery took.
+        let window_len = usize::try_from(candidate.window.end - candidate.window.start)
+            .map_err(|_| "candidate window length does not fit in usize".to_string())?;
+
+        // Whatever goes wrong here is a property of this one window, not of the
+        // image: nothing is on disk until the final `write_to`, so propagating
+        // would abort the run and discard every rewrite accepted so far.
+        // Reassembly is a live source of such errors — x86 window reassembly
+        // *fails* (rather than returning oversized bytes) when an optimized
+        // prefix would displace the window's pinned `Jcc`, so the `fits_window`
+        // gate below never sees that case.
+        let outcome = match optimize_elf_window_with_backend(
             &self.backend,
             self.patcher,
             candidate.window.start,
             candidate.window.end,
             self.options,
             false,
-        )
-        .map_err(|error| {
-            format!(
-                "window 0x{:x}-0x{:x}: {}",
-                candidate.window.start, candidate.window.end, error
-            )
-        })?;
+        ) {
+            Ok(outcome) => outcome,
+            Err(error) => return Ok(self.refuse_rewrite(candidate, &error.to_string())),
+        };
 
         // `apply_patch` would reject an oversized replacement, and that error
-        // would abort the whole run and discard every rewrite accepted so far.
-        // Refuse just this window instead, and report it so it is not silent.
-        // Gate on the window's own extent — the same number `apply_patch`
-        // validates against — rather than on the byte snapshot discovery took.
-        let window_len = usize::try_from(candidate.window.end - candidate.window.start)
-            .map_err(|_| "candidate window length does not fit in usize".to_string())?;
+        // would likewise abort the whole run. Refuse just this window instead.
         if !outcome.fits_window(window_len) {
-            println!(
-                "Auto driver: refusing rewrite at 0x{:x}-0x{:x}: the replacement does not fit the {window_len}-byte window.",
-                candidate.window.start, candidate.window.end,
-            );
-            return Ok(WindowSearchResult::NoImprovement);
+            return Ok(self.refuse_rewrite(
+                candidate,
+                &format!("the replacement does not fit the {window_len}-byte window"),
+            ));
         }
 
         Ok(WindowSearchResult::from(outcome))
@@ -1628,13 +1649,18 @@ fn run_auto_optimization_with_backend<B: ElfOptimizationBackend>(
         patcher: image,
         options,
         refused_windows: 0,
+        refused_rewrites: 0,
     };
     let summary = drive_auto_optimization(&mut adapter, max_windows)?;
     let refused_windows = adapter.refused_windows;
+    let refused_rewrites = adapter.refused_rewrites;
 
     image.write_to(output_path)?;
     println!("Created optimized binary: {}", output_path.display());
-    println!("{}", auto_run_summary_log(&summary, refused_windows));
+    println!(
+        "{}",
+        auto_run_summary_log(&summary, refused_windows, refused_rewrites)
+    );
 
     Ok(())
 }
@@ -1642,7 +1668,11 @@ fn run_auto_optimization_with_backend<B: ElfOptimizationBackend>(
 /// Run-level accounting for one `--auto` invocation, as the lines the CLI
 /// prints. Kept as a pure formatter beside [`indirect_target_refusal_log`] so
 /// the wording integration tests assert on is pinned by a unit test first.
-fn auto_run_summary_log(summary: &AutoRunSummary, refused_windows: usize) -> String {
+fn auto_run_summary_log(
+    summary: &AutoRunSummary,
+    refused_windows: usize,
+    refused_rewrites: usize,
+) -> String {
     let mut lines = vec![format!(
         "Auto summary: {} searched, {} cache hits, {} rewrites accepted.",
         summary.searches, summary.cache_hits, summary.accepted_rewrites,
@@ -1650,6 +1680,11 @@ fn auto_run_summary_log(summary: &AutoRunSummary, refused_windows: usize) -> Str
     if let AutoTermination::BudgetExhausted { skipped } = summary.termination {
         lines.push(format!(
             "Auto window budget exhausted; skipped {skipped} candidate window(s) due to budget."
+        ));
+    }
+    if refused_rewrites > 0 {
+        lines.push(format!(
+            "Auto coverage is incomplete: refused {refused_rewrites} rewrite(s) that search or reassembly could not apply to their window."
         ));
     }
     if refused_windows > 0 {
@@ -1660,7 +1695,7 @@ fn auto_run_summary_log(summary: &AutoRunSummary, refused_windows: usize) -> Str
     if summary.termination == AutoTermination::Fixpoint {
         // A fixpoint over an incompletely covered binary is still a fixpoint,
         // but it is not "this binary is optimal" — say which one it is.
-        let scope = if refused_windows > 0 {
+        let scope = if refused_windows > 0 || refused_rewrites > 0 {
             " over admitted windows"
         } else {
             ""
@@ -3150,6 +3185,7 @@ mod cli_helper_tests {
                 termination: AutoTermination::BudgetExhausted { skipped: 2 },
             },
             0,
+            0,
         );
         assert_eq!(
             bounded,
@@ -3165,6 +3201,7 @@ mod cli_helper_tests {
                 termination: AutoTermination::Fixpoint,
             },
             0,
+            0,
         );
         assert!(
             fixpoint.ends_with(
@@ -3174,7 +3211,7 @@ mod cli_helper_tests {
         );
 
         // Refused coverage qualifies the fixpoint rather than hiding it.
-        let partial = auto_run_summary_log(&AutoRunSummary::default(), 5);
+        let partial = auto_run_summary_log(&AutoRunSummary::default(), 5, 0);
         assert!(
             partial.contains(
                 "Auto coverage is incomplete: refused 5 candidate window(s) whose interior contained an indirect target."
@@ -3182,6 +3219,18 @@ mod cli_helper_tests {
                 "reached a fixpoint over admitted windows (zero rewrites in the final pass)."
             ),
             "a fixpoint over incomplete coverage must say so: {partial}"
+        );
+
+        // A window whose rewrite the driver declined is suppressed coverage
+        // too, so it qualifies the fixpoint the same way.
+        let refused = auto_run_summary_log(&AutoRunSummary::default(), 0, 3);
+        assert!(
+            refused.contains(
+                "Auto coverage is incomplete: refused 3 rewrite(s) that search or reassembly could not apply to their window."
+            ) && refused.contains(
+                "reached a fixpoint over admitted windows (zero rewrites in the final pass)."
+            ),
+            "a refused rewrite must qualify the fixpoint: {refused}"
         );
     }
 
@@ -3295,6 +3344,7 @@ mod cli_helper_tests {
             patcher: &mut patcher,
             options: &options,
             refused_windows: 0,
+            refused_rewrites: 0,
         };
 
         let candidates = adapter
@@ -3308,6 +3358,47 @@ mod cli_helper_tests {
         assert_eq!(
             adapter.refused_windows, 1,
             "refused coverage must be accounted for, not silently dropped"
+        );
+    }
+
+    #[test]
+    fn auto_adapter_contains_a_window_search_failure_instead_of_aborting_the_run() {
+        // Nothing reaches disk until the driver's final `write_to`, so
+        // propagating one window's search/reassembly failure would discard
+        // every rewrite already accepted in memory. x86 window reassembly
+        // really does error (rather than return oversized bytes) when an
+        // optimized prefix would displace a pinned `Jcc`, so this seam must
+        // hold for errors and not just for the `fits_window` gate.
+        let elf_bytes = build_minimal_elf64(&[0x90], 0x1000, elf::abi::EM_X86_64);
+        let input = TempFile::new_bytes("s11-auto-window-error", "elf", &elf_bytes);
+        let mut patcher = ElfPatcher::new(input.path()).expect("synthetic ELF should parse");
+        let options = options_for(Algorithm::Enumerative);
+        let mut adapter = ElfAutoOptimizationAdapter {
+            backend: X86OptimizationBackend::new(X86Arch::X86_64),
+            patcher: &mut patcher,
+            options: &options,
+            refused_windows: 0,
+            refused_rewrites: 0,
+        };
+
+        // An address window outside every executable section makes
+        // `optimize_elf_window_with_backend` fail before any search runs.
+        let outcome = adapter
+            .optimize_window(&AutoWindow {
+                window: AddressWindow {
+                    start: 0x9000,
+                    end: 0x9004,
+                },
+                instruction_bytes: vec![0x90; 4],
+                instruction_count: 4,
+                redundancy_score: 3,
+            })
+            .expect("a single window's failure must not fail the run");
+
+        assert_eq!(outcome, WindowSearchResult::NoImprovement);
+        assert_eq!(
+            adapter.refused_rewrites, 1,
+            "a contained failure must still be accounted for in the run summary"
         );
     }
 

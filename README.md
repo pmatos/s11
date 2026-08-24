@@ -84,9 +84,10 @@ the end. Each rewrite must strictly lower `--cost-metric`; discovery restarts
 after a rewrite and stops at a rewrite-free pass. A candidate window whose
 interior contains an indirect target (named by a relocation, or stored as a
 code pointer in `.rodata`/`.data.rel.ro`) is conservatively refused, and the
-refused count is reported so suppressed coverage is never silent. A cheaper
-sequence that nonetheless encodes to more bytes than its window is refused for
-that window alone — the rest of the run continues.
+refused count is reported so suppressed coverage is never silent. A window whose
+rewrite cannot be applied — a search or reassembly failure, or a cheaper
+sequence that nonetheless encodes to more bytes than its window — is refused
+for that window alone, counted, and the rest of the run continues.
 Auto mode rejects relocatable ELF objects (`ET_REL`): their executable
 sections can share virtual addresses, while the v1 worklist identifies patch
 windows by virtual address. Link the object to an executable or shared object
