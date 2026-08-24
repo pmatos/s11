@@ -382,18 +382,20 @@ impl X86Register {
 
     /// True when this individual GPR view has an encoding in `mode`.
     ///
-    /// In 32-bit mode, indices 0..=7 are available, but low-byte views are
-    /// limited to the legacy AL/CL/DL/BL encodings at indices 0..=3. In 64-bit
-    /// mode, all sixteen GPRs and the REX-only low-byte views SPL/BPL/SIL/DIL
-    /// are available. Whole-instruction constraints, such as pairing a legacy
-    /// high-byte register with a REX-requiring operand, remain the encoding
-    /// prefilter's responsibility.
+    /// This is the mode-typed spelling of [`x86_register_ok`] and delegates to
+    /// it, so the search backends' register pools filter through exactly the
+    /// rule the assembler enforces. In 32-bit mode, indices 0..=7 are
+    /// available, but low-byte views are limited to the legacy AL/CL/DL/BL
+    /// encodings at indices 0..=3. In 64-bit mode, all sixteen GPRs and the
+    /// REX-only low-byte views SPL/BPL/SIL/DIL are available. Whole-instruction
+    /// constraints, such as pairing a legacy high-byte register with a
+    /// REX-requiring operand, remain the encoding prefilter's responsibility.
     pub fn is_available_in(self, mode: crate::assembler::x86::X86Mode) -> bool {
         let mode_width = match mode {
             crate::assembler::x86::X86Mode::Mode64 => 64,
             crate::assembler::x86::X86Mode::Mode32 => 32,
         };
-        encoding::x86_register_ok(self, mode_width)
+        x86_register_ok(self, mode_width)
     }
 }
 
@@ -2102,13 +2104,17 @@ mod tests {
         }
 
         // 32-bit mode has no encoding for the extended registers R8..R15 or
-        // the REX-only low-byte views SPL/BPL/SIL/DIL. Native views of the
-        // eight legacy GPRs and the legacy low-byte views remain addressable.
+        // the REX-only low-byte views SPL/BPL/SIL/DIL. Every view of the eight
+        // legacy GPRs, including the legacy high and low bytes, remains
+        // addressable.
         for r in [
             X86Register::RAX,
             X86Register::RSP,
             X86Register::RDI,
+            X86Register::EAX,
+            X86Register::AX,
             X86Register::AL,
+            X86Register::AH,
             X86Register::CL,
             X86Register::DL,
             X86Register::BL,
@@ -2119,11 +2125,16 @@ mod tests {
                 r
             );
         }
+        // The REX-only low bytes are as unavailable in 32-bit mode as the
+        // extended file; `is_available_in` must not diverge from the
+        // assembler's `x86_register_ok`.
         for r in [
             X86Register::R8,
             X86Register::R9,
             X86Register::R12,
             X86Register::R15,
+            X86Register::R8D,
+            X86Register::R8B,
             X86Register::SPL,
             X86Register::BPL,
             X86Register::SIL,

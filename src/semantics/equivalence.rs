@@ -1290,14 +1290,23 @@ mod tests {
             check_equivalence_for::<crate::isa::X86_64>(&seq_mov_al, &seq_clear_low_byte, &cfg),
             EquivalenceResult::Equivalent
         );
+        let clobber_full_register = [X86Instruction::MovImm {
+            rd: X86Register::RAX,
+            imm: 0,
+        }];
+        assert!(matches!(
+            check_equivalence_for::<crate::isa::X86_64>(&seq_mov_al, &clobber_full_register, &cfg),
+            EquivalenceResult::NotEquivalent
+        ));
+        // The concrete pass above refutes this pair before SMT is reached, so
+        // repeat it with the fast path suppressed; otherwise a regression in
+        // the SMT partial-write model would go unnoticed here.
+        let smt_only = cfg.clone().random_tests(0);
         assert!(matches!(
             check_equivalence_for::<crate::isa::X86_64>(
                 &seq_mov_al,
-                &[X86Instruction::MovImm {
-                    rd: X86Register::RAX,
-                    imm: 0,
-                }],
-                &cfg
+                &clobber_full_register,
+                &smt_only
             ),
             EquivalenceResult::NotEquivalent
         ));
