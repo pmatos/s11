@@ -2072,7 +2072,9 @@ mod tests {
             .with_immediates(vec![0])
             .with_cores(Some(1))
             .with_solver_timeout(std::time::Duration::from_millis(250))
-            .with_timeout(std::time::Duration::from_secs(10));
+            // The finite pool terminates on its own. A wall-clock deadline makes
+            // this semantic regression load-sensitive as candidate coverage grows.
+            .with_timeout_option(None);
 
         let mut search = EnumerativeSearch::<crate::isa::AArch64>::new();
         let result = search.search(&target, &live_out, &config);
