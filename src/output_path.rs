@@ -7,17 +7,14 @@
 //! are checked before search so a bad target fails cheaply.
 //!
 //! An output that already exists as a **symlink** or a **directory** is refused
-//! outright, with or without `--force`: following a symlink would truncate a
-//! file at a path the user never named (the clobber this seam exists to
-//! prevent), and a directory can never become the result file, so advertising
-//! `--force` for either would be a dead end.
+//! outright, with or without `--force` — see `validate_existing_output` for why
+//! `--force` cannot help in either case.
 //!
 //! [`resolve_output_path`] returns a [`ResolvedOutput`] that carries the policy
-//! into the final write. Default writes use exclusive creation, closing the
-//! race where another file appears during a long search; forced writes reopen
-//! without truncation, recheck the input identity, and only then replace the
-//! target. Deriving a sibling remains fallible for stem-less or non-UTF-8 input
-//! names. See the `CONTEXT.md` glossary for the domain term.
+//! into the final write, which repeats it: the preflight runs before a
+//! potentially long search, so it cannot be the last word. Deriving a sibling
+//! remains fallible for stem-less or non-UTF-8 input names. See the
+//! `CONTEXT.md` glossary for the domain term.
 
 use std::fs::{File, OpenOptions};
 use std::io::{self, Write};
@@ -26,9 +23,8 @@ use std::path::{Path, PathBuf};
 /// A validated `opt` output target together with its overwrite policy.
 ///
 /// Callers resolve this once before starting a potentially long search, then
-/// pass it to the ELF writer. The final write repeats the safety policy:
-/// default writes use exclusive creation, while forced writes may truncate a
-/// distinct existing target but still refuse an alias of the input binary.
+/// pass it to the ELF writer, whose write re-applies the policy against the
+/// state of the filesystem at the end of that search.
 #[derive(Debug)]
 pub struct ResolvedOutput {
     input: PathBuf,
@@ -43,41 +39,42 @@ impl ResolvedOutput {
     }
 
     pub(crate) fn write(&self, bytes: &[u8]) -> io::Result<()> {
-        let mut options = OpenOptions::new();
-        options.write(true);
-        if self.overwrite {
-            options.create(true);
-        } else {
-            options.create_new(true);
-        }
-
-        // The search that produced `bytes` may have run for hours, so an open
-        // failure here has to name the path and the way out — the bare
-        // `File exists (os error 17)` an unwrapped `create_new` yields tells
-        // the user neither.
-        let mut file = options.open(&self.path).map_err(|error| {
-            let context = if error.kind() == io::ErrorKind::AlreadyExists {
-                format!(
-                    "output path '{}' appeared while the search was running; refusing to replace it (pass --force to replace it)",
-                    self.path.display()
-                )
-            } else {
-                format!("cannot write output path '{}': {error}", self.path.display())
-            };
-            io::Error::new(error.kind(), context)
-        })?;
-        if self.overwrite {
-            if self.opened_target_aliases_input(&file) {
-                return Err(io::Error::new(
-                    io::ErrorKind::PermissionDenied,
+        // `create_new` wins over `create` when both are set, so the two flags
+        // are the whole policy: exclusive creation by default, open-or-create
+        // under `--force`.
+        let mut file = OpenOptions::new()
+            .write(true)
+            .create(self.overwrite)
+            .create_new(!self.overwrite)
+            .open(&self.path)
+            .map_err(|error| {
+                // The search that produced `bytes` may have run for hours, so an
+                // open failure here has to name the path and the way out — the
+                // bare `File exists (os error 17)` an unwrapped `create_new`
+                // yields tells the user neither.
+                let context = if error.kind() == io::ErrorKind::AlreadyExists {
                     format!(
-                        "output path '{}' resolves to the input binary; refusing to optimize in place",
+                        "output path '{}' appeared while the search was running; refusing to replace it (pass --force to replace it)",
                         self.path.display()
-                    ),
-                ));
-            }
-            file.set_len(0)?;
+                    )
+                } else {
+                    format!("cannot write output path '{}': {error}", self.path.display())
+                };
+                io::Error::new(error.kind(), context)
+            })?;
+
+        // Unconditional, though it can only fire under `--force`: the default
+        // path just created this file exclusively, so it cannot already share
+        // the input's inode. Stating the guard once beats gating it on the same
+        // flag the open mode already encodes.
+        if self.opened_target_aliases_input(&file) {
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                in_place_refusal(&self.path),
+            ));
         }
+        // Also a no-op on the default path: a freshly created file is empty.
+        file.set_len(0)?;
         file.write_all(bytes)
     }
 
@@ -88,10 +85,7 @@ impl ResolvedOutput {
     /// link to the input can appear at the output path in between.
     #[cfg(unix)]
     fn opened_target_aliases_input(&self, file: &File) -> bool {
-        match (file.metadata(), std::fs::metadata(&self.input)) {
-            (Ok(target), Ok(input)) => same_file_ids(&target, &input),
-            _ => false,
-        }
+        same_file_ids(file.metadata(), std::fs::metadata(&self.input))
     }
 
     #[cfg(not(unix))]
@@ -119,10 +113,7 @@ pub fn resolve_output_path(
     };
 
     if paths_point_to_same_file(input, &output) {
-        return Err(format!(
-            "output path '{}' resolves to the input binary; refusing to optimize in place (choose a different -o/--output)",
-            output.display()
-        ));
+        return Err(in_place_refusal(&output));
     }
 
     // One stat decides the whole existing-target policy; the branches below
@@ -194,17 +185,22 @@ fn validate_output_parent(output: &Path) -> Result<(), String> {
         .parent()
         .filter(|path| !path.as_os_str().is_empty())
         .unwrap_or_else(|| Path::new("."));
-    if !parent.exists() {
-        return Err(format!(
-            "output parent directory '{}' does not exist",
-            parent.display()
-        ));
-    }
-    if !parent.is_dir() {
-        return Err(format!(
-            "output parent path '{}' is not a directory",
-            parent.display()
-        ));
+    // One stat answers both questions; `Path::exists` and `Path::is_dir` are
+    // each a `metadata` call, so asking in turn would stat the same path twice.
+    match std::fs::metadata(parent) {
+        Err(_) => {
+            return Err(format!(
+                "output parent directory '{}' does not exist",
+                parent.display()
+            ));
+        }
+        Ok(metadata) if !metadata.is_dir() => {
+            return Err(format!(
+                "output parent path '{}' is not a directory",
+                parent.display()
+            ));
+        }
+        Ok(_) => {}
     }
     tempfile::tempfile_in(parent).map_err(|error| {
         format!(
@@ -254,40 +250,49 @@ fn optimized_output_path(path: &Path) -> Result<PathBuf, String> {
 
 /// Whether `a` and `b` are the same file on disk.
 ///
-/// On Unix this compares the `(device, inode)` pair, the only check that catches
-/// a **hard link**: two hard links to one inode are distinct directory entries
-/// with distinct canonical paths, so a canonical-path comparison would miss them
-/// and let an `-o` hard link to the input slip through the in-place guard and get
+/// Comparing the `(device, inode)` pair is the only check that catches a **hard
+/// link**: two hard links to one inode are distinct directory entries with
+/// distinct canonical paths, so a canonical-path comparison would miss them and
+/// let an `-o` hard link to the input slip through the in-place guard and get
 /// truncated by `create_patched_copy`. `metadata` follows symlinks and requires
-/// the path to exist, so it subsumes the symlink and `./bin` vs `bin` cases too;
-/// a `-o` target that does not exist yet cannot alias the already-present input,
-/// so a failed stat means "different". Off Unix, fall back to comparing canonical
-/// paths (then literal paths when canonicalization fails, which only happens for
-/// a not-yet-created output that therefore cannot be the input).
+/// the path to exist, so it subsumes the symlink and `./bin` vs `bin` cases too.
+#[cfg(unix)]
 fn paths_point_to_same_file(a: &Path, b: &Path) -> bool {
-    #[cfg(unix)]
-    fn same_file(a: &Path, b: &Path) -> bool {
-        match (std::fs::metadata(a), std::fs::metadata(b)) {
-            (Ok(ma), Ok(mb)) => same_file_ids(&ma, &mb),
-            _ => false,
-        }
+    same_file_ids(std::fs::metadata(a), std::fs::metadata(b))
+}
+
+/// Whether `a` and `b` are the same file on disk.
+///
+/// Without `(device, inode)` this compares canonical paths, then literal paths
+/// when canonicalization fails — which only happens for a not-yet-created
+/// output, which therefore cannot be the input.
+#[cfg(not(unix))]
+fn paths_point_to_same_file(a: &Path, b: &Path) -> bool {
+    match (std::fs::canonicalize(a), std::fs::canonicalize(b)) {
+        (Ok(ca), Ok(cb)) => ca == cb,
+        _ => a == b,
     }
-    #[cfg(not(unix))]
-    fn same_file(a: &Path, b: &Path) -> bool {
-        match (std::fs::canonicalize(a), std::fs::canonicalize(b)) {
-            (Ok(ca), Ok(cb)) => ca == cb,
-            _ => a == b,
-        }
-    }
-    same_file(a, b)
 }
 
 /// The single `(device, inode)` identity rule, shared by the preflight guard
 /// and the write-time recheck so the two can never drift apart.
+///
+/// Takes the `Result`s rather than the metadata so the "a failed stat means
+/// *different*" half of the rule is shared too: a `-o` target that does not
+/// exist yet cannot alias the already-present input.
 #[cfg(unix)]
-fn same_file_ids(a: &std::fs::Metadata, b: &std::fs::Metadata) -> bool {
+fn same_file_ids(a: io::Result<std::fs::Metadata>, b: io::Result<std::fs::Metadata>) -> bool {
     use std::os::unix::fs::MetadataExt;
-    a.dev() == b.dev() && a.ino() == b.ino()
+    matches!((a, b), (Ok(a), Ok(b)) if a.dev() == b.dev() && a.ino() == b.ino())
+}
+
+/// The one wording for "this output is the input binary", shared by the
+/// preflight guard and the write-time recheck that enforce the same rule.
+fn in_place_refusal(output: &Path) -> String {
+    format!(
+        "output path '{}' resolves to the input binary; refusing to optimize in place (choose a different -o/--output)",
+        output.display()
+    )
 }
 
 #[cfg(test)]

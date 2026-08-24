@@ -720,6 +720,20 @@ mod tests {
     use super::*;
     use crate::output_path::resolve_output_path;
 
+    /// A [`ResolvedOutput`] over a not-yet-existing path in a fresh temp dir.
+    ///
+    /// The padding tests care about the bytes `create_patched_copy` writes, not
+    /// about overwrite policy, so resolving against an absent target keeps
+    /// `force` out of them entirely. The returned `TempDir` owns the cleanup and
+    /// must stay alive for as long as the output is used.
+    fn resolved_test_output(input: &Path) -> (tempfile::TempDir, ResolvedOutput) {
+        let dir = tempfile::tempdir().expect("create output directory");
+        let output = dir.path().join("patched.elf");
+        let resolved =
+            resolve_output_path(input, Some(&output), false).expect("resolve test output path");
+        (dir, resolved)
+    }
+
     #[test]
     fn detected_arch_alignment() {
         assert_eq!(DetectedArch::Aarch64.instruction_alignment(), 4);
@@ -1314,8 +1328,7 @@ mod tests {
         let elf_bytes = build_minimal_x86_64_elf(&text_bytes, text_vaddr);
 
         let input = TempFile::new_bytes("s11-elf-padding-in", "elf", &elf_bytes);
-        let output_file = TempFile::new_bytes("s11-elf-padding-out", "elf", &[]);
-        let output = resolve_output_path(input.path(), Some(output_file.path()), true).unwrap();
+        let (_output_dir, output) = resolved_test_output(input.path());
 
         let patcher = ElfPatcher::new(input.path()).expect("patcher should accept minimal ELF");
         assert_eq!(patcher.arch(), DetectedArch::X86_64);
@@ -1349,8 +1362,7 @@ mod tests {
         let elf_bytes = build_minimal_aarch64_elf(&text_bytes, text_vaddr);
 
         let input = TempFile::new_bytes("s11-elf-aarch64-padding-in", "elf", &elf_bytes);
-        let output_file = TempFile::new_bytes("s11-elf-aarch64-padding-out", "elf", &[]);
-        let output = resolve_output_path(input.path(), Some(output_file.path()), true).unwrap();
+        let (_output_dir, output) = resolved_test_output(input.path());
 
         let patcher = ElfPatcher::new(input.path()).expect("patcher should accept minimal ELF");
         assert_eq!(patcher.arch(), DetectedArch::Aarch64);
@@ -1384,8 +1396,7 @@ mod tests {
         let elf_bytes = build_minimal_aarch64_elf(&text_bytes, text_vaddr);
 
         let input = TempFile::new_bytes("s11-elf-aarch64-no-padding-in", "elf", &elf_bytes);
-        let output_file = TempFile::new_bytes("s11-elf-aarch64-no-padding-out", "elf", &[]);
-        let output = resolve_output_path(input.path(), Some(output_file.path()), true).unwrap();
+        let (_output_dir, output) = resolved_test_output(input.path());
 
         let patcher = ElfPatcher::new(input.path()).expect("patcher should accept minimal ELF");
 
@@ -1420,8 +1431,7 @@ mod tests {
         let elf_bytes = build_minimal_x86_64_elf(&text_bytes, text_vaddr);
 
         let input = TempFile::new_bytes("s11-elf-x86-no-padding-in", "elf", &elf_bytes);
-        let output_file = TempFile::new_bytes("s11-elf-x86-no-padding-out", "elf", &[]);
-        let output = resolve_output_path(input.path(), Some(output_file.path()), true).unwrap();
+        let (_output_dir, output) = resolved_test_output(input.path());
 
         let patcher = ElfPatcher::new(input.path()).expect("patcher should accept minimal ELF");
 
@@ -1453,8 +1463,7 @@ mod tests {
         let elf_bytes = build_minimal_x86_64_elf(&text_bytes, text_vaddr);
 
         let input = TempFile::new_bytes("s11-elf-padding-big-in", "elf", &elf_bytes);
-        let output_file = TempFile::new_bytes("s11-elf-padding-big-out", "elf", &[]);
-        let output = resolve_output_path(input.path(), Some(output_file.path()), true).unwrap();
+        let (_output_dir, output) = resolved_test_output(input.path());
 
         let patcher = ElfPatcher::new(input.path()).expect("patcher should accept minimal ELF");
 
@@ -1494,8 +1503,7 @@ mod tests {
         let elf_bytes = build_minimal_aarch64_elf(&text_bytes, text_vaddr);
 
         let input = TempFile::new_bytes("s11-elf-aarch64-padding-big-in", "elf", &elf_bytes);
-        let output_file = TempFile::new_bytes("s11-elf-aarch64-padding-big-out", "elf", &[]);
-        let output = resolve_output_path(input.path(), Some(output_file.path()), true).unwrap();
+        let (_output_dir, output) = resolved_test_output(input.path());
 
         let patcher = ElfPatcher::new(input.path()).expect("patcher should accept minimal ELF");
 

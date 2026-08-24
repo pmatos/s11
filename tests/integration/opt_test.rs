@@ -270,6 +270,49 @@ fn assert_opt_arch_mismatch_rejected(test_elf: &Path, arch: &str, detected_arch:
     );
 }
 
+/// Run `opt` over a one-byte window and assert it is refused *before* the
+/// search starts, with a stderr diagnostic containing every string in
+/// `expected`.
+///
+/// Sibling of [`assert_opt_arch_mismatch_rejected`]: both pin "reject before
+/// search", so the stdout markers that prove the search never started live in
+/// one place rather than once per output-policy test.
+fn assert_opt_output_rejected_before_search(
+    input: &Path,
+    output_arg: Option<&Path>,
+    expected: &[&str],
+) {
+    let mut command = Command::new(get_binary_path());
+    command
+        .arg("opt")
+        .arg(input)
+        .arg("--start-addr")
+        .arg("0x0")
+        .arg("--end-addr")
+        .arg("0x1");
+    if let Some(path) = output_arg {
+        command.arg("-o").arg(path);
+    }
+    let output = command.output().expect("execute s11 opt");
+
+    assert!(
+        !output.status.success(),
+        "opt must fail for input {input:?} with -o {output_arg:?}"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    for needle in expected {
+        assert!(
+            stderr.contains(needle),
+            "diagnostic should contain {needle:?}; stderr: {stderr}"
+        );
+    }
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        !stdout.contains("Optimizing ELF binary") && !stdout.contains("Optimizing x86 ELF binary"),
+        "bad output must fail before search; stdout: {stdout}"
+    );
+}
+
 #[test]
 fn test_opt_refuses_existing_explicit_output_before_search() {
     let binary = get_binary_path();
@@ -277,29 +320,12 @@ fn test_opt_refuses_existing_explicit_output_before_search() {
     let sentinel = b"unrelated file contents";
     fs::write(existing_output.path(), sentinel).expect("seed existing output");
 
-    let output = Command::new(&binary)
-        .arg("opt")
-        .arg(&binary)
-        .arg("--start-addr")
-        .arg("0x0")
-        .arg("--end-addr")
-        .arg("0x1")
-        .arg("-o")
-        .arg(existing_output.path())
-        .output()
-        .expect("execute s11 opt");
+    assert_opt_output_rejected_before_search(
+        &binary,
+        Some(existing_output.path()),
+        &["output path already exists", "--force"],
+    );
 
-    assert!(!output.status.success(), "existing output must be refused");
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(
-        stderr.contains("output path already exists") && stderr.contains("--force"),
-        "diagnostic should explain the safe override; stderr: {stderr}"
-    );
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(
-        !stdout.contains("Optimizing ELF binary"),
-        "collision must fail before search; stdout: {stdout}"
-    );
     assert_eq!(
         fs::read(existing_output.path()).expect("read refused output"),
         sentinel,
@@ -317,27 +343,12 @@ fn test_opt_refuses_existing_derived_output_before_search() {
     let sentinel = b"previous optimization result";
     fs::write(&derived_output, sentinel).expect("seed derived output");
 
-    let output = Command::new(&binary)
-        .arg("opt")
-        .arg(&input)
-        .arg("--start-addr")
-        .arg("0x0")
-        .arg("--end-addr")
-        .arg("0x1")
-        .output()
-        .expect("execute s11 opt");
+    assert_opt_output_rejected_before_search(
+        &input,
+        None,
+        &["output path already exists", "--force"],
+    );
 
-    assert!(!output.status.success(), "existing output must be refused");
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(
-        stderr.contains("output path already exists") && stderr.contains("--force"),
-        "diagnostic should explain the safe override; stderr: {stderr}"
-    );
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(
-        !stdout.contains("Optimizing ELF binary"),
-        "collision must fail before search; stdout: {stdout}"
-    );
     assert_eq!(
         fs::read(&derived_output).expect("read refused output"),
         sentinel,
@@ -351,29 +362,12 @@ fn test_opt_rejects_missing_output_parent_before_search() {
     let temp_dir = tempfile::tempdir().expect("create fixture directory");
     let output_path = temp_dir.path().join("missing").join("output.elf");
 
-    let output = Command::new(&binary)
-        .arg("opt")
-        .arg(&binary)
-        .arg("--start-addr")
-        .arg("0x0")
-        .arg("--end-addr")
-        .arg("0x1")
-        .arg("-o")
-        .arg(&output_path)
-        .output()
-        .expect("execute s11 opt");
+    assert_opt_output_rejected_before_search(
+        &binary,
+        Some(&output_path),
+        &["output parent directory", "does not exist"],
+    );
 
-    assert!(!output.status.success(), "missing parent must be rejected");
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(
-        stderr.contains("output parent directory") && stderr.contains("does not exist"),
-        "diagnostic should identify the missing parent; stderr: {stderr}"
-    );
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(
-        !stdout.contains("Optimizing ELF binary"),
-        "bad output must fail before search; stdout: {stdout}"
-    );
     assert!(!output_path.exists(), "bad output must not be created");
 }
 
@@ -403,55 +397,36 @@ fn test_opt_rejects_unwritable_output_parent_before_search() {
 
     let output_path = read_only_dir.join("output.elf");
 
-    let output = Command::new(&binary)
-        .arg("opt")
-        .arg(&binary)
-        .arg("--start-addr")
-        .arg("0x0")
-        .arg("--end-addr")
-        .arg("0x1")
-        .arg("-o")
-        .arg(&output_path)
-        .output()
-        .expect("execute s11 opt");
+    assert_opt_output_rejected_before_search(
+        &binary,
+        Some(&output_path),
+        &["output parent directory", "not writable"],
+    );
 
-    assert!(
-        !output.status.success(),
-        "unwritable parent must be rejected"
-    );
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(
-        stderr.contains("output parent directory") && stderr.contains("not writable"),
-        "diagnostic should identify the unwritable parent; stderr: {stderr}"
-    );
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(
-        !stdout.contains("Optimizing ELF binary"),
-        "bad output must fail before search; stdout: {stdout}"
-    );
     assert!(!output_path.exists(), "bad output must not be created");
 }
 
 #[test]
 fn test_opt_basic_functionality() {
     let binary = get_binary_path();
-    let test_elf = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+    let source_elf = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("binaries")
         .join("arrays_debug");
 
-    check_test_binary(&test_elf);
+    check_test_binary(&source_elf);
+
+    // Stage the fixture in a private tempdir: the run derives its output as a
+    // sibling of the input, so optimizing in place would write into the shared
+    // `binaries/` directory, where a leftover from an aborted run now fails
+    // every later run against the existing-output guard.
+    let tmp_dir = tempfile::tempdir().expect("create temp fixture dir");
+    let test_elf = tmp_dir.path().join("arrays_debug");
+    fs::copy(&source_elf, &test_elf).expect("copy AArch64 fixture to tmp");
+    let optimized_path = tmp_dir.path().join("arrays_debug_optimized");
 
     // Avoid the unsupported .init PAC instruction while still exercising a
     // parser-supported, straight-line multi-instruction optimization window.
     let (start_addr, end_addr) = find_supported_aarch64_instruction_window(&test_elf, 4);
-
-    // The derived sibling lives in the shared `binaries/` fixture directory and
-    // an existing output is now refused without --force, so a leftover from an
-    // aborted run would fail every later run with an unrelated diagnostic.
-    let optimized_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("binaries")
-        .join("arrays_debug_optimized");
-    let _ = fs::remove_file(&optimized_path);
 
     let output = Command::new(binary)
         .arg("opt")
@@ -472,8 +447,6 @@ fn test_opt_basic_functionality() {
         .expect("Failed to execute s11");
 
     if !output.status.success() {
-        // Clean up in case of failure and print debug info
-        let _ = fs::remove_file(&optimized_path);
         panic!(
             "Command failed with status: {:?}\nstderr: {}\nstdout: {}",
             output.status,
@@ -534,9 +507,6 @@ fn test_opt_basic_functionality() {
         "Optimized binary should be created at: {:?}",
         optimized_path
     );
-
-    // Clean up
-    let _ = fs::remove_file(optimized_path);
 }
 
 #[test]
@@ -1259,6 +1229,54 @@ fn x86_find_byte_sequence(path: &Path, needle: &[u8]) -> u64 {
     panic!("byte sequence {needle:02x?} not found in any executable section of {path:?}");
 }
 
+/// `mov rax, 5` == `48 c7 c0 05 00 00 00`, the instruction `dup_mov_imm`
+/// repeats. Kept beside [`stage_dup_mov_imm`] so the encoding and the fixture
+/// it is coupled to move together.
+const MOV_RAX_5: [u8; 7] = [0x48, 0xc7, 0xc0, 0x05, 0x00, 0x00, 0x00];
+
+/// Copy the `binaries/x86_64/dup_mov_imm` fixture into a private tempdir.
+///
+/// `None` means the fixture was never built (no host x86-64 gcc), which every
+/// caller treats as a skip rather than a failure. The returned `TempDir` owns
+/// the cleanup and must outlive the returned path; a private directory also
+/// keeps the derived `dup_mov_imm_optimized` sibling from colliding between
+/// concurrently running tests.
+fn stage_dup_mov_imm(label: &str) -> Option<(tempfile::TempDir, PathBuf)> {
+    let source_elf = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("binaries")
+        .join("x86_64")
+        .join("dup_mov_imm");
+    if !source_elf.exists() {
+        eprintln!("Skipping {label}: {source_elf:?} not present (run build_tests.sh)");
+        return None;
+    }
+    let tmp_dir = tempfile::tempdir().expect("create temp fixture dir");
+    let test_elf = tmp_dir.path().join("dup_mov_imm");
+    fs::copy(&source_elf, &test_elf).expect("copy x86-64 fixture to tmp");
+    Some((tmp_dir, test_elf))
+}
+
+/// `s11 opt` over an x86-64 window with the settings the `dup_mov_imm` tests
+/// share. Enumerative search keeps the result deterministic; callers append
+/// their own `-o` / `--force` arguments.
+fn x86_opt_command(test_elf: &Path, start_addr: u64, end_addr: u64) -> Command {
+    let mut command = Command::new(get_binary_path());
+    command
+        .arg("opt")
+        .arg(test_elf)
+        .arg("--arch")
+        .arg("x86-64")
+        .arg("--algorithm")
+        .arg("enumerative")
+        .arg("--timeout")
+        .arg("30")
+        .arg("--start-addr")
+        .arg(format!("0x{start_addr:x}"))
+        .arg("--end-addr")
+        .arg(format!("0x{end_addr:x}"));
+    command
+}
+
 /// End-to-end x86-64 opt test (issue #91): run the `s11 opt` CLI on a real
 /// x86-64 ELF and assert a *known* one-instruction shortening is found and
 /// reported.
@@ -1276,47 +1294,22 @@ fn x86_find_byte_sequence(path: &Path, needle: &[u8]) -> u64 {
 /// rather than failing, matching the other x86 opt tests here.
 #[test]
 fn test_opt_x86_64_known_shortening() {
-    let binary = get_binary_path();
-    let source_elf = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("binaries")
-        .join("x86_64")
-        .join("dup_mov_imm");
-    if !source_elf.exists() {
-        eprintln!(
-            "Skipping x86-64 known-shortening opt test: {:?} not present (run build_tests.sh)",
-            source_elf
-        );
+    let Some((tmp_dir, test_elf)) = stage_dup_mov_imm("x86-64 known-shortening opt test") else {
         return;
-    }
+    };
 
-    // `mov rax, 5` == 48 c7 c0 05 00 00 00; find the first of the redundant
-    // pair and take a 14-byte (two-instruction) window over both.
-    let mov_rax_5: [u8; 7] = [0x48, 0xc7, 0xc0, 0x05, 0x00, 0x00, 0x00];
-    let pair: Vec<u8> = mov_rax_5.iter().chain(mov_rax_5.iter()).copied().collect();
-    let start_addr = x86_find_byte_sequence(&source_elf, &pair);
+    // Find the first of the redundant pair and take a 14-byte
+    // (two-instruction) window over both.
+    let pair: Vec<u8> = MOV_RAX_5.iter().chain(MOV_RAX_5.iter()).copied().collect();
+    let start_addr = x86_find_byte_sequence(&test_elf, &pair);
     let end_addr = start_addr + pair.len() as u64;
 
-    // Copy to a unique tempdir and use an explicit output so this also pins the
-    // end-to-end `-o` write path requested by issue #685.
-    let tmp_dir = tempfile::tempdir().expect("create temp fixture dir");
-    let test_elf = tmp_dir.path().join("dup_mov_imm");
-    fs::copy(&source_elf, &test_elf).expect("copy x86-64 fixture to tmp");
+    // Use an explicit output so this also pins the end-to-end `-o` write path
+    // requested by issue #685.
     let optimized_path = tmp_dir.path().join("custom-optimized.elf");
     let derived_path = tmp_dir.path().join("dup_mov_imm_optimized");
 
-    let output = Command::new(&binary)
-        .arg("opt")
-        .arg(&test_elf)
-        .arg("--arch")
-        .arg("x86-64")
-        .arg("--algorithm")
-        .arg("enumerative")
-        .arg("--timeout")
-        .arg("30")
-        .arg("--start-addr")
-        .arg(format!("0x{start_addr:x}"))
-        .arg("--end-addr")
-        .arg(format!("0x{end_addr:x}"))
+    let output = x86_opt_command(&test_elf, start_addr, end_addr)
         .arg("-o")
         .arg(&optimized_path)
         .output()
@@ -1364,44 +1357,19 @@ fn test_opt_x86_64_known_shortening() {
 
 #[test]
 fn test_opt_force_overwrites_existing_custom_output() {
-    let binary = get_binary_path();
-    let source_elf = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("binaries")
-        .join("x86_64")
-        .join("dup_mov_imm");
-    if !source_elf.exists() {
-        eprintln!(
-            "Skipping x86-64 forced-output opt test: {:?} not present (run build_tests.sh)",
-            source_elf
-        );
+    let Some((tmp_dir, test_elf)) = stage_dup_mov_imm("x86-64 forced-output opt test") else {
         return;
-    }
+    };
 
-    let mov_rax_5: [u8; 7] = [0x48, 0xc7, 0xc0, 0x05, 0x00, 0x00, 0x00];
-    let pair: Vec<u8> = mov_rax_5.iter().chain(mov_rax_5.iter()).copied().collect();
-    let start_addr = x86_find_byte_sequence(&source_elf, &pair);
+    let pair: Vec<u8> = MOV_RAX_5.iter().chain(MOV_RAX_5.iter()).copied().collect();
+    let start_addr = x86_find_byte_sequence(&test_elf, &pair);
     let end_addr = start_addr + pair.len() as u64;
 
-    let tmp_dir = tempfile::tempdir().expect("create temp fixture dir");
-    let test_elf = tmp_dir.path().join("dup_mov_imm");
-    fs::copy(&source_elf, &test_elf).expect("copy x86-64 fixture to tmp");
     let custom_output = tmp_dir.path().join("custom-output.elf");
     fs::write(&custom_output, b"unrelated file contents").expect("seed existing output");
     let derived_output = tmp_dir.path().join("dup_mov_imm_optimized");
 
-    let output = Command::new(&binary)
-        .arg("opt")
-        .arg(&test_elf)
-        .arg("--arch")
-        .arg("x86-64")
-        .arg("--algorithm")
-        .arg("enumerative")
-        .arg("--timeout")
-        .arg("30")
-        .arg("--start-addr")
-        .arg(format!("0x{start_addr:x}"))
-        .arg("--end-addr")
-        .arg(format!("0x{end_addr:x}"))
+    let output = x86_opt_command(&test_elf, start_addr, end_addr)
         .arg("--force")
         .arg("-o")
         .arg(&custom_output)
@@ -1439,42 +1407,19 @@ fn test_opt_force_overwrites_existing_custom_output() {
 
 #[test]
 fn test_opt_custom_output_copies_input_when_no_improvement_is_found() {
-    let binary = get_binary_path();
-    let source_elf = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("binaries")
-        .join("x86_64")
-        .join("dup_mov_imm");
-    if !source_elf.exists() {
-        eprintln!(
-            "Skipping x86-64 no-improvement output test: {:?} not present (run build_tests.sh)",
-            source_elf
-        );
+    let Some((tmp_dir, test_elf)) = stage_dup_mov_imm("x86-64 no-improvement output test") else {
         return;
-    }
+    };
 
-    let mov_rax_5: [u8; 7] = [0x48, 0xc7, 0xc0, 0x05, 0x00, 0x00, 0x00];
-    let start_addr = x86_find_byte_sequence(&source_elf, &mov_rax_5);
-    let end_addr = start_addr + mov_rax_5.len() as u64;
+    // A single `mov rax, 5` window: already minimal, so the search finds
+    // nothing to shorten and the run must still materialize an output.
+    let start_addr = x86_find_byte_sequence(&test_elf, &MOV_RAX_5);
+    let end_addr = start_addr + MOV_RAX_5.len() as u64;
 
-    let tmp_dir = tempfile::tempdir().expect("create temp fixture dir");
-    let test_elf = tmp_dir.path().join("dup_mov_imm");
-    fs::copy(&source_elf, &test_elf).expect("copy x86-64 fixture to tmp");
     let custom_output = tmp_dir.path().join("unchanged-output.elf");
     let derived_output = tmp_dir.path().join("dup_mov_imm_optimized");
 
-    let output = Command::new(&binary)
-        .arg("opt")
-        .arg(&test_elf)
-        .arg("--arch")
-        .arg("x86-64")
-        .arg("--algorithm")
-        .arg("enumerative")
-        .arg("--timeout")
-        .arg("30")
-        .arg("--start-addr")
-        .arg(format!("0x{start_addr:x}"))
-        .arg("--end-addr")
-        .arg(format!("0x{end_addr:x}"))
+    let output = x86_opt_command(&test_elf, start_addr, end_addr)
         .arg("-o")
         .arg(&custom_output)
         .output()
