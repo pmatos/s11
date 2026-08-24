@@ -133,12 +133,11 @@ can reconstruct *why* the window-selection rules are as conservative as they are
 8. **The loop is a monotone worklist with a no-improvement cache.** Each accepted
    rewrite strictly lowers the chosen cost metric, so progress is monotone. To
    avoid re-proving the same window across passes and across overlaps, the driver
-   caches "no improvement found" keyed by a hash of the window's instruction
-   bytes; a window whose bytes are unchanged since a prior miss is skipped. The
-   v1 cache is process-local and stores the exact byte vector in a hash set, so
-   hash collisions cannot cause false misses. Discovery restarts immediately
-   after an accepted patch; a pass that accepts zero rewrites terminates the
-   loop. Per-window search time is bounded by the existing `--timeout`, because
+   caches "no improvement found" keyed by the window's instruction bytes; a
+   window whose bytes are unchanged since a prior miss is skipped. The v1 cache
+   is process-local and stores the exact byte vector in a hash set, so hash
+   collisions cannot cause false misses. Discovery restarts immediately after an
+   accepted patch; a pass that accepts zero rewrites terminates the loop. Per-window search time is bounded by the existing `--timeout`, because
    superoptimizing every window of a binary the size of `/bin/ls` is otherwise
    unbounded.
 

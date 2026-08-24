@@ -15,22 +15,6 @@ pub struct AutoWindow {
     pub redundancy_score: usize,
 }
 
-impl AutoWindow {
-    pub fn new(
-        window: AddressWindow,
-        instruction_bytes: Vec<u8>,
-        instruction_count: usize,
-        redundancy_score: usize,
-    ) -> Self {
-        Self {
-            window,
-            instruction_bytes,
-            instruction_count,
-            redundancy_score,
-        }
-    }
-}
-
 /// Outcome of searching one candidate window.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum WindowSearchResult {
@@ -54,14 +38,23 @@ pub trait AutoOptimizationAdapter {
     ) -> Result<(), String>;
 }
 
+/// Why a whole-binary run stopped.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum AutoTermination {
+    /// A pass accepted no rewrite, so the image is at a fixpoint.
+    #[default]
+    Fixpoint,
+    /// The global search budget ran out with candidates still unproven.
+    BudgetExhausted { skipped: usize },
+}
+
 /// Observable accounting for one whole-binary run.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct AutoRunSummary {
     pub searches: usize,
     pub accepted_rewrites: usize,
     pub cache_hits: usize,
-    pub budget_skipped: usize,
-    pub fixpoint_reached: bool,
+    pub termination: AutoTermination,
 }
 
 /// Drive prioritized passes, bounded by a global count of actual searches.
@@ -89,12 +82,14 @@ pub fn drive_auto_optimization<A: AutoOptimizationAdapter>(
                 continue;
             }
             if summary.searches == max_windows {
-                summary.budget_skipped = candidates[index..]
-                    .iter()
-                    .filter(|remaining| {
-                        !no_improvement_cache.contains(&remaining.instruction_bytes)
-                    })
-                    .count();
+                summary.termination = AutoTermination::BudgetExhausted {
+                    skipped: candidates[index..]
+                        .iter()
+                        .filter(|remaining| {
+                            !no_improvement_cache.contains(&remaining.instruction_bytes)
+                        })
+                        .count(),
+                };
                 return Ok(summary);
             }
 
@@ -126,7 +121,7 @@ pub fn drive_auto_optimization<A: AutoOptimizationAdapter>(
         }
 
         if !accepted_rewrite {
-            summary.fixpoint_reached = true;
+            summary.termination = AutoTermination::Fixpoint;
             return Ok(summary);
         }
     }
@@ -166,15 +161,15 @@ mod tests {
     }
 
     fn candidate(start: u64, instructions: usize, redundancy: usize) -> AutoWindow {
-        AutoWindow::new(
-            AddressWindow {
+        AutoWindow {
+            window: AddressWindow {
                 start,
                 end: start + instructions as u64,
             },
-            vec![start as u8; instructions],
-            instructions,
-            redundancy,
-        )
+            instruction_bytes: vec![start as u8; instructions],
+            instruction_count: instructions,
+            redundancy_score: redundancy,
+        }
     }
 
     #[test]
@@ -192,8 +187,10 @@ mod tests {
 
         assert_eq!(adapter.searched, [0x10, 0x20]);
         assert_eq!(summary.searches, 2);
-        assert_eq!(summary.budget_skipped, 1);
-        assert!(!summary.fixpoint_reached);
+        assert_eq!(
+            summary.termination,
+            AutoTermination::BudgetExhausted { skipped: 1 }
+        );
     }
 
     #[derive(Default)]
@@ -207,15 +204,15 @@ mod tests {
     impl AutoOptimizationAdapter for RewriteThenFixpointAdapter {
         fn discover_windows(&mut self) -> Result<Vec<AutoWindow>, String> {
             self.discoveries += 1;
-            let unchanged_miss = AutoWindow::new(
-                AddressWindow {
+            let unchanged_miss = AutoWindow {
+                window: AddressWindow {
                     start: 0x10,
                     end: 0x13,
                 },
-                vec![0xaa, 0xbb, 0xcc],
-                3,
-                0,
-            );
+                instruction_bytes: vec![0xaa, 0xbb, 0xcc],
+                instruction_count: 3,
+                redundancy_score: 0,
+            };
             if self.patched {
                 Ok(vec![unchanged_miss])
             } else {
@@ -263,8 +260,7 @@ mod tests {
         assert_eq!(summary.searches, 2);
         assert_eq!(summary.accepted_rewrites, 1);
         assert_eq!(summary.cache_hits, 1);
-        assert_eq!(summary.budget_skipped, 0);
-        assert!(summary.fixpoint_reached);
+        assert_eq!(summary.termination, AutoTermination::Fixpoint);
     }
 
     struct EqualCostAdapter {

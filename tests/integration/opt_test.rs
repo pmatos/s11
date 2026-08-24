@@ -1190,18 +1190,6 @@ fn test_opt_x86_64_known_shortening() {
     );
 }
 
-fn elf_vaddr_to_file_offset(path: &Path, address: u64) -> usize {
-    let data = fs::read(path).expect("read ELF for address translation");
-    let elf = elf::ElfBytes::<elf::endian::AnyEndian>::minimal_parse(&data)
-        .expect("parse ELF for address translation");
-    for section in elf.section_headers().expect("read section headers").iter() {
-        if address >= section.sh_addr && address < section.sh_addr + section.sh_size {
-            return (section.sh_offset + address - section.sh_addr) as usize;
-        }
-    }
-    panic!("address 0x{address:x} is not mapped by a section in {path:?}");
-}
-
 #[test]
 fn test_auto_x86_64_rewrites_two_windows_then_reaches_fixpoint() {
     let binary = get_binary_path();
@@ -1231,21 +1219,25 @@ fn test_auto_x86_64_rewrites_two_windows_then_reaches_fixpoint() {
     let bounded = tmp.path().join("auto-two-bounded");
     fs::copy(&source_elf, &input).expect("copy auto fixture");
 
-    let first = Command::new(&binary)
-        .args(["opt", "--auto"])
-        .arg(&input)
-        .args([
-            "--algorithm",
-            "enumerative",
-            "--timeout",
-            "30",
-            "--max-windows",
-            "10",
-            "-o",
-        ])
-        .arg(&optimized)
-        .output()
-        .expect("run first auto optimization");
+    let run_auto = |source: &Path, destination: &Path, max_windows: &str| {
+        Command::new(&binary)
+            .args(["opt", "--auto"])
+            .arg(source)
+            .args([
+                "--algorithm",
+                "enumerative",
+                "--timeout",
+                "30",
+                "--max-windows",
+                max_windows,
+                "-o",
+            ])
+            .arg(destination)
+            .output()
+            .expect("run auto optimization")
+    };
+
+    let first = run_auto(&input, &optimized, "10");
     assert!(
         first.status.success(),
         "first auto run failed\nstdout: {}\nstderr: {}",
@@ -1265,8 +1257,8 @@ fn test_auto_x86_64_rewrites_two_windows_then_reaches_fixpoint() {
         before.len(),
         "in-place patching keeps file size"
     );
-    let rax_offset = elf_vaddr_to_file_offset(&input, rax_addr);
-    let rcx_offset = elf_vaddr_to_file_offset(&input, rcx_addr);
+    let rax_offset = file_offset_for_executable_addr(&input, rax_addr);
+    let rcx_offset = file_offset_for_executable_addr(&input, rcx_addr);
     let pair_len = rax_pair.len();
     for index in 0..before.len() {
         let inside_rewrite = (rax_offset..rax_offset + pair_len).contains(&index)
@@ -1306,21 +1298,7 @@ fn test_auto_x86_64_rewrites_two_windows_then_reaches_fixpoint() {
         );
     }
 
-    let second = Command::new(&binary)
-        .args(["opt", "--auto"])
-        .arg(&optimized)
-        .args([
-            "--algorithm",
-            "enumerative",
-            "--timeout",
-            "30",
-            "--max-windows",
-            "10",
-            "-o",
-        ])
-        .arg(&fixpoint)
-        .output()
-        .expect("rerun auto optimization");
+    let second = run_auto(&optimized, &fixpoint, "10");
     assert!(second.status.success());
     let second_stdout = String::from_utf8_lossy(&second.stdout);
     assert!(
@@ -1334,13 +1312,7 @@ fn test_auto_x86_64_rewrites_two_windows_then_reaches_fixpoint() {
         "fixpoint rerun must be byte-identical",
     );
 
-    let budget = Command::new(binary)
-        .args(["opt", "--auto"])
-        .arg(&input)
-        .args(["--max-windows", "0", "-o"])
-        .arg(&bounded)
-        .output()
-        .expect("run bounded auto optimization");
+    let budget = run_auto(&input, &bounded, "0");
     assert!(budget.status.success());
     assert!(
         String::from_utf8_lossy(&budget.stdout)

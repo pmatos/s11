@@ -11,7 +11,8 @@ mod test_utils;
 
 use s11::assembler::AArch64Assembler;
 use s11::auto_driver::{
-    AutoOptimizationAdapter, AutoWindow, WindowSearchResult, drive_auto_optimization,
+    AutoOptimizationAdapter, AutoTermination, AutoWindow, WindowSearchResult,
+    drive_auto_optimization,
 };
 use s11::candidate_windows::{WindowInstruction, WindowRole, plan_candidate_windows};
 use s11::capstone_bridge::{ConvertOutcome, convert_capstone_op};
@@ -556,16 +557,34 @@ enum OptimizedWindowBytes {
 
 enum ElfWindowOptimization {
     NoImprovement {
-        /// Preserve the historical single-window AArch64 behavior, which
-        /// materializes a copy even when search misses. Auto mode ignores this
-        /// fallback and writes its in-memory image once at the end.
-        single_window_bytes: Option<Vec<u8>>,
+        /// The window reassembled from its original IR, when the backend
+        /// produced one. Single-window mode writes it so a search miss still
+        /// materializes a copy; auto mode discards it and writes its in-memory
+        /// image once at the end.
+        reassembled: Option<Vec<u8>>,
     },
     Improved {
         replacement: Vec<u8>,
         original_cost: u64,
         optimized_cost: u64,
     },
+}
+
+impl From<ElfWindowOptimization> for WindowSearchResult {
+    fn from(outcome: ElfWindowOptimization) -> Self {
+        match outcome {
+            ElfWindowOptimization::NoImprovement { .. } => WindowSearchResult::NoImprovement,
+            ElfWindowOptimization::Improved {
+                replacement,
+                original_cost,
+                optimized_cost,
+            } => WindowSearchResult::Improved {
+                replacement,
+                original_cost,
+                optimized_cost,
+            },
+        }
+    }
 }
 
 /// Registers proven live downstream of the window, carried per-arch.
@@ -634,6 +653,8 @@ trait ElfOptimizationBackend {
     fn validate_window_ir(&self, ir: &[Self::Instruction]) -> Result<(), String>;
 
     /// Cost used both by the search and by the auto driver's monotonicity gate.
+    /// Routed through `isa::CostModel` so the gate and the search that
+    /// produced the candidate can never drift onto different cost models.
     fn sequence_cost(&self, ir: &[Self::Instruction], metric: &CostMetric) -> u64;
 
     /// Build the per-window `OptimizationContext`, deriving the downstream
@@ -720,7 +741,7 @@ impl ElfOptimizationBackend for AArch64OptimizationBackend {
     }
 
     fn sequence_cost(&self, ir: &[Self::Instruction], metric: &CostMetric) -> u64 {
-        semantics::cost::sequence_cost(ir, metric)
+        <isa::AArch64 as isa::CostModel<Instruction>>::sequence_cost(&isa::AArch64, ir, metric)
     }
 
     fn optimization_context(
@@ -915,7 +936,18 @@ impl ElfOptimizationBackend for X86OptimizationBackend {
     }
 
     fn sequence_cost(&self, ir: &[Self::Instruction], metric: &CostMetric) -> u64 {
-        semantics::cost_x86::sequence_cost(ir, metric, self.arch.width())
+        match self.arch {
+            X86Arch::X86_64 => <isa::X86_64 as isa::CostModel<Self::Instruction>>::sequence_cost(
+                &isa::X86_64,
+                ir,
+                metric,
+            ),
+            X86Arch::X86_32 => <isa::X86_32 as isa::CostModel<Self::Instruction>>::sequence_cost(
+                &isa::X86_32,
+                ir,
+                metric,
+            ),
+        }
     }
 
     fn optimization_context(
@@ -1172,10 +1204,11 @@ fn find_candidate_windows_with_backend<B: ElfOptimizationBackend>(
                     error
                 )
             })?;
-            branch_targets.extend(capstone_detail_direct_branch_targets(&detail));
-            if capstone_detail_is_indirect_control_flow(&detail) {
+            let direct_targets = capstone_detail_direct_branch_targets(&detail);
+            if direct_targets.is_empty() && capstone_detail_transfers_control(&detail) {
                 indirect_control_flow.push(instruction.address());
             }
+            branch_targets.extend(direct_targets);
         }
 
         decoded_sections.push((section, instructions, indirect_control_flow));
@@ -1327,20 +1360,18 @@ fn capstone_detail_direct_branch_targets(detail: &capstone::InsnDetail<'_>) -> V
         .collect()
 }
 
-fn capstone_detail_is_indirect_control_flow(detail: &capstone::InsnDetail<'_>) -> bool {
+fn capstone_detail_transfers_control(detail: &capstone::InsnDetail<'_>) -> bool {
     let group = |kind| capstone::InsnGroupId(kind as capstone::InsnGroupIdInt);
     let groups = detail.groups();
-    let transfers_control = groups.contains(&group(capstone::InsnGroupType::CS_GRP_JUMP))
-        || groups.contains(&group(capstone::InsnGroupType::CS_GRP_CALL))
+    groups.contains(&group(capstone::InsnGroupType::CS_GRP_JUMP))
         || groups.contains(&group(capstone::InsnGroupType::CS_GRP_RET))
-        || groups.contains(&group(capstone::InsnGroupType::CS_GRP_IRET));
-    transfers_control && capstone_detail_direct_branch_targets(detail).is_empty()
+        || groups.contains(&group(capstone::InsnGroupType::CS_GRP_IRET))
+        || capstone_detail_is_call(detail)
 }
 
 struct ElfAutoOptimizationAdapter<'a, B> {
     backend: B,
     patcher: &'a mut ElfPatcher,
-    binary: &'a Path,
     options: &'a OptimizationOptions,
     /// Sections already reported as refused. Discovery reruns after every
     /// accepted rewrite, so without this the same refusal would be logged once
@@ -1392,14 +1423,14 @@ impl<B: ElfOptimizationBackend> AutoOptimizationAdapter for ElfAutoOptimizationA
                 let mut seen_encodings = std::collections::HashSet::new();
                 let redundancy_score = instructions
                     .iter()
-                    .filter(|instruction| !seen_encodings.insert(instruction.bytes().to_vec()))
+                    .filter(|instruction| !seen_encodings.insert(instruction.bytes()))
                     .count();
-                work.push(AutoWindow::new(
+                work.push(AutoWindow {
                     window,
-                    bytes,
-                    instructions.len(),
+                    instruction_count: instructions.len(),
                     redundancy_score,
-                ));
+                    instruction_bytes: bytes,
+                });
             }
         }
 
@@ -1407,28 +1438,15 @@ impl<B: ElfOptimizationBackend> AutoOptimizationAdapter for ElfAutoOptimizationA
     }
 
     fn optimize_window(&mut self, candidate: &AutoWindow) -> Result<WindowSearchResult, String> {
-        let result = optimize_elf_window_with_backend(
+        optimize_elf_window_with_backend(
             &self.backend,
             self.patcher,
-            self.binary,
             candidate.window.start,
             candidate.window.end,
             self.options,
         )
-        .map_err(|error| error.to_string())?;
-
-        Ok(match result {
-            ElfWindowOptimization::NoImprovement { .. } => WindowSearchResult::NoImprovement,
-            ElfWindowOptimization::Improved {
-                replacement,
-                original_cost,
-                optimized_cost,
-            } => WindowSearchResult::Improved {
-                replacement,
-                original_cost,
-                optimized_cost,
-            },
-        })
+        .map(WindowSearchResult::from)
+        .map_err(|error| error.to_string())
     }
 
     fn apply_optimization(
@@ -1484,7 +1502,6 @@ fn run_auto_optimization_with_backend<B: ElfOptimizationBackend>(
     let mut adapter = ElfAutoOptimizationAdapter {
         backend,
         patcher: image,
-        binary,
         options,
         reported_refusals: std::collections::HashSet::new(),
         refused_windows: 0,
@@ -1498,10 +1515,9 @@ fn run_auto_optimization_with_backend<B: ElfOptimizationBackend>(
         "Auto summary: {} searched, {} cache hits, {} rewrites accepted.",
         summary.searches, summary.cache_hits, summary.accepted_rewrites,
     );
-    if summary.budget_skipped > 0 {
+    if let AutoTermination::BudgetExhausted { skipped } = summary.termination {
         println!(
-            "Auto window budget exhausted; skipped {} candidate window(s) due to budget.",
-            summary.budget_skipped,
+            "Auto window budget exhausted; skipped {skipped} candidate window(s) due to budget."
         );
     }
     if refused_windows > 0 {
@@ -1510,7 +1526,7 @@ fn run_auto_optimization_with_backend<B: ElfOptimizationBackend>(
             refused_windows,
         );
     }
-    if summary.fixpoint_reached && refused_windows == 0 {
+    if summary.termination == AutoTermination::Fixpoint && refused_windows == 0 {
         println!("Auto optimization reached a fixpoint (zero rewrites in the final pass).");
     }
 
@@ -1559,13 +1575,10 @@ fn optimize_elf_binary(
 fn optimize_elf_window_with_backend<B: ElfOptimizationBackend>(
     backend: &B,
     patcher: &ElfPatcher,
-    path: &Path,
     start_addr: u64,
     end_addr: u64,
     options: &OptimizationOptions,
 ) -> Result<ElfWindowOptimization, Box<dyn std::error::Error>> {
-    println!("Optimizing ELF binary: {}", path.display());
-    println!("Detected: {}", backend.arch_description());
     println!("Address window: 0x{:x} - 0x{:x}", start_addr, end_addr);
     println!("Algorithm: {:?}", options.algorithm);
 
@@ -1657,29 +1670,23 @@ fn optimize_elf_window_with_backend<B: ElfOptimizationBackend>(
         &original_bytes,
         start_addr,
     )?;
-    match (optimized_instructions.as_ref(), assembled_bytes) {
-        (Some(optimized), OptimizedWindowBytes::Patch(replacement)) => {
-            println!("Reassembled to {} bytes", replacement.len());
-            Ok(ElfWindowOptimization::Improved {
-                original_cost: backend.sequence_cost(&ir_instructions, &options.cost_metric),
-                optimized_cost: backend.sequence_cost(optimized, &options.cost_metric),
-                replacement,
-            })
+    let assembled_bytes = match assembled_bytes {
+        OptimizedWindowBytes::Patch(bytes) => {
+            println!("Reassembled to {} bytes", bytes.len());
+            Some(bytes)
         }
-        (Some(_), OptimizedWindowBytes::LeaveInputUnchanged) => {
+        OptimizedWindowBytes::LeaveInputUnchanged => None,
+    };
+    match (optimized_instructions.as_ref(), assembled_bytes) {
+        (Some(optimized), Some(replacement)) => Ok(ElfWindowOptimization::Improved {
+            original_cost: backend.sequence_cost(&ir_instructions, &options.cost_metric),
+            optimized_cost: backend.sequence_cost(optimized, &options.cost_metric),
+            replacement,
+        }),
+        (Some(_), None) => {
             Err("backend reported an optimization but refused to assemble its replacement".into())
         }
-        (None, OptimizedWindowBytes::Patch(bytes)) => {
-            println!("Reassembled to {} bytes", bytes.len());
-            Ok(ElfWindowOptimization::NoImprovement {
-                single_window_bytes: Some(bytes),
-            })
-        }
-        (None, OptimizedWindowBytes::LeaveInputUnchanged) => {
-            Ok(ElfWindowOptimization::NoImprovement {
-                single_window_bytes: None,
-            })
-        }
+        (None, reassembled) => Ok(ElfWindowOptimization::NoImprovement { reassembled }),
     }
 }
 
@@ -1692,27 +1699,25 @@ fn optimize_elf_binary_with_backend<B: ElfOptimizationBackend>(
     output_path: &Path,
     options: &OptimizationOptions,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    println!("Optimizing ELF binary: {}", path.display());
+    println!("Detected: {}", backend.arch_description());
+
     let window = AddressWindow {
         start: start_addr,
         end: end_addr,
     };
-    let result =
-        optimize_elf_window_with_backend(&backend, patcher, path, start_addr, end_addr, options)?;
-    match result {
-        ElfWindowOptimization::Improved { replacement, .. } => {
-            patcher.create_patched_copy(output_path, &window, &replacement)?;
-            println!("Created optimized binary: {}", output_path.display());
-        }
-        ElfWindowOptimization::NoImprovement {
-            single_window_bytes: Some(bytes),
-        } => {
-            patcher.create_patched_copy(output_path, &window, &bytes)?;
-            println!("Created optimized binary: {}", output_path.display());
-        }
-        ElfWindowOptimization::NoImprovement {
-            single_window_bytes: None,
-        } => {}
-    }
+    // Single-window mode materializes a copy even when search misses, so a
+    // reassembled miss is written just like an accepted rewrite.
+    let bytes =
+        match optimize_elf_window_with_backend(&backend, patcher, start_addr, end_addr, options)? {
+            ElfWindowOptimization::Improved { replacement, .. } => Some(replacement),
+            ElfWindowOptimization::NoImprovement { reassembled } => reassembled,
+        };
+    let Some(bytes) = bytes else {
+        return Ok(());
+    };
+    patcher.create_patched_copy(output_path, &window, &bytes)?;
+    println!("Created optimized binary: {}", output_path.display());
     Ok(())
 }
 
@@ -2940,7 +2945,6 @@ mod cli_helper_tests {
         let mut adapter = ElfAutoOptimizationAdapter {
             backend: X86OptimizationBackend::new(X86Arch::X86_64),
             patcher: &mut patcher,
-            binary: input.path(),
             options: &options,
             reported_refusals: std::collections::HashSet::new(),
             refused_windows: 0,
