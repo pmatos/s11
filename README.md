@@ -51,6 +51,23 @@ Before pushing, run `./ci_check.sh` to mirror the test workflow locally:
 wrapper regression checks, fmt check, build, AArch64 test binaries, and the
 full test suite.
 
+## Contributing
+
+Commit subjects and pull request titles must follow the
+[Conventional Commits 1.0.0 specification]. Use the
+`type(scope)?: description` form; the scope is optional. For example:
+
+```
+feat(search): add cost-bounded enumeration
+fix(x86): reject invalid byte-register operands
+docs: explain benchmark setup
+```
+
+To validate commit messages locally with the repository's commit hook, run
+`git config core.hooksPath .githooks`.
+
+[Conventional Commits 1.0.0 specification]: https://www.conventionalcommits.org/en/v1.0.0/
+
 ## Using it
 
 ```
