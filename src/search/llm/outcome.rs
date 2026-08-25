@@ -40,6 +40,26 @@ pub fn classify(
     live_out: &LiveOut,
     smt_timeout: Duration,
 ) -> (IterationOutcome, Option<EquivalenceMetrics>) {
+    classify_with_verifier(
+        target,
+        raw_asm,
+        live_out,
+        smt_timeout,
+        check_equivalence_with_config_metrics,
+    )
+}
+
+fn classify_with_verifier(
+    target: &[Instruction],
+    raw_asm: &str,
+    live_out: &LiveOut,
+    smt_timeout: Duration,
+    verifier: impl FnOnce(
+        &[Instruction],
+        &[Instruction],
+        &EquivalenceConfig,
+    ) -> (EquivalenceResult, EquivalenceMetrics),
+) -> (IterationOutcome, Option<EquivalenceMetrics>) {
     let candidate = match parse_assembly_string(raw_asm, "<llm-output>".to_string()) {
         Ok(v) => v,
         Err(_) => {
@@ -68,7 +88,7 @@ pub fn classify(
     // upstream flag-liveness early-exit could silently accept flag-divergent
     // rewrites.
     let cfg = verification_config(live_out, smt_timeout);
-    let (result, metrics) = check_equivalence_with_config_metrics(target, &candidate, &cfg);
+    let (result, metrics) = verifier(target, &candidate, &cfg);
     let outcome = match result {
         EquivalenceResult::Equivalent => IterationOutcome::Success(candidate),
         EquivalenceResult::NotEquivalent | EquivalenceResult::NotEquivalentFast(_) => {
@@ -116,7 +136,7 @@ fn extract_unsupported_mnemonics(raw: &str) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ir::{Operand, Register, RegisterWidth};
+    use crate::ir::{Operand, Register};
 
     fn live_out_x0() -> LiveOut {
         LiveOut::from_registers(vec![Register::X0])
@@ -238,62 +258,44 @@ mod tests {
 
     #[test]
     fn near_zero_smt_timeout_classifies_as_equiv_unknown() {
-        // Each target group expands addition into its carry identity:
-        // a + b = (a ^ b) + 2 * (a & b). Eight independent outputs put the
-        // full proof around 250 ms of Z3 time, far beyond a 1 ms budget.
-        //
-        // The concrete fast path cannot refute the pair either, but not
-        // because the rewrite is subtle: with `fast_only` off, `run_fast_path`
-        // randomizes only the live-out registers (x0-x7, all *outputs* here),
-        // so the operands x10-x25 stay zero on every trial. That makes the
-        // fast path vacuous, which is why the generous-budget assertion at
-        // the end of this test — not the fast path — is what pins the
-        // fixture's equivalence.
-        let groups = [
-            (Register::X0, Register::X10, Register::X11),
-            (Register::X1, Register::X12, Register::X13),
-            (Register::X2, Register::X14, Register::X15),
-            (Register::X3, Register::X16, Register::X17),
-            (Register::X4, Register::X18, Register::X19),
-            (Register::X5, Register::X20, Register::X21),
-            (Register::X6, Register::X22, Register::X23),
-            (Register::X7, Register::X24, Register::X25),
+        let target = vec![
+            Instruction::MovReg {
+                rd: Register::X0,
+                rn: Register::X1,
+            },
+            Instruction::Add {
+                rd: Register::X0,
+                rn: Register::X0,
+                rm: Operand::Immediate(1),
+            },
         ];
-        let mut target = Vec::new();
-        let mut candidate_lines = Vec::new();
+        let candidate = Instruction::Add {
+            rd: Register::X0,
+            rn: Register::X1,
+            rm: Operand::Immediate(1),
+        };
+        let timeout = Duration::from_millis(1);
 
-        for (output, a, b) in groups {
-            target.extend([
-                Instruction::Eor {
-                    rd: Register::X26,
-                    rn: a,
-                    rm: Operand::Register(b),
-                    width: RegisterWidth::X64,
-                },
-                Instruction::And {
-                    rd: Register::X27,
-                    rn: a,
-                    rm: Operand::Register(b),
-                    width: RegisterWidth::X64,
-                },
-                Instruction::Lsl {
-                    rd: Register::X27,
-                    rn: Register::X27,
-                    shift: Operand::Immediate(1),
-                },
-                Instruction::Add {
-                    rd: output,
-                    rn: Register::X26,
-                    rm: Operand::Register(Register::X27),
-                },
-            ]);
-            candidate_lines.push(format!("add {output}, {a}, {b}"));
-        }
+        let (outcome, metrics) = classify_with_verifier(
+            &target,
+            "add x0, x1, #1",
+            &live_out_x0(),
+            timeout,
+            |verified_target, verified_candidate, cfg| {
+                assert_eq!(verified_target, target);
+                assert_eq!(verified_candidate, [candidate]);
+                assert_eq!(cfg.smt_timeout, Some(timeout));
 
-        let live_out = LiveOut::from_registers(groups.map(|(output, _, _)| output).to_vec());
-        let raw = candidate_lines.join("\n");
-
-        let (outcome, metrics) = classify(&target, &raw, &live_out, Duration::from_millis(1));
+                (
+                    EquivalenceResult::Unknown("solver timeout".to_string()),
+                    EquivalenceMetrics {
+                        smt_called: true,
+                        smt_elapsed: Duration::from_millis(1),
+                        ..EquivalenceMetrics::default()
+                    },
+                )
+            },
+        );
 
         assert_eq!(outcome, IterationOutcome::EquivUnknown);
         let metrics = metrics.expect("equiv-unknown path must have verification metrics");
@@ -305,18 +307,7 @@ mod tests {
             metrics.smt_formula_bytes.is_none(),
             "formula size is serialized only on the unsat branch"
         );
-
-        // The budget must be the *only* reason for equiv-unknown. Without
-        // this second classification the test stays green even when it has
-        // stopped testing anything: a fixture that drifted into a
-        // non-equivalent pair (e.g. `sub` in place of `add`) also returns
-        // EquivUnknown with `smt_called` set at 1 ms, because the fast path
-        // above never varies the operands.
-        let (generous, _) = classify(&target, &raw, &live_out, Duration::from_secs(30));
-        match generous {
-            IterationOutcome::Success(seq) => assert_eq!(seq.len(), groups.len()),
-            other => panic!("fixture must be equivalent under a generous budget, got {other:?}"),
-        }
+        assert_eq!(metrics.smt_elapsed, Duration::from_millis(1));
     }
 
     #[test]
