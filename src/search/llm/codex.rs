@@ -231,6 +231,10 @@ fn validate_answer_metadata(
     Ok(())
 }
 
+/// Precondition: `child` must have been spawned as its own process-group
+/// leader (`Command::process_group(0)`). On timeout this SIGKILLs the whole
+/// group by the child's pid, so a child that shares its parent's group would
+/// target an unrelated (possibly pid-recycled) process group.
 fn wait_for_child(child: &mut Child, timeout: Duration) -> Result<ExitStatus, CodexError> {
     let started = Instant::now();
     loop {
