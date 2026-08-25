@@ -1,0 +1,9 @@
+[default.extend-words]
+ands = "ands"
+rela = "rela"
+setp = "setp"
+
+[default.extend-identifiers]
+CMOVcc = "CMOVcc"
+cmovCC = "cmovCC"
+Uscaled = "Uscaled"

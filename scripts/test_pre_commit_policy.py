@@ -4,9 +4,12 @@ import re
 import unittest
 from pathlib import Path
 
+import tomllib
+
 REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
 CONFIG_PATH = REPOSITORY_ROOT / ".pre-commit-config.yaml"
 README_PATH = REPOSITORY_ROOT / "README.md"
+TYPOS_CONFIG_PATH = REPOSITORY_ROOT / "_typos.toml"
 
 PINNED_REPOSITORIES = {
     "https://github.com/pre-commit/pre-commit-hooks": "v6.0.0",
@@ -28,6 +31,21 @@ GENERIC_HOOK_IDS = {
     "mixed-line-ending",
     "name-tests-test",
     "trailing-whitespace",
+}
+
+EXPECTED_TYPOS_CONFIG = {
+    "default": {
+        "extend-words": {
+            "ands": "ands",
+            "rela": "rela",
+            "setp": "setp",
+        },
+        "extend-identifiers": {
+            "CMOVcc": "CMOVcc",
+            "cmovCC": "cmovCC",
+            "Uscaled": "Uscaled",
+        },
+    }
 }
 
 
@@ -119,6 +137,14 @@ class TestPreCommitPolicy(unittest.TestCase):
         self.assertIn("pre-commit install", readme)
         self.assertIn("pre-commit run --all-files", readme)
         self.assertNotIn("`git config core.hooksPath .githooks`", readme)
+
+    def test_typos_allowlist_contains_only_verified_domain_terms(self):
+        self.assertTrue(
+            TYPOS_CONFIG_PATH.is_file(), f"missing {TYPOS_CONFIG_PATH.name}"
+        )
+        config = tomllib.loads(TYPOS_CONFIG_PATH.read_text(encoding="utf-8"))
+
+        self.assertEqual(config, EXPECTED_TYPOS_CONFIG)
 
 
 if __name__ == "__main__":
