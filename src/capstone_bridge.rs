@@ -84,11 +84,11 @@ fn normalize_mov_wide_alias(op_str: &str) -> Result<Option<String>, String> {
     }
 
     let value = imm as u64;
-    if let Some((imm, shift)) = move_wide_movz_encoding(value) {
-        return Ok(Some(format_move_wide("movz", rd, imm, shift)));
+    if let Some((enc_imm, enc_shift)) = move_wide_movz_encoding(value) {
+        return Ok(Some(format_move_wide("movz", rd, enc_imm, enc_shift)));
     }
-    if let Some((imm, shift)) = move_wide_movn_encoding(value) {
-        return Ok(Some(format_move_wide("movn", rd, imm, shift)));
+    if let Some((enc_imm, enc_shift)) = move_wide_movn_encoding(value) {
+        return Ok(Some(format_move_wide("movn", rd, enc_imm, enc_shift)));
     }
 
     Ok(None)
