@@ -101,6 +101,18 @@ impl ResolvedOutput {
         mut staged: tempfile::NamedTempFile,
         input: &Handle,
     ) -> io::Result<()> {
+        // Creation needs no replacement primitive. Trying no-clobber first
+        // lets `--force` remain portable when the target is absent, while an
+        // AlreadyExists result returns ownership of the staged file so the
+        // atomic replacement path below can still handle a raced entry.
+        match staged.persist_noclobber(&self.path) {
+            Ok(_) => return Ok(()),
+            Err(error) if error.error.kind() == io::ErrorKind::AlreadyExists => {
+                staged = error.file;
+            }
+            Err(error) => return Err(self.write_error(&error.error)),
+        }
+
         match exchange_paths(staged.path(), &self.path) {
             Ok(()) => match self.validate_displaced_target(staged.path(), input) {
                 Ok(()) => {
@@ -221,12 +233,7 @@ pub fn resolve_output_path(
     // must not re-derive it, or the diagnostic and the check can disagree.
     match std::fs::symlink_metadata(&output) {
         Ok(existing) => validate_existing_output(&output, &existing, force)?,
-        Err(error) if error.kind() == io::ErrorKind::NotFound => {
-            validate_output_parent(&output)?;
-            if force {
-                validate_atomic_replacement(&output)?;
-            }
-        }
+        Err(error) if error.kind() == io::ErrorKind::NotFound => validate_output_parent(&output)?,
         Err(error) => {
             return Err(format!(
                 "cannot inspect output path '{}': {error}",
@@ -765,6 +772,25 @@ mod tests {
             std::fs::read(&output).expect("read racing output"),
             sentinel,
             "racing output must remain unchanged"
+        );
+    }
+
+    #[test]
+    fn forced_write_creates_a_missing_output_without_replacement() {
+        let dir = tempfile::tempdir().expect("create output directory");
+        let input = dir.path().join("input.elf");
+        let output = dir.path().join("output.elf");
+        std::fs::write(&input, b"original input binary").expect("seed input");
+
+        let resolved = resolve_output_path(&input, Some(&output), true)
+            .expect("force must not require replacement support for a missing target");
+        resolved
+            .write(b"optimized ELF")
+            .expect("force should create a missing output with no-clobber publication");
+
+        assert_eq!(
+            std::fs::read(output).expect("read created output"),
+            b"optimized ELF"
         );
     }
 
