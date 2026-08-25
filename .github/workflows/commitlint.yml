@@ -23,7 +23,15 @@ jobs:
         with:
           node-version: lts/*
       - name: Install commitlint
-        run: npm install --no-save @commitlint/cli@21 @commitlint/config-conventional@21 # zizmor: ignore[adhoc-packages]
+        run: npm install --no-save @commitlint/cli@21.2.2 @commitlint/config-conventional@21.2.2 # zizmor: ignore[adhoc-packages]
       - name: Lint pushed commits
         if: github.event.before != '0000000000000000000000000000000000000000'
-        run: npx commitlint --from ${{ github.event.before }} --to ${{ github.sha }} --verbose
+        env:
+          AFTER_SHA: ${{ github.sha }}
+          BEFORE_SHA: ${{ github.event.before }}
+        run: |
+          if ! git cat-file -e "${BEFORE_SHA}^{commit}" 2>/dev/null; then
+            echo "::notice title=Commitlint skipped::Before commit ${BEFORE_SHA} is unavailable (possibly after a force-push); no reliable pushed range can be constructed."
+            exit 0
+          fi
+          npx commitlint --from "$BEFORE_SHA" --to "$AFTER_SHA" --verbose

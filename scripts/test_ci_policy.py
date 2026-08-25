@@ -7,6 +7,9 @@ import unittest
 REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
 CI_CHECK_PATH = REPOSITORY_ROOT / "ci_check.sh"
 TEST_WORKFLOW_PATH = REPOSITORY_ROOT / ".github" / "workflows" / "test.yml"
+COMMITLINT_WORKFLOW_PATH = (
+    REPOSITORY_ROOT / ".github" / "workflows" / "commitlint.yml"
+)
 
 INTEGRATION_TEST_COMMAND = "cargo test --test integration_tests -- --nocapture"
 POLICY_DISCOVERY_COMMAND = (
@@ -15,6 +18,17 @@ POLICY_DISCOVERY_COMMAND = (
 SHELL_REGRESSION_COMMAND = "./scripts/test_test_all.sh"
 MUTANTS_REGRESSION_COMMAND = "./scripts/test_run_mutants.sh"
 MUTANTS_WORKFLOW_STEP = "Check mutation-wrapper command construction"
+COMMITLINT_PACKAGE_SPECS = [
+    "@commitlint/cli@21.2.2",
+    "@commitlint/config-conventional@21.2.2",
+]
+ZERO_SHA = "0" * 40
+COMMITLINT_BEFORE_GUARD = (
+    'if ! git cat-file -e "${BEFORE_SHA}^{commit}" 2>/dev/null; then'
+)
+COMMITLINT_COMMAND = (
+    'npx commitlint --from "$BEFORE_SHA" --to "$AFTER_SHA" --verbose'
+)
 
 
 def has_required_command(contents: str, command: str) -> bool:
@@ -60,6 +74,53 @@ class TestCiPolicy(unittest.TestCase):
         self.assertTrue(
             has_required_command(workflow, INTEGRATION_TEST_COMMAND),
             f"{INTEGRATION_TEST_COMMAND!r} must be present without failure masking",
+        )
+
+    def test_commitlint_dependencies_are_pinned_exactly(self):
+        workflow = COMMITLINT_WORKFLOW_PATH.read_text(encoding="utf-8")
+        try:
+            install_step = workflow_step(workflow, "Install commitlint")
+        except ValueError as error:
+            self.fail(str(error))
+
+        package_specs = [
+            token
+            for token in install_step.split()
+            if token.startswith("@commitlint/")
+        ]
+        self.assertEqual(package_specs, COMMITLINT_PACKAGE_SPECS)
+
+    def test_commitlint_skips_an_unavailable_before_commit(self):
+        workflow = COMMITLINT_WORKFLOW_PATH.read_text(encoding="utf-8")
+        try:
+            lint_step = workflow_step(workflow, "Lint pushed commits")
+        except ValueError as error:
+            self.fail(str(error))
+
+        self.assertIn(f"if: github.event.before != '{ZERO_SHA}'", lint_step)
+        self.assertIn("BEFORE_SHA: ${{ github.event.before }}", lint_step)
+        self.assertIn("AFTER_SHA: ${{ github.sha }}", lint_step)
+
+        guard_index = lint_step.find(COMMITLINT_BEFORE_GUARD)
+        notice_index = lint_step.find("::notice")
+        exit_index = lint_step.find("exit 0")
+        lint_index = lint_step.find("npx commitlint")
+        self.assertGreaterEqual(guard_index, 0)
+        self.assertGreater(notice_index, guard_index)
+        self.assertGreater(exit_index, notice_index)
+        self.assertGreater(lint_index, exit_index)
+        self.assertIn("force-push", lint_step)
+
+    def test_commitlint_normal_push_failures_remain_unmasked(self):
+        workflow = COMMITLINT_WORKFLOW_PATH.read_text(encoding="utf-8")
+        try:
+            lint_step = workflow_step(workflow, "Lint pushed commits")
+        except ValueError as error:
+            self.fail(str(error))
+
+        self.assertTrue(
+            has_required_command(lint_step, COMMITLINT_COMMAND),
+            f"normal pushes must run {COMMITLINT_COMMAND!r} without failure masking",
         )
 
     def test_repository_policy_step_runs_all_regressions(self):
