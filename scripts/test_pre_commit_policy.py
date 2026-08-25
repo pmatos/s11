@@ -120,6 +120,11 @@ class TestPreCommitPolicy(unittest.TestCase):
 
         self.assertIn("default_install_hook_types: [pre-commit, commit-msg]", contents)
 
+    def test_quality_hooks_default_to_pre_commit_stage_only(self):
+        contents = self.config()
+
+        self.assertIn("default_stages: [pre-commit]", contents)
+
     def test_existing_commit_message_validator_is_routed_through_pre_commit(self):
         block = repository_block(self.config(), "local")
 
