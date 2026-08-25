@@ -347,12 +347,7 @@ fn create_staged_output(parent: &Path) -> io::Result<(tempfile::TempDir, tempfil
     Ok((staging_dir, staged))
 }
 
-#[cfg(any(
-    target_os = "linux",
-    target_os = "android",
-    target_vendor = "apple",
-    target_os = "redox"
-))]
+#[cfg(any(target_os = "linux", target_os = "android", target_vendor = "apple"))]
 fn exchange_paths(a: &Path, b: &Path) -> io::Result<()> {
     rustix::fs::renameat_with(
         rustix::fs::CWD,
@@ -364,12 +359,7 @@ fn exchange_paths(a: &Path, b: &Path) -> io::Result<()> {
     .map_err(|error| io::Error::from_raw_os_error(error.raw_os_error()))
 }
 
-#[cfg(not(any(
-    target_os = "linux",
-    target_os = "android",
-    target_vendor = "apple",
-    target_os = "redox"
-)))]
+#[cfg(not(any(target_os = "linux", target_os = "android", target_vendor = "apple")))]
 fn exchange_paths(_a: &Path, _b: &Path) -> io::Result<()> {
     Err(io::Error::new(
         io::ErrorKind::Unsupported,
