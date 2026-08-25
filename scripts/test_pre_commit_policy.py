@@ -7,6 +7,7 @@ import unittest
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
 CONFIG_PATH = REPOSITORY_ROOT / ".pre-commit-config.yaml"
+README_PATH = REPOSITORY_ROOT / "README.md"
 
 PINNED_REPOSITORIES = {
     "https://github.com/pre-commit/pre-commit-hooks": "v6.0.0",
@@ -98,6 +99,31 @@ class TestPreCommitPolicy(unittest.TestCase):
         self.assertIn("entry: cargo fmt --all -- --check", block)
         self.assertIn("types: [rust]", block)
         self.assertIn("pass_filenames: false", block)
+
+    def test_default_install_covers_quality_and_commit_message_hooks(self):
+        contents = self.config()
+
+        self.assertIn(
+            "default_install_hook_types: [pre-commit, commit-msg]", contents
+        )
+
+    def test_existing_commit_message_validator_is_routed_through_pre_commit(self):
+        block = repository_block(self.config(), "local")
+
+        commit_message_index = block.find("- id: conventional-commit-message")
+        self.assertGreaterEqual(commit_message_index, 0)
+        commit_message_hook = block[commit_message_index:]
+        self.assertIn("entry: .githooks/commit-msg", commit_message_hook)
+        self.assertIn("language: script", commit_message_hook)
+        self.assertIn("stages: [commit-msg]", commit_message_hook)
+
+    def test_readme_documents_installation_and_old_hook_migration(self):
+        readme = README_PATH.read_text(encoding="utf-8")
+
+        self.assertIn("git config --unset-all core.hooksPath", readme)
+        self.assertIn("pre-commit install", readme)
+        self.assertIn("pre-commit run --all-files", readme)
+        self.assertNotIn("`git config core.hooksPath .githooks`", readme)
 
 
 if __name__ == "__main__":

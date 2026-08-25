@@ -1,4 +1,5 @@
 minimum_pre_commit_version: "3.2.0"
+default_install_hook_types: [pre-commit, commit-msg]
 
 repos:
   - repo: https://github.com/pre-commit/pre-commit-hooks
@@ -46,3 +47,8 @@ repos:
         language: system
         types: [rust]
         pass_filenames: false
+      - id: conventional-commit-message
+        name: conventional commit message
+        entry: .githooks/commit-msg
+        language: script
+        stages: [commit-msg]
