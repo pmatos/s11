@@ -55,7 +55,9 @@ full test suite.
 
 Commit subjects and pull request titles must follow the
 [Conventional Commits 1.0.0 specification]. Use the
-`type(scope)?: description` form; the scope is optional. For example:
+`type(scope)?: description` form; the scope is optional. The accepted types are
+`build`, `chore`, `ci`, `docs`, `feat`, `fix`, `perf`, `refactor`, `revert`,
+`style`, and `test`. For example:
 
 ```
 feat(search): add cost-bounded enumeration
