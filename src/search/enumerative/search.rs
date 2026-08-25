@@ -387,7 +387,10 @@ where
     /// generated up front.
     pub fn with_config(config: &SearchConfig) -> Self {
         let mut search = Self::new();
-        // Populate the cache eagerly; the returned slice is intentionally discarded.
+        // Warm the cache for `config`; the returned slice is deliberately dropped --
+        // only the side effect matters here. `search` re-derives the pool when its
+        // config's registers/immediates differ, so this just moves the one-off
+        // enumeration cost from the first `search` call to construction time.
         let _ = search.candidate_pool_for_config(config);
         search
     }
@@ -808,7 +811,10 @@ where
     }
 
     fn reset(&mut self) {
-        // Preserve the candidate pool so its generated instructions remain reusable across resets.
+        // Clear per-run statistics only. `search` calls `reset` as its first
+        // statement, so clearing `candidate_pool` or `private_pool` here would
+        // defeat both caches on *every* search, not just on explicit `reset`
+        // calls -- the pools are deliberately left intact.
         self.statistics = SearchStatistics::new(Algorithm::Enumerative);
     }
 }
