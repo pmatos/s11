@@ -380,7 +380,7 @@ mod tests {
     }
 
     #[test]
-    fn remaining_until_returns_positive_budget_without_deadline() {
+    fn remaining_until_returns_positive_budget_for_fresh_start() {
         let remaining = remaining_until(Instant::now(), Duration::MAX)
             .expect("a fresh search should retain a positive budget");
 
