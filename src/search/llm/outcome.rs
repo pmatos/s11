@@ -40,6 +40,26 @@ pub fn classify(
     live_out: &LiveOut,
     smt_timeout: Duration,
 ) -> (IterationOutcome, Option<EquivalenceMetrics>) {
+    classify_with_verifier(
+        target,
+        raw_asm,
+        live_out,
+        smt_timeout,
+        check_equivalence_with_config_metrics,
+    )
+}
+
+fn classify_with_verifier(
+    target: &[Instruction],
+    raw_asm: &str,
+    live_out: &LiveOut,
+    smt_timeout: Duration,
+    verifier: impl FnOnce(
+        &[Instruction],
+        &[Instruction],
+        &EquivalenceConfig,
+    ) -> (EquivalenceResult, EquivalenceMetrics),
+) -> (IterationOutcome, Option<EquivalenceMetrics>) {
     let candidate = match parse_assembly_string(raw_asm, "<llm-output>".to_string()) {
         Ok(v) => v,
         Err(_) => {
@@ -68,7 +88,7 @@ pub fn classify(
     // upstream flag-liveness early-exit could silently accept flag-divergent
     // rewrites.
     let cfg = verification_config(live_out, smt_timeout);
-    let (result, metrics) = check_equivalence_with_config_metrics(target, &candidate, &cfg);
+    let (result, metrics) = verifier(target, &candidate, &cfg);
     let outcome = match result {
         EquivalenceResult::Equivalent => IterationOutcome::Success(candidate),
         EquivalenceResult::NotEquivalent | EquivalenceResult::NotEquivalentFast(_) => {
@@ -234,6 +254,60 @@ mod tests {
             metrics.smt_formula_bytes.map(|n| n > 0).unwrap_or(false),
             "smt_formula_bytes should be populated and non-zero"
         );
+    }
+
+    #[test]
+    fn near_zero_smt_timeout_classifies_as_equiv_unknown() {
+        let target = vec![
+            Instruction::MovReg {
+                rd: Register::X0,
+                rn: Register::X1,
+            },
+            Instruction::Add {
+                rd: Register::X0,
+                rn: Register::X0,
+                rm: Operand::Immediate(1),
+            },
+        ];
+        let candidate = Instruction::Add {
+            rd: Register::X0,
+            rn: Register::X1,
+            rm: Operand::Immediate(1),
+        };
+        let timeout = Duration::from_millis(1);
+
+        let (outcome, metrics) = classify_with_verifier(
+            &target,
+            "add x0, x1, #1",
+            &live_out_x0(),
+            timeout,
+            |verified_target, verified_candidate, cfg| {
+                assert_eq!(verified_target, target);
+                assert_eq!(verified_candidate, [candidate]);
+                assert_eq!(cfg.smt_timeout, Some(timeout));
+
+                (
+                    EquivalenceResult::Unknown("solver timeout".to_string()),
+                    EquivalenceMetrics {
+                        smt_called: true,
+                        smt_elapsed: Duration::from_millis(1),
+                        ..EquivalenceMetrics::default()
+                    },
+                )
+            },
+        );
+
+        assert_eq!(outcome, IterationOutcome::EquivUnknown);
+        let metrics = metrics.expect("equiv-unknown path must have verification metrics");
+        assert!(
+            metrics.smt_called,
+            "near-zero timeout must reach SMT before returning equiv-unknown"
+        );
+        assert!(
+            metrics.smt_formula_bytes.is_none(),
+            "formula size is serialized only on the unsat branch"
+        );
+        assert_eq!(metrics.smt_elapsed, Duration::from_millis(1));
     }
 
     #[test]
