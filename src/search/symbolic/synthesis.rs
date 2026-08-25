@@ -445,6 +445,7 @@ mod tests {
     static TEST_EQUIVALENCE_SMT_CALLED: AtomicBool = AtomicBool::new(false);
     static TEST_RECORDED_TIMEOUT_MS: AtomicU64 = AtomicU64::new(u64::MAX);
     static TEST_SEQUENCE_COST_DELAY_MS: AtomicU64 = AtomicU64::new(0);
+    static TEST_STOP_AFTER_GENERATED_SEQUENCE_COST: AtomicBool = AtomicBool::new(false);
     static TEST_GENERATED_CANDIDATE_COST_OVERRIDE: AtomicU64 = AtomicU64::new(0);
     static TEST_STOP_FLAG: Mutex<Option<Arc<AtomicBool>>> = Mutex::new(None);
     static SYMBOLIC_INNER_LOOP_TEST_LOCK: Mutex<()> = Mutex::new(());
@@ -472,6 +473,7 @@ mod tests {
         TEST_EQUIVALENCE_SMT_CALLED.store(false, Ordering::SeqCst);
         TEST_RECORDED_TIMEOUT_MS.store(u64::MAX, Ordering::SeqCst);
         TEST_SEQUENCE_COST_DELAY_MS.store(0, Ordering::SeqCst);
+        TEST_STOP_AFTER_GENERATED_SEQUENCE_COST.store(false, Ordering::SeqCst);
         TEST_GENERATED_CANDIDATE_COST_OVERRIDE.store(0, Ordering::SeqCst);
         let mut slot = TEST_STOP_FLAG.lock().expect("test stop flag lock poisoned");
         *slot = None;
@@ -638,6 +640,15 @@ mod tests {
             let delay_ms = TEST_SEQUENCE_COST_DELAY_MS.load(Ordering::SeqCst);
             if delay_ms > 0 {
                 std::thread::sleep(Duration::from_millis(delay_ms));
+            }
+            if TEST_STOP_AFTER_GENERATED_SEQUENCE_COST.load(Ordering::SeqCst)
+                && !seq.is_empty()
+                && seq.iter().all(|instruction| instruction.0 == 0)
+            {
+                let slot = TEST_STOP_FLAG.lock().expect("test stop flag lock poisoned");
+                if let Some(flag) = slot.as_ref() {
+                    flag.store(true, Ordering::SeqCst);
+                }
             }
             let generated_cost = TEST_GENERATED_CANDIDATE_COST_OVERRIDE.load(Ordering::SeqCst);
             if generated_cost > 0
@@ -1074,6 +1085,37 @@ mod tests {
             search.statistics().candidates_evaluated,
             1,
             "length-2 search should stop counting after the first cancelled candidate",
+        );
+    }
+
+    #[test]
+    fn symbolic_length_one_stops_after_cost_before_smt() {
+        let _guard = SYMBOLIC_INNER_LOOP_TEST_LOCK
+            .lock()
+            .expect("symbolic inner-loop test lock poisoned");
+        reset_symbolic_inner_loop_test_state();
+        TEST_STOP_AFTER_GENERATED_SEQUENCE_COST.store(true, Ordering::SeqCst);
+
+        let flag = Arc::new(AtomicBool::new(false));
+        let _stop_guard = install_test_stop_flag(Arc::clone(&flag));
+        let config = SearchConfig::default()
+            .with_timeout_option(None)
+            .with_stop_flag(Arc::clone(&flag));
+        let target = [TestInstruction(100), TestInstruction(101)];
+        let mut search: SymbolicSearch<TestIsa> = SymbolicSearch::new();
+
+        let result = search.search(&target, &(), &config);
+
+        assert!(flag.load(Ordering::SeqCst));
+        assert!(!result.found_optimization);
+        assert_eq!(
+            result.statistics.candidates_evaluated, 0,
+            "a length-1 candidate cancelled while costing must not be counted",
+        );
+        assert_eq!(
+            TEST_EQUIVALENCE_CHECKS.load(Ordering::SeqCst),
+            0,
+            "a length-1 candidate cancelled while costing must not reach SMT",
         );
     }
 
