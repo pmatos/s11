@@ -242,7 +242,7 @@ mod tests {
         let jcc = X86Instruction::Jcc {
             cond: X86Condition::E,
         };
-        let final_ir = [mov_rax_rbx(), jcc.clone()];
+        let final_ir = [mov_rax_rbx(), jcc];
         let original_ir = [mov_rax_rbx(), jcc];
         let out = reassemble_optimized_x86_window(
             &final_ir,
@@ -277,7 +277,7 @@ mod tests {
         let jcc = X86Instruction::Jcc {
             cond: X86Condition::E,
         };
-        let final_ir = [mov_rax_rbx(), jcc.clone()];
+        let final_ir = [mov_rax_rbx(), jcc];
         let original_ir = [mov_rax_rbx(), jcc];
         let err =
             reassemble_optimized_x86_window(&final_ir, &original_ir, None, 5, DetectedArch::X86_64)
