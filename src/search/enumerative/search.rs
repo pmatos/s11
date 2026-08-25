@@ -808,6 +808,7 @@ where
     }
 
     fn reset(&mut self) {
+        // Preserve the candidate pool so its generated instructions remain reusable across resets.
         self.statistics = SearchStatistics::new(Algorithm::Enumerative);
     }
 }
