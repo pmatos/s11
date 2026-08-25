@@ -387,6 +387,7 @@ where
     /// generated up front.
     pub fn with_config(config: &SearchConfig) -> Self {
         let mut search = Self::new();
+        // Populate the cache eagerly; the returned slice is intentionally discarded.
         let _ = search.candidate_pool_for_config(config);
         search
     }
