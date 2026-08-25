@@ -231,8 +231,20 @@ fn validate_answer_metadata(
     Ok(())
 }
 
+const INITIAL_CHILD_POLL_INTERVAL: Duration = Duration::from_millis(10);
+const MAX_CHILD_POLL_INTERVAL: Duration = Duration::from_millis(100);
+
+fn child_poll_delay(remaining: Duration, current_interval: Duration) -> (Duration, Duration) {
+    let delay = remaining.min(current_interval);
+    let next_interval = current_interval
+        .saturating_mul(2)
+        .min(MAX_CHILD_POLL_INTERVAL);
+    (delay, next_interval)
+}
+
 fn wait_for_child(child: &mut Child, timeout: Duration) -> Result<ExitStatus, CodexError> {
     let started = Instant::now();
+    let mut poll_interval = INITIAL_CHILD_POLL_INTERVAL;
     loop {
         if let Some(status) = child
             .try_wait()
@@ -263,7 +275,9 @@ fn wait_for_child(child: &mut Child, timeout: Duration) -> Result<ExitStatus, Co
         }
 
         let remaining = timeout.saturating_sub(elapsed);
-        std::thread::sleep(std::cmp::min(remaining, Duration::from_millis(10)));
+        let (delay, next_interval) = child_poll_delay(remaining, poll_interval);
+        std::thread::sleep(delay);
+        poll_interval = next_interval;
     }
 }
 
@@ -436,6 +450,40 @@ done
             "codex envelope parse error: envelope `assembly` field is empty or whitespace-only"
         );
         assert!(envelope.source().is_some());
+    }
+
+    #[test]
+    fn child_poll_delays_back_off_without_exceeding_timeout() {
+        let mut interval = Duration::from_millis(10);
+        let delays = (0..6)
+            .map(|_| {
+                let (delay, next_interval) = child_poll_delay(Duration::from_secs(60), interval);
+                interval = next_interval;
+                delay
+            })
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            delays,
+            [10, 20, 40, 80, 100, 100].map(Duration::from_millis)
+        );
+
+        let (truncated_delay, next_interval) =
+            child_poll_delay(Duration::from_millis(7), Duration::from_millis(100));
+        assert_eq!(truncated_delay, Duration::from_millis(7));
+        assert_eq!(next_interval, Duration::from_millis(100));
+
+        let mut remaining = Duration::from_secs(60);
+        let mut interval = Duration::from_millis(10);
+        let mut sleep_count = 0;
+        while !remaining.is_zero() {
+            let (delay, next_interval) = child_poll_delay(remaining, interval);
+            remaining = remaining.saturating_sub(delay);
+            interval = next_interval;
+            sleep_count += 1;
+        }
+
+        assert_eq!(sleep_count, 603);
     }
 
     #[test]
