@@ -120,13 +120,12 @@ impl SearchAlgorithm<crate::isa::AArch64> for LlmSearch {
         let live_in = compute_live_in_registers(target);
         let prompt = build_prompt(target, &live_in, live_out);
         let timeout = config.timeout.unwrap_or(Duration::from_secs(60));
-        let deadline = started.checked_add(timeout);
         let max_calls = config.llm.max_codex_calls;
 
         let mut found: Option<Vec<Instruction>> = None;
 
         for call_idx in 0..max_calls {
-            let Some(remaining) = remaining_until(started, timeout, deadline) else {
+            let Some(remaining) = remaining_until(started, timeout) else {
                 if config.verbose {
                     eprintln!("llm-search: timeout after {} calls", call_idx);
                 }
@@ -175,7 +174,7 @@ impl SearchAlgorithm<crate::isa::AArch64> for LlmSearch {
                 }
             };
 
-            let Some(verify_remaining) = remaining_until(started, timeout, deadline)
+            let Some(verify_remaining) = remaining_until(started, timeout)
                 .and_then(|remaining| verification_timeout_for_remaining(config, remaining))
             else {
                 if config.verbose {
@@ -293,15 +292,8 @@ impl SearchAlgorithm<crate::isa::AArch64> for LlmSearch {
     }
 }
 
-fn remaining_until(
-    started: Instant,
-    timeout: Duration,
-    deadline: Option<Instant>,
-) -> Option<Duration> {
-    let remaining = match deadline {
-        Some(deadline) => deadline.saturating_duration_since(Instant::now()),
-        None => timeout.saturating_sub(started.elapsed()),
-    };
+fn remaining_until(started: Instant, timeout: Duration) -> Option<Duration> {
+    let remaining = timeout.saturating_sub(started.elapsed());
     (!remaining.is_zero()).then_some(remaining)
 }
 
@@ -385,6 +377,24 @@ mod tests {
             verification_timeout_for_remaining(&config, Duration::from_secs(10)),
             Some(Duration::from_millis(25))
         );
+    }
+
+    #[test]
+    fn remaining_until_returns_positive_budget_without_deadline() {
+        let remaining = remaining_until(Instant::now(), Duration::MAX)
+            .expect("a fresh search should retain a positive budget");
+
+        assert!(!remaining.is_zero());
+    }
+
+    #[test]
+    fn remaining_until_returns_none_for_exhausted_budget() {
+        assert_eq!(remaining_until(Instant::now(), Duration::ZERO), None);
+
+        let started = Instant::now()
+            .checked_sub(Duration::from_secs(2))
+            .expect("a two-second-old instant should be representable");
+        assert_eq!(remaining_until(started, Duration::from_secs(1)), None);
     }
 
     #[test]
