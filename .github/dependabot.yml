@@ -12,7 +12,8 @@ updates:
     commit-message:
       prefix: "chore"
 
-  # GitHub Actions
+  # Keep immutable full-SHA workflow pins current. Same-line version comments in
+  # the workflows let Dependabot update their human-readable release labels too.
   - package-ecosystem: "github-actions"
     directory: "/"
     schedule:

@@ -19,9 +19,8 @@ jobs:
     name: Validate PR title
     runs-on: ubuntu-latest
     steps:
-      # Tag-pinned, not hash-pinned: this repo's policy is tag pins kept current by
-      # Dependabot rather than SHA pins.
-      - uses: actions/setup-node@v7.0.0 # zizmor: ignore[unpinned-uses]
+      # Dependabot keeps full-SHA pins current; version comments make updates reviewable.
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: lts/*
       - name: Install commitlint
