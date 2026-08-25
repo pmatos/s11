@@ -5,9 +5,12 @@ use elf::parse::ParseAt;
 use elf::relocation::{Rel, Rela};
 use elf::section::{SectionHeader, SectionHeaderTable};
 use elf::symbol::{Symbol, SymbolTable};
+use same_file::Handle;
 use std::collections::HashSet;
-use std::fs;
+use std::fs::{File, OpenOptions};
+use std::io::{Read, Write};
 use std::path::Path;
+use std::sync::Arc;
 
 /// Intel SDM canonical multi-byte NOP sequences, indexed by length.
 /// Index 0 is the empty slice; indices 1..=9
@@ -111,6 +114,7 @@ pub struct ElfPatcher {
     file_data: Vec<u8>,
     arch: DetectedArch,
     elf_type: u16,
+    input_handle: Arc<Handle>,
 }
 
 #[derive(Debug, Clone)]
@@ -129,7 +133,9 @@ pub struct TextSection {
 
 impl ElfPatcher {
     pub fn new(path: &Path) -> Result<Self, Box<dyn std::error::Error>> {
-        let file_data = fs::read(path)?;
+        let input_handle = Handle::from_file(File::open(path)?)?;
+        let mut file_data = Vec::new();
+        input_handle.as_file().read_to_end(&mut file_data)?;
         let elf = ElfBytes::<AnyEndian>::minimal_parse(&file_data)?;
         let arch = DetectedArch::from_e_machine(elf.ehdr.e_machine).ok_or_else(|| {
             format!(
@@ -142,6 +148,7 @@ impl ElfPatcher {
             file_data,
             arch,
             elf_type,
+            input_handle: Arc::new(input_handle),
         })
     }
 
@@ -442,7 +449,26 @@ impl ElfPatcher {
 
     /// Materialize the current in-memory ELF image at `output_path`.
     pub fn write_to(&self, output_path: &Path) -> Result<(), Box<dyn std::error::Error>> {
-        fs::write(output_path, &self.file_data)?;
+        // Opening with truncation would clobber an alias before its identity is
+        // checked. Do not reopen this path after the check: truncate and write
+        // through the same pinned handle so a later pathname swap is harmless.
+        let output = OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .write(true)
+            .open(output_path)?;
+        let mut output_handle = Handle::from_file(output)?;
+        if self.input_handle.as_ref() == &output_handle {
+            return Err(format!(
+                "output path '{}' resolves to the input binary; refusing to optimize in place (choose a different -o/--output)",
+                output_path.display()
+            )
+            .into());
+        }
+
+        let output = output_handle.as_file_mut();
+        output.set_len(0)?;
+        output.write_all(&self.file_data)?;
         Ok(())
     }
 }
@@ -1333,6 +1359,42 @@ mod tests {
 
         assert!(targets.contains(&0x1000), "direct RELR address is named");
         assert!(targets.contains(&0x1008), "RELR bitmap address is named");
+    }
+
+    #[cfg(any(unix, windows))]
+    #[test]
+    fn create_patched_copy_refuses_output_replaced_by_hard_link_to_input() {
+        let text_vaddr = 0x100000;
+        let text_bytes = [0xc3u8; 8];
+        let elf_bytes = build_minimal_x86_64_elf(&text_bytes, text_vaddr);
+        let temp = tempfile::tempdir().expect("temporary directory should be created");
+        let input = temp.path().join("input.elf");
+        let requested_output = temp.path().join("output.elf");
+        std::fs::write(&input, &elf_bytes).expect("input ELF should be written");
+
+        let patcher = ElfPatcher::new(&input).expect("patcher should accept minimal ELF");
+        let output = crate::output_path::resolve_output_path(&input, Some(&requested_output))
+            .expect("nonexistent output should pass the early in-place guard");
+
+        std::fs::hard_link(&input, &output)
+            .expect("output should be replaceable with a hard link to the input");
+
+        let window = AddressWindow {
+            start: text_vaddr,
+            end: text_vaddr + text_bytes.len() as u64,
+        };
+        let result = patcher.create_patched_copy(&output, &window, &[0x90]);
+
+        let err = result.expect_err("late output alias must be refused before writing");
+        assert!(
+            err.to_string().contains("refusing to optimize in place"),
+            "unexpected error: {err}"
+        );
+        assert_eq!(
+            std::fs::read(&input).expect("input should remain readable"),
+            elf_bytes,
+            "refusing the late alias must leave the input byte-for-byte unchanged"
+        );
     }
 
     #[test]

@@ -1390,6 +1390,31 @@ mod tests {
     }
 
     #[test]
+    fn general_parser_rejects_legacy_high_byte_with_rex_only_register() {
+        for operands in ["ah, r8b", "dh, spl"] {
+            let err = x86_ir_from_mnemonic("mov", operands)
+                .expect_err("legacy high-byte operands cannot coexist with a REX prefix");
+            assert!(
+                err.contains("legacy high-byte register cannot be encoded with REX-byte operand"),
+                "unexpected error for mov {operands}: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn mode32_parser_rejects_rex_only_low_byte_registers() {
+        for alias in ["spl", "bpl", "sil", "dil"] {
+            let operands = format!("{alias}, al");
+            let err = x86_ir_from_mnemonic_for_mode("mov", &operands, X86ParseMode::Mode32)
+                .expect_err("x86-32 has no REX prefix for low-byte aliases 4 through 7");
+            assert!(
+                err.contains("not encodable in this mode"),
+                "unexpected error for mov {operands}: {err}"
+            );
+        }
+    }
+
+    #[test]
     fn test_mnemonic_parses_reg_and_imm_forms_and_round_trips_display() {
         // `test rax, rbx` and `test rax, 5` parse to TestReg/TestImm, and the
         // Display output round-trips back through the parser to the same IR.

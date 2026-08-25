@@ -1271,7 +1271,7 @@ mod tests {
     }
 
     #[test]
-    fn x86_64_smt_models_partial_byte_writes() {
+    fn x86_64_concrete_and_smt_model_partial_byte_writes() {
         let seq_mov_al = vec![X86Instruction::MovImm {
             rd: X86Register::AL,
             imm: 0,
@@ -1282,20 +1282,31 @@ mod tests {
         }];
         let cfg = EquivalenceConfigFor::<crate::isa::X86_64>::default()
             .live_out(X86LiveOut::from_registers(vec![X86Register::RAX]))
-            .random_tests(0);
+            // Exercise the concrete partial-write model before asking SMT for
+            // the all-input proof, so the two implementations stay in sync.
+            .random_tests(16);
 
         assert_eq!(
             check_equivalence_for::<crate::isa::X86_64>(&seq_mov_al, &seq_clear_low_byte, &cfg),
             EquivalenceResult::Equivalent
         );
+        let clobber_full_register = [X86Instruction::MovImm {
+            rd: X86Register::RAX,
+            imm: 0,
+        }];
+        assert!(matches!(
+            check_equivalence_for::<crate::isa::X86_64>(&seq_mov_al, &clobber_full_register, &cfg),
+            EquivalenceResult::NotEquivalent
+        ));
+        // The concrete pass above refutes this pair before SMT is reached, so
+        // repeat it with the fast path suppressed; otherwise a regression in
+        // the SMT partial-write model would go unnoticed here.
+        let smt_only = cfg.clone().random_tests(0);
         assert!(matches!(
             check_equivalence_for::<crate::isa::X86_64>(
                 &seq_mov_al,
-                &[X86Instruction::MovImm {
-                    rd: X86Register::RAX,
-                    imm: 0,
-                }],
-                &cfg
+                &clobber_full_register,
+                &smt_only
             ),
             EquivalenceResult::NotEquivalent
         ));
@@ -1329,7 +1340,7 @@ mod tests {
     }
 
     #[test]
-    fn x86_64_smt_models_dword_writes_as_zero_extending() {
+    fn x86_64_concrete_and_smt_model_dword_writes_as_zero_extending() {
         let seq_xor_eax = vec![X86Instruction::XorReg {
             rd: X86Register::EAX,
             rs: X86Register::EAX,
@@ -1340,7 +1351,8 @@ mod tests {
         }];
         let cfg = EquivalenceConfigFor::<crate::isa::X86_64>::default()
             .live_out(X86LiveOut::from_registers(vec![X86Register::RAX]).with_flags(true))
-            .random_tests(0);
+            // Exercise concrete dword zero-extension before the SMT proof.
+            .random_tests(16);
 
         assert_eq!(
             check_equivalence_for::<crate::isa::X86_64>(&seq_xor_eax, &seq_xor_rax, &cfg),

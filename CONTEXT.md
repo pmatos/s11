@@ -74,7 +74,11 @@ rules live behind the pure `src/output_path.rs` seam, whose single entry point i
 `resolve_output_path`; the `opt` driver in `src/main.rs` is a thin adapter that
 passes the input path and optional `-o` through it. Deriving the sibling name is
 fallible — a stem-less or non-UTF-8 input yields an error the driver reports
-rather than a panic.
+rather than a panic. Because optimization can run after that early check,
+`ElfPatcher::create_patched_copy` is the authoritative in-place guard: it pins
+the exact input and output file handles, compares their identities before
+truncation, and writes through the already-checked output handle so a concurrent
+pathname swap cannot redirect the destructive write to the input.
 
 ### Auto optimization pass
 One discovery-to-search sweep of the whole-binary `--auto` worklist. Candidate

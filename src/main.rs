@@ -1044,6 +1044,9 @@ impl ElfOptimizationBackend for X86OptimizationBackend {
                 options,
                 context.downstream_flags_live,
                 downstream_live.as_ref(),
+                // See docs/adr/0010-x86-register-views.md#decision: operand
+                // views remain precise through execution, costing, and
+                // assembly, so same-count code-size rewrites are safe here.
                 true,
             ),
             Algorithm::Hybrid | Algorithm::Llm => {
@@ -4509,6 +4512,49 @@ mod cli_helper_tests {
             vec![0x1000],
             "the register operand is skipped and the branch target resolves absolute"
         );
+    }
+
+    #[test]
+    fn direct_branch_targets_overcollect_aarch64_tbz_tbnz_bit_positions() {
+        let cs = aarch64_test_capstone();
+        for (mnemonic, instruction, bit) in [
+            (
+                "tbz",
+                Instruction::Tbz {
+                    rt: Register::X0,
+                    bit: 5,
+                    target: s11::ir::LabelId(0x1100),
+                },
+                5,
+            ),
+            (
+                "tbnz",
+                Instruction::Tbnz {
+                    rt: Register::X0,
+                    bit: 40,
+                    target: s11::ir::LabelId(0x1100),
+                },
+                40,
+            ),
+        ] {
+            let bytes = assemble_aarch64_test_bytes(&[instruction]);
+            let disassembly = cs
+                .disasm_all(&bytes, 0x1000)
+                .unwrap_or_else(|_| panic!("{mnemonic} fixture should disassemble"));
+            let instruction = disassembly
+                .iter()
+                .next()
+                .unwrap_or_else(|| panic!("fixture should contain {mnemonic}"));
+            let detail = cs
+                .insn_detail(instruction)
+                .unwrap_or_else(|_| panic!("{mnemonic} detail should be available"));
+
+            assert_eq!(
+                capstone_detail_direct_branch_targets(&detail),
+                vec![bit, 0x1100],
+                "{mnemonic} bit position and absolute branch target must both be collected"
+            );
+        }
     }
 
     #[test]

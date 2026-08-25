@@ -17,7 +17,10 @@
 // disfiguring the macro invocations. Allow at module scope.
 #![allow(clippy::useless_conversion)]
 
-use crate::isa::x86::{X86Condition, X86Instruction, X86Register, X86RegisterView};
+use crate::isa::x86::{
+    X86Condition, X86Instruction, X86Register, X86RegisterView, x86_register_ok,
+    x86_register_pair_ok,
+};
 use dynasm::dynasm;
 use dynasmrt::DynasmApi;
 
@@ -56,16 +59,17 @@ impl X86Assembler {
 }
 
 fn reg_index(reg: X86Register) -> Result<u8, String> {
-    reg.index()
-        .ok_or_else(|| format!("register {:?} has no index", reg))
+    // X86Register construction is private and every value stores a valid GPR
+    // index. Keep Result here only so the encoder macros can use one `?`-based
+    // calling convention for index and immediate extraction.
+    Ok(reg
+        .index()
+        .expect("every X86Register has a construction-validated GPR index"))
 }
 
 fn reg_index_32(reg: X86Register) -> Result<u8, String> {
-    let i = reg_index(reg)?;
-    if i >= 8 {
-        return Err(format!("register {:?} not available in x86-32 mode", reg));
-    }
-    Ok(i)
+    validate_single_register(reg, 32)?;
+    reg_index(reg)
 }
 
 fn validate_register_pair(
@@ -75,38 +79,41 @@ fn validate_register_pair(
 ) -> Result<(), String> {
     validate_single_register(lhs, mode_width)?;
     validate_single_register(rhs, mode_width)?;
+
+    if x86_register_pair_ok(lhs, rhs, mode_width) {
+        return Ok(());
+    }
+
+    // The shared predicate above decides legality. The branches below only
+    // classify its remaining pair-specific failure for a useful diagnostic.
     if lhs.effective_width(mode_width) != rhs.effective_width(mode_width) {
         return Err(format!("register widths do not match: {} and {}", lhs, rhs));
     }
-    if (lhs.is_high_byte() || rhs.is_high_byte())
-        && (lhs.index().is_some_and(|index| index >= 4)
-            || rhs.index().is_some_and(|index| index >= 4))
-    {
-        return Err(format!(
-            "high-byte register cannot be encoded when a REX prefix is required: {}, {}",
-            lhs, rhs
-        ));
-    }
-    Ok(())
+    debug_assert!(lhs.is_high_byte() || rhs.is_high_byte());
+    Err(format!(
+        "high-byte register cannot be encoded when a REX prefix is required: {}, {}",
+        lhs, rhs
+    ))
 }
 
 fn validate_single_register(reg: X86Register, mode_width: u32) -> Result<(), String> {
-    if reg.effective_width(mode_width) > mode_width {
-        return Err(format!(
-            "register {} is not available in x86-{}",
-            reg, mode_width
-        ));
+    if x86_register_ok(reg, mode_width) {
+        return Ok(());
     }
-    if mode_width == 32
-        && reg.view() == X86RegisterView::LowByte
-        && reg.index().is_some_and(|index| index >= 4)
-    {
+
+    // The shared predicate is authoritative. A rejected low-byte operand in
+    // Mode32 necessarily belongs to the REX-only SPL..DIL/R8B..R15B family;
+    // distinguish that case solely to retain the actionable encoder message.
+    if mode_width == 32 && reg.view() == X86RegisterView::LowByte {
         return Err(format!(
             "register {} requires a REX prefix and is not available in x86-32",
             reg
         ));
     }
-    Ok(())
+    Err(format!(
+        "register {} is not available in x86-{}",
+        reg, mode_width
+    ))
 }
 
 fn validate_extension_move_registers(
@@ -1419,6 +1426,35 @@ mod tests {
             }])
             .expect_err("AH cannot be encoded in an instruction requiring REX");
         assert!(err.contains("high-byte"), "unexpected error: {err}");
+    }
+
+    #[test]
+    fn x86_32_rejects_rex_only_low_byte_registers_with_actionable_error() {
+        for reg in [
+            X86Register::SPL,
+            X86Register::BPL,
+            X86Register::SIL,
+            X86Register::DIL,
+        ] {
+            let err = X86Assembler::new_32()
+                .assemble_instructions(&[X86Instruction::MovImm { rd: reg, imm: 0 }])
+                .expect_err("x86-32 cannot encode the REX-only low-byte registers");
+            assert_eq!(
+                err,
+                format!("register {reg} requires a REX prefix and is not available in x86-32")
+            );
+        }
+    }
+
+    #[test]
+    fn assembler_rejects_mismatched_register_widths() {
+        let err = X86Assembler::new_64()
+            .assemble_instructions(&[X86Instruction::MovReg {
+                rd: X86Register::RAX,
+                rs: X86Register::EAX,
+            }])
+            .expect_err("x86 register operands must have matching widths");
+        assert_eq!(err, "register widths do not match: rax and eax");
     }
 
     #[test]

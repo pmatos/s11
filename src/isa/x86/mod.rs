@@ -18,7 +18,7 @@
 
 mod encoding;
 mod stochastic;
-pub(crate) use encoding::x86_extension_source_ok;
+pub(crate) use encoding::{x86_extension_source_ok, x86_register_ok, x86_register_pair_ok};
 pub use stochastic::{
     X86InstructionGenerator, X86Mutator, default_x86_immediates, default_x86_registers,
 };
@@ -353,8 +353,8 @@ impl X86Register {
         self.view
     }
 
-    pub fn canonical(self) -> Self {
-        Self::from_index(self.index).expect("x86 register index is always valid")
+    pub const fn canonical(self) -> Self {
+        Self::new(self.index, X86RegisterView::Native)
     }
 
     pub const fn effective_width(self, mode_width: u32) -> u32 {
@@ -380,32 +380,22 @@ impl X86Register {
         matches!(self.view, X86RegisterView::Native | X86RegisterView::Dword)
     }
 
-    pub fn with_view(self, view: X86RegisterView) -> Option<Self> {
-        if view == X86RegisterView::HighByte && self.index >= 4 {
-            None
-        } else {
-            Some(Self::new(self.index, view))
-        }
-    }
-
-    pub fn with_base(self, base: X86Register) -> Option<Self> {
-        base.canonical().with_view(self.view)
-    }
-
     /// True when this individual GPR view has an encoding in `mode`.
     ///
-    /// In 32-bit mode, indices 0..=7 are available, but low-byte views are
-    /// limited to the legacy AL/CL/DL/BL encodings at indices 0..=3. In 64-bit
-    /// mode, all sixteen GPRs and the REX-only low-byte views SPL/BPL/SIL/DIL
-    /// are available. Whole-instruction constraints, such as pairing a legacy
-    /// high-byte register with a REX-requiring operand, remain the encoding
-    /// prefilter's responsibility.
+    /// This is the mode-typed spelling of [`x86_register_ok`] and delegates to
+    /// it, so the search backends' register pools filter through exactly the
+    /// rule the assembler enforces. In 32-bit mode, indices 0..=7 are
+    /// available, but low-byte views are limited to the legacy AL/CL/DL/BL
+    /// encodings at indices 0..=3. In 64-bit mode, all sixteen GPRs and the
+    /// REX-only low-byte views SPL/BPL/SIL/DIL are available. Whole-instruction
+    /// constraints, such as pairing a legacy high-byte register with a
+    /// REX-requiring operand, remain the encoding prefilter's responsibility.
     pub fn is_available_in(self, mode: crate::assembler::x86::X86Mode) -> bool {
         let mode_width = match mode {
             crate::assembler::x86::X86Mode::Mode64 => 64,
             crate::assembler::x86::X86Mode::Mode32 => 32,
         };
-        encoding::x86_register_ok(self, mode_width)
+        x86_register_ok(self, mode_width)
     }
 }
 
@@ -1248,6 +1238,44 @@ mod tests {
     type RegImmForm = (&'static str, fn(X86Register, i64) -> X86Instruction);
 
     #[test]
+    fn register_views_share_a_canonical_architectural_gpr() {
+        for view in [
+            X86Register::RAX,
+            X86Register::EAX,
+            X86Register::AX,
+            X86Register::AL,
+            X86Register::AH,
+        ] {
+            assert_eq!(view.canonical(), X86Register::RAX, "unexpected view {view}");
+        }
+        for view in [
+            X86Register::R8,
+            X86Register::R8D,
+            X86Register::R8W,
+            X86Register::R8B,
+        ] {
+            assert_eq!(view.canonical(), X86Register::R8, "unexpected view {view}");
+        }
+    }
+
+    #[test]
+    fn register_view_width_and_high_byte_classification_are_explicit() {
+        for (reg, width64, width32, high_byte) in [
+            (X86Register::RAX, 64, 32, false),
+            (X86Register::EAX, 32, 32, false),
+            (X86Register::AX, 16, 16, false),
+            (X86Register::AL, 8, 8, false),
+            (X86Register::AH, 8, 8, true),
+            (X86Register::SPL, 8, 8, false),
+            (X86Register::R8B, 8, 8, false),
+        ] {
+            assert_eq!(reg.effective_width(64), width64, "x86-64 width for {reg}");
+            assert_eq!(reg.effective_width(32), width32, "x86-32 width for {reg}");
+            assert_eq!(reg.is_high_byte(), high_byte, "high-byte marker for {reg}");
+        }
+    }
+
+    #[test]
     fn x86_32_generic_encodability_rejects_extended_registers() {
         let seq = [X86Instruction::MovReg {
             rd: X86Register::R8,
@@ -1259,6 +1287,27 @@ mod tests {
         assert!(crate::search::candidate::is_sequence_encodable_for(
             &seq, &X86_64
         ));
+    }
+
+    #[test]
+    fn x86_search_encodability_rejects_high_byte_with_rex_register() {
+        let rex_conflict = [X86Instruction::MovReg {
+            rd: X86Register::AH,
+            rs: X86Register::R8B,
+        }];
+        assert!(
+            !crate::search::candidate::is_sequence_encodable_for(&rex_conflict, &X86_64),
+            "the search filter must drop high-byte candidates that require REX"
+        );
+
+        let legacy_pair = [X86Instruction::MovReg {
+            rd: X86Register::AH,
+            rs: X86Register::BL,
+        }];
+        assert!(
+            crate::search::candidate::is_sequence_encodable_for(&legacy_pair, &X86_64),
+            "the search filter must retain encodable legacy-byte pairs"
+        );
     }
 
     #[test]
@@ -2055,13 +2104,17 @@ mod tests {
         }
 
         // 32-bit mode has no encoding for the extended registers R8..R15 or
-        // the REX-only low-byte views SPL/BPL/SIL/DIL. Native views of the
-        // eight legacy GPRs and the legacy low-byte views remain addressable.
+        // the REX-only low-byte views SPL/BPL/SIL/DIL. Every view of the eight
+        // legacy GPRs, including the legacy high and low bytes, remains
+        // addressable.
         for r in [
             X86Register::RAX,
             X86Register::RSP,
             X86Register::RDI,
+            X86Register::EAX,
+            X86Register::AX,
             X86Register::AL,
+            X86Register::AH,
             X86Register::CL,
             X86Register::DL,
             X86Register::BL,
@@ -2072,11 +2125,16 @@ mod tests {
                 r
             );
         }
+        // The REX-only low bytes are as unavailable in 32-bit mode as the
+        // extended file; `is_available_in` must not diverge from the
+        // assembler's `x86_register_ok`.
         for r in [
             X86Register::R8,
             X86Register::R9,
             X86Register::R12,
             X86Register::R15,
+            X86Register::R8D,
+            X86Register::R8B,
             X86Register::SPL,
             X86Register::BPL,
             X86Register::SIL,
