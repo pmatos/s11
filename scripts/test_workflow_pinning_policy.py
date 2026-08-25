@@ -1,6 +1,7 @@
 """Regression checks for immutable GitHub Actions workflow dependencies."""
 
 from collections.abc import Iterator
+from dataclasses import dataclass
 from pathlib import Path
 import re
 import unittest
@@ -13,13 +14,45 @@ DEPENDABOT_PATH = REPOSITORY_ROOT / ".github" / "dependabot.yml"
 
 FULL_COMMIT_SHA_PATTERN = re.compile(r"[0-9a-f]{40}")
 VERSION_LABEL_PATTERN = re.compile(r"(?:v?\d+(?:\.\d+){0,2}|stable)(?:\s|$)")
+BLOCK_SCALAR_HEADER_PATTERN = re.compile(
+    r"(?P<style>[|>])(?:[1-9][+-]?|[+-][1-9]?)?"
+)
 SEMANTIC_RELEASE_PLUGIN_PATTERN = re.compile(
-    r"^\s+(?P<package>@semantic-release/[a-z0-9-]+)@(?P<version>\S+)\s*$",
-    re.MULTILINE,
+    r"(?P<package>@semantic-release/[a-z0-9-]+)@(?P<version>\S+)"
 )
 EXACT_SEMVER_PATTERN = re.compile(
     r"\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?"
 )
+DOUBLE_QUOTED_ESCAPES = {
+    "0": "\0",
+    "a": "\a",
+    "b": "\b",
+    "t": "\t",
+    "n": "\n",
+    "v": "\v",
+    "f": "\f",
+    "r": "\r",
+    "e": "\x1b",
+    " ": " ",
+    '"': '"',
+    "/": "/",
+    "\\": "\\",
+    "N": "\x85",
+    "_": "\xa0",
+    "L": "\u2028",
+    "P": "\u2029",
+}
+HEX_ESCAPE_LENGTHS = {"x": 2, "u": 4, "U": 8}
+
+
+@dataclass(frozen=True)
+class _MappingScalar:
+    """One line-numbered YAML mapping scalar relevant to policy checks."""
+
+    line_number: int
+    key: str
+    value: str | None
+    comment: str | None
 
 
 def _quoted_scalar_at(text: str, start: int) -> tuple[str, int] | None:
@@ -37,9 +70,23 @@ def _quoted_scalar_at(text: str, start: int) -> tuple[str, int] | None:
                 continue
             return "".join(value), index + 1
         if quote == '"' and character == "\\" and index + 1 < len(text):
-            value.append(text[index + 1])
-            index += 2
-            continue
+            escape = text[index + 1]
+            if escape in DOUBLE_QUOTED_ESCAPES:
+                value.append(DOUBLE_QUOTED_ESCAPES[escape])
+                index += 2
+                continue
+            if escape in HEX_ESCAPE_LENGTHS:
+                length = HEX_ESCAPE_LENGTHS[escape]
+                digits = text[index + 2 : index + 2 + length]
+                if len(digits) != length or re.fullmatch(r"[0-9A-Fa-f]+", digits) is None:
+                    return None
+                try:
+                    value.append(chr(int(digits, 16)))
+                except ValueError:
+                    return None
+                index += 2 + length
+                continue
+            return None
         value.append(character)
         index += 1
 
@@ -64,13 +111,19 @@ def _split_yaml_comment(line: str) -> tuple[str, str | None]:
     return line, None
 
 
-def _uses_value_at(text: str, boundary: int) -> str | None:
-    """Parse a uses mapping entry beginning at a known mapping boundary."""
+def _mapping_scalar_at(
+    text: str, boundary: int
+) -> tuple[str, str | None, str | None] | None:
+    """Parse one mapping scalar beginning at a known mapping boundary."""
     index = boundary
     while index < len(text) and text[index].isspace():
         index += 1
 
-    if index < len(text) and text[index] == "-":
+    if (
+        index < len(text)
+        and text[index] == "-"
+        and (index + 1 == len(text) or text[index + 1].isspace())
+    ):
         index += 1
         while index < len(text) and text[index].isspace():
             index += 1
@@ -91,75 +144,180 @@ def _uses_value_at(text: str, boundary: int) -> str | None:
 
     while index < len(text) and text[index].isspace():
         index += 1
-    if key != "uses" or index >= len(text) or text[index] != ":":
+    if not key or index >= len(text) or text[index] != ":":
         return None
 
     index += 1
     while index < len(text) and text[index].isspace():
         index += 1
     if index >= len(text):
-        return None
+        return key, None, None
 
     if text[index] in "'\"":
         scalar = _quoted_scalar_at(text, index)
-        return None if scalar is None else scalar[0]
+        if scalar is None:
+            return key, None, None
+        value, value_end = scalar
+        while value_end < len(text) and text[value_end] not in ",}]":
+            if not text[value_end].isspace():
+                return key, None, None
+            value_end += 1
+        return key, value, None
 
-    value_start = index
-    while index < len(text) and not text[index].isspace() and text[index] not in ",}]":
-        index += 1
-    return text[value_start:index] or None
+    value_end = index
+    while value_end < len(text) and text[value_end] not in ",}]":
+        value_end += 1
+    value = text[index:value_end].strip()
+    block_header = BLOCK_SCALAR_HEADER_PATTERN.fullmatch(value)
+    if block_header is not None:
+        return key, None, block_header.group("style")
+    if value.startswith(
+        ("*", "&", "!", "${{", "[", "{", "|", ">")
+    ) or value in {"~", "null", "Null", "NULL"}:
+        return key, None, None
+
+    return key, value or None, None
 
 
-def _uses_values(line: str) -> Iterator[str]:
-    """Yield uses values at block or flow mapping-entry boundaries."""
-    value = _uses_value_at(line, 0)
-    if value is not None:
-        yield value
+def _mapping_scalars_on_line(
+    text: str,
+) -> Iterator[tuple[str, str | None, str | None]]:
+    """Yield mapping scalars at block or flow mapping-entry boundaries."""
+    scalar = _mapping_scalar_at(text, 0)
+    if scalar is not None:
+        yield scalar
 
     index = 0
-    while index < len(line):
-        character = line[index]
+    while index < len(text):
+        character = text[index]
         if character in "'\"":
-            scalar = _quoted_scalar_at(line, index)
-            if scalar is None:
+            quoted = _quoted_scalar_at(text, index)
+            if quoted is None:
                 return
-            _, index = scalar
+            _, index = quoted
             continue
         if character in "{,":
-            value = _uses_value_at(line, index + 1)
-            if value is not None:
-                yield value
+            scalar = _mapping_scalar_at(text, index + 1)
+            if scalar is not None:
+                yield scalar
         index += 1
 
 
-def action_references(contents: str) -> Iterator[tuple[int, str, str | None]]:
-    """Yield line-numbered action specs and their same-line comments."""
-    for line_number, line in enumerate(contents.splitlines(), start=1):
-        mapping, comment = _split_yaml_comment(line)
-        for spec in _uses_values(mapping):
-            yield line_number, spec, comment
+def _block_scalar_body(
+    lines: list[str], header_index: int
+) -> tuple[list[str], int]:
+    """Return a de-indented block-scalar body and the next structural line."""
+    header = lines[header_index]
+    header_indentation = len(header) - len(header.lstrip(" "))
+    body = []
+    content_indentation = None
+    index = header_index + 1
+
+    while index < len(lines):
+        line = lines[index]
+        if not line.strip():
+            body.append("")
+            index += 1
+            continue
+
+        indentation = len(line) - len(line.lstrip(" "))
+        if indentation <= header_indentation:
+            break
+        if content_indentation is None:
+            content_indentation = indentation
+        if indentation < content_indentation:
+            break
+
+        body.append(line[content_indentation:])
+        index += 1
+
+    return body, index
+
+
+def _decode_block_scalar(style: str, body: list[str]) -> str:
+    """Decode the line folding needed by workflow dependency scalars."""
+    if style == "|":
+        return "\n".join(body)
+
+    value = []
+    for index, line in enumerate(body):
+        value.append(line)
+        if index + 1 == len(body):
+            continue
+        value.append(" " if line and body[index + 1] else "\n")
+    return "".join(value)
+
+
+def _mapping_scalars(contents: str) -> Iterator[_MappingScalar]:
+    """Yield decoded mapping scalars without rescanning block-scalar bodies."""
+    lines = contents.splitlines()
+    index = 0
+
+    while index < len(lines):
+        mapping, comment = _split_yaml_comment(lines[index])
+        scalars = list(_mapping_scalars_on_line(mapping))
+        block_scalar = next(
+            (scalar for scalar in scalars if scalar[2] is not None), None
+        )
+
+        if block_scalar is None:
+            for key, value, _ in scalars:
+                yield _MappingScalar(index + 1, key, value, comment)
+            index += 1
+            continue
+
+        body, next_index = _block_scalar_body(lines, index)
+        for key, value, style in scalars:
+            if style is not None:
+                value = _decode_block_scalar(style, body)
+            yield _MappingScalar(index + 1, key, value, comment)
+        index = next_index
 
 
 def remote_action_pinning_violations(contents: str) -> list[str]:
     """Return policy failures for remote action references in a workflow."""
     violations = []
 
-    for line_number, spec, label in action_references(contents):
-        if spec.startswith(("./", "docker://")) or "@" not in spec:
+    for scalar in _mapping_scalars(contents):
+        if scalar.key != "uses":
+            continue
+        if scalar.value is None or not scalar.value.strip():
+            violations.append(
+                f"line {scalar.line_number}: uses must be a decodable literal "
+                "action reference"
+            )
+            continue
+
+        spec = scalar.value.strip()
+        if spec.startswith(("./", "docker://")):
+            continue
+        if any(character.isspace() for character in spec) or "@" not in spec:
+            violations.append(
+                f"line {scalar.line_number}: uses must be a decodable literal "
+                "action reference"
+            )
             continue
 
         repository, reference = spec.rsplit("@", 1)
-        if "/" not in repository:
+        if "/" not in repository or not reference:
+            violations.append(
+                f"line {scalar.line_number}: uses must be a decodable literal "
+                "action reference"
+            )
             continue
 
         if FULL_COMMIT_SHA_PATTERN.fullmatch(reference) is None:
             violations.append(
-                f"line {line_number}: {spec} must use a full 40-character commit SHA"
+                f"line {scalar.line_number}: {spec} must use a full 40-character "
+                "commit SHA"
             )
 
-        if label is None or VERSION_LABEL_PATTERN.match(label) is None:
+        if (
+            scalar.comment is None
+            or VERSION_LABEL_PATTERN.match(scalar.comment) is None
+        ):
             violations.append(
-                f"line {line_number}: {spec} must include its tag or channel "
+                f"line {scalar.line_number}: {spec} must include its tag or channel "
                 "in a same-line comment"
             )
 
@@ -168,11 +326,27 @@ def remote_action_pinning_violations(contents: str) -> list[str]:
 
 def semantic_release_plugin_pinning_violations(contents: str) -> list[str]:
     """Return semantic-release plugin specs that do not use exact SemVer."""
-    return [
-        f"{match.group('package')}@{match.group('version')} must use an exact version"
-        for match in SEMANTIC_RELEASE_PLUGIN_PATTERN.finditer(contents)
-        if EXACT_SEMVER_PATTERN.fullmatch(match.group("version")) is None
-    ]
+    violations = []
+
+    for scalar in _mapping_scalars(contents):
+        if scalar.key != "extra_plugins":
+            continue
+        if scalar.value is None or not scalar.value.strip():
+            violations.append(
+                f"line {scalar.line_number}: extra_plugins must be a decodable "
+                "literal plugin list"
+            )
+            continue
+        for token in scalar.value.split():
+            if not token.startswith("@semantic-release/"):
+                continue
+            match = SEMANTIC_RELEASE_PLUGIN_PATTERN.fullmatch(token)
+            if match is None or EXACT_SEMVER_PATTERN.fullmatch(
+                match.group("version")
+            ) is None:
+                violations.append(f"{token} must use an exact version")
+
+    return violations
 
 
 def dependabot_update_block(contents: str, ecosystem: str) -> str:
@@ -281,6 +455,55 @@ class TestWorkflowPinningPolicy(unittest.TestCase):
             remote_action_pinning_violations(workflow),
         )
 
+    def test_remote_action_policy_rejects_folded_block_scalar_references(self):
+        workflow = """
+        - uses: >-
+            actions/checkout@v7
+        """
+
+        self.assertEqual(
+            [
+                "line 2: actions/checkout@v7 must use a full 40-character "
+                "commit SHA",
+                "line 2: actions/checkout@v7 must include its tag or channel "
+                "in a same-line comment",
+            ],
+            remote_action_pinning_violations(workflow),
+        )
+
+    def test_remote_action_policy_handles_block_scalar_references_and_bodies(self):
+        workflow = """
+        - uses: >- # v7.0.1
+            actions/checkout@0123456789012345678901234567890123456789
+        - uses: | # stable
+            dtolnay/rust-toolchain@abcdefabcdefabcdefabcdefabcdefabcdefabcd
+        - uses: >-
+            ./.github/actions/local
+        - uses: |
+            docker://alpine:3.23
+        - run: |
+            echo "uses: owner/action@v7"
+            uses: owner/action@v7
+        """
+
+        self.assertEqual([], remote_action_pinning_violations(workflow))
+
+    def test_remote_action_policy_rejects_undecodable_target_scalars(self):
+        workflow = """
+        - uses: *floating-action
+        - uses: "owner/action@v7
+        - run: *floating-action
+        - name: "uses: *floating-action"
+        """
+
+        self.assertEqual(
+            [
+                "line 2: uses must be a decodable literal action reference",
+                "line 3: uses must be a decodable literal action reference",
+            ],
+            remote_action_pinning_violations(workflow),
+        )
+
     def test_all_remote_workflow_actions_use_documented_full_shas(self):
         violations = []
         workflow_paths = sorted(WORKFLOW_DIRECTORY.glob("*.y*ml"))
@@ -293,6 +516,69 @@ class TestWorkflowPinningPolicy(unittest.TestCase):
                 violations.append(f"{relative_path}: {violation}")
 
         self.assertEqual([], violations, "\n".join(violations))
+
+    def test_semantic_release_plugin_policy_rejects_inline_mutable_versions(self):
+        workflow = "extra_plugins: '@semantic-release/changelog@6'"
+
+        self.assertEqual(
+            ["@semantic-release/changelog@6 must use an exact version"],
+            semantic_release_plugin_pinning_violations(workflow),
+        )
+
+    def test_semantic_release_plugin_policy_decodes_double_quoted_newlines(self):
+        workflow = (
+            r'extra_plugins: "@semantic-release/changelog@6.0.3\n'
+            r'@semantic-release/git@10"'
+        )
+
+        self.assertEqual(
+            ["@semantic-release/git@10 must use an exact version"],
+            semantic_release_plugin_pinning_violations(workflow),
+        )
+
+    def test_semantic_release_plugin_policy_handles_mapping_and_scalar_styles(self):
+        workflow = """
+        extra_plugins: '@semantic-release/changelog@6'
+        with: { extra_plugins: '@semantic-release/git@10' }
+        literal:
+          extra_plugins: |
+            @semantic-release/changelog@6.0.3
+            @semantic-release/git@10.0.1
+        folded:
+          extra_plugins: >-
+            @semantic-release/exec@7.1.0
+            @semantic-release/git@10.0.1
+        commands:
+          - run: |
+              extra_plugins: '@semantic-release/exec@7'
+          - run: "extra_plugins: '@semantic-release/exec@7'"
+        """
+
+        self.assertEqual(
+            [
+                "@semantic-release/changelog@6 must use an exact version",
+                "@semantic-release/git@10 must use an exact version",
+            ],
+            semantic_release_plugin_pinning_violations(workflow),
+        )
+
+    def test_semantic_release_plugin_policy_rejects_undecodable_target_scalars(self):
+        workflow = """
+        extra_plugins: *floating-plugins
+        extra_plugins: "@semantic-release/changelog@6
+        extra_plugins: >invalid
+        run: *floating-plugins
+        name: "extra_plugins: *floating-plugins"
+        """
+
+        self.assertEqual(
+            [
+                "line 2: extra_plugins must be a decodable literal plugin list",
+                "line 3: extra_plugins must be a decodable literal plugin list",
+                "line 4: extra_plugins must be a decodable literal plugin list",
+            ],
+            semantic_release_plugin_pinning_violations(workflow),
+        )
 
     def test_semantic_release_plugins_use_exact_versions(self):
         release_workflow = RELEASE_WORKFLOW_PATH.read_text(encoding="utf-8")
