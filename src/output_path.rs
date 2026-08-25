@@ -13,12 +13,11 @@
 //! [`resolve_output_path`] returns a [`ResolvedOutput`] that carries the policy
 //! into the final write, which repeats it: the preflight runs before a
 //! potentially long search, so it cannot be the last word. Writes are staged in
-//! the destination directory, inherit the input's permissions, and are then
-//! published without exposing a partial result. Deriving a sibling remains
-//! fallible for stem-less or non-UTF-8 input names. See the `CONTEXT.md`
-//! glossary for the domain term.
+//! a private directory under the destination, inherit the input's ordinary
+//! access permissions, and are then published without exposing a partial
+//! result. Deriving a sibling remains fallible for stem-less or non-UTF-8 input
+//! names. See the `CONTEXT.md` glossary for the domain term.
 
-use std::fs::OpenOptions;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 
@@ -61,18 +60,19 @@ impl ResolvedOutput {
         bytes: &[u8],
         input_permissions: std::fs::Permissions,
     ) -> io::Result<()> {
-        // Build the complete result privately in the destination directory, so
-        // publishing it is a same-filesystem rename rather than a destructive
-        // open of the final path.
+        // Build the complete result in a mode-0700 staging directory under the
+        // destination. Another user with write access to the shared parent
+        // cannot replace the named staging inode before publication, while the
+        // nested location still guarantees a same-filesystem rename.
         let parent = output_parent(&self.path);
-        let mut staged =
-            tempfile::NamedTempFile::new_in(parent).map_err(|error| self.write_error(&error))?;
+        let (_staging_dir, mut staged) =
+            create_staged_output(parent).map_err(|error| self.write_error(&error))?;
         staged
             .write_all(bytes)
             .map_err(|error| self.write_error(&error))?;
         staged
             .as_file()
-            .set_permissions(input_permissions)
+            .set_permissions(sanitize_output_permissions(input_permissions))
             .map_err(|error| self.write_error(&error))?;
 
         if self.overwrite {
@@ -191,16 +191,10 @@ fn validate_existing_output(
             output.display()
         ));
     }
-    OpenOptions::new()
-        .write(true)
-        .open(output)
-        .map_err(|error| {
-            format!(
-                "output path '{}' is not writable: {error}",
-                output.display()
-            )
-        })?;
-    Ok(())
+    // Atomic replacement renames a new inode into the directory; the old
+    // inode's mode is irrelevant, while parent publication permission is
+    // essential and must fail before search.
+    validate_output_parent(output)
 }
 
 /// Reject every existing target that cannot safely become a regular result.
@@ -249,6 +243,35 @@ fn output_parent(output: &Path) -> &Path {
         .unwrap_or_else(|| Path::new("."))
 }
 
+fn create_staged_output(parent: &Path) -> io::Result<(tempfile::TempDir, tempfile::NamedTempFile)> {
+    let mut builder = tempfile::Builder::new();
+    builder.prefix(".s11-output-");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        // Apply this at creation time, not with a later chmod: no other user
+        // may get a window in which they can enter the staging directory.
+        builder.permissions(std::fs::Permissions::from_mode(0o700));
+    }
+    let staging_dir = builder.tempdir_in(parent)?;
+    let staged = tempfile::NamedTempFile::new_in(staging_dir.path())?;
+    Ok((staging_dir, staged))
+}
+
+#[cfg(unix)]
+fn sanitize_output_permissions(input: std::fs::Permissions) -> std::fs::Permissions {
+    use std::os::unix::fs::PermissionsExt;
+    // The staged inode belongs to the current user, which may differ from the
+    // input owner. Copy only ordinary access bits so a privileged invocation
+    // can never manufacture a setuid/setgid executable owned by itself.
+    std::fs::Permissions::from_mode(input.mode() & 0o777)
+}
+
+#[cfg(not(unix))]
+fn sanitize_output_permissions(input: std::fs::Permissions) -> std::fs::Permissions {
+    input
+}
+
 fn validate_output_parent(output: &Path) -> Result<(), String> {
     let parent = output_parent(output);
     // One stat answers both questions; `Path::exists` and `Path::is_dir` are
@@ -268,7 +291,10 @@ fn validate_output_parent(output: &Path) -> Result<(), String> {
         }
         Ok(_) => {}
     }
-    tempfile::tempfile_in(parent).map_err(|error| {
+    // Exercise the exact directory-and-file creation used by publication. This
+    // proves parent writability without depending on the mode of an old target
+    // inode, which atomic replacement never opens.
+    create_staged_output(parent).map_err(|error| {
         format!(
             "output parent directory '{}' is not writable: {error}",
             parent.display()
@@ -543,15 +569,15 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn resolved_output_preserves_input_permissions() {
+    fn resolved_output_preserves_access_permissions_without_privilege_bits() {
         use std::os::unix::fs::PermissionsExt;
 
         let dir = tempfile::tempdir().expect("create output directory");
         let input = dir.path().join("input.elf");
         let output = dir.path().join("output.elf");
         std::fs::write(&input, b"original input binary").expect("seed input");
-        std::fs::set_permissions(&input, std::fs::Permissions::from_mode(0o751))
-            .expect("set executable input mode");
+        std::fs::set_permissions(&input, std::fs::Permissions::from_mode(0o6751))
+            .expect("set executable input mode with privilege bits");
 
         let resolved = resolve_output_path(&input, Some(&output), false)
             .expect("missing output should pass preflight");
@@ -562,7 +588,10 @@ mod tests {
             .permissions()
             .mode()
             & 0o7777;
-        assert_eq!(output_mode, 0o751, "output must inherit the input mode");
+        assert_eq!(
+            output_mode, 0o751,
+            "output must inherit access bits without becoming setuid or setgid"
+        );
     }
 
     #[cfg(unix)]
@@ -709,5 +738,95 @@ mod tests {
                 "non-regular output diagnostic must not advertise --force: {err}"
             );
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn resolve_forced_output_requires_writable_parent() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().expect("create fixture directory");
+        let input = dir.path().join("input.elf");
+        std::fs::write(&input, b"input").expect("seed input");
+        let parent = dir.path().join("read-only");
+        std::fs::create_dir(&parent).expect("create output parent");
+        let output = parent.join("output.elf");
+        std::fs::write(&output, b"stale output").expect("seed existing output");
+        std::fs::set_permissions(&parent, std::fs::Permissions::from_mode(0o555))
+            .expect("make output parent read-only");
+
+        if tempfile::tempfile_in(&parent).is_ok() {
+            std::fs::set_permissions(&parent, std::fs::Permissions::from_mode(0o755))
+                .expect("restore output parent permissions");
+            eprintln!(
+                "Skipping forced-parent test: read-only mode not enforced (running as root?)"
+            );
+            return;
+        }
+
+        let result = resolve_output_path(&input, Some(&output), true);
+        std::fs::set_permissions(&parent, std::fs::Permissions::from_mode(0o755))
+            .expect("restore output parent permissions");
+        let err = result.expect_err("forced replacement requires writable parent directory");
+        assert!(
+            err.contains("output parent directory") && err.contains("not writable"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn resolve_forced_output_does_not_require_old_inode_writability() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().expect("create fixture directory");
+        let input = dir.path().join("input.elf");
+        let output = dir.path().join("read-only-output.elf");
+        std::fs::write(&input, b"input").expect("seed input");
+        std::fs::write(&output, b"stale output").expect("seed existing output");
+        std::fs::set_permissions(&output, std::fs::Permissions::from_mode(0o444))
+            .expect("make old output inode read-only");
+
+        if std::fs::OpenOptions::new()
+            .write(true)
+            .open(&output)
+            .is_ok()
+        {
+            eprintln!("Skipping read-only-inode test: mode not enforced (running as root?)");
+            return;
+        }
+
+        resolve_output_path(&input, Some(&output), true)
+            .expect("atomic replacement should depend on parent, not old inode, writability");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn staged_output_is_nested_in_a_private_directory() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let parent = tempfile::tempdir().expect("create output parent");
+        let (staging_dir, staged) =
+            create_staged_output(parent.path()).expect("create staged output");
+
+        assert_eq!(
+            staging_dir.path().parent(),
+            Some(parent.path()),
+            "staging directory must share the destination filesystem"
+        );
+        assert_eq!(
+            staged.path().parent(),
+            Some(staging_dir.path()),
+            "named staging file must not be exposed directly in a shared parent"
+        );
+        let staging_mode = std::fs::metadata(staging_dir.path())
+            .expect("stat staging directory")
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(
+            staging_mode, 0o700,
+            "other users must not be able to replace the staged inode"
+        );
     }
 }

@@ -76,8 +76,9 @@ search runs in between), existing targets require `--force`, a symlink or
 any other non-regular filesystem entry at the output path is refused outright,
 and a successful run always writes a result file — a byte copy of the input on
 x86 when nothing better is found. `ElfPatcher` retains the exact input handle it
-read, and the complete result is staged in the output's parent, given that
-handle's permissions, and then published with no-clobber or atomic-replace
+read, and the complete result is built inside a mode-0700 staging directory in
+the output's parent, given that handle's ordinary access permissions (never its
+setuid/setgid bits), and then published with no-clobber or atomic-replace
 semantics. There is no destructive open of the final path, so a raced
 final-component symlink is never followed and a partial executable is never
 exposed. Deriving the sibling name is fallible: an empty or

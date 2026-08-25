@@ -1468,12 +1468,12 @@ fn test_opt_custom_output_copies_input_when_no_improvement_is_found() {
             .expect("stat input")
             .permissions()
             .mode()
-            & 0o7777;
+            & 0o777;
         let output_mode = fs::metadata(&custom_output)
             .expect("stat unchanged output")
             .permissions()
             .mode()
-            & 0o7777;
+            & 0o777;
         assert_eq!(
             output_mode, input_mode,
             "no-improvement output should preserve executable permissions"
