@@ -1486,6 +1486,138 @@ fn test_opt_custom_output_copies_input_when_no_improvement_is_found() {
 }
 
 #[test]
+fn test_auto_x86_64_rewrites_two_windows_then_reaches_fixpoint() {
+    let binary = get_binary_path();
+    let source_elf = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("binaries")
+        .join("x86_64")
+        .join("auto_two_dup_mov");
+    if !source_elf.exists() {
+        eprintln!(
+            "Skipping x86-64 auto loop test: {:?} not present (run build_tests.sh)",
+            source_elf
+        );
+        return;
+    }
+
+    let rax_mov = [0x48, 0xc7, 0xc0, 0x05, 0x00, 0x00, 0x00];
+    let rcx_mov = [0x48, 0xc7, 0xc1, 0x07, 0x00, 0x00, 0x00];
+    let rax_pair: Vec<u8> = rax_mov.iter().chain(&rax_mov).copied().collect();
+    let rcx_pair: Vec<u8> = rcx_mov.iter().chain(&rcx_mov).copied().collect();
+    let rax_addr = x86_find_byte_sequence(&source_elf, &rax_pair);
+    let rcx_addr = x86_find_byte_sequence(&source_elf, &rcx_pair);
+
+    let tmp = tempfile::tempdir().expect("create auto fixture tempdir");
+    let input = tmp.path().join("auto-two");
+    let optimized = tmp.path().join("auto-two-optimized");
+    let fixpoint = tmp.path().join("auto-two-fixpoint");
+    let bounded = tmp.path().join("auto-two-bounded");
+    fs::copy(&source_elf, &input).expect("copy auto fixture");
+
+    let run_auto = |source: &Path, destination: &Path, max_windows: &str| {
+        Command::new(&binary)
+            .args(["opt", "--auto"])
+            .arg(source)
+            .args([
+                "--algorithm",
+                "enumerative",
+                "--timeout",
+                "30",
+                "--max-windows",
+                max_windows,
+                "-o",
+            ])
+            .arg(destination)
+            .output()
+            .expect("run auto optimization")
+    };
+
+    let first = run_auto(&input, &optimized, "10");
+    assert!(
+        first.status.success(),
+        "first auto run failed\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&first.stdout),
+        String::from_utf8_lossy(&first.stderr),
+    );
+    let first_stdout = String::from_utf8_lossy(&first.stdout);
+    assert!(
+        first_stdout.contains("2 rewrites accepted") && first_stdout.contains("reached a fixpoint"),
+        "auto loop should rewrite both windows and terminate: {first_stdout}",
+    );
+
+    let before = fs::read(&input).expect("read auto input");
+    let after = fs::read(&optimized).expect("read auto output");
+    assert_eq!(
+        after.len(),
+        before.len(),
+        "in-place patching keeps file size"
+    );
+    let rax_offset = file_offset_for_executable_addr(&input, rax_addr);
+    let rcx_offset = file_offset_for_executable_addr(&input, rcx_addr);
+    let pair_len = rax_pair.len();
+    for index in 0..before.len() {
+        let inside_rewrite = (rax_offset..rax_offset + pair_len).contains(&index)
+            || (rcx_offset..rcx_offset + pair_len).contains(&index);
+        if !inside_rewrite {
+            assert_eq!(
+                after[index], before[index],
+                "byte outside rewrite windows changed at file offset 0x{index:x}",
+            );
+        }
+    }
+    assert_ne!(&after[rax_offset..rax_offset + pair_len], &rax_pair);
+    assert_ne!(&after[rcx_offset..rcx_offset + pair_len], &rcx_pair);
+
+    let cs = Capstone::new()
+        .x86()
+        .mode(capstone::arch::x86::ArchMode::Mode64)
+        .build()
+        .expect("build x86 disassembler");
+    for (address, offset) in [(rax_addr, rax_offset), (rcx_addr, rcx_offset)] {
+        let rewritten = &after[offset..offset + pair_len];
+        let instructions = cs
+            .disasm_all(rewritten, address)
+            .expect("NOP-padded window should fully disassemble");
+        assert_eq!(
+            instructions
+                .iter()
+                .map(|instruction| instruction.bytes().len())
+                .sum::<usize>(),
+            pair_len,
+        );
+        assert!(
+            instructions
+                .iter()
+                .any(|instruction| instruction.mnemonic() == Some("nop")),
+            "short replacement should be padded with canonical NOPs",
+        );
+    }
+
+    let second = run_auto(&optimized, &fixpoint, "10");
+    assert!(second.status.success());
+    let second_stdout = String::from_utf8_lossy(&second.stdout);
+    assert!(
+        second_stdout.contains("0 rewrites accepted")
+            && second_stdout.contains("reached a fixpoint"),
+        "rerun should already be at fixpoint: {second_stdout}",
+    );
+    assert_eq!(
+        fs::read(&fixpoint).expect("read fixpoint output"),
+        after,
+        "fixpoint rerun must be byte-identical",
+    );
+
+    let budget = run_auto(&input, &bounded, "0");
+    assert!(budget.status.success());
+    assert!(
+        String::from_utf8_lossy(&budget.stdout)
+            .contains("skipped 2 candidate window(s) due to budget"),
+        "bounded run must report exact skipped coverage; stdout: {}",
+        String::from_utf8_lossy(&budget.stdout),
+    );
+}
+
+#[test]
 fn test_opt_x86_symbolic_is_no_longer_rejected_at_cli() {
     // Companion to the stochastic regression test: symbolic must
     // also be accepted now.

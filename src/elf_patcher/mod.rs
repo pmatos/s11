@@ -10,6 +10,7 @@ use std::collections::HashSet;
 use std::fs::File;
 use std::io::Read;
 use std::path::Path;
+use std::sync::Arc;
 
 use crate::output_path::ResolvedOutput;
 
@@ -110,10 +111,12 @@ impl DetectedArch {
     }
 }
 
+#[derive(Clone)]
 pub struct ElfPatcher {
     file_data: Vec<u8>,
     arch: DetectedArch,
-    input_handle: Handle,
+    elf_type: u16,
+    input_handle: Arc<Handle>,
 }
 
 #[derive(Debug, Clone)]
@@ -142,15 +145,21 @@ impl ElfPatcher {
                 elf.ehdr.e_machine
             )
         })?;
+        let elf_type = elf.ehdr.e_type;
         Ok(Self {
             file_data,
             arch,
-            input_handle,
+            elf_type,
+            input_handle: Arc::new(input_handle),
         })
     }
 
     pub fn arch(&self) -> DetectedArch {
         self.arch
+    }
+
+    pub fn elf_type(&self) -> u16 {
+        self.elf_type
     }
 
     pub fn get_text_sections(&self) -> Result<Vec<TextSection>, Box<dyn std::error::Error>> {
@@ -340,6 +349,33 @@ impl ElfPatcher {
         ))
     }
 
+    /// File-data range backing an already-validated address window.
+    ///
+    /// A section header may name a range past the end of the file, and
+    /// `sh_offset` is attacker-controlled. Keep every step checked so a crafted
+    /// header fails closed rather than wrapping into a valid-looking offset or
+    /// panicking on the slices below.
+    fn window_file_range(
+        &self,
+        window: &AddressWindow,
+        section: &TextSection,
+    ) -> Result<std::ops::Range<usize>, Box<dyn std::error::Error>> {
+        let offset_in_section = window.start - section.virtual_addr;
+        let start = section
+            .file_offset
+            .checked_add(offset_in_section)
+            .and_then(|offset| usize::try_from(offset).ok())
+            .ok_or("Address window extends beyond file")?;
+        let end = usize::try_from(window.end - window.start)
+            .ok()
+            .and_then(|length| start.checked_add(length))
+            .ok_or("Address window extends beyond file")?;
+        if end > self.file_data.len() {
+            return Err("Address window extends beyond file".into());
+        }
+        Ok(start..end)
+    }
+
     pub fn get_instructions_in_window(
         &self,
         window: &AddressWindow,
@@ -348,22 +384,28 @@ impl ElfPatcher {
             .validate_address_window(window)
             .map_err(|e| format!("Invalid address window: {}", e))?;
 
-        let offset_in_section = window.start - section.virtual_addr;
-        let length = window.end - window.start;
-
-        let file_start = section.file_offset + offset_in_section;
-        let file_end = file_start + length;
-
-        if file_end > self.file_data.len() as u64 {
-            return Err("Address window extends beyond file".into());
-        }
-
-        Ok(self.file_data[file_start as usize..file_end as usize].to_vec())
+        Ok(self.file_data[self.window_file_range(window, &section)?].to_vec())
     }
 
     pub fn create_patched_copy(
         &self,
         output: &ResolvedOutput,
+        window: &AddressWindow,
+        new_code: &[u8],
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let mut patched = self.clone();
+        patched.apply_patch(window, new_code)?;
+        patched.write_to(output)
+    }
+
+    /// Apply one replacement to the in-memory ELF image.
+    ///
+    /// The replacement may be shorter than the selected address window; the
+    /// remainder is filled with architecture-canonical NOPs. It may never be
+    /// longer, so bytes following the window retain both their contents and
+    /// virtual addresses. No filesystem write occurs until [`Self::write_to`].
+    pub fn apply_patch(
+        &mut self,
         window: &AddressWindow,
         new_code: &[u8],
     ) -> Result<(), Box<dyn std::error::Error>> {
@@ -382,21 +424,16 @@ impl ElfPatcher {
             .into());
         }
 
-        // Create a copy of the original file data
-        let mut patched_data = self.file_data.clone();
-
-        // Calculate file offset for the patch
-        let offset_in_section = window.start - section.virtual_addr;
-        let file_offset = (section.file_offset + offset_in_section) as usize;
+        let window_file_range = self.window_file_range(window, &section)?;
 
         // Apply the patch
-        let patch_end = file_offset + new_code.len();
-        patched_data[file_offset..patch_end].copy_from_slice(new_code);
+        let patch_end = window_file_range.start + new_code.len();
+        self.file_data[window_file_range.start..patch_end].copy_from_slice(new_code);
 
         // If new code is smaller than window, pad with arch-appropriate NOPs.
         if new_code.len() < window_size {
             let mut cursor = patch_end;
-            let gap_end = file_offset + window_size;
+            let gap_end = window_file_range.end;
             while cursor < gap_end {
                 let nop = self.arch.nop_sequence(gap_end - cursor);
                 debug_assert!(
@@ -404,13 +441,17 @@ impl ElfPatcher {
                     "nop_sequence returned empty slice with {} bytes remaining",
                     gap_end - cursor
                 );
-                patched_data[cursor..cursor + nop.len()].copy_from_slice(nop);
+                self.file_data[cursor..cursor + nop.len()].copy_from_slice(nop);
                 cursor += nop.len();
             }
         }
 
-        output.write_from_input(&patched_data, &self.input_handle)?;
+        Ok(())
+    }
 
+    /// Materialize the current in-memory ELF image at the resolved output.
+    pub fn write_to(&self, output: &ResolvedOutput) -> Result<(), Box<dyn std::error::Error>> {
+        output.write_from_input(&self.file_data, &self.input_handle)?;
         Ok(())
     }
 
@@ -418,8 +459,7 @@ impl ElfPatcher {
         &self,
         output: &ResolvedOutput,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        output.write_from_input(&self.file_data, &self.input_handle)?;
-
+        self.write_to(output)?;
         Ok(())
     }
 }
@@ -1434,6 +1474,50 @@ mod tests {
             &[0x0f, 0x1f, 0x44, 0x00, 0x00][..],
             "padding should be the canonical 5-byte Intel NOP",
         );
+    }
+
+    #[test]
+    fn in_memory_patch_preserves_source_and_downstream_bytes_until_final_write() {
+        use crate::test_utils::TempFile;
+
+        let text_vaddr = 0x100000;
+        let text_bytes = [0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xaa, 0xbb, 0xcc];
+        let elf_bytes = build_minimal_x86_64_elf(&text_bytes, text_vaddr);
+        let input = TempFile::new_bytes("s11-elf-in-memory-in", "elf", &elf_bytes);
+        let source_before = std::fs::read(input.path()).expect("read source before patch");
+
+        let mut patcher = ElfPatcher::new(input.path()).expect("minimal ELF should parse");
+        let window = AddressWindow {
+            start: text_vaddr,
+            end: text_vaddr + 5,
+        };
+        patcher
+            .apply_patch(&window, &[0x90])
+            .expect("in-memory patch should succeed");
+
+        assert_eq!(
+            patcher
+                .get_instructions_in_window(&AddressWindow {
+                    start: text_vaddr,
+                    end: text_vaddr + text_bytes.len() as u64,
+                })
+                .expect("read in-memory text"),
+            [0x90, 0x0f, 0x1f, 0x40, 0x00, 0xaa, 0xbb, 0xcc],
+            "the selected range is NOP-padded and downstream bytes are untouched",
+        );
+        assert_eq!(
+            std::fs::read(input.path()).expect("read source after patch"),
+            source_before,
+            "in-memory mutation must not rewrite the input file",
+        );
+
+        let (_output_dir, resolved) = resolved_test_output(input.path());
+        patcher
+            .write_to(&resolved)
+            .expect("final image write should succeed");
+        let written = std::fs::read(resolved.path()).expect("read final image");
+        assert_eq!(written.len(), source_before.len());
+        assert_ne!(written, source_before);
     }
 
     #[test]

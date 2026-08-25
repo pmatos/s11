@@ -84,7 +84,11 @@ can reconstruct *why* the window-selection rules are as conservative as they are
    (near line 1637) without rejection. The driver does not maintain a second
    mnemonic allow-list — drift between the driver and the search is thereby
    impossible, mirroring the parser-is-the-single-source-of-truth rule in
-   `CLAUDE.md`. For a fixed-width ISA, discovery scans the largest complete,
+   `CLAUDE.md`. The v1 address-only worklist accepts executable and shared-object
+   ELFs (`ET_EXEC` / `ET_DYN`) but rejects relocatable objects (`ET_REL`):
+   multiple executable sections in a relocatable object may all have
+   `sh_addr == 0`, so an `AddressWindow` cannot identify which section to read
+   or patch. For a fixed-width ISA, discovery scans the largest complete,
    instruction-aligned prefix of each executable section. ELF does not require
    `SHF_EXECINSTR` section sizes to be a multiple of the ISA's instruction
    width, so a shorter trailing suffix is ignored and reported rather than
@@ -140,17 +144,30 @@ can reconstruct *why* the window-selection rules are as conservative as they are
 8. **The loop is a monotone worklist with a no-improvement cache.** Each accepted
    rewrite strictly lowers the chosen cost metric, so progress is monotone. To
    avoid re-proving the same window across passes and across overlaps, the driver
-   caches "no improvement found" keyed by a hash of the window's instruction
-   bytes; a window whose bytes are unchanged since a prior miss is skipped. A
-   pass that accepts zero rewrites terminates the loop. Per-window search time is
-   bounded by the existing `--timeout`, because superoptimizing every window of a
-   binary the size of `/bin/ls` is otherwise unbounded.
+   caches "no improvement found" keyed by the window's instruction bytes; a
+   window whose bytes are unchanged since a prior miss is skipped. The v1 cache
+   is process-local and stores the exact byte vector in a hash set, so hash
+   collisions cannot cause false misses. Discovery restarts immediately after an
+   accepted patch; a pass that accepts zero rewrites terminates the loop. Per-window search time is bounded by the existing `--timeout`, because
+   superoptimizing every window of a binary the size of `/bin/ls` is otherwise
+   unbounded. Whatever goes wrong for one window stays scoped to that window:
+   nothing reaches disk until the run's final write, so a search or reassembly
+   failure — or a cheaper sequence that nonetheless encodes to more bytes than
+   its window — is refused, counted, and the run continues, rather than
+   unwinding and discarding every rewrite already accepted in memory. This is
+   the fourth way coverage can be incomplete, alongside the indirect-target
+   (Decision 5), RIP-relative (Decision 6), and budget (Decision 9) refusals;
+   like those, it is reported, and any of them qualifies the reported fixpoint
+   as one over admitted windows rather than over the whole binary.
 
 9. **Window selection is prioritized, not exhaustive-by-default.** The driver
-   prefers longer admissible runs and windows with apparent redundancy, and
-   honours a global budget (time and/or window count). When the budget bounds
-   coverage, the driver `log()`s what it skipped — a silent top-N would read as
-   "the whole binary was optimized" when it was not.
+   orders admissible runs by decoded instruction count, then by repeated exact
+   instruction encodings as an apparent-redundancy tie-breaker, then by address
+   for deterministic ties. `--max-windows N` bounds actual search attempts
+   across all passes (default 100); cache hits do not spend it. When the budget
+   bounds coverage, the driver logs the exact number of currently admissible
+   windows it skipped — a silent top-N would read as "the whole binary was
+   optimized" when it was not.
 
 10. **"Improvement" means lower cost under the selected `--cost-metric`, and the
     on-disk file never shrinks regardless of metric.** Because freed bytes become
@@ -224,11 +241,10 @@ maintenance cost, deleting the `--auto` arm leaves the rest of the tool intact.
 - **ADR-0001** (live-in derivation): unchanged; per-window live-in continues to
   flow from `source_registers()` / `destinations()`.
 
-## Open questions (resolved during implementation, not by this ADR)
+## Open questions
 
-- Exact priority function for window selection (Decision 9).
-- Whether the no-improvement cache persists across process runs or is in-memory
-  only (Decision 8) — in-memory is the v1 default.
+- Whether a future persistent no-improvement cache should supplement the v1
+  process-local cache (Decision 8).
 - Whether `--auto` should accept a section filter (e.g. only `.text`) or always
   sweep every executable section.
 - **Cost-model fidelity is the precondition for honestly calling this a speed

@@ -10,6 +10,10 @@ use std::time::Duration;
 mod test_utils;
 
 use s11::assembler::AArch64Assembler;
+use s11::auto_driver::{
+    AutoOptimizationAdapter, AutoRunSummary, AutoTermination, AutoWindow, WindowSearchResult,
+    drive_auto_optimization,
+};
 use s11::candidate_windows::{
     WindowInstruction, WindowRole, plan_candidate_windows, refuse_windows_with_interior_targets,
 };
@@ -264,6 +268,13 @@ enum Commands {
         /// Write the optimized binary to PATH (defaults to <stem>_optimized.<ext>)
         #[arg(long, short = 'o')]
         output: Option<PathBuf>,
+        /// Maximum window searches across all auto-mode passes
+        #[arg(
+            long,
+            conflicts_with_all = ["start_addr", "end_addr"],
+            default_value_t = s11::auto_driver::DEFAULT_MAX_WINDOWS
+        )]
+        max_windows: usize,
         /// Replace an existing output file (never permits optimizing the input in place)
         #[arg(long)]
         force: bool,
@@ -553,6 +564,55 @@ enum OptimizedWindowBytes {
     LeaveInputUnchanged,
 }
 
+enum ElfWindowOptimization {
+    NoImprovement {
+        /// The window reassembled from its original IR, when the backend
+        /// produced one. Single-window mode writes it so a search miss still
+        /// materializes a copy; auto mode never asks for it and writes its
+        /// in-memory image once at the end.
+        reassembled: Option<Vec<u8>>,
+    },
+    Improved {
+        replacement: Vec<u8>,
+        original_cost: u64,
+        optimized_cost: u64,
+    },
+}
+
+impl ElfWindowOptimization {
+    /// Whether this outcome can actually be written back into a window of
+    /// `window_len` bytes.
+    ///
+    /// A search that lowers the selected cost metric does **not** guarantee a
+    /// shorter encoding: under `instruction-count` or `latency` a
+    /// variable-length x86 replacement can encode to more bytes than the window
+    /// it must occupy. Callers that patch in place must check this rather than
+    /// let `ElfPatcher::apply_patch` reject the replacement.
+    fn fits_window(&self, window_len: usize) -> bool {
+        match self {
+            ElfWindowOptimization::Improved { replacement, .. } => replacement.len() <= window_len,
+            ElfWindowOptimization::NoImprovement { .. } => true,
+        }
+    }
+}
+
+impl From<ElfWindowOptimization> for WindowSearchResult {
+    fn from(outcome: ElfWindowOptimization) -> Self {
+        match outcome {
+            ElfWindowOptimization::NoImprovement { .. } => WindowSearchResult::NoImprovement,
+            ElfWindowOptimization::Improved {
+                replacement,
+                original_cost,
+                optimized_cost,
+            } => WindowSearchResult::Improved {
+                replacement,
+                original_cost,
+                optimized_cost,
+            },
+        }
+    }
+}
+
 /// Registers proven live downstream of the window, carried per-arch.
 ///
 /// `None` means "no downstream narrowing available" — the consumer falls back
@@ -584,9 +644,7 @@ impl Default for OptimizationContext {
     }
 }
 
-// This discovery seam is consumed by the later auto-driver loop (#620). Until
-// then it is exercised directly by tests but has no production CLI caller.
-#[cfg_attr(not(test), allow(dead_code))]
+// Shared classification seam for candidate discovery and the auto driver.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum CandidateInstructionDisposition {
     StraightLine,
@@ -613,13 +671,17 @@ trait ElfOptimizationBackend {
         instructions: &capstone::Instructions,
     ) -> Result<Vec<Self::Instruction>, String>;
 
-    #[cfg_attr(not(test), allow(dead_code))]
     fn classify_candidate_instruction(
         &self,
         instruction: &capstone::Insn<'_>,
     ) -> Result<CandidateInstructionDisposition, String>;
 
     fn validate_window_ir(&self, ir: &[Self::Instruction]) -> Result<(), String>;
+
+    /// Cost used both by the search and by the auto driver's monotonicity gate.
+    /// Routed through `isa::CostModel` so the gate and the search that
+    /// produced the candidate can never drift onto different cost models.
+    fn sequence_cost(&self, ir: &[Self::Instruction], metric: &CostMetric) -> u64;
 
     /// Build the per-window `OptimizationContext`, deriving the downstream
     /// flags- and register-liveness from the bytes that follow the window in
@@ -702,6 +764,10 @@ impl ElfOptimizationBackend for AArch64OptimizationBackend {
 
     fn validate_window_ir(&self, ir: &[Self::Instruction]) -> Result<(), String> {
         aarch64_search_inputs::validate_basic_block(ir)
+    }
+
+    fn sequence_cost(&self, ir: &[Self::Instruction], metric: &CostMetric) -> u64 {
+        <isa::AArch64 as isa::CostModel<Instruction>>::sequence_cost(&isa::AArch64, ir, metric)
     }
 
     fn optimization_context(
@@ -895,6 +961,21 @@ impl ElfOptimizationBackend for X86OptimizationBackend {
         x86_search_inputs::validate_terminator_placement(ir)
     }
 
+    fn sequence_cost(&self, ir: &[Self::Instruction], metric: &CostMetric) -> u64 {
+        match self.arch {
+            X86Arch::X86_64 => <isa::X86_64 as isa::CostModel<Self::Instruction>>::sequence_cost(
+                &isa::X86_64,
+                ir,
+                metric,
+            ),
+            X86Arch::X86_32 => <isa::X86_32 as isa::CostModel<Self::Instruction>>::sequence_cost(
+                &isa::X86_32,
+                ir,
+                metric,
+            ),
+        }
+    }
+
     fn optimization_context(
         &self,
         ir: &[Self::Instruction],
@@ -1054,32 +1135,38 @@ impl ElfOptimizationBackend for X86OptimizationBackend {
     }
 }
 
-#[cfg_attr(not(test), allow(dead_code))]
 #[derive(Debug, Clone)]
 struct SectionCandidateWindows {
+    /// Which executable section the candidates came from. The auto driver
+    /// consumes the windows themselves, so this is currently read only by the
+    /// discovery tests that pin per-section behaviour.
+    #[cfg_attr(not(test), allow(dead_code))]
     section: TextSection,
     candidates: Vec<AddressWindow>,
+    /// Candidate windows this section's discovery pass dropped because an
+    /// indirect target (relocation- or pointer-derived) fell in their interior.
+    /// The auto driver reads it so a fixpoint is never claimed over coverage
+    /// that was silently suppressed (ADR-0009 Decision 5/9).
     indirect_target_refusals: usize,
 }
 
-#[cfg_attr(not(test), allow(dead_code))]
+#[cfg(test)]
 fn find_candidate_windows(
     patcher: &ElfPatcher,
 ) -> Result<Vec<SectionCandidateWindows>, Box<dyn std::error::Error>> {
     match patcher.arch() {
         DetectedArch::Aarch64 => {
-            find_candidate_windows_with_backend(AArch64OptimizationBackend, patcher)
+            find_candidate_windows_with_backend(&AArch64OptimizationBackend, patcher)
         }
         DetectedArch::X86_64 | DetectedArch::X86_32 => find_candidate_windows_with_backend(
-            X86OptimizationBackend::new(X86Arch::try_from(patcher.arch())?),
+            &X86OptimizationBackend::new(X86Arch::try_from(patcher.arch())?),
             patcher,
         ),
     }
 }
 
-#[cfg_attr(not(test), allow(dead_code))]
 fn find_candidate_windows_with_backend<B: ElfOptimizationBackend>(
-    backend: B,
+    backend: &B,
     patcher: &ElfPatcher,
 ) -> Result<Vec<SectionCandidateWindows>, Box<dyn std::error::Error>> {
     find_candidate_windows_with_detail_provider(
@@ -1126,9 +1213,8 @@ fn instruction_detail_error(
     )
 }
 
-#[cfg_attr(not(test), allow(dead_code))]
 fn find_candidate_windows_with_detail_provider<B, F>(
-    backend: B,
+    backend: &B,
     patcher: &ElfPatcher,
     mut inspect_detail: F,
 ) -> Result<Vec<SectionCandidateWindows>, Box<dyn std::error::Error>>
@@ -1299,13 +1385,20 @@ where
         });
     }
 
-    let refused = section_results
-        .iter()
-        .map(|section| section.indirect_target_refusals)
-        .sum();
-    println!("{}", indirect_target_refusal_log(refused));
+    let refused = total_indirect_target_refusals(&section_results);
+    if refused > 0 {
+        println!("{}", indirect_target_refusal_log(refused));
+    }
 
     Ok(section_results)
+}
+
+/// Candidate windows dropped for indirect-target reasons across every section.
+fn total_indirect_target_refusals(sections: &[SectionCandidateWindows]) -> usize {
+    sections
+        .iter()
+        .map(|section| section.indirect_target_refusals)
+        .sum()
 }
 
 fn indirect_target_refusal_log(refused: usize) -> String {
@@ -1368,7 +1461,6 @@ fn capstone_detail_has_rip_relative_memory(detail: &capstone::InsnDetail<'_>) ->
 /// over-collected: an extra target can only cause an extra window split, never
 /// an unsound admit, and a 0..=63 bit index never coincides with a real
 /// in-section code address.
-#[cfg_attr(not(test), allow(dead_code))]
 fn capstone_detail_direct_branch_targets(detail: &capstone::InsnDetail<'_>) -> Vec<u64> {
     let jump =
         capstone::InsnGroupId(capstone::InsnGroupType::CS_GRP_JUMP as capstone::InsnGroupIdInt);
@@ -1400,19 +1492,232 @@ fn capstone_detail_direct_branch_targets(detail: &capstone::InsnDetail<'_>) -> V
         .collect()
 }
 
+struct ElfAutoOptimizationAdapter<'a, B> {
+    backend: B,
+    patcher: &'a mut ElfPatcher,
+    options: &'a OptimizationOptions,
+    /// Candidate windows the most recent discovery pass refused for
+    /// indirect-target reasons (ADR-0009 Decision 5). Read after the loop so
+    /// the run summary never claims an unqualified fixpoint over a binary whose
+    /// coverage was incomplete.
+    refused_windows: usize,
+    /// Windows whose rewrite this run declined to apply after searching them —
+    /// a search or reassembly failure, or a replacement that does not fit.
+    /// Same reason as `refused_windows`: suppressed coverage must not be
+    /// silent, and a fixpoint reached over it is only a fixpoint over what was
+    /// actually admitted.
+    refused_rewrites: usize,
+}
+
+impl<B: ElfOptimizationBackend> ElfAutoOptimizationAdapter<'_, B> {
+    /// Drop one window from this run without failing it, and account for the
+    /// drop so the summary can qualify its fixpoint.
+    fn refuse_rewrite(&mut self, candidate: &AutoWindow, reason: &str) -> WindowSearchResult {
+        self.refused_rewrites += 1;
+        println!(
+            "Auto driver: refusing rewrite at 0x{:x}-0x{:x}: {reason}.",
+            candidate.window.start, candidate.window.end,
+        );
+        WindowSearchResult::NoImprovement
+    }
+}
+
+impl<B: ElfOptimizationBackend> AutoOptimizationAdapter for ElfAutoOptimizationAdapter<'_, B> {
+    fn discover_windows(&mut self) -> Result<Vec<AutoWindow>, String> {
+        let discovered = find_candidate_windows_with_backend(&self.backend, self.patcher)
+            .map_err(|error| error.to_string())?;
+        let cs = self
+            .backend
+            .disassembler()
+            .map_err(|error| error.to_string())?;
+        let mut work = Vec::new();
+        self.refused_windows = total_indirect_target_refusals(&discovered);
+
+        for section in discovered {
+            for window in section.candidates {
+                let bytes = self
+                    .patcher
+                    .get_instructions_in_window(&window)
+                    .map_err(|error| error.to_string())?;
+                let instructions = cs
+                    .disasm_all(&bytes, window.start)
+                    .map_err(|error| error.to_string())?;
+                let mut seen_encodings = std::collections::HashSet::new();
+                let redundancy_score = instructions
+                    .iter()
+                    .filter(|instruction| !seen_encodings.insert(instruction.bytes()))
+                    .count();
+                work.push(AutoWindow {
+                    window,
+                    instruction_count: instructions.len(),
+                    redundancy_score,
+                    instruction_bytes: bytes,
+                });
+            }
+        }
+
+        Ok(work)
+    }
+
+    fn optimize_window(&mut self, candidate: &AutoWindow) -> Result<WindowSearchResult, String> {
+        // Gate on the window's own extent — the same number `apply_patch`
+        // validates against — rather than on the byte snapshot discovery took.
+        let window_len = usize::try_from(candidate.window.end - candidate.window.start)
+            .map_err(|_| "candidate window length does not fit in usize".to_string())?;
+
+        // Whatever goes wrong here is a property of this one window, not of the
+        // image: nothing is on disk until the final `write_to`, so propagating
+        // would abort the run and discard every rewrite accepted so far.
+        // Reassembly is a live source of such errors — x86 window reassembly
+        // *fails* (rather than returning oversized bytes) when an optimized
+        // prefix would displace the window's pinned `Jcc`, so the `fits_window`
+        // gate below never sees that case.
+        let outcome = match optimize_elf_window_with_backend(
+            &self.backend,
+            self.patcher,
+            candidate.window.start,
+            candidate.window.end,
+            self.options,
+            false,
+        ) {
+            Ok(outcome) => outcome,
+            Err(error) => return Ok(self.refuse_rewrite(candidate, &error.to_string())),
+        };
+
+        // `apply_patch` would reject an oversized replacement, and that error
+        // would likewise abort the whole run. Refuse just this window instead.
+        if !outcome.fits_window(window_len) {
+            return Ok(self.refuse_rewrite(
+                candidate,
+                &format!("the replacement does not fit the {window_len}-byte window"),
+            ));
+        }
+
+        Ok(WindowSearchResult::from(outcome))
+    }
+
+    fn apply_optimization(
+        &mut self,
+        candidate: &AutoWindow,
+        replacement: &[u8],
+    ) -> Result<(), String> {
+        self.patcher
+            .apply_patch(&candidate.window, replacement)
+            .map_err(|error| error.to_string())
+    }
+}
+
 /// Whole-binary `--auto` driver entry point.
-///
-/// Issue #616 wires the `--auto`/`-o` CLI surface through to here; the driver
-/// loop itself (window discovery, the optimize/patch loop) lands in later #615
-/// slices. Until then this is a deterministic not-yet-implemented guard so the
-/// CLI slice never pretends to do work it cannot.
 fn run_auto_optimization(
-    _patcher: &ElfPatcher,
-    _binary: &Path,
-    _output: Option<&Path>,
-    _options: &OptimizationOptions,
+    mut image: ElfPatcher,
+    binary: &Path,
+    output: Option<&Path>,
+    force: bool,
+    options: &OptimizationOptions,
+    max_windows: usize,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    Err("whole-binary auto optimization (--auto) is not yet implemented".into())
+    if image.elf_type() == elf::abi::ET_REL {
+        return Err(
+            "--auto does not support relocatable ELF objects (ET_REL), whose executable sections can share virtual addresses"
+                .into(),
+        );
+    }
+    let output = resolve_output_path(binary, output, force)?;
+    let arch = image.arch();
+    match arch {
+        DetectedArch::Aarch64 => run_auto_optimization_with_backend(
+            AArch64OptimizationBackend,
+            &mut image,
+            binary,
+            &output,
+            options,
+            max_windows,
+        ),
+        DetectedArch::X86_64 | DetectedArch::X86_32 => run_auto_optimization_with_backend(
+            X86OptimizationBackend::new(X86Arch::try_from(arch)?),
+            &mut image,
+            binary,
+            &output,
+            options,
+            max_windows,
+        ),
+    }
+}
+
+fn run_auto_optimization_with_backend<B: ElfOptimizationBackend>(
+    backend: B,
+    image: &mut ElfPatcher,
+    binary: &Path,
+    output: &ResolvedOutput,
+    options: &OptimizationOptions,
+    max_windows: usize,
+) -> Result<(), Box<dyn std::error::Error>> {
+    println!("Auto-optimizing ELF binary: {}", binary.display());
+    println!("Detected: {}", backend.arch_description());
+    println!("Algorithm: {:?}", options.algorithm);
+    println!("Global window-search budget: {max_windows}");
+
+    let mut adapter = ElfAutoOptimizationAdapter {
+        backend,
+        patcher: image,
+        options,
+        refused_windows: 0,
+        refused_rewrites: 0,
+    };
+    let summary = drive_auto_optimization(&mut adapter, max_windows)?;
+    let refused_windows = adapter.refused_windows;
+    let refused_rewrites = adapter.refused_rewrites;
+
+    image.write_to(output)?;
+    println!("Created optimized binary: {}", output.path().display());
+    println!(
+        "{}",
+        auto_run_summary_log(&summary, refused_windows, refused_rewrites)
+    );
+
+    Ok(())
+}
+
+/// Run-level accounting for one `--auto` invocation, as the lines the CLI
+/// prints. Kept as a pure formatter beside [`indirect_target_refusal_log`] so
+/// the wording integration tests assert on is pinned by a unit test first.
+fn auto_run_summary_log(
+    summary: &AutoRunSummary,
+    refused_windows: usize,
+    refused_rewrites: usize,
+) -> String {
+    let mut lines = vec![format!(
+        "Auto summary: {} searched, {} cache hits, {} rewrites accepted.",
+        summary.searches, summary.cache_hits, summary.accepted_rewrites,
+    )];
+    if let AutoTermination::BudgetExhausted { skipped } = summary.termination {
+        lines.push(format!(
+            "Auto window budget exhausted; skipped {skipped} candidate window(s) due to budget."
+        ));
+    }
+    if refused_rewrites > 0 {
+        lines.push(format!(
+            "Auto coverage is incomplete: refused {refused_rewrites} rewrite(s) that search or reassembly could not apply to their window."
+        ));
+    }
+    if refused_windows > 0 {
+        lines.push(format!(
+            "Auto coverage is incomplete: refused {refused_windows} candidate window(s) whose interior contained an indirect target."
+        ));
+    }
+    if summary.termination == AutoTermination::Fixpoint {
+        // A fixpoint over an incompletely covered binary is still a fixpoint,
+        // but it is not "this binary is optimal" — say which one it is.
+        let scope = if refused_windows > 0 || refused_rewrites > 0 {
+            " over admitted windows"
+        } else {
+            ""
+        };
+        lines.push(format!(
+            "Auto optimization reached a fixpoint{scope} (zero rewrites in the final pass)."
+        ));
+    }
+    lines.join("\n")
 }
 
 fn decode_arch_label(arch: DetectedArch) -> &'static str {
@@ -1433,7 +1738,7 @@ fn optimize_elf_binary(
 ) -> Result<(), Box<dyn std::error::Error>> {
     match patcher.arch() {
         DetectedArch::Aarch64 => optimize_elf_binary_with_backend(
-            AArch64OptimizationBackend,
+            &AArch64OptimizationBackend,
             patcher,
             path,
             start_addr,
@@ -1443,7 +1748,7 @@ fn optimize_elf_binary(
         ),
         DetectedArch::X86_64 | DetectedArch::X86_32 => optimize_elf_binary_with_backend(
             // TryFrom cannot fail in this arm — the match already excluded Aarch64.
-            X86OptimizationBackend::new(X86Arch::try_from(patcher.arch())?),
+            &X86OptimizationBackend::new(X86Arch::try_from(patcher.arch())?),
             patcher,
             path,
             start_addr,
@@ -1454,19 +1759,16 @@ fn optimize_elf_binary(
     }
 }
 
-fn optimize_elf_binary_with_backend<B: ElfOptimizationBackend>(
-    backend: B,
+fn optimize_elf_window_with_backend<B: ElfOptimizationBackend>(
+    backend: &B,
     patcher: &ElfPatcher,
-    path: &Path,
     start_addr: u64,
     end_addr: u64,
-    output: &ResolvedOutput,
+
     options: &OptimizationOptions,
-) -> Result<(), Box<dyn std::error::Error>> {
-    println!("Optimizing ELF binary: {}", path.display());
-    println!("Detected: {}", backend.arch_description());
+    reassemble_on_miss: bool,
+) -> Result<ElfWindowOptimization, Box<dyn std::error::Error>> {
     println!("Address window: 0x{:x} - 0x{:x}", start_addr, end_addr);
-    println!("Algorithm: {:?}", options.algorithm);
 
     // Create address window
     let window = AddressWindow {
@@ -1548,25 +1850,77 @@ fn optimize_elf_binary_with_backend<B: ElfOptimizationBackend>(
     }
 
     // Reassemble the instructions
-    let assembled_bytes = backend.assemble_window(
-        &ir_instructions,
-        final_instructions,
-        optimized_instructions.is_some(),
-        &instructions,
-        &original_bytes,
-        start_addr,
-    )?;
-    let OptimizedWindowBytes::Patch(assembled_bytes) = assembled_bytes else {
-        patcher.create_unmodified_copy(output)?;
-        println!("Created unchanged binary: {}", output.path().display());
-        return Ok(());
+    // Reassembling a search miss is only useful to a caller that will write the
+    // bytes. The auto driver discards them, so skipping the work there also
+    // removes an encoder-failure surface that would otherwise abort a
+    // whole-binary run over a window nothing was going to patch.
+    let assembled_bytes = if optimized_instructions.is_none() && !reassemble_on_miss {
+        None
+    } else {
+        match backend.assemble_window(
+            &ir_instructions,
+            final_instructions,
+            optimized_instructions.is_some(),
+            &instructions,
+            &original_bytes,
+            start_addr,
+        )? {
+            OptimizedWindowBytes::Patch(bytes) => {
+                println!("Reassembled to {} bytes", bytes.len());
+                Some(bytes)
+            }
+            OptimizedWindowBytes::LeaveInputUnchanged => None,
+        }
     };
-    println!("Reassembled to {} bytes", assembled_bytes.len());
+    match (optimized_instructions.as_ref(), assembled_bytes) {
+        (Some(optimized), Some(replacement)) => Ok(ElfWindowOptimization::Improved {
+            original_cost: backend.sequence_cost(&ir_instructions, &options.cost_metric),
+            optimized_cost: backend.sequence_cost(optimized, &options.cost_metric),
+            replacement,
+        }),
+        (Some(_), None) => {
+            Err("backend reported an optimization but refused to assemble its replacement".into())
+        }
+        (None, reassembled) => Ok(ElfWindowOptimization::NoImprovement { reassembled }),
+    }
+}
 
-    // Create patched ELF file at the caller-resolved output path.
-    patcher.create_patched_copy(output, &window, &assembled_bytes)?;
-    println!("Created optimized binary: {}", output.path().display());
+fn optimize_elf_binary_with_backend<B: ElfOptimizationBackend>(
+    backend: &B,
+    patcher: &ElfPatcher,
+    path: &Path,
+    start_addr: u64,
+    end_addr: u64,
+    output: &ResolvedOutput,
+    options: &OptimizationOptions,
+) -> Result<(), Box<dyn std::error::Error>> {
+    println!("Optimizing ELF binary: {}", path.display());
+    println!("Detected: {}", backend.arch_description());
+    println!("Algorithm: {:?}", options.algorithm);
 
+    let window = AddressWindow {
+        start: start_addr,
+        end: end_addr,
+    };
+    // Single-window mode always materializes the result file: a reassembled
+    // miss is written just like an accepted rewrite, and a window the backend
+    // leaves unchanged is written as an unmodified copy.
+    match optimize_elf_window_with_backend(backend, patcher, start_addr, end_addr, options, true)? {
+        ElfWindowOptimization::Improved { replacement, .. } => {
+            patcher.create_patched_copy(output, &window, &replacement)?;
+            println!("Created optimized binary: {}", output.path().display());
+        }
+        ElfWindowOptimization::NoImprovement {
+            reassembled: Some(bytes),
+        } => {
+            patcher.create_patched_copy(output, &window, &bytes)?;
+            println!("Created optimized binary: {}", output.path().display());
+        }
+        ElfWindowOptimization::NoImprovement { reassembled: None } => {
+            patcher.create_unmodified_copy(output)?;
+            println!("Created unchanged binary: {}", output.path().display());
+        }
+    }
     Ok(())
 }
 
@@ -2379,6 +2733,7 @@ fn main() {
             end_addr,
             auto,
             output,
+            max_windows,
             force,
             arch,
             algorithm,
@@ -2464,9 +2819,15 @@ fn main() {
 
             let result = if auto {
                 // Whole-binary driver. clap already guaranteed --start-addr /
-                // --end-addr are absent (conflicts_with_all); the driver loop
-                // itself is a later #615 slice, so this dispatches to a guard.
-                run_auto_optimization(&patcher, &binary, output.as_deref(), &options)
+                // --end-addr are absent (conflicts_with_all).
+                run_auto_optimization(
+                    patcher,
+                    &binary,
+                    output.as_deref(),
+                    force,
+                    &options,
+                    max_windows,
+                )
             } else {
                 // Single-window path. clap's required_unless_present guarantees
                 // both addresses are present here; guard defensively rather than
@@ -2841,10 +3202,231 @@ mod cli_helper_tests {
     }
 
     #[test]
+    fn auto_run_summary_log_reports_budget_and_qualified_fixpoint() {
+        // `tests/integration/opt_test.rs` asserts on these substrings, so pin
+        // the wording here where a reword fails fast and locally.
+        let bounded = auto_run_summary_log(
+            &AutoRunSummary {
+                searches: 4,
+                accepted_rewrites: 2,
+                cache_hits: 1,
+                termination: AutoTermination::BudgetExhausted { skipped: 2 },
+            },
+            0,
+            0,
+        );
+        assert_eq!(
+            bounded,
+            "Auto summary: 4 searched, 1 cache hits, 2 rewrites accepted.\n\
+             Auto window budget exhausted; skipped 2 candidate window(s) due to budget."
+        );
+
+        let fixpoint = auto_run_summary_log(
+            &AutoRunSummary {
+                searches: 3,
+                accepted_rewrites: 0,
+                cache_hits: 3,
+                termination: AutoTermination::Fixpoint,
+            },
+            0,
+            0,
+        );
+        assert!(
+            fixpoint.ends_with(
+                "Auto optimization reached a fixpoint (zero rewrites in the final pass)."
+            ),
+            "unqualified fixpoint should not claim a scope: {fixpoint}"
+        );
+
+        // Refused coverage qualifies the fixpoint rather than hiding it.
+        let partial = auto_run_summary_log(&AutoRunSummary::default(), 5, 0);
+        assert!(
+            partial.contains(
+                "Auto coverage is incomplete: refused 5 candidate window(s) whose interior contained an indirect target."
+            ) && partial.contains(
+                "reached a fixpoint over admitted windows (zero rewrites in the final pass)."
+            ),
+            "a fixpoint over incomplete coverage must say so: {partial}"
+        );
+
+        // A window whose rewrite the driver declined is suppressed coverage
+        // too, so it qualifies the fixpoint the same way.
+        let refused = auto_run_summary_log(&AutoRunSummary::default(), 0, 3);
+        assert!(
+            refused.contains(
+                "Auto coverage is incomplete: refused 3 rewrite(s) that search or reassembly could not apply to their window."
+            ) && refused.contains(
+                "reached a fixpoint over admitted windows (zero rewrites in the final pass)."
+            ),
+            "a refused rewrite must qualify the fixpoint: {refused}"
+        );
+    }
+
+    #[test]
     fn incomplete_executable_section_tail_log_reports_ignored_range() {
         assert_eq!(
             incomplete_executable_section_tail_log(".text", 0x1000, 0x100b, 0x1008, 4, 3),
             "Auto candidate discovery: executable section '.text' has raw range 0x1000-0x100b; scanning complete 4-byte-aligned instruction prefix 0x1000-0x1008 and ignoring 3 trailing byte(s)."
+        );
+    }
+
+    #[test]
+    fn oversized_replacement_does_not_fit_its_window() {
+        // Lower cost under `instruction-count` does not imply a shorter
+        // encoding on a variable-length ISA. The auto driver must catch that
+        // here rather than let `apply_patch` reject it and abort the whole run.
+        let improved = ElfWindowOptimization::Improved {
+            replacement: vec![0x83, 0xc0, 0x02],
+            original_cost: 2,
+            optimized_cost: 1,
+        };
+        assert!(!improved.fits_window(2));
+        assert!(improved.fits_window(3));
+        assert!(improved.fits_window(4));
+        assert!(
+            ElfWindowOptimization::NoImprovement { reassembled: None }.fits_window(0),
+            "a miss patches nothing and always fits"
+        );
+    }
+
+    #[test]
+    fn auto_mode_skips_reassembling_a_search_miss() {
+        // AArch64 `assemble_window` re-encodes the original IR even on a miss.
+        // Auto mode discards those bytes, so asking for them is pure work and
+        // an extra encoder-failure surface that would abort a whole-binary run
+        // over a window nothing was going to patch.
+        let text = 0x8b02_0020u32.to_le_bytes(); // add x0, x1, x2
+        let elf_bytes = build_minimal_elf64(&text, 0x1000, elf::abi::EM_AARCH64);
+        let input = TempFile::new_bytes("s11-auto-miss-reassembly", "elf", &elf_bytes);
+        let patcher = ElfPatcher::new(input.path()).expect("synthetic ELF should parse");
+        let options = options_for(Algorithm::Enumerative);
+
+        let skipped = optimize_elf_window_with_backend(
+            &AArch64OptimizationBackend,
+            &patcher,
+            0x1000,
+            0x1004,
+            &options,
+            false,
+        )
+        .expect("single-instruction window should search cleanly");
+        assert!(
+            matches!(
+                skipped,
+                ElfWindowOptimization::NoImprovement { reassembled: None }
+            ),
+            "auto mode must not pay for reassembly it discards"
+        );
+
+        let reassembled = optimize_elf_window_with_backend(
+            &AArch64OptimizationBackend,
+            &patcher,
+            0x1000,
+            0x1004,
+            &options,
+            true,
+        )
+        .expect("single-instruction window should search cleanly");
+        assert!(
+            matches!(
+                reassembled,
+                ElfWindowOptimization::NoImprovement {
+                    reassembled: Some(ref bytes),
+                } if bytes.as_slice() == text
+            ),
+            "single-window mode still materializes the reassembled miss"
+        );
+    }
+
+    #[test]
+    fn auto_adapter_accounts_for_indirect_target_refusals() {
+        // Same switch-table shape as
+        // `candidate_window_straddling_switch_table_target_is_refused`: the
+        // .rodata entry names 0x1004, inside the only candidate. The adapter
+        // must surface that suppressed coverage rather than hand the driver an
+        // empty worklist that reads as "nothing left to optimize".
+        let text = [
+            0x48, 0x83, 0xc0, 0x01, // add rax, 1 @0x1000
+            0x48, 0x83, 0xc0, 0x01, // add rax, 1 @0x1004 <- table target
+            0x48, 0x83, 0xc0, 0x01, // add rax, 1 @0x1008
+            0xff, 0xe0, // jmp rax (indirect dispatch; excluded separator)
+        ];
+        let rodata = 0x1004u64.to_le_bytes();
+        let elf_bytes = build_elf64_with_sections(
+            &[
+                (
+                    ".text",
+                    &text,
+                    0x1000,
+                    (elf::abi::SHF_ALLOC | elf::abi::SHF_EXECINSTR) as u64,
+                ),
+                (".rodata", &rodata, 0x2000, elf::abi::SHF_ALLOC as u64),
+            ],
+            elf::abi::EM_X86_64,
+        );
+        let input = TempFile::new_bytes("s11-auto-indirect-gate", "elf", &elf_bytes);
+        let mut patcher = ElfPatcher::new(input.path()).expect("synthetic ELF should parse");
+        let options = options_for(Algorithm::Enumerative);
+        let mut adapter = ElfAutoOptimizationAdapter {
+            backend: X86OptimizationBackend::new(X86Arch::X86_64),
+            patcher: &mut patcher,
+            options: &options,
+            refused_windows: 0,
+            refused_rewrites: 0,
+        };
+
+        let candidates = adapter
+            .discover_windows()
+            .expect("indirect-target refusal should be non-fatal");
+
+        assert!(
+            candidates.is_empty(),
+            "the only candidate straddles an indirect target and must be refused"
+        );
+        assert_eq!(
+            adapter.refused_windows, 1,
+            "refused coverage must be accounted for, not silently dropped"
+        );
+    }
+
+    #[test]
+    fn auto_adapter_contains_a_window_search_failure_instead_of_aborting_the_run() {
+        // Nothing reaches disk until the driver's final `write_to`, so
+        // propagating one window's search/reassembly failure would discard
+        // every rewrite already accepted in memory. x86 window reassembly
+        // really does error (rather than return oversized bytes) when an
+        // optimized prefix would displace a pinned `Jcc`, so this seam must
+        // hold for errors and not just for the `fits_window` gate.
+        let elf_bytes = build_minimal_elf64(&[0x90], 0x1000, elf::abi::EM_X86_64);
+        let input = TempFile::new_bytes("s11-auto-window-error", "elf", &elf_bytes);
+        let mut patcher = ElfPatcher::new(input.path()).expect("synthetic ELF should parse");
+        let options = options_for(Algorithm::Enumerative);
+        let mut adapter = ElfAutoOptimizationAdapter {
+            backend: X86OptimizationBackend::new(X86Arch::X86_64),
+            patcher: &mut patcher,
+            options: &options,
+            refused_windows: 0,
+            refused_rewrites: 0,
+        };
+
+        // An address window outside every executable section makes
+        // `optimize_elf_window_with_backend` fail before any search runs.
+        let outcome = adapter
+            .optimize_window(&AutoWindow {
+                window: AddressWindow {
+                    start: 0x9000,
+                    end: 0x9004,
+                },
+                instruction_bytes: vec![0x90; 4],
+                instruction_count: 4,
+                redundancy_score: 3,
+            })
+            .expect("a single window's failure must not fail the run");
+
+        assert_eq!(outcome, WindowSearchResult::NoImprovement);
+        assert_eq!(
+            adapter.refused_rewrites, 1,
+            "a contained failure must still be accounted for in the run summary"
         );
     }
 
@@ -3217,17 +3799,51 @@ mod cli_helper_tests {
         // The driver falls back to the derived path when -o is omitted, so
         // --auto must be legal on its own — guards against a future change that
         // makes -o mandatory.
-        let Commands::Opt { auto, output, .. } = parse_opt(&["s11", "opt", "prog.elf", "--auto"])
+        let Commands::Opt {
+            auto,
+            output,
+            max_windows,
+            ..
+        } = parse_opt(&["s11", "opt", "prog.elf", "--auto"])
         else {
             panic!("expected the opt subcommand");
         };
         assert!(auto);
         assert_eq!(output, None);
+        assert_eq!(max_windows, s11::auto_driver::DEFAULT_MAX_WINDOWS);
+    }
+
+    #[test]
+    fn opt_auto_parses_global_window_budget() {
+        let Commands::Opt {
+            auto, max_windows, ..
+        } = parse_opt(&["s11", "opt", "prog.elf", "--auto", "--max-windows", "0"])
+        else {
+            panic!("expected the opt subcommand");
+        };
+        assert!(auto);
+        assert_eq!(max_windows, 0);
     }
 
     #[test]
     fn opt_auto_conflicts_with_start_addr() {
         let err = parse_opt_err(&["s11", "opt", "prog.elf", "--auto", "--start-addr", "0x1000"]);
+        assert_eq!(err.kind(), clap::error::ErrorKind::ArgumentConflict);
+    }
+
+    #[test]
+    fn opt_max_windows_requires_auto_mode() {
+        let err = parse_opt_err(&[
+            "s11",
+            "opt",
+            "prog.elf",
+            "--start-addr",
+            "0x1000",
+            "--end-addr",
+            "0x1100",
+            "--max-windows",
+            "1",
+        ]);
         assert_eq!(err.kind(), clap::error::ErrorKind::ArgumentConflict);
     }
 
@@ -3326,6 +3942,10 @@ mod cli_helper_tests {
             "opt help should document -o/--output:\n{opt_help}"
         );
         assert!(
+            opt_help.contains("--max-windows"),
+            "opt help should document the global auto budget:\n{opt_help}"
+        );
+        assert!(
             opt_help.contains("Existing output files are refused unless --force is passed"),
             "opt help should document the overwrite policy:\n{opt_help}"
         );
@@ -3345,16 +3965,44 @@ mod cli_helper_tests {
     }
 
     #[test]
-    fn run_auto_optimization_is_not_yet_implemented() {
+    fn run_auto_optimization_with_zero_budget_writes_unchanged_image() {
         let elf = build_minimal_elf64(&[0x90], 0x1000, elf::abi::EM_X86_64);
-        let input = TempFile::new_bytes("s11-auto-guard", "elf", &elf);
+        let input = TempFile::new_bytes("s11-auto-zero-budget-in", "elf", &elf);
+        let output = TempFile::new_bytes("s11-auto-zero-budget-out", "elf", &[]);
         let patcher = ElfPatcher::new(input.path()).expect("synthetic ELF should parse");
         let opts = options_for(Algorithm::Enumerative);
-        let err = run_auto_optimization(&patcher, input.path(), None, &opts)
-            .expect_err("--auto driver is a not-yet-implemented guard for now");
+
+        run_auto_optimization(patcher, input.path(), Some(output.path()), true, &opts, 0)
+            .expect("zero-budget auto run should succeed");
+
+        assert_eq!(
+            std::fs::read(output.path()).expect("read auto output"),
+            elf,
+            "zero search budget must materialize an unchanged image",
+        );
+    }
+
+    #[test]
+    fn run_auto_optimization_rejects_relocatable_elf_before_writing_output() {
+        let mut elf = build_minimal_elf64(&[0x90], 0, elf::abi::EM_X86_64);
+        elf[16..18].copy_from_slice(&elf::abi::ET_REL.to_le_bytes());
+        let input = TempFile::new_bytes("s11-auto-relocatable-in", "o", &elf);
+        let output = TempFile::new_bytes("s11-auto-relocatable-out", "elf", &[]);
+        let patcher = ElfPatcher::new(input.path()).expect("relocatable ELF should parse");
+        let opts = options_for(Algorithm::Enumerative);
+
+        let error =
+            run_auto_optimization(patcher, input.path(), Some(output.path()), false, &opts, 0)
+                .expect_err("auto mode must reject address-ambiguous relocatable objects");
+
         assert!(
-            err.to_string().contains("not yet implemented"),
-            "unexpected error: {err}"
+            error.to_string().contains("relocatable ELF"),
+            "unexpected error: {error}"
+        );
+        assert_eq!(
+            std::fs::read(output.path()).expect("read untouched output placeholder"),
+            Vec::<u8>::new(),
+            "rejection must happen before the auto driver writes an output image",
         );
     }
 
@@ -3768,7 +4416,7 @@ mod cli_helper_tests {
         let mut detail_inspections = 0usize;
 
         let sections = find_candidate_windows_with_detail_provider(
-            X86OptimizationBackend::new(X86Arch::X86_64),
+            &X86OptimizationBackend::new(X86Arch::X86_64),
             &patcher,
             |cs, instruction, section_name| {
                 detail_inspections += 1;

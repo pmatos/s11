@@ -86,6 +86,21 @@ executable is never exposed. Deriving the sibling name is fallible: an empty or
 separator-terminated explicit path, or a stem-less or non-UTF-8 derived name,
 yields an error the driver reports rather than a panic.
 
+### Auto optimization pass
+One discovery-to-search sweep of the whole-binary `--auto` worklist. Candidate
+windows are ordered by decoded instruction count, then repeated instruction
+encodings, then address. A successful strict cost decrease ends the current
+pass immediately, applies the NOP-padded replacement to the in-memory ELF, and
+restarts discovery because overlapping window bytes may have changed. A pass
+that accepts no rewrite establishes the fixpoint.
+
+### No-improvement cache
+Process-local auto-driver memory of instruction byte vectors for which search
+found no cheaper equivalent. The cache is address-independent and exact-byte
+checked by `HashSet<Vec<u8>>`, so unchanged overlaps and later passes do not
+repeat a proof attempt, while a changed byte vector is eligible again. Cache
+hits do not consume the global `--max-windows` search budget.
+
 ### Subset hint (intentionally absent)
 The LLM prompt does **not** enumerate the maintained AArch64 subset s11's parser accepts (see [docs/capability.md](docs/capability.md)). The model is invited to use any AArch64 mnemonic it knows. Outputs that use unsupported instructions are recorded as a research signal (which mnemonics the model "wanted" to reach for), not treated as wasted calls. See ADR-0003.
 

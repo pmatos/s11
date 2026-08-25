@@ -13,3 +13,6 @@ addresses are stable across rebuilds.
 - `dup_mov_imm.s` — two identical `mov rax, 5` instructions. The enumerative
   search collapses the redundant pair to a single `mov rax, 5` (a one
   instruction shortening), exercised by `test_opt_x86_64_known_shortening`.
+- `auto_two_dup_mov.s` — two duplicate-MOV pairs separated by an unsupported
+  `push`, giving `--auto` two deterministic windows for loop, padding, budget,
+  and fixpoint coverage.
