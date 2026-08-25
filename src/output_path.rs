@@ -163,7 +163,13 @@ pub fn resolve_output_path(
     // must not re-derive it, or the diagnostic and the check can disagree.
     match std::fs::symlink_metadata(&output) {
         Ok(existing) => validate_existing_output(&output, &existing, force)?,
-        Err(_) => validate_output_parent(&output)?,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => validate_output_parent(&output)?,
+        Err(error) => {
+            return Err(format!(
+                "cannot inspect output path '{}': {error}",
+                output.display()
+            ));
+        }
     }
 
     Ok(ResolvedOutput {
@@ -471,6 +477,22 @@ mod tests {
                 "force cannot make an unusable file path valid: {err}"
             );
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn resolve_output_path_reports_metadata_errors_before_search() {
+        let dir = tempfile::tempdir().expect("create output directory");
+        let input = dir.path().join("prog.elf");
+        let output = dir.path().join("x".repeat(256));
+
+        let err = resolve_output_path(&input, Some(&output), false)
+            .expect_err("an invalid final component must fail during preflight");
+
+        assert!(
+            err.contains("cannot inspect output path"),
+            "unexpected error: {err}"
+        );
     }
 
     #[test]
