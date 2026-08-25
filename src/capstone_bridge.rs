@@ -32,12 +32,17 @@ fn split_capstone_alias_operands(op_str: &str) -> Vec<&str> {
     op_str.split(',').map(str::trim).collect()
 }
 
+/// Encodes `value` as one MOVZ halfword, or `None` if it needs more than one.
+///
+/// Zero is deliberately declined. `normalize_mov_wide_alias` returns early for
+/// `0..=0xffff`, so `value == 0` cannot reach here through that caller; declining
+/// it keeps zero on the canonical `mov Xd, #0` (`MovImm`) spelling instead of the
+/// redundant `movz Xd, #0`. `move_wide_movz_encoding_declines_zero` pins this.
 fn move_wide_movz_encoding(value: u64) -> Option<(u16, u8)> {
     for shift in MOVW_LEGAL_SHIFTS {
         let mask = 0xffff_u64 << shift;
         if value & !mask == 0 {
             let imm = ((value >> shift) & 0xffff) as u16;
-            // The current caller excludes zero; keep `None` for zero if this helper is reused.
             if imm != 0 {
                 return Some((imm, shift));
             }
@@ -534,6 +539,14 @@ mod tests {
                 other => panic!("expected normalized Instruction for `mov {ops}`, got {other:?}"),
             }
         }
+    }
+
+    #[test]
+    fn move_wide_movz_encoding_declines_zero() {
+        assert_eq!(super::move_wide_movz_encoding(0), None);
+        assert_eq!(super::move_wide_movz_encoding(1), Some((1, 0)));
+        assert_eq!(super::move_wide_movz_encoding(0x1_0000), Some((1, 16)));
+        assert_eq!(super::move_wide_movz_encoding(0x1_0001), None);
     }
 
     #[test]
