@@ -37,6 +37,7 @@ fn move_wide_movz_encoding(value: u64) -> Option<(u16, u8)> {
         let mask = 0xffff_u64 << shift;
         if value & !mask == 0 {
             let imm = ((value >> shift) & 0xffff) as u16;
+            // The current caller excludes zero; keep `None` for zero if this helper is reused.
             if imm != 0 {
                 return Some((imm, shift));
             }
