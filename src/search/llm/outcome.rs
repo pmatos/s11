@@ -256,8 +256,11 @@ mod tests {
         );
     }
 
+    /// The verifier is stubbed so the verdict mapping is deterministic; the
+    /// real near-zero-budget Z3 path (1 ms timeout -> `SatResult::Unknown`)
+    /// is deliberately not exercised here.
     #[test]
-    fn near_zero_smt_timeout_classifies_as_equiv_unknown() {
+    fn unknown_verifier_verdict_classifies_as_equiv_unknown() {
         let target = vec![
             Instruction::MovReg {
                 rd: Register::X0,
@@ -290,7 +293,7 @@ mod tests {
                     EquivalenceResult::Unknown("solver timeout".to_string()),
                     EquivalenceMetrics {
                         smt_called: true,
-                        smt_elapsed: Duration::from_millis(1),
+                        smt_elapsed: Duration::from_millis(7),
                         ..EquivalenceMetrics::default()
                     },
                 )
@@ -298,16 +301,12 @@ mod tests {
         );
 
         assert_eq!(outcome, IterationOutcome::EquivUnknown);
-        let metrics = metrics.expect("equiv-unknown path must have verification metrics");
+        let metrics = metrics.expect("equiv-unknown path must surface verification metrics");
         assert!(
             metrics.smt_called,
-            "near-zero timeout must reach SMT before returning equiv-unknown"
+            "classify must surface the verifier's metrics unchanged"
         );
-        assert!(
-            metrics.smt_formula_bytes.is_none(),
-            "formula size is serialized only on the unsat branch"
-        );
-        assert_eq!(metrics.smt_elapsed, Duration::from_millis(1));
+        assert_eq!(metrics.smt_elapsed, Duration::from_millis(7));
     }
 
     #[test]
