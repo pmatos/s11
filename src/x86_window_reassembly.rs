@@ -42,7 +42,7 @@ use crate::isa::x86::X86Instruction;
 /// * `original_ir` — the window's original Target. Only its terminator is
 ///   consulted: it must equal `final_ir`'s terminator, otherwise the search
 ///   returned a sequence that transfers control differently and the window is
-///   refused rather than mis-patched.
+///   refused rather than incorrectly patched.
 /// * `pinned_terminator_bytes` — the raw bytes of the original `Jcc` as they were
 ///   encoded in the source binary. `Some` iff the original window ended in a
 ///   terminator; the caller (a Capstone adapter) supplies them because
@@ -67,7 +67,7 @@ pub fn reassemble_optimized_x86_window(
 
     // A search that changes the terminator changes where control transfers.
     // Splicing the original `Jcc` bytes behind such a prefix would silently
-    // patch the wrong branch, so refuse rather than mis-patch.
+    // patch the wrong branch, so refuse rather than patch incorrectly.
     if final_terminator != original_terminator {
         return Err(format!(
             "search returned a terminator ({final_terminator:?}) that does not match \
@@ -242,7 +242,7 @@ mod tests {
         let jcc = X86Instruction::Jcc {
             cond: X86Condition::E,
         };
-        let final_ir = [mov_rax_rbx(), jcc.clone()];
+        let final_ir = [mov_rax_rbx(), jcc];
         let original_ir = [mov_rax_rbx(), jcc];
         let out = reassemble_optimized_x86_window(
             &final_ir,
@@ -277,7 +277,7 @@ mod tests {
         let jcc = X86Instruction::Jcc {
             cond: X86Condition::E,
         };
-        let final_ir = [mov_rax_rbx(), jcc.clone()];
+        let final_ir = [mov_rax_rbx(), jcc];
         let original_ir = [mov_rax_rbx(), jcc];
         let err =
             reassemble_optimized_x86_window(&final_ir, &original_ir, None, 5, DetectedArch::X86_64)

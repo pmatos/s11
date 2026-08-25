@@ -25,7 +25,7 @@ jobs:
     runs-on: ubuntu-24.04
 
     steps:
-    - uses: actions/checkout@v7
+    - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
     - name: Check repository CI policy
       run: |
@@ -51,7 +51,7 @@ jobs:
         echo "$HOME/.cargo/bin" >> $GITHUB_PATH
 
     - name: Cache cargo registry and target
-      uses: Swatinem/rust-cache@v2
+      uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
 
     - name: Check formatting
       run: cargo fmt -- --check
@@ -61,7 +61,7 @@ jobs:
 
     - name: Run unit tests (lib + bins)
       run: cargo test --lib --bins --verbose
-      
+
     - name: Check s11 binary exists
       run: |
         echo "Checking if s11 binary was built..."
@@ -80,11 +80,11 @@ jobs:
         echo "Architecture: $(uname -m)"
         echo "Checking if we can run AArch64 binaries:"
         file binaries/simple_debug || echo "simple_debug not found"
-        
+
     - name: Run integration tests with debug output
       run: |
         export RUST_BACKTRACE=1
         cargo test --test integration_tests -- --nocapture
-        
+
     - name: Run all tests
       run: ./test_all.sh

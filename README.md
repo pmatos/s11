@@ -51,6 +51,42 @@ Before pushing, run `./ci_check.sh` to mirror the test workflow locally:
 wrapper regression checks, fmt check, build, AArch64 test binaries, and the
 full test suite.
 
+## Contributing
+
+Commit subjects and pull request titles must follow the
+[Conventional Commits 1.0.0 specification]. Use the
+`type(scope)?: description` form; the scope is optional. The accepted types are
+`build`, `chore`, `ci`, `docs`, `feat`, `fix`, `perf`, `refactor`, `revert`,
+`style`, and `test`. For example:
+
+```
+feat(search): add cost-bounded enumeration
+fix(x86): reject invalid byte-register operands
+docs: explain benchmark setup
+```
+
+Install [`pre-commit`] to run repository hygiene, Python quality, spelling, and
+Rust formatting checks before each commit. If you previously enabled the
+repository's `.githooks` directory directly, remove that setting first because
+it conflicts with pre-commit's hook installation:
+
+```
+git config --unset-all core.hooksPath
+```
+
+Then install the hooks and establish a clean baseline:
+
+```
+pre-commit install
+pre-commit run --all-files
+```
+
+The default installation covers both the quality checks and Conventional
+Commit message validation.
+
+[Conventional Commits 1.0.0 specification]: https://www.conventionalcommits.org/en/v1.0.0/
+[`pre-commit`]: https://pre-commit.com/
+
 ## Using it
 
 ```

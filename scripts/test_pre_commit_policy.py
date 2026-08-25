@@ -1,0 +1,221 @@
+"""Regression checks for the repository's pre-commit policy."""
+
+import re
+import unittest
+from pathlib import Path
+
+import tomllib
+
+REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
+CONFIG_PATH = REPOSITORY_ROOT / ".pre-commit-config.yaml"
+README_PATH = REPOSITORY_ROOT / "README.md"
+TYPOS_CONFIG_PATH = REPOSITORY_ROOT / "_typos.toml"
+
+PINNED_REPOSITORIES = {
+    "https://github.com/pre-commit/pre-commit-hooks": "v6.0.0",
+    "https://github.com/astral-sh/ruff-pre-commit": "v0.16.4",
+    "https://github.com/crate-ci/typos": "v1.49.0",
+    "https://github.com/jsh9/pydoclint": "0.9.1",
+}
+
+GENERIC_HOOK_IDS = {
+    "check-added-large-files",
+    "check-case-conflict",
+    "check-merge-conflict",
+    "check-symlinks",
+    "check-yaml",
+    "check-toml",
+    "debug-statements",
+    "detect-private-key",
+    "end-of-file-fixer",
+    "mixed-line-ending",
+    "name-tests-test",
+    "trailing-whitespace",
+}
+
+EXPECTED_TYPOS_CONFIG = {
+    "default": {
+        "extend-words": {
+            "ands": "ands",
+            "rela": "rela",
+            "setp": "setp",
+        },
+        "extend-identifiers": {
+            "CMOVcc": "CMOVcc",
+            "cmovCC": "cmovCC",
+            "Uscaled": "Uscaled",
+        },
+    }
+}
+
+
+def repository_block(contents: str, repository: str) -> str:
+    """Return one repository declaration from a pre-commit configuration."""
+    marker = f"  - repo: {repository}"
+    start = contents.find(marker)
+    if start < 0:
+        raise ValueError(f"repository not found: {repository}")
+
+    next_repository = contents.find("\n  - repo:", start + len(marker))
+    if next_repository < 0:
+        return contents[start:]
+    return contents[start:next_repository]
+
+
+def hook_ids(block: str) -> set[str]:
+    """Return hook identifiers declared in a repository block."""
+    return set(re.findall(r"^\s+- id: ([^\s]+)$", block, flags=re.MULTILINE))
+
+
+def hook_block(repository: str, hook_id: str) -> str:
+    """Return one hook declaration from a repository block."""
+    marker = f"      - id: {hook_id}"
+    start = repository.find(marker)
+    if start < 0:
+        raise ValueError(f"hook not found: {hook_id}")
+
+    next_hook = repository.find("\n      - id:", start + len(marker))
+    if next_hook < 0:
+        return repository[start:]
+    return repository[start:next_hook]
+
+
+def hook_scalar(hook: str, key: str) -> str:
+    """Return an unquoted scalar from a hook declaration."""
+    match = re.search(rf"^\s+{re.escape(key)}:\s+(.+)$", hook, flags=re.MULTILINE)
+    if match is None:
+        raise ValueError(f"hook key not found: {key}")
+    return match.group(1)
+
+
+class TestPreCommitPolicy(unittest.TestCase):
+    def config(self) -> str:
+        """Read the repository's pre-commit configuration."""
+        self.assertTrue(CONFIG_PATH.is_file(), f"missing {CONFIG_PATH.name}")
+        return CONFIG_PATH.read_text(encoding="utf-8")
+
+    def test_external_hooks_are_pinned_exactly(self):
+        contents = self.config()
+
+        for repository, revision in PINNED_REPOSITORIES.items():
+            with self.subTest(repository=repository):
+                block = repository_block(contents, repository)
+                self.assertIn(f"\n    rev: {revision}\n", block)
+
+    def test_generic_repository_hygiene_hooks_are_enabled(self):
+        block = repository_block(
+            self.config(), "https://github.com/pre-commit/pre-commit-hooks"
+        )
+
+        self.assertEqual(hook_ids(block), GENERIC_HOOK_IDS)
+        self.assertIn('args: ["--pytest-test-first"]', block)
+
+    def test_test_name_exclusions_apply_to_python_basenames_only(self):
+        repository = repository_block(
+            self.config(), "https://github.com/pre-commit/pre-commit-hooks"
+        )
+        hook = hook_block(repository, "name-tests-test")
+        exclude = re.compile(hook_scalar(hook, "exclude"))
+
+        for path in (
+            "scripts/test_ci_policy.py",
+            "scripts/test_pre_commit_policy.py",
+            "scripts/ci_policy_test.py",
+        ):
+            with self.subTest(path=path):
+                self.assertIsNone(exclude.search(path))
+
+        for path in (
+            "_helper.py",
+            "scripts/_helper.py",
+            "lit.cfg.py",
+            "tests/lit.cfg.py",
+        ):
+            with self.subTest(path=path):
+                self.assertIsNotNone(exclude.search(path))
+
+    def test_test_name_hook_covers_repository_test_conventions(self):
+        repository = repository_block(
+            self.config(), "https://github.com/pre-commit/pre-commit-hooks"
+        )
+        hook = hook_block(repository, "name-tests-test")
+        files = re.compile(hook_scalar(hook, "files"))
+
+        for path in (
+            "scripts/test_ci_policy.py",
+            "scripts/test_pre_commit_policy.py",
+            "scripts/test_mutants_summary.py",
+            "scripts/ci_policy_test.py",
+            "tests/test_optimizer.py",
+            "tests/optimizer_test.py",
+        ):
+            with self.subTest(path=path):
+                self.assertIsNotNone(files.search(path))
+
+        self.assertIsNone(files.search("scripts/mutants_summary.py"))
+
+    def test_ruff_fixes_before_it_formats(self):
+        block = repository_block(
+            self.config(), "https://github.com/astral-sh/ruff-pre-commit"
+        )
+
+        check_index = block.find("- id: ruff-check")
+        format_index = block.find("- id: ruff-format")
+        self.assertGreaterEqual(check_index, 0)
+        self.assertGreater(format_index, check_index)
+        self.assertIn("args: [--fix]", block[check_index:format_index])
+
+    def test_typos_is_check_only(self):
+        block = repository_block(self.config(), "https://github.com/crate-ci/typos")
+
+        self.assertEqual(hook_ids(block), {"typos"})
+        self.assertIn("entry: typos", block)
+        self.assertIn("args: []", block)
+        self.assertNotIn("--write-changes", block)
+
+    def test_rust_format_hook_is_fast_and_checks_the_whole_crate(self):
+        block = repository_block(self.config(), "local")
+
+        self.assertIn("entry: cargo fmt --all -- --check", block)
+        self.assertIn("types: [rust]", block)
+        self.assertIn("pass_filenames: false", block)
+
+    def test_default_install_covers_quality_and_commit_message_hooks(self):
+        contents = self.config()
+
+        self.assertIn("default_install_hook_types: [pre-commit, commit-msg]", contents)
+
+    def test_quality_hooks_default_to_pre_commit_stage_only(self):
+        contents = self.config()
+
+        self.assertIn("default_stages: [pre-commit]", contents)
+
+    def test_existing_commit_message_validator_is_routed_through_pre_commit(self):
+        block = repository_block(self.config(), "local")
+
+        commit_message_index = block.find("- id: conventional-commit-message")
+        self.assertGreaterEqual(commit_message_index, 0)
+        commit_message_hook = block[commit_message_index:]
+        self.assertIn("entry: .githooks/commit-msg", commit_message_hook)
+        self.assertIn("language: script", commit_message_hook)
+        self.assertIn("stages: [commit-msg]", commit_message_hook)
+
+    def test_readme_documents_installation_and_old_hook_migration(self):
+        readme = README_PATH.read_text(encoding="utf-8")
+
+        self.assertIn("git config --unset-all core.hooksPath", readme)
+        self.assertIn("pre-commit install", readme)
+        self.assertIn("pre-commit run --all-files", readme)
+        self.assertNotIn("`git config core.hooksPath .githooks`", readme)
+
+    def test_typos_allowlist_contains_only_verified_domain_terms(self):
+        self.assertTrue(
+            TYPOS_CONFIG_PATH.is_file(), f"missing {TYPOS_CONFIG_PATH.name}"
+        )
+        config = tomllib.loads(TYPOS_CONFIG_PATH.read_text(encoding="utf-8"))
+
+        self.assertEqual(config, EXPECTED_TYPOS_CONFIG)
+
+
+if __name__ == "__main__":
+    unittest.main()

@@ -13,17 +13,24 @@ jobs:
   commitlint:
     runs-on: ubuntu-latest
     steps:
-      # Tag-pinned, not hash-pinned: this repo's policy is tag pins kept current by
-      # Dependabot rather than SHA pins.
-      - uses: actions/checkout@v7.0.0 # zizmor: ignore[unpinned-uses]
+      # Dependabot keeps full-SHA pins current; version comments make updates reviewable.
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           fetch-depth: 0
           persist-credentials: false
-      - uses: actions/setup-node@v7.0.0 # zizmor: ignore[unpinned-uses]
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: lts/*
       - name: Install commitlint
-        run: npm install --no-save @commitlint/cli@21 @commitlint/config-conventional@21 # zizmor: ignore[adhoc-packages]
+        run: npm install --no-save @commitlint/cli@21.2.2 @commitlint/config-conventional@21.2.2 # zizmor: ignore[adhoc-packages]
       - name: Lint pushed commits
         if: github.event.before != '0000000000000000000000000000000000000000'
-        run: npx commitlint --from ${{ github.event.before }} --to ${{ github.sha }} --verbose
+        env:
+          AFTER_SHA: ${{ github.sha }}
+          BEFORE_SHA: ${{ github.event.before }}
+        run: |
+          if ! git cat-file -e "${BEFORE_SHA}^{commit}" 2>/dev/null; then
+            echo "::notice title=Commitlint skipped::Before commit ${BEFORE_SHA} is unavailable (possibly after a force-push); no reliable pushed range can be constructed."
+            exit 0
+          fi
+          npx commitlint --from "$BEFORE_SHA" --to "$AFTER_SHA" --verbose

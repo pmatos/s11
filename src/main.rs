@@ -23,7 +23,7 @@ use s11::disassembly::{self, DisassembledInstruction};
 use s11::elf_patcher::{AddressWindow, DetectedArch, ElfPatcher, TextSection, parse_hex_address};
 use s11::ir::instructions::split_terminator;
 use s11::ir::{Instruction, Register};
-use s11::output_path::resolve_output_path;
+use s11::output_path::{ResolvedOutput, resolve_output_path};
 use s11::report;
 use s11::search::config::{
     Algorithm, LlmConfig, SearchConfig, SearchMode, StochasticConfig, SymbolicConfig,
@@ -240,6 +240,12 @@ enum Commands {
             "exclusive with --start-addr/--end-addr. Use -o/--output to name the ",
             "result file; when omitted the result is written next to the input as ",
             "<stem>_optimized.<ext>.\n\n",
+            "Output policy: Existing output files are refused unless --force is passed; ",
+            "--force never permits replacing the input itself. Any non-regular filesystem entry ",
+            "(including a symlink or directory) at the output path is always refused. ",
+            "A successful run always writes the ",
+            "result file; when no improvement is found the result is a byte copy of the ",
+            "input on x86, and a re-encoding of the searched window on AArch64.\n\n",
             "Note: enumerative search scales with the generated instruction families ",
             "in its candidate pool. At the default AArch64 8-register CLI scope, ",
             "multiply-accumulate and high-half multiply add 9,728 candidates per ",
@@ -269,6 +275,9 @@ enum Commands {
             default_value_t = s11::auto_driver::DEFAULT_MAX_WINDOWS
         )]
         max_windows: usize,
+        /// Replace an existing output file (never permits optimizing the input in place)
+        #[arg(long)]
+        force: bool,
 
         // --- Architecture selection ---
         /// Target architecture (auto-detected from ELF if not specified)
@@ -1059,7 +1068,7 @@ impl ElfOptimizationBackend for X86OptimizationBackend {
     }
 
     fn no_optimization_message(&self) -> &'static str {
-        "No optimization found; not patching (input binary left untouched)."
+        "No optimization found; copying the input unchanged."
     }
 
     fn assemble_window(
@@ -1603,6 +1612,7 @@ fn run_auto_optimization(
     mut image: ElfPatcher,
     binary: &Path,
     output: Option<&Path>,
+    force: bool,
     options: &OptimizationOptions,
     max_windows: usize,
 ) -> Result<(), Box<dyn std::error::Error>> {
@@ -1612,14 +1622,14 @@ fn run_auto_optimization(
                 .into(),
         );
     }
-    let output_path = resolve_output_path(binary, output)?;
+    let output = resolve_output_path(binary, output, force)?;
     let arch = image.arch();
     match arch {
         DetectedArch::Aarch64 => run_auto_optimization_with_backend(
             AArch64OptimizationBackend,
             &mut image,
             binary,
-            &output_path,
+            &output,
             options,
             max_windows,
         ),
@@ -1627,7 +1637,7 @@ fn run_auto_optimization(
             X86OptimizationBackend::new(X86Arch::try_from(arch)?),
             &mut image,
             binary,
-            &output_path,
+            &output,
             options,
             max_windows,
         ),
@@ -1638,7 +1648,7 @@ fn run_auto_optimization_with_backend<B: ElfOptimizationBackend>(
     backend: B,
     image: &mut ElfPatcher,
     binary: &Path,
-    output_path: &Path,
+    output: &ResolvedOutput,
     options: &OptimizationOptions,
     max_windows: usize,
 ) -> Result<(), Box<dyn std::error::Error>> {
@@ -1658,8 +1668,8 @@ fn run_auto_optimization_with_backend<B: ElfOptimizationBackend>(
     let refused_windows = adapter.refused_windows;
     let refused_rewrites = adapter.refused_rewrites;
 
-    image.write_to(output_path)?;
-    println!("Created optimized binary: {}", output_path.display());
+    image.write_to(output)?;
+    println!("Created optimized binary: {}", output.path().display());
     println!(
         "{}",
         auto_run_summary_log(&summary, refused_windows, refused_rewrites)
@@ -1723,7 +1733,7 @@ fn optimize_elf_binary(
     path: &Path,
     start_addr: u64,
     end_addr: u64,
-    output_path: &Path,
+    output: &ResolvedOutput,
     options: &OptimizationOptions,
 ) -> Result<(), Box<dyn std::error::Error>> {
     match patcher.arch() {
@@ -1733,7 +1743,7 @@ fn optimize_elf_binary(
             path,
             start_addr,
             end_addr,
-            output_path,
+            output,
             options,
         ),
         DetectedArch::X86_64 | DetectedArch::X86_32 => optimize_elf_binary_with_backend(
@@ -1743,7 +1753,7 @@ fn optimize_elf_binary(
             path,
             start_addr,
             end_addr,
-            output_path,
+            output,
             options,
         ),
     }
@@ -1754,6 +1764,7 @@ fn optimize_elf_window_with_backend<B: ElfOptimizationBackend>(
     patcher: &ElfPatcher,
     start_addr: u64,
     end_addr: u64,
+
     options: &OptimizationOptions,
     reassemble_on_miss: bool,
 ) -> Result<ElfWindowOptimization, Box<dyn std::error::Error>> {
@@ -1880,7 +1891,7 @@ fn optimize_elf_binary_with_backend<B: ElfOptimizationBackend>(
     path: &Path,
     start_addr: u64,
     end_addr: u64,
-    output_path: &Path,
+    output: &ResolvedOutput,
     options: &OptimizationOptions,
 ) -> Result<(), Box<dyn std::error::Error>> {
     println!("Optimizing ELF binary: {}", path.display());
@@ -1891,19 +1902,25 @@ fn optimize_elf_binary_with_backend<B: ElfOptimizationBackend>(
         start: start_addr,
         end: end_addr,
     };
-    // Single-window mode materializes a copy even when search misses, so a
-    // reassembled miss is written just like an accepted rewrite.
-    let bytes = match optimize_elf_window_with_backend(
-        backend, patcher, start_addr, end_addr, options, true,
-    )? {
-        ElfWindowOptimization::Improved { replacement, .. } => Some(replacement),
-        ElfWindowOptimization::NoImprovement { reassembled } => reassembled,
-    };
-    let Some(bytes) = bytes else {
-        return Ok(());
-    };
-    patcher.create_patched_copy(output_path, &window, &bytes)?;
-    println!("Created optimized binary: {}", output_path.display());
+    // Single-window mode always materializes the result file: a reassembled
+    // miss is written just like an accepted rewrite, and a window the backend
+    // leaves unchanged is written as an unmodified copy.
+    match optimize_elf_window_with_backend(backend, patcher, start_addr, end_addr, options, true)? {
+        ElfWindowOptimization::Improved { replacement, .. } => {
+            patcher.create_patched_copy(output, &window, &replacement)?;
+            println!("Created optimized binary: {}", output.path().display());
+        }
+        ElfWindowOptimization::NoImprovement {
+            reassembled: Some(bytes),
+        } => {
+            patcher.create_patched_copy(output, &window, &bytes)?;
+            println!("Created optimized binary: {}", output.path().display());
+        }
+        ElfWindowOptimization::NoImprovement { reassembled: None } => {
+            patcher.create_unmodified_copy(output)?;
+            println!("Created unchanged binary: {}", output.path().display());
+        }
+    }
     Ok(())
 }
 
@@ -2717,6 +2734,7 @@ fn main() {
             auto,
             output,
             max_windows,
+            force,
             arch,
             algorithm,
             timeout,
@@ -2802,7 +2820,14 @@ fn main() {
             let result = if auto {
                 // Whole-binary driver. clap already guaranteed --start-addr /
                 // --end-addr are absent (conflicts_with_all).
-                run_auto_optimization(patcher, &binary, output.as_deref(), &options, max_windows)
+                run_auto_optimization(
+                    patcher,
+                    &binary,
+                    output.as_deref(),
+                    force,
+                    &options,
+                    max_windows,
+                )
             } else {
                 // Single-window path. clap's required_unless_present guarantees
                 // both addresses are present here; guard defensively rather than
@@ -2827,7 +2852,7 @@ fn main() {
                         std::process::exit(1);
                     }
                 };
-                let output_path = match resolve_output_path(&binary, output.as_deref()) {
+                let output_path = match resolve_output_path(&binary, output.as_deref(), force) {
                     Ok(path) => path,
                     Err(e) => {
                         eprintln!("Error: {e}");
@@ -3920,6 +3945,23 @@ mod cli_helper_tests {
             opt_help.contains("--max-windows"),
             "opt help should document the global auto budget:\n{opt_help}"
         );
+        assert!(
+            opt_help.contains("Existing output files are refused unless --force is passed"),
+            "opt help should document the overwrite policy:\n{opt_help}"
+        );
+        assert!(
+            opt_help.contains("Any non-regular filesystem entry"),
+            "opt help should document rejection of special output files:\n{opt_help}"
+        );
+        assert!(
+            opt_help.contains("A successful run always writes the result file"),
+            "opt help should document no-improvement copy-through:\n{opt_help}"
+        );
+        assert!(
+            opt_help.contains("a re-encoding of the searched window on AArch64"),
+            "opt help must not promise a byte copy on AArch64, whose no-improvement \
+             path re-assembles the window:\n{opt_help}"
+        );
     }
 
     #[test]
@@ -3930,7 +3972,7 @@ mod cli_helper_tests {
         let patcher = ElfPatcher::new(input.path()).expect("synthetic ELF should parse");
         let opts = options_for(Algorithm::Enumerative);
 
-        run_auto_optimization(patcher, input.path(), Some(output.path()), &opts, 0)
+        run_auto_optimization(patcher, input.path(), Some(output.path()), true, &opts, 0)
             .expect("zero-budget auto run should succeed");
 
         assert_eq!(
@@ -3949,8 +3991,9 @@ mod cli_helper_tests {
         let patcher = ElfPatcher::new(input.path()).expect("relocatable ELF should parse");
         let opts = options_for(Algorithm::Enumerative);
 
-        let error = run_auto_optimization(patcher, input.path(), Some(output.path()), &opts, 0)
-            .expect_err("auto mode must reject address-ambiguous relocatable objects");
+        let error =
+            run_auto_optimization(patcher, input.path(), Some(output.path()), false, &opts, 0)
+                .expect_err("auto mode must reject address-ambiguous relocatable objects");
 
         assert!(
             error.to_string().contains("relocatable ELF"),
@@ -4949,7 +4992,7 @@ mod cli_helper_tests {
         opts.timeout = Some(Duration::from_secs(5));
         opts.cost_metric = CostMetric::CodeSize;
 
-        let output = resolve_output_path(input.path(), None).unwrap();
+        let output = resolve_output_path(input.path(), None, false).unwrap();
         optimize_elf_binary(&patcher, input.path(), 0x1000, 0x100a, &output, &opts)
             .expect("narrow register aliases should reach search");
     }
@@ -5057,7 +5100,7 @@ mod cli_helper_tests {
         opts.timeout = Some(Duration::from_secs(5));
         opts.cost_metric = CostMetric::CodeSize;
 
-        let output = resolve_output_path(input.path(), None).unwrap();
+        let output = resolve_output_path(input.path(), None, false).unwrap();
         let err = optimize_elf_binary(&patcher, input.path(), 0x1000, 0x1006, &output, &opts)
             .expect_err("architectural byte SETcc should be rejected before search");
         let msg = err.to_string();
