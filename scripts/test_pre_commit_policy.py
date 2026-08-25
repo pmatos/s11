@@ -67,6 +67,27 @@ def hook_ids(block: str) -> set[str]:
     return set(re.findall(r"^\s+- id: ([^\s]+)$", block, flags=re.MULTILINE))
 
 
+def hook_block(repository: str, hook_id: str) -> str:
+    """Return one hook declaration from a repository block."""
+    marker = f"      - id: {hook_id}"
+    start = repository.find(marker)
+    if start < 0:
+        raise ValueError(f"hook not found: {hook_id}")
+
+    next_hook = repository.find("\n      - id:", start + len(marker))
+    if next_hook < 0:
+        return repository[start:]
+    return repository[start:next_hook]
+
+
+def hook_scalar(hook: str, key: str) -> str:
+    """Return an unquoted scalar from a hook declaration."""
+    match = re.search(rf"^\s+{re.escape(key)}:\s+(.+)$", hook, flags=re.MULTILINE)
+    if match is None:
+        raise ValueError(f"hook key not found: {key}")
+    return match.group(1)
+
+
 class TestPreCommitPolicy(unittest.TestCase):
     def config(self) -> str:
         """Read the repository's pre-commit configuration."""
@@ -88,6 +109,50 @@ class TestPreCommitPolicy(unittest.TestCase):
 
         self.assertEqual(hook_ids(block), GENERIC_HOOK_IDS)
         self.assertIn('args: ["--pytest-test-first"]', block)
+
+    def test_test_name_exclusions_apply_to_python_basenames_only(self):
+        repository = repository_block(
+            self.config(), "https://github.com/pre-commit/pre-commit-hooks"
+        )
+        hook = hook_block(repository, "name-tests-test")
+        exclude = re.compile(hook_scalar(hook, "exclude"))
+
+        for path in (
+            "scripts/test_ci_policy.py",
+            "scripts/test_pre_commit_policy.py",
+            "scripts/ci_policy_test.py",
+        ):
+            with self.subTest(path=path):
+                self.assertIsNone(exclude.search(path))
+
+        for path in (
+            "_helper.py",
+            "scripts/_helper.py",
+            "lit.cfg.py",
+            "tests/lit.cfg.py",
+        ):
+            with self.subTest(path=path):
+                self.assertIsNotNone(exclude.search(path))
+
+    def test_test_name_hook_covers_repository_test_conventions(self):
+        repository = repository_block(
+            self.config(), "https://github.com/pre-commit/pre-commit-hooks"
+        )
+        hook = hook_block(repository, "name-tests-test")
+        files = re.compile(hook_scalar(hook, "files"))
+
+        for path in (
+            "scripts/test_ci_policy.py",
+            "scripts/test_pre_commit_policy.py",
+            "scripts/test_mutants_summary.py",
+            "scripts/ci_policy_test.py",
+            "tests/test_optimizer.py",
+            "tests/optimizer_test.py",
+        ):
+            with self.subTest(path=path):
+                self.assertIsNotNone(files.search(path))
+
+        self.assertIsNone(files.search("scripts/mutants_summary.py"))
 
     def test_ruff_fixes_before_it_formats(self):
         block = repository_block(
