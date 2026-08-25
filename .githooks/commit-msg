@@ -1,7 +1,7 @@
 #!/usr/bin/env sh
 # Validates the commit message subject against Conventional Commits
-# (https://www.conventionalcommits.org/). Enabled via:
-#   git config core.hooksPath .githooks
+# (https://www.conventionalcommits.org/). Invoked at the commit-msg stage by
+# .pre-commit-config.yaml.
 set -eu
 
 msg_file="$1"

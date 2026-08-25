@@ -1,15 +1,12 @@
 """Regression checks for required Test workflow gates."""
 
-from pathlib import Path
 import unittest
-
+from pathlib import Path
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
 CI_CHECK_PATH = REPOSITORY_ROOT / "ci_check.sh"
 TEST_WORKFLOW_PATH = REPOSITORY_ROOT / ".github" / "workflows" / "test.yml"
-COMMITLINT_WORKFLOW_PATH = (
-    REPOSITORY_ROOT / ".github" / "workflows" / "commitlint.yml"
-)
+COMMITLINT_WORKFLOW_PATH = REPOSITORY_ROOT / ".github" / "workflows" / "commitlint.yml"
 
 INTEGRATION_TEST_COMMAND = "cargo test --test integration_tests -- --nocapture"
 POLICY_DISCOVERY_COMMAND = (
@@ -26,9 +23,7 @@ ZERO_SHA = "0" * 40
 COMMITLINT_BEFORE_GUARD = (
     'if ! git cat-file -e "${BEFORE_SHA}^{commit}" 2>/dev/null; then'
 )
-COMMITLINT_COMMAND = (
-    'npx commitlint --from "$BEFORE_SHA" --to "$AFTER_SHA" --verbose'
-)
+COMMITLINT_COMMAND = 'npx commitlint --from "$BEFORE_SHA" --to "$AFTER_SHA" --verbose'
 
 
 def has_required_command(contents: str, command: str) -> bool:
@@ -52,7 +47,9 @@ def workflow_step(contents: str, name: str) -> str:
             if not candidate.strip():
                 continue
             candidate_indentation = len(candidate) - len(candidate.lstrip())
-            if candidate_indentation == indentation and candidate.lstrip().startswith("- "):
+            if candidate_indentation == indentation and candidate.lstrip().startswith(
+                "- "
+            ):
                 end = index
                 break
         return "\n".join(lines[start:end])
@@ -84,9 +81,7 @@ class TestCiPolicy(unittest.TestCase):
             self.fail(str(error))
 
         package_specs = [
-            token
-            for token in install_step.split()
-            if token.startswith("@commitlint/")
+            token for token in install_step.split() if token.startswith("@commitlint/")
         ]
         self.assertEqual(package_specs, COMMITLINT_PACKAGE_SPECS)
 

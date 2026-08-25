@@ -13,7 +13,7 @@ use crate::isa::x86::X86Instruction;
 use crate::parser::x86::{X86ParseMode, x86_ir_from_mnemonic_for_mode};
 
 /// Convert every instruction in a Capstone x86 disassembly into IR, refusing the
-/// whole window on the first unsupported or unparseable instruction.
+/// whole window on the first unsupported or unparsable instruction.
 pub fn convert_to_x86_ir(
     instructions: &capstone::Instructions,
     mode: X86ParseMode,

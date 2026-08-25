@@ -5,9 +5,8 @@ Run with:
 """
 
 import json
-from pathlib import Path
 import unittest
-
+from pathlib import Path
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
 SETTINGS_PATH = REPOSITORY_ROOT / ".claude" / "settings.json"
@@ -48,8 +47,7 @@ class TestClaudeSettingsPolicy(unittest.TestCase):
             if is_dangerous_shared_allow(rule)
         )
         normalized_denies = {
-            normalize_trailing_wildcard(rule)
-            for rule in permissions.get("deny", [])
+            normalize_trailing_wildcard(rule) for rule in permissions.get("deny", [])
         }
         missing_denies = sorted(REQUIRED_DENY_RULES - normalized_denies)
 

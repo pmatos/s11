@@ -75,10 +75,26 @@ class TestAggregate(unittest.TestCase):
     def test_aggregates_multiple_shards(self):
         with tempfile.TemporaryDirectory() as d:
             root = pathlib.Path(d)
-            make_shard(root / "mutants-shard-0", caught=5, missed=1, timeout=0, unviable=0, unrun=0)
-            make_shard(root / "mutants-shard-1", caught=3, missed=2, timeout=1, unviable=0, unrun=0)
+            make_shard(
+                root / "mutants-shard-0",
+                caught=5,
+                missed=1,
+                timeout=0,
+                unviable=0,
+                unrun=0,
+            )
+            make_shard(
+                root / "mutants-shard-1",
+                caught=3,
+                missed=2,
+                timeout=1,
+                unviable=0,
+                unrun=0,
+            )
             result = ms.aggregate(root)
-            self.assertEqual([s[0] for s in result["shards"]], ["mutants-shard-0", "mutants-shard-1"])
+            self.assertEqual(
+                [s[0] for s in result["shards"]], ["mutants-shard-0", "mutants-shard-1"]
+            )
             self.assertEqual(result["totals"]["caught"], 8)
             self.assertEqual(result["totals"]["missed"], 3)
             self.assertEqual(result["totals"]["timeout"], 1)
@@ -105,7 +121,12 @@ class TestFormatSummaryMd(unittest.TestCase):
 
     def test_header_lists_buckets_in_order(self):
         agg = self._agg(
-            [("s0", {"caught": 0, "missed": 0, "timeout": 0, "unviable": 0, "unrun": 0})],
+            [
+                (
+                    "s0",
+                    {"caught": 0, "missed": 0, "timeout": 0, "unviable": 0, "unrun": 0},
+                )
+            ],
             dict.fromkeys(ms.BUCKETS, 0),
         )
         out = ms.format_summary_md(agg)
@@ -113,7 +134,12 @@ class TestFormatSummaryMd(unittest.TestCase):
 
     def test_per_shard_row_has_counts(self):
         agg = self._agg(
-            [("mutants-shard-0", {"caught": 5, "missed": 1, "timeout": 0, "unviable": 2, "unrun": 0})],
+            [
+                (
+                    "mutants-shard-0",
+                    {"caught": 5, "missed": 1, "timeout": 0, "unviable": 2, "unrun": 0},
+                )
+            ],
             {"caught": 5, "missed": 1, "timeout": 0, "unviable": 2, "unrun": 0},
         )
         out = ms.format_summary_md(agg)
@@ -122,8 +148,14 @@ class TestFormatSummaryMd(unittest.TestCase):
     def test_totals_row_uses_bold(self):
         agg = self._agg(
             [
-                ("s0", {"caught": 5, "missed": 1, "timeout": 0, "unviable": 0, "unrun": 0}),
-                ("s1", {"caught": 3, "missed": 2, "timeout": 1, "unviable": 0, "unrun": 0}),
+                (
+                    "s0",
+                    {"caught": 5, "missed": 1, "timeout": 0, "unviable": 0, "unrun": 0},
+                ),
+                (
+                    "s1",
+                    {"caught": 3, "missed": 2, "timeout": 1, "unviable": 0, "unrun": 0},
+                ),
             ],
             {"caught": 8, "missed": 3, "timeout": 1, "unviable": 0, "unrun": 0},
         )
@@ -189,7 +221,9 @@ class TestIsEmptyResult(unittest.TestCase):
         for b in ms.BUCKETS:
             counts = dict.fromkeys(ms.BUCKETS, 0)
             counts[b] = 1
-            self.assertFalse(ms.is_empty_result(counts), f"{b} bumped should be non-empty")
+            self.assertFalse(
+                ms.is_empty_result(counts), f"{b} bumped should be non-empty"
+            )
 
 
 class TestReadMissedLines(unittest.TestCase):
@@ -199,7 +233,10 @@ class TestReadMissedLines(unittest.TestCase):
             make_shard(
                 root,
                 missed="src/a.rs:1: m1\nsrc/b.rs:2: m2\n",
-                caught=0, timeout=0, unviable=0, unrun=0,
+                caught=0,
+                timeout=0,
+                unviable=0,
+                unrun=0,
             )
             self.assertEqual(
                 ms._read_missed_lines(root),
@@ -213,17 +250,26 @@ class TestReadMissedLines(unittest.TestCase):
             make_shard(
                 root / "mutants-shard-2",
                 missed="src/c.rs:1: from-shard-2\n",
-                caught=0, timeout=0, unviable=0, unrun=0,
+                caught=0,
+                timeout=0,
+                unviable=0,
+                unrun=0,
             )
             make_shard(
                 root / "mutants-shard-0",
                 missed="src/a.rs:1: from-shard-0\n",
-                caught=0, timeout=0, unviable=0, unrun=0,
+                caught=0,
+                timeout=0,
+                unviable=0,
+                unrun=0,
             )
             make_shard(
                 root / "mutants-shard-1",
                 missed="src/b.rs:1: from-shard-1\n",
-                caught=0, timeout=0, unviable=0, unrun=0,
+                caught=0,
+                timeout=0,
+                unviable=0,
+                unrun=0,
             )
             self.assertEqual(
                 ms._read_missed_lines(root),
@@ -240,12 +286,18 @@ class TestReadMissedLines(unittest.TestCase):
             make_shard(
                 root / "mutants-shard-0",
                 missed="src/a.rs:1: dup\nsrc/a.rs:2: only-in-0\n",
-                caught=0, timeout=0, unviable=0, unrun=0,
+                caught=0,
+                timeout=0,
+                unviable=0,
+                unrun=0,
             )
             make_shard(
                 root / "mutants-shard-1",
                 missed="src/a.rs:1: dup\nsrc/a.rs:3: only-in-1\n",
-                caught=0, timeout=0, unviable=0, unrun=0,
+                caught=0,
+                timeout=0,
+                unviable=0,
+                unrun=0,
             )
             self.assertEqual(
                 ms._read_missed_lines(root),
@@ -262,7 +314,10 @@ class TestReadMissedLines(unittest.TestCase):
             make_shard(
                 root,
                 missed="src/a.rs:1: m1\n\n   \nsrc/b.rs:2: m2\n",
-                caught=0, timeout=0, unviable=0, unrun=0,
+                caught=0,
+                timeout=0,
+                unviable=0,
+                unrun=0,
             )
             self.assertEqual(
                 ms._read_missed_lines(root),
@@ -274,7 +329,14 @@ class TestMainCli(unittest.TestCase):
     def test_main_writes_summary_to_stdout(self):
         with tempfile.TemporaryDirectory() as d:
             root = pathlib.Path(d)
-            make_shard(root / "mutants-shard-0", caught=5, missed=1, timeout=0, unviable=0, unrun=0)
+            make_shard(
+                root / "mutants-shard-0",
+                caught=5,
+                missed=1,
+                timeout=0,
+                unviable=0,
+                unrun=0,
+            )
             buf = io.StringIO()
             with contextlib.redirect_stdout(buf):
                 rc = ms.main([str(root)])
@@ -290,7 +352,9 @@ class TestMainCli(unittest.TestCase):
                 root,
                 caught=2,
                 missed="src/a.rs:10: replace + with -\nsrc/b.rs:20: delete return\n",
-                timeout=0, unviable=0, unrun=0,
+                timeout=0,
+                unviable=0,
+                unrun=0,
             )
             comment_path = pathlib.Path(d) / "comment.md"
             buf = io.StringIO()
@@ -326,8 +390,10 @@ class TestMainCli(unittest.TestCase):
                 rc = ms.main(
                     [
                         str(root),
-                        "--pr-comment", str(comment_path),
-                        "--run-url", "https://github.com/o/r/actions/runs/42",
+                        "--pr-comment",
+                        str(comment_path),
+                        "--run-url",
+                        "https://github.com/o/r/actions/runs/42",
                     ]
                 )
             self.assertEqual(rc, 0)

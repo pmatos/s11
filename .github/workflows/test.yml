@@ -61,7 +61,7 @@ jobs:
 
     - name: Run unit tests (lib + bins)
       run: cargo test --lib --bins --verbose
-      
+
     - name: Check s11 binary exists
       run: |
         echo "Checking if s11 binary was built..."
@@ -80,11 +80,11 @@ jobs:
         echo "Architecture: $(uname -m)"
         echo "Checking if we can run AArch64 binaries:"
         file binaries/simple_debug || echo "simple_debug not found"
-        
+
     - name: Run integration tests with debug output
       run: |
         export RUST_BACKTRACE=1
         cargo test --test integration_tests -- --nocapture
-        
+
     - name: Run all tests
       run: ./test_all.sh

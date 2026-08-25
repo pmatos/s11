@@ -31,10 +31,10 @@ run_test() {
     local name="$2"
     local instructions
     local output
-    
+
     echo "=== Testing $name ==="
     echo "Binary: $binary"
-    
+
     # Run the disassembler and show the last ~20 instructions of .text
     # (usually contains main). `s11 disasm` prints one
     # "addr: bytes mnemonic" line per instruction with no header.
