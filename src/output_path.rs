@@ -71,7 +71,7 @@ impl ResolvedOutput {
         // cannot replace the named staging inode before publication, while the
         // nested location still guarantees a same-filesystem rename.
         let parent = output_parent(&self.path);
-        let (_staging_dir, mut staged) =
+        let (staging_dir, mut staged) =
             create_staged_output(parent).map_err(|error| self.write_error(&error))?;
         staged
             .write_all(bytes)
@@ -82,32 +82,70 @@ impl ResolvedOutput {
             .map_err(|error| self.write_error(&error))?;
 
         if self.overwrite {
-            // Search can run for hours after preflight. Refuse any unsafe entry
-            // now present at the target, then rename over a regular file (or a
-            // target that is still absent). Rename replaces a final-component
-            // symlink rather than following it if one appears after this check.
-            self.revalidate_forced_target(input)?;
+            return self.publish_forced(staging_dir, staged, input);
         }
 
-        let published = if self.overwrite {
-            staged.persist(&self.path)
-        } else {
-            staged.persist_noclobber(&self.path)
-        };
-        published
+        staged
+            .persist_noclobber(&self.path)
             .map(|_| ())
             .map_err(|error| self.persist_error(&error.error))
     }
 
-    fn revalidate_forced_target(&self, input: &Handle) -> io::Result<()> {
-        match std::fs::symlink_metadata(&self.path) {
-            Ok(existing) => validate_existing_output_kind(&self.path, &existing)
-                .map_err(|message| io::Error::new(io::ErrorKind::PermissionDenied, message))?,
-            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
-            Err(error) => return Err(self.write_error(&error)),
+    /// Publish with one atomic exchange, then validate the entry displaced into
+    /// the protected staging directory. This binds validation to replacement:
+    /// no pathname race can substitute an input alias or special file between
+    /// the two operations because they are the same filesystem operation.
+    fn publish_forced(
+        &self,
+        mut staging_dir: tempfile::TempDir,
+        mut staged: tempfile::NamedTempFile,
+        input: &Handle,
+    ) -> io::Result<()> {
+        match exchange_paths(staged.path(), &self.path) {
+            Ok(()) => match self.validate_displaced_target(staged.path(), input) {
+                Ok(()) => {
+                    // `staged` now names the safe, displaced old output. Its
+                    // cleanup removes that inode; the open file it owns is the
+                    // newly published output and remains at `self.path`.
+                    drop(staged);
+                    drop(staging_dir);
+                    Ok(())
+                }
+                Err(refusal) => match exchange_paths(staged.path(), &self.path) {
+                    Ok(()) => Err(refusal),
+                    Err(rollback) => {
+                        // A hostile shared-directory writer may remove the new
+                        // output before rollback. Never let cleanup then unlink
+                        // the displaced original: leave it at a reported,
+                        // mode-0700 recovery path.
+                        let recovery = staged.path().to_path_buf();
+                        staged.disable_cleanup(true);
+                        staging_dir.disable_cleanup(true);
+                        Err(io::Error::new(
+                            rollback.kind(),
+                            format!(
+                                "{refusal}; rollback failed: {rollback}; displaced entry preserved at '{}'",
+                                recovery.display()
+                            ),
+                        ))
+                    }
+                },
+            },
+            Err(error) if error.kind() == io::ErrorKind::NotFound => staged
+                .persist_noclobber(&self.path)
+                .map(|_| ())
+                .map_err(|persist| self.write_error(&persist.error)),
+            Err(error) => Err(self.write_error(&error)),
         }
+    }
 
-        if path_points_to_handle(&self.path, input) {
+    fn validate_displaced_target(&self, displaced: &Path, input: &Handle) -> io::Result<()> {
+        let existing =
+            std::fs::symlink_metadata(displaced).map_err(|error| self.write_error(&error))?;
+        validate_existing_output_kind_at(displaced, &self.path, &existing)
+            .map_err(|message| io::Error::new(io::ErrorKind::PermissionDenied, message))?;
+
+        if path_points_to_handle(displaced, input) {
             return Err(io::Error::new(
                 io::ErrorKind::PermissionDenied,
                 in_place_refusal(&self.path),
@@ -183,7 +221,12 @@ pub fn resolve_output_path(
     // must not re-derive it, or the diagnostic and the check can disagree.
     match std::fs::symlink_metadata(&output) {
         Ok(existing) => validate_existing_output(&output, &existing, force)?,
-        Err(error) if error.kind() == io::ErrorKind::NotFound => validate_output_parent(&output)?,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            validate_output_parent(&output)?;
+            if force {
+                validate_atomic_replacement(&output)?;
+            }
+        }
         Err(error) => {
             return Err(format!(
                 "cannot inspect output path '{}': {error}",
@@ -220,7 +263,9 @@ fn validate_existing_output(
     // Atomic replacement renames a new inode into the directory; the old
     // inode's mode is irrelevant, while parent publication permission is
     // essential and must fail before search.
-    validate_output_parent(output)
+    validate_output_parent(output)?;
+    validate_sticky_replacement(output, existing)?;
+    validate_atomic_replacement(output)
 }
 
 /// Reject every existing target that cannot safely become a regular result.
@@ -232,31 +277,42 @@ fn validate_existing_output_kind(
     output: &Path,
     existing: &std::fs::Metadata,
 ) -> Result<(), String> {
+    validate_existing_output_kind_at(output, output, existing)
+}
+
+/// Validate metadata read at `actual`, while diagnostics consistently name the
+/// user-selected `display` path. They differ after an atomic exchange, when the
+/// displaced entry is protected under the private staging directory.
+fn validate_existing_output_kind_at(
+    actual: &Path,
+    display: &Path,
+    existing: &std::fs::Metadata,
+) -> Result<(), String> {
     let file_type = existing.file_type();
     if file_type.is_symlink() {
-        return Err(match std::fs::read_link(output) {
+        return Err(match std::fs::read_link(actual) {
             Ok(target) => format!(
                 "output path '{}' is a symlink to '{}'; refusing to write through it (pass -o '{}' or remove the link)",
-                output.display(),
+                display.display(),
                 target.display(),
                 target.display()
             ),
             Err(_) => format!(
                 "output path '{}' is a symlink; refusing to write through it (remove the link or choose a different -o/--output)",
-                output.display()
+                display.display()
             ),
         });
     }
     if file_type.is_dir() {
         return Err(format!(
             "output path '{}' is an existing directory; choose a file path with -o/--output",
-            output.display()
+            display.display()
         ));
     }
     if !file_type.is_file() {
         return Err(format!(
             "output path '{}' is not a regular file; choose a regular file path with -o/--output",
-            output.display()
+            display.display()
         ));
     }
     Ok(())
@@ -282,6 +338,109 @@ fn create_staged_output(parent: &Path) -> io::Result<(tempfile::TempDir, tempfil
     let staging_dir = builder.tempdir_in(parent)?;
     let staged = tempfile::NamedTempFile::new_in(staging_dir.path())?;
     Ok((staging_dir, staged))
+}
+
+#[cfg(any(
+    target_os = "linux",
+    target_os = "android",
+    target_vendor = "apple",
+    target_os = "redox"
+))]
+fn exchange_paths(a: &Path, b: &Path) -> io::Result<()> {
+    rustix::fs::renameat_with(
+        rustix::fs::CWD,
+        a,
+        rustix::fs::CWD,
+        b,
+        rustix::fs::RenameFlags::EXCHANGE,
+    )
+    .map_err(|error| io::Error::from_raw_os_error(error.raw_os_error()))
+}
+
+#[cfg(not(any(
+    target_os = "linux",
+    target_os = "android",
+    target_vendor = "apple",
+    target_os = "redox"
+)))]
+fn exchange_paths(_a: &Path, _b: &Path) -> io::Result<()> {
+    Err(io::Error::new(
+        io::ErrorKind::Unsupported,
+        "this platform does not provide atomic pathname exchange",
+    ))
+}
+
+/// Probe the exact cross-directory atomic exchange used for forced
+/// publication. The destination-side probe file is owned by this process, so
+/// the operation is non-destructive; sticky-directory ownership is checked
+/// separately for the real existing target.
+fn validate_atomic_replacement(output: &Path) -> Result<(), String> {
+    let parent = output_parent(output);
+    let (_staging_dir, staged) = create_staged_output(parent).map_err(|error| {
+        format!(
+            "output parent directory '{}' is not writable: {error}",
+            parent.display()
+        )
+    })?;
+    let peer = tempfile::NamedTempFile::new_in(parent).map_err(|error| {
+        format!(
+            "output parent directory '{}' is not writable: {error}",
+            parent.display()
+        )
+    })?;
+    exchange_paths(staged.path(), peer.path()).map_err(|error| {
+        format!(
+            "output parent directory '{}' cannot atomically replace '{}': {error}",
+            parent.display(),
+            output.display()
+        )
+    })
+}
+
+#[cfg(unix)]
+fn validate_sticky_replacement(output: &Path, existing: &std::fs::Metadata) -> Result<(), String> {
+    use std::os::unix::fs::MetadataExt;
+
+    let parent = output_parent(output);
+    let parent_metadata = std::fs::metadata(parent).map_err(|error| {
+        format!(
+            "cannot inspect output parent directory '{}': {error}",
+            parent.display()
+        )
+    })?;
+    if parent_metadata.mode() & 0o1000 == 0 {
+        return Ok(());
+    }
+
+    let effective_uid = rustix::process::geteuid().as_raw();
+    if sticky_directory_allows_replacement(parent_metadata.uid(), existing.uid(), effective_uid) {
+        Ok(())
+    } else {
+        Err(format!(
+            "cannot replace output path '{}' in sticky directory '{}': output is owned by uid {}, current effective uid is {}",
+            output.display(),
+            parent.display(),
+            existing.uid(),
+            effective_uid
+        ))
+    }
+}
+
+#[cfg(not(unix))]
+fn validate_sticky_replacement(
+    _output: &Path,
+    _existing: &std::fs::Metadata,
+) -> Result<(), String> {
+    Ok(())
+}
+
+#[cfg(unix)]
+fn sticky_directory_allows_replacement(
+    parent_uid: u32,
+    output_uid: u32,
+    effective_uid: u32,
+) -> bool {
+    effective_uid == 0 || effective_uid == parent_uid || effective_uid == output_uid
 }
 
 #[cfg(unix)]
@@ -668,6 +827,10 @@ mod tests {
             input_bytes,
             "input binary must survive the refused forced write"
         );
+        assert!(
+            paths_point_to_same_file(&input, &output),
+            "atomic refusal must restore the raced input link at the output path"
+        );
     }
 
     #[cfg(unix)]
@@ -700,6 +863,11 @@ mod tests {
             std::fs::read(&victim).expect("read unrelated file"),
             victim_bytes,
             "forced publication must not follow the raced symlink"
+        );
+        assert_eq!(
+            std::fs::read_link(&output).expect("raced symlink should be restored"),
+            victim,
+            "atomic refusal must restore the unsafe output entry"
         );
     }
 
@@ -840,6 +1008,18 @@ mod tests {
 
         resolve_output_path(&input, Some(&output), true)
             .expect("atomic replacement should depend on parent, not old inode, writability");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn sticky_directory_replacement_policy_checks_ownership() {
+        assert!(sticky_directory_allows_replacement(10, 20, 0));
+        assert!(sticky_directory_allows_replacement(10, 20, 10));
+        assert!(sticky_directory_allows_replacement(10, 20, 20));
+        assert!(
+            !sticky_directory_allows_replacement(10, 20, 30),
+            "an unrelated user cannot replace another users file in a sticky directory"
+        );
     }
 
     #[cfg(unix)]
