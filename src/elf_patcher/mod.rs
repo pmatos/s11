@@ -409,8 +409,7 @@ impl ElfPatcher {
             }
         }
 
-        let input_permissions = self.input_handle.as_file().metadata()?.permissions();
-        output.write_with_permissions(&patched_data, input_permissions)?;
+        output.write_from_input(&patched_data, &self.input_handle)?;
 
         Ok(())
     }
@@ -419,8 +418,7 @@ impl ElfPatcher {
         &self,
         output: &ResolvedOutput,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        let input_permissions = self.input_handle.as_file().metadata()?.permissions();
-        output.write_with_permissions(&self.file_data, input_permissions)?;
+        output.write_from_input(&self.file_data, &self.input_handle)?;
 
         Ok(())
     }
@@ -1362,6 +1360,45 @@ mod tests {
             std::fs::read(&input).expect("input should remain readable"),
             elf_bytes,
             "refusing the late alias must leave the input byte-for-byte unchanged"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn create_patched_copy_tracks_input_inode_across_rename() {
+        let text_vaddr = 0x100000;
+        let text_bytes = [0xc3u8; 8];
+        let elf_bytes = build_minimal_x86_64_elf(&text_bytes, text_vaddr);
+        let temp = tempfile::tempdir().expect("temporary directory should be created");
+        let input = temp.path().join("input.elf");
+        let requested_output = temp.path().join("output.elf");
+        std::fs::write(&input, &elf_bytes).expect("input ELF should be written");
+        std::fs::write(&requested_output, b"stale output").expect("output should be seeded");
+
+        let patcher = ElfPatcher::new(&input).expect("patcher should accept minimal ELF");
+        let output = crate::output_path::resolve_output_path(&input, Some(&requested_output), true)
+            .expect("existing regular output should pass with force");
+
+        std::fs::rename(&input, &requested_output)
+            .expect("input inode should move onto the output path");
+        std::fs::write(&input, b"replacement input pathname")
+            .expect("input pathname should be replaced");
+
+        let window = AddressWindow {
+            start: text_vaddr,
+            end: text_vaddr + text_bytes.len() as u64,
+        };
+        let result = patcher.create_patched_copy(&output, &window, &[0x90]);
+
+        let err = result.expect_err("pinned input inode must never become the output");
+        assert!(
+            err.to_string().contains("refusing to optimize in place"),
+            "unexpected error: {err}"
+        );
+        assert_eq!(
+            std::fs::read(&requested_output).expect("moved input should remain readable"),
+            elf_bytes,
+            "refusal must preserve the inode ElfPatcher actually read"
         );
     }
 

@@ -21,6 +21,8 @@
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 
+use same_file::Handle;
+
 /// A validated `opt` output target together with its overwrite policy.
 ///
 /// Callers resolve this once before starting a potentially long search, then
@@ -41,7 +43,19 @@ impl ResolvedOutput {
 
     #[cfg(test)]
     pub(crate) fn write(&self, bytes: &[u8]) -> io::Result<()> {
-        let input_permissions = std::fs::metadata(&self.input)
+        let input_handle = Handle::from_path(&self.input).map_err(|error| {
+            io::Error::new(
+                error.kind(),
+                format!("cannot open input '{}': {error}", self.input.display()),
+            )
+        })?;
+        self.write_from_input(bytes, &input_handle)
+    }
+
+    pub(crate) fn write_from_input(&self, bytes: &[u8], input: &Handle) -> io::Result<()> {
+        let input_permissions = input
+            .as_file()
+            .metadata()
             .map_err(|error| {
                 io::Error::new(
                     error.kind(),
@@ -52,14 +66,6 @@ impl ResolvedOutput {
                 )
             })?
             .permissions();
-        self.write_with_permissions(bytes, input_permissions)
-    }
-
-    pub(crate) fn write_with_permissions(
-        &self,
-        bytes: &[u8],
-        input_permissions: std::fs::Permissions,
-    ) -> io::Result<()> {
         // Build the complete result in a mode-0700 staging directory under the
         // destination. Another user with write access to the shared parent
         // cannot replace the named staging inode before publication, while the
@@ -80,7 +86,7 @@ impl ResolvedOutput {
             // now present at the target, then rename over a regular file (or a
             // target that is still absent). Rename replaces a final-component
             // symlink rather than following it if one appears after this check.
-            self.revalidate_forced_target()?;
+            self.revalidate_forced_target(input)?;
         }
 
         let published = if self.overwrite {
@@ -93,7 +99,7 @@ impl ResolvedOutput {
             .map_err(|error| self.persist_error(&error.error))
     }
 
-    fn revalidate_forced_target(&self) -> io::Result<()> {
+    fn revalidate_forced_target(&self, input: &Handle) -> io::Result<()> {
         match std::fs::symlink_metadata(&self.path) {
             Ok(existing) => validate_existing_output_kind(&self.path, &existing)
                 .map_err(|message| io::Error::new(io::ErrorKind::PermissionDenied, message))?,
@@ -101,7 +107,7 @@ impl ResolvedOutput {
             Err(error) => return Err(self.write_error(&error)),
         }
 
-        if paths_point_to_same_file(&self.input, &self.path) {
+        if path_points_to_handle(&self.path, input) {
             return Err(io::Error::new(
                 io::ErrorKind::PermissionDenied,
                 in_place_refusal(&self.path),
@@ -133,6 +139,20 @@ impl ResolvedOutput {
             ),
         )
     }
+}
+
+/// Whether `path` currently identifies the exact input inode held open by the
+/// optimizer, independent of what now exists at the original input pathname.
+#[cfg(unix)]
+fn path_points_to_handle(path: &Path, handle: &Handle) -> bool {
+    same_file_ids(handle.as_file().metadata(), std::fs::metadata(path))
+}
+
+/// Whether `path` currently identifies the exact input file held open by the
+/// optimizer, independent of what now exists at the original input pathname.
+#[cfg(not(unix))]
+fn path_points_to_handle(path: &Path, handle: &Handle) -> bool {
+    matches!(Handle::from_path(path), Ok(path_handle) if &path_handle == handle)
 }
 
 /// Resolve where an `opt` run writes its result.
