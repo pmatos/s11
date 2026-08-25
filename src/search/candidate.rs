@@ -762,6 +762,9 @@ pub fn generate_all_instructions(registers: &[Register], immediates: &[i64]) -> 
     instrs
 }
 
+/// Number of top-level scalar instruction choices in [`generate_random_instruction`].
+pub(crate) const SCALAR_RANDOM_INSTRUCTION_SLOT_COUNT: u32 = 48;
+
 /// Generate a random instruction using the given registers and immediates
 pub fn generate_random_instruction<R: rand::RngExt>(
     rng: &mut R,
@@ -785,7 +788,9 @@ pub fn generate_random_instruction<R: rand::RngExt>(
     }
 
     let sample_neon = !vector_registers.is_empty()
-        && (scalar_registers.is_empty() || rng.random_range(0..51) >= 48);
+        && (scalar_registers.is_empty()
+            || rng.random_range(0..SCALAR_RANDOM_INSTRUCTION_SLOT_COUNT + 3)
+                >= SCALAR_RANDOM_INSTRUCTION_SLOT_COUNT);
     if sample_neon {
         let vd = vector_registers[rng.random_range(0..vector_registers.len())];
         let arrangement = if rng.random_bool(0.5) {
@@ -824,9 +829,9 @@ pub fn generate_random_instruction<R: rand::RngExt>(
     let pick_reg = |rng: &mut R| registers[rng.random_range(0..registers.len())];
 
     // See also `src/isa/aarch64.rs::AArch64InstructionGenerator::generate_random`:
-    // this is a parallel 48-slot sampler, but its slot numbers differ
+    // this is a parallel sampler, but its slot numbers differ
     // (notably, ROR is slot 37 there and slot 23 here).
-    match rng.random_range(0..48) {
+    match rng.random_range(0..SCALAR_RANDOM_INSTRUCTION_SLOT_COUNT) {
         0 => {
             let imm = if immediates.is_empty() {
                 0
@@ -1558,17 +1563,21 @@ mod tests {
     // Primes a `BudgetedRng` to steer `generate_random_instruction` down a
     // chosen opcode arm: the first draw is the `rd` index (`random_range(0..2)`
     // for these 2-register pools), the second is the opcode slot
-    // (`random_range(0..48)`). Slots 32/38 = CCMP/CCMN, and slots
+    // (`random_range(0..SCALAR_RANDOM_INSTRUCTION_SLOT_COUNT)`). Slots 32/38 =
+    // CCMP/CCMN, and slots
     // 33/39..=43 = bit-field aliases — keep these in sync with the match in
     // `generate_random_instruction`.
     fn rng_for_opcode_slot(slot: u32, rd_index: u32) -> BudgetedRng {
-        BudgetedRng::new(vec![word_for_range(2, rd_index), word_for_range(48, slot)])
+        BudgetedRng::new(vec![
+            word_for_range(2, rd_index),
+            word_for_range(SCALAR_RANDOM_INSTRUCTION_SLOT_COUNT, slot),
+        ])
     }
 
     fn rng_for_compare_slot(family: u32, shape: u32, tail: Vec<u32>) -> BudgetedRng {
         let mut words = vec![
             word_for_range(2, 0),
-            word_for_range(48, 36),
+            word_for_range(SCALAR_RANDOM_INSTRUCTION_SLOT_COUNT, 36),
             word_for_range(3, family),
             word_for_range(3, shape),
         ];
@@ -1579,7 +1588,7 @@ mod tests {
     fn rng_for_shifted_arith_slot(slot: u32, kind_index: u32) -> BudgetedRng {
         BudgetedRng::new(vec![
             word_for_range(2, 0),
-            word_for_range(48, slot),
+            word_for_range(SCALAR_RANDOM_INSTRUCTION_SLOT_COUNT, slot),
             word_for_range(2, 0),
             word_for_range(3, 2),
             word_for_range(2, 1),
@@ -2183,8 +2192,7 @@ mod tests {
         let mut rng = ChaCha8Rng::seed_from_u64(0x257);
         let mut counts: HashMap<u8, u32> = HashMap::new();
         const EXPECTED_PER_TOP_LEVEL_SLOT: u32 = 2_000;
-        const RANDOM_SLOT_COUNT: u32 = 48;
-        const DRAWS: u32 = RANDOM_SLOT_COUNT * EXPECTED_PER_TOP_LEVEL_SLOT;
+        const DRAWS: u32 = SCALAR_RANDOM_INSTRUCTION_SLOT_COUNT * EXPECTED_PER_TOP_LEVEL_SLOT;
         const MIN_TOP_LEVEL_SAMPLES: u32 = 1_500;
 
         for _ in 0..DRAWS {
@@ -2856,7 +2864,7 @@ mod tests {
         // `u32::MAX, u32::MAX` selects the immediate (non-register) arm.
         BudgetedRng::new(vec![
             word_for_range(3, 0), // rd register pick
-            word_for_range(48, slot),
+            word_for_range(SCALAR_RANDOM_INSTRUCTION_SLOT_COUNT, slot),
             word_for_range(3, 0), // rn register pick
             word_for_range(3, 0), // shape selector: != 2 → not shifted
             u32::MAX,             // random_bool low word
@@ -2872,8 +2880,9 @@ mod tests {
         // immediate index. Drive `family = choice` (CMP/CMN) with the immediate
         // shape so both choices exercise the imm12-clamped compare path.
         BudgetedRng::new(vec![
-            word_for_range(3, 0),      // rd register pick (unused by CMP/CMN)
-            word_for_range(48, 36),    // slot 36: compare / test
+            word_for_range(3, 0), // rd register pick (unused by CMP/CMN)
+            // slot 36: compare / test
+            word_for_range(SCALAR_RANDOM_INSTRUCTION_SLOT_COUNT, 36),
             word_for_range(3, choice), // family: 0=CMP, 1=CMN
             word_for_range(3, 1),      // shape: 1=immediate
             word_for_range(3, 0),      // rn register pick
@@ -2949,7 +2958,7 @@ mod tests {
         for (imm_index, &raw_imm) in imms.iter().enumerate() {
             let mut rng = BudgetedRng::new(vec![
                 word_for_range(3, 0),
-                word_for_range(48, 32),
+                word_for_range(SCALAR_RANDOM_INSTRUCTION_SLOT_COUNT, 32),
                 word_for_range(3, 0),
                 u32::MAX,
                 u32::MAX,
