@@ -65,20 +65,26 @@ statistics, LLM timings, equivalence counterexamples), which lives in
 `src/report.rs`.
 
 ### Output-path resolution
-Where an `opt` run writes its result. With no explicit `-o/--output` the driver
-derives a `<stem>_optimized.<ext>` sibling of the input; an explicit output is
-honoured unless it resolves to the input binary itself, which is refused so the
-run never rewrites the source in place (the hard-link case is caught by a
-`(device, inode)` identity check a canonical-path comparison would miss). These
-rules live behind the pure `src/output_path.rs` seam, whose single entry point is
-`resolve_output_path`; the `opt` driver in `src/main.rs` is a thin adapter that
-passes the input path and optional `-o` through it. Deriving the sibling name is
-fallible — a stem-less or non-UTF-8 input yields an error the driver reports
-rather than a panic. Because optimization can run after that early check,
-`ElfPatcher::create_patched_copy` is the authoritative in-place guard: it pins
-the exact input and output file handles, compares their identities before
-truncation, and writes through the already-checked output handle so a concurrent
-pathname swap cannot redirect the destructive write to the input.
+Where an `opt` run materializes its result: either the explicit `-o/--output`
+target or a derived `<stem>_optimized.<ext>` sibling. The rules live behind the
+`src/output_path.rs` seam, whose single entry point `resolve_output_path`
+returns a `ResolvedOutput` carrying the overwrite policy into the final write;
+the `opt` driver in `src/main.rs` is a thin adapter over it. The input itself is
+never an output (the hard-link case is caught by a `(device, inode)` identity
+check a canonical-path comparison would miss, re-run at write time because the
+search runs in between), existing targets require `--force`, a symlink or
+any other non-regular filesystem entry at the output path is refused outright,
+and a successful run always writes a result file — a byte copy of the input on
+x86 when nothing better is found. `ElfPatcher` retains the exact input handle it
+read, and the complete result is built inside a mode-0700 staging directory in
+the output's parent, given that handle's ordinary access permissions (never its
+setuid/setgid bits), and then published with no-clobber semantics or an atomic
+exchange that validates the displaced entry before accepting it. Unsafe
+displaced entries are atomically restored. There is no destructive open of the
+final path, so a raced final-component symlink is never followed and a partial
+executable is never exposed. Deriving the sibling name is fallible: an empty or
+separator-terminated explicit path, or a stem-less or non-UTF-8 derived name,
+yields an error the driver reports rather than a panic.
 
 ### Subset hint (intentionally absent)
 The LLM prompt does **not** enumerate the maintained AArch64 subset s11's parser accepts (see [docs/capability.md](docs/capability.md)). The model is invited to use any AArch64 mnemonic it knows. Outputs that use unsupported instructions are recorded as a research signal (which mnemonics the model "wanted" to reach for), not treated as wasted calls. See ADR-0003.

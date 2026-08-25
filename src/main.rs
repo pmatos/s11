@@ -19,7 +19,7 @@ use s11::disassembly::{self, DisassembledInstruction};
 use s11::elf_patcher::{AddressWindow, DetectedArch, ElfPatcher, TextSection, parse_hex_address};
 use s11::ir::instructions::split_terminator;
 use s11::ir::{Instruction, Register};
-use s11::output_path::resolve_output_path;
+use s11::output_path::{ResolvedOutput, resolve_output_path};
 use s11::report;
 use s11::search::config::{
     Algorithm, LlmConfig, SearchConfig, SearchMode, StochasticConfig, SymbolicConfig,
@@ -236,6 +236,12 @@ enum Commands {
             "exclusive with --start-addr/--end-addr. Use -o/--output to name the ",
             "result file; when omitted the result is written next to the input as ",
             "<stem>_optimized.<ext>.\n\n",
+            "Output policy: Existing output files are refused unless --force is passed; ",
+            "--force never permits replacing the input itself. Any non-regular filesystem entry ",
+            "(including a symlink or directory) at the output path is always refused. ",
+            "A successful run always writes the ",
+            "result file; when no improvement is found the result is a byte copy of the ",
+            "input on x86, and a re-encoding of the searched window on AArch64.\n\n",
             "Note: enumerative search scales with the generated instruction families ",
             "in its candidate pool. At the default AArch64 8-register CLI scope, ",
             "multiply-accumulate and high-half multiply add 9,728 candidates per ",
@@ -258,6 +264,9 @@ enum Commands {
         /// Write the optimized binary to PATH (defaults to <stem>_optimized.<ext>)
         #[arg(long, short = 'o')]
         output: Option<PathBuf>,
+        /// Replace an existing output file (never permits optimizing the input in place)
+        #[arg(long)]
+        force: bool,
 
         // --- Architecture selection ---
         /// Target architecture (auto-detected from ELF if not specified)
@@ -978,7 +987,7 @@ impl ElfOptimizationBackend for X86OptimizationBackend {
     }
 
     fn no_optimization_message(&self) -> &'static str {
-        "No optimization found; not patching (input binary left untouched)."
+        "No optimization found; copying the input unchanged."
     }
 
     fn assemble_window(
@@ -1419,7 +1428,7 @@ fn optimize_elf_binary(
     path: &Path,
     start_addr: u64,
     end_addr: u64,
-    output_path: &Path,
+    output: &ResolvedOutput,
     options: &OptimizationOptions,
 ) -> Result<(), Box<dyn std::error::Error>> {
     match patcher.arch() {
@@ -1429,7 +1438,7 @@ fn optimize_elf_binary(
             path,
             start_addr,
             end_addr,
-            output_path,
+            output,
             options,
         ),
         DetectedArch::X86_64 | DetectedArch::X86_32 => optimize_elf_binary_with_backend(
@@ -1439,7 +1448,7 @@ fn optimize_elf_binary(
             path,
             start_addr,
             end_addr,
-            output_path,
+            output,
             options,
         ),
     }
@@ -1451,7 +1460,7 @@ fn optimize_elf_binary_with_backend<B: ElfOptimizationBackend>(
     path: &Path,
     start_addr: u64,
     end_addr: u64,
-    output_path: &Path,
+    output: &ResolvedOutput,
     options: &OptimizationOptions,
 ) -> Result<(), Box<dyn std::error::Error>> {
     println!("Optimizing ELF binary: {}", path.display());
@@ -1548,13 +1557,15 @@ fn optimize_elf_binary_with_backend<B: ElfOptimizationBackend>(
         start_addr,
     )?;
     let OptimizedWindowBytes::Patch(assembled_bytes) = assembled_bytes else {
+        patcher.create_unmodified_copy(output)?;
+        println!("Created unchanged binary: {}", output.path().display());
         return Ok(());
     };
     println!("Reassembled to {} bytes", assembled_bytes.len());
 
     // Create patched ELF file at the caller-resolved output path.
-    patcher.create_patched_copy(output_path, &window, &assembled_bytes)?;
-    println!("Created optimized binary: {}", output_path.display());
+    patcher.create_patched_copy(output, &window, &assembled_bytes)?;
+    println!("Created optimized binary: {}", output.path().display());
 
     Ok(())
 }
@@ -2368,6 +2379,7 @@ fn main() {
             end_addr,
             auto,
             output,
+            force,
             arch,
             algorithm,
             timeout,
@@ -2479,7 +2491,7 @@ fn main() {
                         std::process::exit(1);
                     }
                 };
-                let output_path = match resolve_output_path(&binary, output.as_deref()) {
+                let output_path = match resolve_output_path(&binary, output.as_deref(), force) {
                     Ok(path) => path,
                     Err(e) => {
                         eprintln!("Error: {e}");
@@ -3312,6 +3324,23 @@ mod cli_helper_tests {
         assert!(
             opt_help.contains("--output"),
             "opt help should document -o/--output:\n{opt_help}"
+        );
+        assert!(
+            opt_help.contains("Existing output files are refused unless --force is passed"),
+            "opt help should document the overwrite policy:\n{opt_help}"
+        );
+        assert!(
+            opt_help.contains("Any non-regular filesystem entry"),
+            "opt help should document rejection of special output files:\n{opt_help}"
+        );
+        assert!(
+            opt_help.contains("A successful run always writes the result file"),
+            "opt help should document no-improvement copy-through:\n{opt_help}"
+        );
+        assert!(
+            opt_help.contains("a re-encoding of the searched window on AArch64"),
+            "opt help must not promise a byte copy on AArch64, whose no-improvement \
+             path re-assembles the window:\n{opt_help}"
         );
     }
 
@@ -4315,7 +4344,7 @@ mod cli_helper_tests {
         opts.timeout = Some(Duration::from_secs(5));
         opts.cost_metric = CostMetric::CodeSize;
 
-        let output = resolve_output_path(input.path(), None).unwrap();
+        let output = resolve_output_path(input.path(), None, false).unwrap();
         optimize_elf_binary(&patcher, input.path(), 0x1000, 0x100a, &output, &opts)
             .expect("narrow register aliases should reach search");
     }
@@ -4423,7 +4452,7 @@ mod cli_helper_tests {
         opts.timeout = Some(Duration::from_secs(5));
         opts.cost_metric = CostMetric::CodeSize;
 
-        let output = resolve_output_path(input.path(), None).unwrap();
+        let output = resolve_output_path(input.path(), None, false).unwrap();
         let err = optimize_elf_binary(&patcher, input.path(), 0x1000, 0x1006, &output, &opts)
             .expect_err("architectural byte SETcc should be rejected before search");
         let msg = err.to_string();

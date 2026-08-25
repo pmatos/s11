@@ -7,9 +7,11 @@ use elf::section::{SectionHeader, SectionHeaderTable};
 use elf::symbol::{Symbol, SymbolTable};
 use same_file::Handle;
 use std::collections::HashSet;
-use std::fs::{File, OpenOptions};
-use std::io::{Read, Write};
+use std::fs::File;
+use std::io::Read;
 use std::path::Path;
+
+use crate::output_path::ResolvedOutput;
 
 /// Intel SDM canonical multi-byte NOP sequences, indexed by length.
 /// Index 0 is the empty slice; indices 1..=9
@@ -361,7 +363,7 @@ impl ElfPatcher {
 
     pub fn create_patched_copy(
         &self,
-        output_path: &Path,
+        output: &ResolvedOutput,
         window: &AddressWindow,
         new_code: &[u8],
     ) -> Result<(), Box<dyn std::error::Error>> {
@@ -407,26 +409,16 @@ impl ElfPatcher {
             }
         }
 
-        // Opening with truncation would clobber an alias before its identity is
-        // checked. Do not reopen this path after the check: truncate and write
-        // through the same pinned handle so a later pathname swap is harmless.
-        let output = OpenOptions::new()
-            .create(true)
-            .truncate(false)
-            .write(true)
-            .open(output_path)?;
-        let mut output_handle = Handle::from_file(output)?;
-        if self.input_handle == output_handle {
-            return Err(format!(
-                "output path '{}' resolves to the input binary; refusing to optimize in place (choose a different -o/--output)",
-                output_path.display()
-            )
-            .into());
-        }
+        output.write_from_input(&patched_data, &self.input_handle)?;
 
-        let output = output_handle.as_file_mut();
-        output.set_len(0)?;
-        output.write_all(&patched_data)?;
+        Ok(())
+    }
+
+    pub fn create_unmodified_copy(
+        &self,
+        output: &ResolvedOutput,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        output.write_from_input(&self.file_data, &self.input_handle)?;
 
         Ok(())
     }
@@ -734,6 +726,21 @@ pub fn parse_hex_address(addr_str: &str) -> Result<u64, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::output_path::resolve_output_path;
+
+    /// A [`ResolvedOutput`] over a not-yet-existing path in a fresh temp dir.
+    ///
+    /// The padding tests care about the bytes `create_patched_copy` writes, not
+    /// about overwrite policy, so resolving against an absent target keeps
+    /// `force` out of them entirely. The returned `TempDir` owns the cleanup and
+    /// must stay alive for as long as the output is used.
+    fn resolved_test_output(input: &Path) -> (tempfile::TempDir, ResolvedOutput) {
+        let dir = tempfile::tempdir().expect("create output directory");
+        let output = dir.path().join("patched.elf");
+        let resolved =
+            resolve_output_path(input, Some(&output), false).expect("resolve test output path");
+        (dir, resolved)
+    }
 
     #[test]
     fn detected_arch_alignment() {
@@ -1332,10 +1339,10 @@ mod tests {
         std::fs::write(&input, &elf_bytes).expect("input ELF should be written");
 
         let patcher = ElfPatcher::new(&input).expect("patcher should accept minimal ELF");
-        let output = crate::output_path::resolve_output_path(&input, Some(&requested_output))
+        let output = crate::output_path::resolve_output_path(&input, Some(&requested_output), true)
             .expect("nonexistent output should pass the early in-place guard");
 
-        std::fs::hard_link(&input, &output)
+        std::fs::hard_link(&input, output.path())
             .expect("output should be replaceable with a hard link to the input");
 
         let window = AddressWindow {
@@ -1356,6 +1363,45 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn create_patched_copy_tracks_input_inode_across_rename() {
+        let text_vaddr = 0x100000;
+        let text_bytes = [0xc3u8; 8];
+        let elf_bytes = build_minimal_x86_64_elf(&text_bytes, text_vaddr);
+        let temp = tempfile::tempdir().expect("temporary directory should be created");
+        let input = temp.path().join("input.elf");
+        let requested_output = temp.path().join("output.elf");
+        std::fs::write(&input, &elf_bytes).expect("input ELF should be written");
+        std::fs::write(&requested_output, b"stale output").expect("output should be seeded");
+
+        let patcher = ElfPatcher::new(&input).expect("patcher should accept minimal ELF");
+        let output = crate::output_path::resolve_output_path(&input, Some(&requested_output), true)
+            .expect("existing regular output should pass with force");
+
+        std::fs::rename(&input, &requested_output)
+            .expect("input inode should move onto the output path");
+        std::fs::write(&input, b"replacement input pathname")
+            .expect("input pathname should be replaced");
+
+        let window = AddressWindow {
+            start: text_vaddr,
+            end: text_vaddr + text_bytes.len() as u64,
+        };
+        let result = patcher.create_patched_copy(&output, &window, &[0x90]);
+
+        let err = result.expect_err("pinned input inode must never become the output");
+        assert!(
+            err.to_string().contains("refusing to optimize in place"),
+            "unexpected error: {err}"
+        );
+        assert_eq!(
+            std::fs::read(&requested_output).expect("moved input should remain readable"),
+            elf_bytes,
+            "refusal must preserve the inode ElfPatcher actually read"
+        );
+    }
+
     #[test]
     fn create_patched_copy_emits_canonical_x86_nop_padding() {
         use crate::test_utils::TempFile;
@@ -1365,7 +1411,7 @@ mod tests {
         let elf_bytes = build_minimal_x86_64_elf(&text_bytes, text_vaddr);
 
         let input = TempFile::new_bytes("s11-elf-padding-in", "elf", &elf_bytes);
-        let output = TempFile::new_bytes("s11-elf-padding-out", "elf", &[]);
+        let (_output_dir, output) = resolved_test_output(input.path());
 
         let patcher = ElfPatcher::new(input.path()).expect("patcher should accept minimal ELF");
         assert_eq!(patcher.arch(), DetectedArch::X86_64);
@@ -1376,7 +1422,7 @@ mod tests {
         };
         let payload = [0x90u8, 0x90, 0x90];
         patcher
-            .create_patched_copy(output.path(), &window, &payload)
+            .create_patched_copy(&output, &window, &payload)
             .expect("patch should succeed");
 
         let patched = std::fs::read(output.path()).expect("output should be readable");
@@ -1399,7 +1445,7 @@ mod tests {
         let elf_bytes = build_minimal_aarch64_elf(&text_bytes, text_vaddr);
 
         let input = TempFile::new_bytes("s11-elf-aarch64-padding-in", "elf", &elf_bytes);
-        let output = TempFile::new_bytes("s11-elf-aarch64-padding-out", "elf", &[]);
+        let (_output_dir, output) = resolved_test_output(input.path());
 
         let patcher = ElfPatcher::new(input.path()).expect("patcher should accept minimal ELF");
         assert_eq!(patcher.arch(), DetectedArch::Aarch64);
@@ -1410,7 +1456,7 @@ mod tests {
         };
         let payload = [0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff, 0x11, 0x22];
         patcher
-            .create_patched_copy(output.path(), &window, &payload)
+            .create_patched_copy(&output, &window, &payload)
             .expect("patch should succeed");
 
         let patched = std::fs::read(output.path()).expect("output should be readable");
@@ -1433,7 +1479,7 @@ mod tests {
         let elf_bytes = build_minimal_aarch64_elf(&text_bytes, text_vaddr);
 
         let input = TempFile::new_bytes("s11-elf-aarch64-no-padding-in", "elf", &elf_bytes);
-        let output = TempFile::new_bytes("s11-elf-aarch64-no-padding-out", "elf", &[]);
+        let (_output_dir, output) = resolved_test_output(input.path());
 
         let patcher = ElfPatcher::new(input.path()).expect("patcher should accept minimal ELF");
 
@@ -1446,7 +1492,7 @@ mod tests {
             0xab, 0xcd,
         ];
         patcher
-            .create_patched_copy(output.path(), &window, &payload)
+            .create_patched_copy(&output, &window, &payload)
             .expect("patch should succeed");
 
         let patched = std::fs::read(output.path()).expect("output should be readable");
@@ -1468,7 +1514,7 @@ mod tests {
         let elf_bytes = build_minimal_x86_64_elf(&text_bytes, text_vaddr);
 
         let input = TempFile::new_bytes("s11-elf-x86-no-padding-in", "elf", &elf_bytes);
-        let output = TempFile::new_bytes("s11-elf-x86-no-padding-out", "elf", &[]);
+        let (_output_dir, output) = resolved_test_output(input.path());
 
         let patcher = ElfPatcher::new(input.path()).expect("patcher should accept minimal ELF");
 
@@ -1478,7 +1524,7 @@ mod tests {
         };
         let payload = [0xcc, 0x31, 0xc0, 0x48, 0x83, 0xc0, 0x01, 0xc3];
         patcher
-            .create_patched_copy(output.path(), &window, &payload)
+            .create_patched_copy(&output, &window, &payload)
             .expect("patch should succeed");
 
         let patched = std::fs::read(output.path()).expect("output should be readable");
@@ -1500,7 +1546,7 @@ mod tests {
         let elf_bytes = build_minimal_x86_64_elf(&text_bytes, text_vaddr);
 
         let input = TempFile::new_bytes("s11-elf-padding-big-in", "elf", &elf_bytes);
-        let output = TempFile::new_bytes("s11-elf-padding-big-out", "elf", &[]);
+        let (_output_dir, output) = resolved_test_output(input.path());
 
         let patcher = ElfPatcher::new(input.path()).expect("patcher should accept minimal ELF");
 
@@ -1510,7 +1556,7 @@ mod tests {
         };
         let payload = [0x90u8, 0x90, 0x90];
         patcher
-            .create_patched_copy(output.path(), &window, &payload)
+            .create_patched_copy(&output, &window, &payload)
             .expect("patch should succeed");
 
         let patched = std::fs::read(output.path()).expect("output should be readable");
@@ -1540,7 +1586,7 @@ mod tests {
         let elf_bytes = build_minimal_aarch64_elf(&text_bytes, text_vaddr);
 
         let input = TempFile::new_bytes("s11-elf-aarch64-padding-big-in", "elf", &elf_bytes);
-        let output = TempFile::new_bytes("s11-elf-aarch64-padding-big-out", "elf", &[]);
+        let (_output_dir, output) = resolved_test_output(input.path());
 
         let patcher = ElfPatcher::new(input.path()).expect("patcher should accept minimal ELF");
 
@@ -1550,7 +1596,7 @@ mod tests {
         };
         let payload = [0xaa, 0xbb, 0xcc, 0xdd];
         patcher
-            .create_patched_copy(output.path(), &window, &payload)
+            .create_patched_copy(&output, &window, &payload)
             .expect("patch should succeed");
 
         let patched = std::fs::read(output.path()).expect("output should be readable");
