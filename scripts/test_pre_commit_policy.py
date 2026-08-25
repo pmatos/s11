@@ -1,9 +1,8 @@
 """Regression checks for the repository's pre-commit policy."""
 
-from pathlib import Path
 import re
 import unittest
-
+from pathlib import Path
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
 CONFIG_PATH = REPOSITORY_ROOT / ".pre-commit-config.yaml"
@@ -84,9 +83,7 @@ class TestPreCommitPolicy(unittest.TestCase):
         self.assertIn("args: [--fix]", block[check_index:format_index])
 
     def test_typos_is_check_only(self):
-        block = repository_block(
-            self.config(), "https://github.com/crate-ci/typos"
-        )
+        block = repository_block(self.config(), "https://github.com/crate-ci/typos")
 
         self.assertEqual(hook_ids(block), {"typos"})
         self.assertIn("entry: typos", block)
@@ -103,9 +100,7 @@ class TestPreCommitPolicy(unittest.TestCase):
     def test_default_install_covers_quality_and_commit_message_hooks(self):
         contents = self.config()
 
-        self.assertIn(
-            "default_install_hook_types: [pre-commit, commit-msg]", contents
-        )
+        self.assertIn("default_install_hook_types: [pre-commit, commit-msg]", contents)
 
     def test_existing_commit_message_validator_is_routed_through_pre_commit(self):
         block = repository_block(self.config(), "local")

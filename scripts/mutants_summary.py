@@ -66,7 +66,9 @@ def format_summary_md(agg: dict) -> str:
         row = f"| {name} | " + " | ".join(str(counts[b]) for b in BUCKETS) + " |"
         lines.append(row)
     totals = agg["totals"]
-    total_row = "| **total** | " + " | ".join(f"**{totals[b]}**" for b in BUCKETS) + " |"
+    total_row = (
+        "| **total** | " + " | ".join(f"**{totals[b]}**" for b in BUCKETS) + " |"
+    )
     lines.append(total_row)
     return "\n".join(lines) + "\n"
 
@@ -76,7 +78,11 @@ def aggregate(root: pathlib.Path) -> dict:
         shards = [(root.name, read_shard(root))]
     else:
         shards = sorted(
-            ((d.name, read_shard(d)) for d in root.iterdir() if d.is_dir() and _has_bucket_files(d)),
+            (
+                (d.name, read_shard(d))
+                for d in root.iterdir()
+                if d.is_dir() and _has_bucket_files(d)
+            ),
             key=lambda s: s[0],
         )
     totals = dict.fromkeys(BUCKETS, 0)
@@ -98,7 +104,9 @@ def _read_missed_lines(root: pathlib.Path) -> list[str]:
     for c in candidates:
         p = c / "missed.txt"
         if p.exists():
-            out.extend(line.rstrip("\n") for line in p.read_text().splitlines() if line.strip())
+            out.extend(
+                line.rstrip("\n") for line in p.read_text().splitlines() if line.strip()
+            )
     return list(dict.fromkeys(out))
 
 
@@ -106,7 +114,9 @@ def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("root", type=pathlib.Path)
     ap.add_argument("--pr-comment", type=pathlib.Path)
-    ap.add_argument("--run-url", default=None, help="Workflow run URL to link from PR comment")
+    ap.add_argument(
+        "--run-url", default=None, help="Workflow run URL to link from PR comment"
+    )
     args = ap.parse_args(argv)
 
     agg = aggregate(args.root)
