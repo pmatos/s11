@@ -142,7 +142,8 @@ pub fn invoke_codex(
         .try_clone()
         .map_err(|e| CodexError::Io(format!("retaining stderr file: {e}")))?;
 
-    let mut child = Command::new(&config.codex_bin)
+    let mut command = Command::new(&config.codex_bin);
+    command
         .arg("exec")
         .arg("-m")
         .arg(&config.model)
@@ -157,9 +158,13 @@ pub fn invoke_codex(
         .arg(prompt)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
-        .stderr(Stdio::from(stderr_file))
-        .spawn()
-        .map_err(|e| CodexError::Io(e.to_string()))?;
+        .stderr(Stdio::from(stderr_file));
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        command.process_group(0);
+    }
+    let mut child = command.spawn().map_err(|e| CodexError::Io(e.to_string()))?;
     let status = wait_for_child(&mut child, timeout)?;
 
     if !status.success() {
@@ -238,7 +243,7 @@ fn wait_for_child(child: &mut Child, timeout: Duration) -> Result<ExitStatus, Co
 
         let elapsed = started.elapsed();
         if elapsed >= timeout {
-            if let Err(kill_error) = child.kill() {
+            if let Err(kill_error) = terminate_timed_out_child(child) {
                 if child
                     .try_wait()
                     .map_err(|e| CodexError::Io(format!("checking timed-out codex: {}", e)))?
@@ -260,6 +265,19 @@ fn wait_for_child(child: &mut Child, timeout: Duration) -> Result<ExitStatus, Co
         let remaining = timeout.saturating_sub(elapsed);
         std::thread::sleep(std::cmp::min(remaining, Duration::from_millis(10)));
     }
+}
+
+#[cfg(unix)]
+fn terminate_timed_out_child(child: &mut Child) -> std::io::Result<()> {
+    Ok(rustix::process::kill_process_group(
+        rustix::process::Pid::from_child(child),
+        rustix::process::Signal::KILL,
+    )?)
+}
+
+#[cfg(not(unix))]
+fn terminate_timed_out_child(child: &mut Child) -> std::io::Result<()> {
+    child.kill()
 }
 
 fn create_temp_workspace() -> Result<tempfile::TempDir, String> {
@@ -603,12 +621,18 @@ done
 
     #[cfg(unix)]
     #[test]
-    fn invoke_codex_times_out_and_reaps_slow_child() {
-        let pid_file = tempfile::NamedTempFile::new().expect("create pid file");
-        let pid_path = pid_file.path().to_path_buf();
+    fn invoke_codex_times_out_and_reaps_process_group() {
+        let wrapper_pid_file = tempfile::NamedTempFile::new().expect("create wrapper pid file");
+        let wrapper_pid_path = wrapper_pid_file.path().to_path_buf();
+        let helper_pid_file = tempfile::NamedTempFile::new().expect("create helper pid file");
+        let helper_pid_path = helper_pid_file.path().to_path_buf();
+        let marker_dir = tempfile::tempdir().expect("create marker directory");
+        let marker_path = marker_dir.path().join("helper-finished");
         let fake = FakeCodex::new(&format!(
-            "printf '%s\\n' \"$$\" > {}\nsleep 2\n",
-            shell_single_quote(&pid_path.to_string_lossy())
+            "printf '%s\\n' \"$$\" > {}\n(\n  sleep 1\n  printf '%s\\n' finished > {}\n) &\nhelper_pid=$!\nprintf '%s\\n' \"$helper_pid\" > {}\nwait \"$helper_pid\"\n",
+            shell_single_quote(&wrapper_pid_path.to_string_lossy()),
+            shell_single_quote(&marker_path.to_string_lossy()),
+            shell_single_quote(&helper_pid_path.to_string_lossy()),
         ));
         let config = LlmConfig::default().with_codex_bin(fake.path_string());
 
@@ -623,11 +647,24 @@ done
         );
         assert!(matches!(err, CodexError::TimedOut { .. }));
 
-        let pid = std::fs::read_to_string(&pid_path)
-            .expect("fake codex should record its pid")
+        let wrapper_pid = std::fs::read_to_string(&wrapper_pid_path)
+            .expect("fake codex should record its wrapper pid")
             .trim()
             .parse::<u32>()
-            .expect("fake codex pid should be numeric");
-        wait_until_process_gone(pid);
+            .expect("fake codex wrapper pid should be numeric");
+        wait_until_process_gone(wrapper_pid);
+
+        let helper_pid = std::fs::read_to_string(&helper_pid_path)
+            .expect("fake codex should record its helper pid")
+            .trim()
+            .parse::<u32>()
+            .expect("fake codex helper pid should be numeric");
+        assert_ne!(helper_pid, wrapper_pid);
+
+        std::thread::sleep(Duration::from_millis(1_500));
+        assert!(
+            !marker_path.exists(),
+            "timed-out Codex helper {helper_pid} continued running after its wrapper was reaped"
+        );
     }
 }
