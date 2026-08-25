@@ -116,7 +116,7 @@ fn extract_unsupported_mnemonics(raw: &str) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ir::{Operand, Register};
+    use crate::ir::{Operand, Register, RegisterWidth};
 
     fn live_out_x0() -> LiveOut {
         LiveOut::from_registers(vec![Register::X0])
@@ -233,6 +233,69 @@ mod tests {
         assert!(
             metrics.smt_formula_bytes.map(|n| n > 0).unwrap_or(false),
             "smt_formula_bytes should be populated and non-zero"
+        );
+    }
+
+    #[test]
+    fn near_zero_smt_timeout_classifies_as_equiv_unknown() {
+        // Each target group expands addition into its carry identity:
+        // a + b = (a ^ b) + 2 * (a & b). Eight independent outputs keep the
+        // proof non-trivial enough for a 1 ms Z3 budget while still passing
+        // the concrete fast path.
+        let groups = [
+            (Register::X0, Register::X10, Register::X11),
+            (Register::X1, Register::X12, Register::X13),
+            (Register::X2, Register::X14, Register::X15),
+            (Register::X3, Register::X16, Register::X17),
+            (Register::X4, Register::X18, Register::X19),
+            (Register::X5, Register::X20, Register::X21),
+            (Register::X6, Register::X22, Register::X23),
+            (Register::X7, Register::X24, Register::X25),
+        ];
+        let mut target = Vec::new();
+        let mut candidate_lines = Vec::new();
+
+        for (output, a, b) in groups {
+            target.extend([
+                Instruction::Eor {
+                    rd: Register::X26,
+                    rn: a,
+                    rm: Operand::Register(b),
+                    width: RegisterWidth::X64,
+                },
+                Instruction::And {
+                    rd: Register::X27,
+                    rn: a,
+                    rm: Operand::Register(b),
+                    width: RegisterWidth::X64,
+                },
+                Instruction::Lsl {
+                    rd: Register::X27,
+                    rn: Register::X27,
+                    shift: Operand::Immediate(1),
+                },
+                Instruction::Add {
+                    rd: output,
+                    rn: Register::X26,
+                    rm: Operand::Register(Register::X27),
+                },
+            ]);
+            candidate_lines.push(format!("add {output}, {a}, {b}"));
+        }
+
+        let live_out = LiveOut::from_registers(groups.map(|(output, _, _)| output).to_vec());
+        let (outcome, metrics) = classify(
+            &target,
+            &candidate_lines.join("\n"),
+            &live_out,
+            Duration::from_millis(1),
+        );
+
+        assert_eq!(outcome, IterationOutcome::EquivUnknown);
+        let metrics = metrics.expect("equiv-unknown path must have verification metrics");
+        assert!(
+            metrics.smt_called,
+            "near-zero timeout must reach SMT before returning equiv-unknown"
         );
     }
 
