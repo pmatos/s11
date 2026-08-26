@@ -33,6 +33,9 @@ jobs:
 
       - name: Run Claude Code Review
         id: claude-review
+        # The review is advisory, so a credential or quota failure must not turn
+        # the check red. The classification step below decides.
+        continue-on-error: true
         uses: anthropics/claude-code-action@e5ad3c7725bc2459721893f88879fef9dbcf97b0 # v1.0.202
         with:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
@@ -56,3 +59,10 @@ jobs:
           claude_args: |
             --model claude-sonnet-5
             --allowedTools "Bash(gh issue view:*),Bash(gh search:*),Bash(gh issue list:*),Bash(gh pr comment:*),Bash(gh pr diff:*),Bash(gh pr view:*),Bash(gh pr list:*)"
+
+      - name: Classify review outcome
+        if: always()
+        env:
+          REVIEW_OUTCOME: ${{ steps.claude-review.outcome }}
+          EXECUTION_FILE: ${{ steps.claude-review.outputs.execution_file }}
+        run: bash .github/scripts/classify_claude_review_failure.sh
