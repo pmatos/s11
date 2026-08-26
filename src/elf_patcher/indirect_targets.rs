@@ -438,151 +438,178 @@ fn collect_pointer_values(
 mod tests {
     use super::*;
 
-    /// ELF64 fixture with `.text`, one `.rela.text` entry, and a linked
-    /// `.symtab`. The relocation names three independently useful values: its
-    /// application site, its symbol, and symbol-plus-addend.
-    fn build_x86_64_rela_fixture(
-        text_vaddr: u64,
-        relocation_offset: u64,
-        symbol_value: u64,
-        addend: i64,
-    ) -> Vec<u8> {
-        let elf_header_size = 64usize;
-        let shentsize = 64usize;
-        let shnum = 6usize;
-        let text = [0x90u8; 16];
+    /// Fixture `.text` base for addresses that need to be nowhere near the top
+    /// of the address space.
+    const TEXT_VADDR: u64 = 0x1000;
+    const TEXT_SIZE: u64 = 16;
+    /// Highest `.text` base that still leaves room for [`TEXT_SIZE`] bytes of
+    /// code, so overflow fixtures can name addresses past the end of the
+    /// address space without overflowing the executable range itself.
+    const HIGH_TEXT_VADDR: u64 = u64::MAX - 0xff;
+    /// ELF64 compression-header size, which prefixes every `SHF_COMPRESSED`
+    /// payload the `elf` crate hands back.
+    const CHDR_SIZE: usize = 24;
 
-        let mut rela = Vec::with_capacity(24);
-        rela.extend_from_slice(&relocation_offset.to_le_bytes());
-        let r_info = (1u64 << 32) | u64::from(elf::abi::R_X86_64_64);
-        rela.extend_from_slice(&r_info.to_le_bytes());
-        rela.extend_from_slice(&addend.to_le_bytes());
+    /// One section header plus its bytes in a synthetic ELF image.
+    struct Section {
+        name: &'static str,
+        sh_type: u32,
+        sh_flags: u64,
+        sh_addr: u64,
+        sh_link: u32,
+        sh_info: u32,
+        sh_entsize: u64,
+        data: Vec<u8>,
+    }
 
-        let mut symtab = vec![0u8; 24];
-        symtab.extend_from_slice(&1u32.to_le_bytes()); // st_name -> "target"
-        symtab.push((elf::abi::STB_GLOBAL << 4) | elf::abi::STT_FUNC);
-        symtab.push(0); // st_other
-        symtab.extend_from_slice(&1u16.to_le_bytes()); // st_shndx -> .text
-        symtab.extend_from_slice(&symbol_value.to_le_bytes());
-        symtab.extend_from_slice(&0u64.to_le_bytes()); // st_size
+    impl Section {
+        fn new(name: &'static str, sh_type: u32, data: Vec<u8>) -> Self {
+            Self {
+                name,
+                sh_type,
+                sh_flags: 0,
+                sh_addr: 0,
+                sh_link: 0,
+                sh_info: 0,
+                sh_entsize: 0,
+                data,
+            }
+        }
 
-        let strtab = b"\0target\0";
-        let shstrtab = b"\0.text\0.rela.text\0.symtab\0.strtab\0.shstrtab\0";
-        let text_name = 1u64;
-        let rela_name = 7u64;
-        let symtab_name = 18u64;
-        let strtab_name = 26u64;
-        let shstrtab_name = 34u64;
+        fn flags(mut self, sh_flags: u32) -> Self {
+            self.sh_flags = u64::from(sh_flags);
+            self
+        }
 
-        let text_offset = elf_header_size;
-        let rela_offset = text_offset + text.len();
-        let symtab_offset = rela_offset + rela.len();
-        let strtab_offset = symtab_offset + symtab.len();
-        let shstrtab_offset = strtab_offset + strtab.len();
-        let shoff = shstrtab_offset + shstrtab.len();
-        let mut buf = vec![0u8; shoff + shentsize * shnum];
+        fn addr(mut self, sh_addr: u64) -> Self {
+            self.sh_addr = sh_addr;
+            self
+        }
+
+        /// Index of the linked section: for a relocation table, its symbol
+        /// table.
+        fn link(mut self, sh_link: u32) -> Self {
+            self.sh_link = sh_link;
+            self
+        }
+
+        /// Index of the section a relocation table applies to.
+        fn info(mut self, sh_info: u32) -> Self {
+            self.sh_info = sh_info;
+            self
+        }
+
+        fn entsize(mut self, sh_entsize: u64) -> Self {
+            self.sh_entsize = sh_entsize;
+            self
+        }
+    }
+
+    /// Assemble a little-endian ELF image carrying exactly `sections`, which
+    /// occupy indices 1..=sections.len(): index 0 is the mandatory null header
+    /// and the auto-generated `.shstrtab` follows the caller's sections.
+    fn build_elf(class: Class, e_type: u16, sections: Vec<Section>) -> Vec<u8> {
+        let (ehdr_size, shentsize, machine) = match class {
+            Class::ELF32 => (52usize, 40usize, elf::abi::EM_386),
+            Class::ELF64 => (64usize, 64usize, elf::abi::EM_X86_64),
+        };
+
+        let mut shstrtab = vec![0u8];
+        let mut name_offsets = Vec::with_capacity(sections.len());
+        for section in &sections {
+            name_offsets.push(shstrtab.len() as u64);
+            shstrtab.extend_from_slice(section.name.as_bytes());
+            shstrtab.push(0);
+        }
+        let shstrtab_name = shstrtab.len() as u64;
+        shstrtab.extend_from_slice(b".shstrtab\0");
+
+        let mut buf = vec![0u8; ehdr_size];
+        let mut data_offsets = Vec::with_capacity(sections.len());
+        for section in &sections {
+            data_offsets.push(buf.len() as u64);
+            buf.extend_from_slice(&section.data);
+        }
+        let shstrtab_offset = buf.len() as u64;
+        buf.extend_from_slice(&shstrtab);
+        let shoff = buf.len();
+        let shnum = sections.len() + 2;
+        let shstrndx = sections.len() + 1;
+        buf.resize(shoff + shnum * shentsize, 0);
 
         buf[0..4].copy_from_slice(b"\x7fELF");
-        buf[4] = elf::abi::ELFCLASS64;
+        buf[4] = match class {
+            Class::ELF32 => elf::abi::ELFCLASS32,
+            Class::ELF64 => elf::abi::ELFCLASS64,
+        };
         buf[5] = elf::abi::ELFDATA2LSB;
         buf[6] = elf::abi::EV_CURRENT;
-        buf[16..18].copy_from_slice(&elf::abi::ET_EXEC.to_le_bytes());
-        buf[18..20].copy_from_slice(&elf::abi::EM_X86_64.to_le_bytes());
-        buf[20..24].copy_from_slice(&(elf::abi::EV_CURRENT as u32).to_le_bytes());
-        buf[40..48].copy_from_slice(&(shoff as u64).to_le_bytes());
-        buf[52..54].copy_from_slice(&(elf_header_size as u16).to_le_bytes());
-        buf[58..60].copy_from_slice(&(shentsize as u16).to_le_bytes());
-        buf[60..62].copy_from_slice(&(shnum as u16).to_le_bytes());
-        buf[62..64].copy_from_slice(&5u16.to_le_bytes());
+        buf[16..18].copy_from_slice(&e_type.to_le_bytes());
+        buf[18..20].copy_from_slice(&machine.to_le_bytes());
+        buf[20..24].copy_from_slice(&u32::from(elf::abi::EV_CURRENT).to_le_bytes());
+        match class {
+            Class::ELF32 => {
+                buf[32..36].copy_from_slice(&(shoff as u32).to_le_bytes());
+                buf[40..42].copy_from_slice(&(ehdr_size as u16).to_le_bytes());
+                buf[46..48].copy_from_slice(&(shentsize as u16).to_le_bytes());
+                buf[48..50].copy_from_slice(&(shnum as u16).to_le_bytes());
+                buf[50..52].copy_from_slice(&(shstrndx as u16).to_le_bytes());
+            }
+            Class::ELF64 => {
+                buf[40..48].copy_from_slice(&(shoff as u64).to_le_bytes());
+                buf[52..54].copy_from_slice(&(ehdr_size as u16).to_le_bytes());
+                buf[58..60].copy_from_slice(&(shentsize as u16).to_le_bytes());
+                buf[60..62].copy_from_slice(&(shnum as u16).to_le_bytes());
+                buf[62..64].copy_from_slice(&(shstrndx as u16).to_le_bytes());
+            }
+        }
 
-        buf[text_offset..rela_offset].copy_from_slice(&text);
-        buf[rela_offset..symtab_offset].copy_from_slice(&rela);
-        buf[symtab_offset..strtab_offset].copy_from_slice(&symtab);
-        buf[strtab_offset..shstrtab_offset].copy_from_slice(strtab);
-        buf[shstrtab_offset..shoff].copy_from_slice(shstrtab);
-
+        // sh_name, sh_type, sh_flags, sh_addr, sh_offset, sh_size, sh_link,
+        // sh_info, sh_addralign, sh_entsize. ELF32 stores all ten as words;
+        // ELF64 widens the address-sized ones.
         let mut write_shdr = |index: usize, fields: [u64; 10]| {
             let base = shoff + index * shentsize;
-            buf[base..base + 4].copy_from_slice(&(fields[0] as u32).to_le_bytes());
-            buf[base + 4..base + 8].copy_from_slice(&(fields[1] as u32).to_le_bytes());
-            buf[base + 8..base + 16].copy_from_slice(&fields[2].to_le_bytes());
-            buf[base + 16..base + 24].copy_from_slice(&fields[3].to_le_bytes());
-            buf[base + 24..base + 32].copy_from_slice(&fields[4].to_le_bytes());
-            buf[base + 32..base + 40].copy_from_slice(&fields[5].to_le_bytes());
-            buf[base + 40..base + 44].copy_from_slice(&(fields[6] as u32).to_le_bytes());
-            buf[base + 44..base + 48].copy_from_slice(&(fields[7] as u32).to_le_bytes());
-            buf[base + 48..base + 56].copy_from_slice(&fields[8].to_le_bytes());
-            buf[base + 56..base + 64].copy_from_slice(&fields[9].to_le_bytes());
+            let widths = match class {
+                Class::ELF32 => [4usize; 10],
+                Class::ELF64 => [4, 4, 8, 8, 8, 8, 4, 4, 8, 8],
+            };
+            let mut at = base;
+            for (width, value) in widths.iter().zip(fields.iter()) {
+                if *width == 4 {
+                    buf[at..at + 4].copy_from_slice(&(*value as u32).to_le_bytes());
+                } else {
+                    buf[at..at + 8].copy_from_slice(&value.to_le_bytes());
+                }
+                at += width;
+            }
         };
+
         write_shdr(0, [0; 10]);
+        for (index, section) in sections.iter().enumerate() {
+            write_shdr(
+                index + 1,
+                [
+                    name_offsets[index],
+                    u64::from(section.sh_type),
+                    section.sh_flags,
+                    section.sh_addr,
+                    data_offsets[index],
+                    section.data.len() as u64,
+                    u64::from(section.sh_link),
+                    u64::from(section.sh_info),
+                    1,
+                    section.sh_entsize,
+                ],
+            );
+        }
         write_shdr(
-            1,
-            [
-                text_name,
-                elf::abi::SHT_PROGBITS as u64,
-                (elf::abi::SHF_ALLOC | elf::abi::SHF_EXECINSTR) as u64,
-                text_vaddr,
-                text_offset as u64,
-                text.len() as u64,
-                0,
-                0,
-                1,
-                0,
-            ],
-        );
-        write_shdr(
-            2,
-            [
-                rela_name,
-                elf::abi::SHT_RELA as u64,
-                0,
-                0,
-                rela_offset as u64,
-                rela.len() as u64,
-                3, // linked symbol table
-                1, // target section: .text
-                8,
-                24,
-            ],
-        );
-        write_shdr(
-            3,
-            [
-                symtab_name,
-                elf::abi::SHT_SYMTAB as u64,
-                0,
-                0,
-                symtab_offset as u64,
-                symtab.len() as u64,
-                4, // linked .strtab
-                1,
-                8,
-                24,
-            ],
-        );
-        write_shdr(
-            4,
-            [
-                strtab_name,
-                elf::abi::SHT_STRTAB as u64,
-                0,
-                0,
-                strtab_offset as u64,
-                strtab.len() as u64,
-                0,
-                0,
-                1,
-                0,
-            ],
-        );
-        write_shdr(
-            5,
+            shstrndx,
             [
                 shstrtab_name,
-                elf::abi::SHT_STRTAB as u64,
+                u64::from(elf::abi::SHT_STRTAB),
                 0,
                 0,
-                shstrtab_offset as u64,
+                shstrtab_offset,
                 shstrtab.len() as u64,
                 0,
                 0,
@@ -594,141 +621,93 @@ mod tests {
         buf
     }
 
-    fn build_x86_64_pointer_sections_fixture(
-        text_vaddr: u64,
-        rodata: &[u8],
-        data_rel_ro: &[u8],
-        relr: &[u8],
-    ) -> Vec<u8> {
-        let elf_header_size = 64usize;
-        let shentsize = 64usize;
-        let shnum = 6usize;
-        let text = [0x90u8; 16];
-        let shstrtab = b"\0.text\0.rodata\0.data.rel.ro\0.relr.dyn\0.shstrtab\0";
+    /// Executable `.text` based at `vaddr`, always fixture section index 1.
+    fn text_section(vaddr: u64) -> Section {
+        Section::new(
+            ".text",
+            elf::abi::SHT_PROGBITS,
+            vec![0x90; TEXT_SIZE as usize],
+        )
+        .flags(elf::abi::SHF_ALLOC | elf::abi::SHF_EXECINSTR)
+        .addr(vaddr)
+    }
 
-        let text_offset = elf_header_size;
-        let rodata_offset = text_offset + text.len();
-        let data_rel_ro_offset = rodata_offset + rodata.len();
-        let relr_offset = data_rel_ro_offset + data_rel_ro.len();
-        let shstrtab_offset = relr_offset + relr.len();
-        let shoff = shstrtab_offset + shstrtab.len();
-        let mut buf = vec![0u8; shoff + shentsize * shnum];
+    fn rel_entry(r_offset: u64, r_sym: u32) -> Vec<u8> {
+        let mut entry = r_offset.to_le_bytes().to_vec();
+        let r_info = (u64::from(r_sym) << 32) | u64::from(elf::abi::R_X86_64_64);
+        entry.extend_from_slice(&r_info.to_le_bytes());
+        entry
+    }
 
-        buf[0..4].copy_from_slice(b"\x7fELF");
-        buf[4] = elf::abi::ELFCLASS64;
-        buf[5] = elf::abi::ELFDATA2LSB;
-        buf[6] = elf::abi::EV_CURRENT;
-        buf[16..18].copy_from_slice(&elf::abi::ET_EXEC.to_le_bytes());
-        buf[18..20].copy_from_slice(&elf::abi::EM_X86_64.to_le_bytes());
-        buf[20..24].copy_from_slice(&(elf::abi::EV_CURRENT as u32).to_le_bytes());
-        buf[40..48].copy_from_slice(&(shoff as u64).to_le_bytes());
-        buf[52..54].copy_from_slice(&(elf_header_size as u16).to_le_bytes());
-        buf[58..60].copy_from_slice(&(shentsize as u16).to_le_bytes());
-        buf[60..62].copy_from_slice(&(shnum as u16).to_le_bytes());
-        buf[62..64].copy_from_slice(&5u16.to_le_bytes());
+    fn rela_entry(r_offset: u64, r_sym: u32, r_addend: i64) -> Vec<u8> {
+        let mut entry = rel_entry(r_offset, r_sym);
+        entry.extend_from_slice(&r_addend.to_le_bytes());
+        entry
+    }
 
-        buf[text_offset..rodata_offset].copy_from_slice(&text);
-        buf[rodata_offset..data_rel_ro_offset].copy_from_slice(rodata);
-        buf[data_rel_ro_offset..relr_offset].copy_from_slice(data_rel_ro);
-        buf[relr_offset..shstrtab_offset].copy_from_slice(relr);
-        buf[shstrtab_offset..shoff].copy_from_slice(shstrtab);
+    /// ELF64 `.symtab` holding the mandatory null entry plus one function
+    /// symbol at index 1.
+    fn symtab_section(st_shndx: u16, st_value: u64) -> Section {
+        let mut data = vec![0u8; 24];
+        data.extend_from_slice(&0u32.to_le_bytes()); // st_name
+        data.push((elf::abi::STB_GLOBAL << 4) | elf::abi::STT_FUNC);
+        data.push(0); // st_other
+        data.extend_from_slice(&st_shndx.to_le_bytes());
+        data.extend_from_slice(&st_value.to_le_bytes());
+        data.extend_from_slice(&0u64.to_le_bytes()); // st_size
+        Section::new(".symtab", elf::abi::SHT_SYMTAB, data).entsize(24)
+    }
 
-        let mut write_shdr = |index: usize, fields: [u64; 10]| {
-            let base = shoff + index * shentsize;
-            buf[base..base + 4].copy_from_slice(&(fields[0] as u32).to_le_bytes());
-            buf[base + 4..base + 8].copy_from_slice(&(fields[1] as u32).to_le_bytes());
-            buf[base + 8..base + 16].copy_from_slice(&fields[2].to_le_bytes());
-            buf[base + 16..base + 24].copy_from_slice(&fields[3].to_le_bytes());
-            buf[base + 24..base + 32].copy_from_slice(&fields[4].to_le_bytes());
-            buf[base + 32..base + 40].copy_from_slice(&fields[5].to_le_bytes());
-            buf[base + 40..base + 44].copy_from_slice(&(fields[6] as u32).to_le_bytes());
-            buf[base + 44..base + 48].copy_from_slice(&(fields[7] as u32).to_le_bytes());
-            buf[base + 48..base + 56].copy_from_slice(&fields[8].to_le_bytes());
-            buf[base + 56..base + 64].copy_from_slice(&fields[9].to_le_bytes());
-        };
-        write_shdr(0, [0; 10]);
-        write_shdr(
-            1,
-            [
-                1,
-                elf::abi::SHT_PROGBITS as u64,
-                (elf::abi::SHF_ALLOC | elf::abi::SHF_EXECINSTR) as u64,
-                text_vaddr,
-                text_offset as u64,
-                text.len() as u64,
-                0,
-                0,
-                1,
-                0,
-            ],
-        );
-        write_shdr(
-            2,
-            [
-                7,
-                elf::abi::SHT_PROGBITS as u64,
-                elf::abi::SHF_ALLOC as u64,
-                0x2000,
-                rodata_offset as u64,
-                rodata.len() as u64,
-                0,
-                0,
-                1,
-                0,
-            ],
-        );
-        write_shdr(
-            3,
-            [
-                15,
-                elf::abi::SHT_PROGBITS as u64,
-                (elf::abi::SHF_ALLOC | elf::abi::SHF_WRITE) as u64,
-                0x3000,
-                data_rel_ro_offset as u64,
-                data_rel_ro.len() as u64,
-                0,
-                0,
-                1,
-                0,
-            ],
-        );
-        write_shdr(
-            4,
-            [
-                28,
-                19, // SHT_RELR (not yet exposed by elf 0.8)
-                elf::abi::SHF_ALLOC as u64,
-                0x4000,
-                relr_offset as u64,
-                relr.len() as u64,
-                0,
-                0,
-                8,
-                8,
-            ],
-        );
-        write_shdr(
-            5,
-            [
-                38,
-                elf::abi::SHT_STRTAB as u64,
-                0,
-                0,
-                shstrtab_offset as u64,
-                shstrtab.len() as u64,
-                0,
-                0,
-                1,
-                0,
-            ],
-        );
+    /// A `SHF_COMPRESSED` payload of `size` bytes: a well-formed ELF64
+    /// compression header the analysis must refuse rather than misread as
+    /// relocations, symbols, or pointers.
+    fn compressed_payload(size: usize) -> Vec<u8> {
+        let mut data = Vec::with_capacity(size);
+        data.extend_from_slice(&elf::abi::ELFCOMPRESS_ZLIB.to_le_bytes());
+        data.extend_from_slice(&0u32.to_le_bytes()); // ch_reserved
+        data.extend_from_slice(&64u64.to_le_bytes()); // ch_size
+        data.extend_from_slice(&8u64.to_le_bytes()); // ch_addralign
+        data.resize(size, 0);
+        data
+    }
 
-        buf
+    fn relr_section(entries: Vec<u8>) -> Section {
+        Section::new(".relr.dyn", SHT_RELR, entries)
+            .flags(elf::abi::SHF_ALLOC)
+            .entsize(8)
+    }
+
+    fn relr_entries(entries: &[u64]) -> Vec<u8> {
+        entries.iter().flat_map(|e| e.to_le_bytes()).collect()
+    }
+
+    /// Assert the analysis refuses `elf_bytes` for the stated reason. A partial
+    /// exclusion set would silently unsound whole-binary candidate discovery,
+    /// so every malformed input must surface as an error.
+    fn expect_rejection(elf_bytes: &[u8], case: &str, expectation: &str) {
+        let error = indirect_control_flow_targets(elf_bytes)
+            .expect_err(&format!("{case} must be rejected"))
+            .to_string();
+        assert!(
+            error.contains(expectation),
+            "{case}: expected an error containing {expectation:?}, got {error:?}"
+        );
     }
 
     #[test]
     fn indirect_targets_include_relocation_site_symbol_and_symbol_plus_addend() {
-        let elf_bytes = build_x86_64_rela_fixture(0x1000, 0x1004, 0x1008, 4);
+        let elf_bytes = build_elf(
+            Class::ELF64,
+            elf::abi::ET_EXEC,
+            vec![
+                text_section(TEXT_VADDR),
+                Section::new(".rela.text", elf::abi::SHT_RELA, rela_entry(0x1004, 1, 4))
+                    .entsize(24)
+                    .link(3)
+                    .info(1),
+                symtab_section(1, 0x1008),
+            ],
+        );
 
         let targets = indirect_control_flow_targets(&elf_bytes)
             .expect("valid relocation metadata should be analyzed");
@@ -745,38 +724,517 @@ mod tests {
     }
 
     #[test]
+    fn indirect_targets_include_rel_site_and_symbol_without_an_addend() {
+        let elf_bytes = build_elf(
+            Class::ELF64,
+            elf::abi::ET_EXEC,
+            vec![
+                text_section(TEXT_VADDR),
+                Section::new(".rel.text", elf::abi::SHT_REL, rel_entry(0x1004, 1))
+                    .entsize(16)
+                    .link(3)
+                    .info(1),
+                symtab_section(1, 0x1008),
+            ],
+        );
+
+        let targets = indirect_control_flow_targets(&elf_bytes)
+            .expect("valid REL metadata should be analyzed");
+
+        assert_eq!(
+            targets,
+            HashSet::from([0x1004, 0x1008]),
+            "REL names only its site and symbol, never an addend"
+        );
+    }
+
+    #[test]
+    fn indirect_targets_ignore_relocations_without_a_symbol() {
+        let elf_bytes = build_elf(
+            Class::ELF64,
+            elf::abi::ET_EXEC,
+            vec![
+                text_section(TEXT_VADDR),
+                Section::new(
+                    ".rela.text",
+                    elf::abi::SHT_RELA,
+                    rela_entry(0x1004, 0, 0x1008),
+                )
+                .entsize(24)
+                .link(3)
+                .info(1),
+                symtab_section(1, 0x100c),
+            ],
+        );
+
+        let targets = indirect_control_flow_targets(&elf_bytes)
+            .expect("a symbol-less relocation should be analyzed");
+
+        assert_eq!(
+            targets,
+            HashSet::from([0x1004, 0x1008]),
+            "an unlinked relocation names its site and bare addend only"
+        );
+    }
+
+    #[test]
+    fn indirect_targets_ignore_undefined_symbols() {
+        let elf_bytes = build_elf(
+            Class::ELF64,
+            elf::abi::ET_EXEC,
+            vec![
+                text_section(TEXT_VADDR),
+                Section::new(".rela.text", elf::abi::SHT_RELA, rela_entry(0x1004, 1, 0))
+                    .entsize(24)
+                    .link(3)
+                    .info(1),
+                symtab_section(elf::abi::SHN_UNDEF, 0x1008),
+            ],
+        );
+
+        let targets = indirect_control_flow_targets(&elf_bytes)
+            .expect("an undefined symbol should be analyzed");
+
+        assert_eq!(
+            targets,
+            HashSet::from([0x1004]),
+            "an undefined symbol has no address to exclude"
+        );
+    }
+
+    #[test]
+    fn indirect_targets_resolve_section_relative_sites_and_symbols() {
+        let elf_bytes = build_elf(
+            Class::ELF64,
+            elf::abi::ET_REL,
+            vec![
+                text_section(0),
+                Section::new(".rel.text", elf::abi::SHT_REL, rel_entry(4, 1))
+                    .entsize(16)
+                    .link(3)
+                    .info(1),
+                symtab_section(1, 8),
+            ],
+        );
+
+        let targets = indirect_control_flow_targets(&elf_bytes)
+            .expect("relocatable-object metadata should be analyzed");
+
+        assert_eq!(
+            targets,
+            HashSet::from([4, 8]),
+            "sites and symbols in a relocatable object are section-relative"
+        );
+    }
+
+    #[test]
+    fn indirect_targets_include_absolute_symbols_of_relocatable_objects() {
+        let elf_bytes = build_elf(
+            Class::ELF64,
+            elf::abi::ET_REL,
+            vec![
+                text_section(TEXT_VADDR),
+                Section::new(".rel.text", elf::abi::SHT_REL, rel_entry(4, 1))
+                    .entsize(16)
+                    .link(3)
+                    .info(1),
+                symtab_section(elf::abi::SHN_ABS, 0x1008),
+            ],
+        );
+
+        let targets = indirect_control_flow_targets(&elf_bytes)
+            .expect("an absolute symbol should be analyzed");
+
+        assert!(
+            targets.contains(&0x1008),
+            "an absolute symbol value is already a final address"
+        );
+    }
+
+    #[test]
     fn indirect_targets_include_code_pointers_from_rodata_and_data_rel_ro() {
         let mut rodata = vec![0xa5]; // force the first pointer to be unaligned
         rodata.extend_from_slice(&0x1004u64.to_le_bytes());
         rodata.extend_from_slice(&0xfeed_face_cafe_beefu64.to_le_bytes());
-        let data_rel_ro = 0x1008u64.to_le_bytes();
-        let elf_bytes = build_x86_64_pointer_sections_fixture(0x1000, &rodata, &data_rel_ro, &[]);
+        let elf_bytes = build_elf(
+            Class::ELF64,
+            elf::abi::ET_EXEC,
+            vec![
+                text_section(TEXT_VADDR),
+                Section::new(".rodata", elf::abi::SHT_PROGBITS, rodata)
+                    .flags(elf::abi::SHF_ALLOC)
+                    .addr(0x2000),
+                Section::new(
+                    ".data.rel.ro",
+                    elf::abi::SHT_PROGBITS,
+                    0x1008u64.to_le_bytes().to_vec(),
+                )
+                .flags(elf::abi::SHF_ALLOC | elf::abi::SHF_WRITE)
+                .addr(0x3000),
+            ],
+        );
 
         let targets = indirect_control_flow_targets(&elf_bytes)
             .expect("valid pointer sections should be analyzed");
 
-        assert!(
-            targets.contains(&0x1004),
-            "unaligned .rodata code pointer must be excluded"
+        assert_eq!(
+            targets,
+            HashSet::from([0x1004, 0x1008]),
+            "code pointers are excluded at any alignment, other data is ignored"
         );
-        assert!(
-            targets.contains(&0x1008),
-            ".data.rel.ro code pointer must be excluded"
+    }
+
+    #[test]
+    fn indirect_targets_ignore_pointer_sections_too_short_to_hold_a_pointer() {
+        let elf_bytes = build_elf(
+            Class::ELF64,
+            elf::abi::ET_EXEC,
+            vec![
+                text_section(TEXT_VADDR),
+                Section::new(
+                    ".rodata",
+                    elf::abi::SHT_PROGBITS,
+                    0x1004u32.to_le_bytes().to_vec(),
+                )
+                .flags(elf::abi::SHF_ALLOC)
+                .addr(0x2000),
+            ],
         );
-        assert_eq!(targets.len(), 2, "non-code data values must be ignored");
+
+        let targets = indirect_control_flow_targets(&elf_bytes)
+            .expect("a short pointer section should be analyzed");
+
+        assert!(
+            targets.is_empty(),
+            "four bytes cannot hold a 64-bit code pointer"
+        );
     }
 
     #[test]
     fn indirect_targets_include_compact_relr_direct_and_bitmap_addresses() {
-        let mut relr = Vec::new();
-        relr.extend_from_slice(&0x1000u64.to_le_bytes()); // direct relocation
-        relr.extend_from_slice(&3u64.to_le_bytes()); // bitmap bit 1 -> 0x1008
-        let elf_bytes = build_x86_64_pointer_sections_fixture(0x1000, &[], &[], &relr);
+        let elf_bytes = build_elf(
+            Class::ELF64,
+            elf::abi::ET_EXEC,
+            vec![
+                text_section(TEXT_VADDR),
+                relr_section(relr_entries(&[
+                    0x1000, // direct relocation
+                    3,      // bitmap bit 0 -> 0x1008
+                ])),
+            ],
+        );
 
         let targets = indirect_control_flow_targets(&elf_bytes)
             .expect("valid RELR metadata should be analyzed");
 
-        assert!(targets.contains(&0x1000), "direct RELR address is named");
-        assert!(targets.contains(&0x1008), "RELR bitmap address is named");
+        assert_eq!(
+            targets,
+            HashSet::from([0x1000, 0x1008]),
+            "RELR names its direct entry and every address its bitmap sets"
+        );
+    }
+
+    #[test]
+    fn indirect_targets_read_elf32_pointers_and_relr_entries() {
+        let mut rodata = 0x1004u32.to_le_bytes().to_vec();
+        rodata.extend_from_slice(&0xdead_beefu32.to_le_bytes());
+        let relr: Vec<u8> = [0x1000u32, 3]
+            .iter()
+            .flat_map(|entry| entry.to_le_bytes())
+            .collect();
+        let elf_bytes = build_elf(
+            Class::ELF32,
+            elf::abi::ET_EXEC,
+            vec![
+                text_section(TEXT_VADDR),
+                Section::new(".rodata", elf::abi::SHT_PROGBITS, rodata)
+                    .flags(elf::abi::SHF_ALLOC)
+                    .addr(0x2000),
+                Section::new(".relr.dyn", SHT_RELR, relr)
+                    .flags(elf::abi::SHF_ALLOC)
+                    .entsize(4),
+            ],
+        );
+
+        let targets =
+            indirect_control_flow_targets(&elf_bytes).expect("32-bit metadata should be analyzed");
+
+        assert_eq!(
+            targets,
+            HashSet::from([0x1000, 0x1004]),
+            "32-bit pointers and RELR entries are four bytes wide"
+        );
+    }
+
+    #[test]
+    fn analysis_rejects_every_compressed_section_it_must_read() {
+        let cases = [
+            (
+                "compressed REL",
+                vec![
+                    text_section(TEXT_VADDR),
+                    Section::new(
+                        ".rel.text",
+                        elf::abi::SHT_REL,
+                        compressed_payload(CHDR_SIZE + 8),
+                    )
+                    .flags(elf::abi::SHF_COMPRESSED)
+                    .entsize(16)
+                    .info(1),
+                ],
+                "compressed relocation section 2 cannot be analyzed",
+            ),
+            (
+                "compressed RELA",
+                vec![
+                    text_section(TEXT_VADDR),
+                    Section::new(
+                        ".rela.text",
+                        elf::abi::SHT_RELA,
+                        compressed_payload(CHDR_SIZE + 24),
+                    )
+                    .flags(elf::abi::SHF_COMPRESSED)
+                    .entsize(24)
+                    .info(1),
+                ],
+                "compressed relocation section 2 cannot be analyzed",
+            ),
+            (
+                "compressed RELR",
+                vec![
+                    text_section(TEXT_VADDR),
+                    Section::new(".relr.dyn", SHT_RELR, compressed_payload(CHDR_SIZE + 8))
+                        .flags(elf::abi::SHF_COMPRESSED)
+                        .entsize(8),
+                ],
+                "compressed RELR section 2 cannot be analyzed",
+            ),
+            (
+                "compressed symbol table",
+                vec![
+                    text_section(TEXT_VADDR),
+                    Section::new(".rela.text", elf::abi::SHT_RELA, rela_entry(0x1004, 1, 0))
+                        .entsize(24)
+                        .link(3)
+                        .info(1),
+                    Section::new(
+                        ".symtab",
+                        elf::abi::SHT_SYMTAB,
+                        compressed_payload(CHDR_SIZE + 24),
+                    )
+                    .flags(elf::abi::SHF_COMPRESSED)
+                    .entsize(24),
+                ],
+                "compressed symbol table section 3 cannot be analyzed",
+            ),
+            (
+                "compressed pointer section",
+                vec![
+                    text_section(TEXT_VADDR),
+                    Section::new(
+                        ".rodata",
+                        elf::abi::SHT_PROGBITS,
+                        compressed_payload(CHDR_SIZE + 8),
+                    )
+                    .flags(elf::abi::SHF_ALLOC | elf::abi::SHF_COMPRESSED)
+                    .addr(0x2000),
+                ],
+                "compressed pointer section '.rodata' cannot be analyzed",
+            ),
+        ];
+
+        for (case, sections, expectation) in cases {
+            let elf_bytes = build_elf(Class::ELF64, elf::abi::ET_EXEC, sections);
+            expect_rejection(&elf_bytes, case, expectation);
+        }
+    }
+
+    #[test]
+    fn analysis_rejects_malformed_relocation_tables() {
+        let cases = [
+            (
+                "RELA size that is not a whole number of entries",
+                elf::abi::ET_EXEC,
+                vec![
+                    text_section(TEXT_VADDR),
+                    Section::new(".rela.text", elf::abi::SHT_RELA, vec![0u8; 25])
+                        .entsize(24)
+                        .info(1),
+                ],
+                "size 25 is not a multiple of entry size 24",
+            ),
+            (
+                "relocation applied to a section that does not exist",
+                elf::abi::ET_REL,
+                vec![
+                    text_section(TEXT_VADDR),
+                    Section::new(".rel.text", elf::abi::SHT_REL, rel_entry(4, 0))
+                        .entsize(16)
+                        .info(99),
+                ],
+                "relocation target section 99 is invalid",
+            ),
+            (
+                "RELR entry size that does not match the ELF class",
+                elf::abi::ET_EXEC,
+                vec![
+                    text_section(TEXT_VADDR),
+                    relr_section(relr_entries(&[0x1000])).entsize(4),
+                ],
+                "RELR section 2 has entry size 4, expected 8",
+            ),
+            (
+                "RELR size that is not a whole number of entries",
+                elf::abi::ET_EXEC,
+                vec![text_section(TEXT_VADDR), relr_section(vec![0u8; 12])],
+                "RELR section 2 size 12 is not a multiple of entry size 8",
+            ),
+            (
+                "RELR table that opens with a bitmap",
+                elf::abi::ET_EXEC,
+                vec![text_section(TEXT_VADDR), relr_section(relr_entries(&[1]))],
+                "RELR section 2 begins with a bitmap entry",
+            ),
+        ];
+
+        for (case, e_type, sections, expectation) in cases {
+            let elf_bytes = build_elf(Class::ELF64, e_type, sections);
+            expect_rejection(&elf_bytes, case, expectation);
+        }
+    }
+
+    #[test]
+    fn analysis_rejects_unusable_symbol_tables() {
+        let relocation = || {
+            Section::new(".rela.text", elf::abi::SHT_RELA, rela_entry(4, 1, 0))
+                .entsize(24)
+                .link(3)
+                .info(1)
+        };
+        let cases = [
+            (
+                "relocation linked to a section that does not exist",
+                elf::abi::ET_EXEC,
+                vec![
+                    text_section(TEXT_VADDR),
+                    relocation().link(99),
+                    symtab_section(1, 0x1008),
+                ],
+                "relocation-linked symbol table 99 is invalid",
+            ),
+            (
+                "relocation linked to something other than a symbol table",
+                elf::abi::ET_EXEC,
+                vec![
+                    text_section(TEXT_VADDR),
+                    relocation().link(1),
+                    symtab_section(1, 0x1008),
+                ],
+                "links to section 1 of type 1, not a symbol table",
+            ),
+            (
+                "symbol in a reserved section of a relocatable object",
+                elf::abi::ET_REL,
+                vec![
+                    text_section(TEXT_VADDR),
+                    relocation(),
+                    symtab_section(elf::abi::SHN_LORESERVE, 0x1008),
+                ],
+                "unsupported reserved section index 0xff00",
+            ),
+            (
+                "symbol defined by a section that does not exist",
+                elf::abi::ET_REL,
+                vec![
+                    text_section(TEXT_VADDR),
+                    relocation(),
+                    symtab_section(99, 0x1008),
+                ],
+                "defining section 99 is invalid",
+            ),
+        ];
+
+        for (case, e_type, sections, expectation) in cases {
+            let elf_bytes = build_elf(Class::ELF64, e_type, sections);
+            expect_rejection(&elf_bytes, case, expectation);
+        }
+    }
+
+    #[test]
+    fn analysis_rejects_addresses_that_overflow() {
+        let cases = [
+            (
+                "executable section running past the address space",
+                elf::abi::ET_EXEC,
+                vec![text_section(u64::MAX)],
+                "executable section range overflows",
+            ),
+            (
+                "section-relative site past the address space",
+                elf::abi::ET_REL,
+                vec![
+                    text_section(HIGH_TEXT_VADDR),
+                    Section::new(".rel.text", elf::abi::SHT_REL, rel_entry(0x200, 0))
+                        .entsize(16)
+                        .link(3)
+                        .info(1),
+                    symtab_section(1, 0),
+                ],
+                "section-relative relocation offset overflows",
+            ),
+            (
+                "section-relative symbol past the address space",
+                elf::abi::ET_REL,
+                vec![
+                    text_section(HIGH_TEXT_VADDR),
+                    Section::new(".rel.text", elf::abi::SHT_REL, rel_entry(4, 1))
+                        .entsize(16)
+                        .link(3)
+                        .info(1),
+                    symtab_section(1, 0x200),
+                ],
+                "section-relative symbol value overflows",
+            ),
+            (
+                "symbol-plus-addend past the address space",
+                elf::abi::ET_EXEC,
+                vec![
+                    text_section(HIGH_TEXT_VADDR),
+                    Section::new(
+                        ".rela.text",
+                        elf::abi::SHT_RELA,
+                        rela_entry(HIGH_TEXT_VADDR, 1, i64::MAX),
+                    )
+                    .entsize(24)
+                    .link(3)
+                    .info(1),
+                    symtab_section(1, HIGH_TEXT_VADDR),
+                ],
+                "relocation symbol-plus-addend overflows",
+            ),
+            (
+                "RELR bitmap address past the address space",
+                elf::abi::ET_EXEC,
+                vec![
+                    text_section(TEXT_VADDR),
+                    relr_section(relr_entries(&[u64::MAX - 0xf, 5])),
+                ],
+                "RELR bitmap address overflows",
+            ),
+            (
+                "RELR bitmap window past the address space",
+                elf::abi::ET_EXEC,
+                vec![
+                    text_section(TEXT_VADDR),
+                    relr_section(relr_entries(&[u64::MAX - 0x107, 3])),
+                ],
+                "RELR bitmap base overflows",
+            ),
+        ];
+
+        for (case, e_type, sections, expectation) in cases {
+            let elf_bytes = build_elf(Class::ELF64, e_type, sections);
+            expect_rejection(&elf_bytes, case, expectation);
+        }
     }
 }
