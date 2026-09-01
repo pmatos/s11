@@ -22,6 +22,14 @@ use crate::search::config::MutationWeights;
 use rand::RngExt;
 
 const ADDRESS_OFFSET_POOL: [i64; 8] = [0, 8, 16, 24, 32, 64, -8, -256];
+// These are compact, curated heuristic samples rather than exhaustive sets of
+// encodable logical immediates. `random_logical_immediate` samples each pool
+// uniformly, so every addition retunes the proposal probabilities. The pools
+// represent useful shapes such as low single bits, contiguous low/high runs,
+// boundary bits, and repeating patterns, but W32 and X64 deliberately need not
+// contain width-scaled counterparts. Additions should be motivated by search
+// workloads while preserving the tested invariants: values are unique,
+// nonzero, not all ones, and encodable at the pool's register width.
 const LOGICAL_IMM32_POOL: &[i64] = &[
     0x1,
     0x2,
@@ -44,6 +52,9 @@ const LOGICAL_IMM64_POOL: &[i64] = &[
     0xffff_ffff,
     0x5555_5555_5555_5555,
     0xaaaa_aaaa_aaaa_aaaa_u64 as i64,
+    // Nibble alternation; W32 has no 0xf0f0_f0f0 counterpart because it
+    // already covers the bit-alternation pattern class via
+    // 0x5555_5555/0xaaaa_aaaa (see the pool-level comment above).
     0xf0f0_f0f0_f0f0_f0f0_u64 as i64,
     0x8000_0000_0000_0000_u64 as i64,
     -256, // i64 -256 = 0xFFFF_FFFF_FFFF_FF00 as X64: a 56-bit high run, a valid logical bitmask immediate
