@@ -12,7 +12,7 @@ candidates were re-verified against the current tree and re-ranked. The two
 top-scoring candidates' modules are unchanged since scoring, so the pick is
 stable.
 
-**Picked**: `llm-search-stats-accumulator` — see PR (linked from the backlog) and `.architecture/backlog.md`.
+**Picked**: `llm-search-stats-accumulator` — see [PR #812](https://github.com/pmatos/s11/pull/812) and `.architecture/backlog.md`.
 
 **Degradations**: Backlog memory recovered from the unmerged branch
 `pm-deepen/run-2026-09-01-0107` rather than `origin/main`, because PR #800 merged
@@ -35,7 +35,7 @@ inside the implementation, behind the seam.
   - **Heat 5** — `src/search/llm/` is among the hottest areas: #793, #794, #797, #798 all landed recently.
 - **Problem**: `LlmSearch::search` is a **shallow orchestrator wrapped around a deep accounting responsibility that has no interface of its own**. Three accumulators — `SearchStatistics`, `LlmTimings`, `UnsupportedMnemonicLedger` — are mutated inline at eight+ sites across the loop, each governed by a subtle rule: `codex_calls` counts every attempt but `candidates_evaluated` only counts a Codex `Ok`; the SMT counters (`smt_calls`, `smt_queries`, `smt_formula_bytes_total/_max`) are driven by the *metrics* event, not the *outcome* event, so an `EquivUnknown` with `smt_called: true` still bumps `smt_calls` while contributing zero formula bytes; `Success` alone touches four counters at once. None of this is unit-testable — the tests in `mod.rs` prove it, every one routing through `FakeCodex`.
 - **Deletion test**: delete the seam and the counting logic doesn't vanish — it floods back into the search loop exactly as it is today. Complexity **concentrates** in the seam rather than moving to callers. Passes.
-- **Solution**: introduce `LlmRunAccounting`, a struct owning the three accumulators, constructed with the target length and fed one method call per loop event: `record_codex_attempt(elapsed)`, `record_codex_success()`, `record_verification(&EquivalenceMetrics, elapsed)`, `record_outcome(&IterationOutcome)`, and `finish(elapsed) -> (SearchStatistics, UnsupportedMnemonicLedger, LlmTimings)`. The search loop keeps the control flow and delegates all counting; the rules become assertable by constructing the struct and feeding synthetic events.
+- **Solution** (sketch — the `## Design` section below is authoritative): introduce a struct owning the three accumulators, constructed with the target length and fed one call per loop event, then drained once at the end. The search loop keeps the control flow and delegates all counting; the rules become assertable by constructing the struct and feeding synthetic events. *As implemented*, the design pass chose the minimal-surface shape: `RunAccounting::new(target_len)`, a single `record(RunEvent)` (with `RunEvent::{Codex, Candidate}`), and `finish(elapsed) -> RunTotals` — not the event-per-method (`record_codex_attempt`/`record_outcome`/…) variant sketched here.
 - **Benefits**: **Leverage** — the FakeCodex subprocess dance is no longer the only way to assert a counting rule; new rules get cheap, exhaustive, cross-platform tests. **Locality** — one file owns the counting; the search loop reads as control flow, not bookkeeping. **Test surface** — the interface *is* the test surface: every counter transition is exercised directly through `record_*`, including the two rules the loop encodes non-obviously (metrics-vs-outcome SMT counting; Codex-error-counts-call-but-not-evaluation).
 - **Before / After**
 
@@ -50,7 +50,7 @@ graph LR
 
 ```mermaid
 graph LR
-  L[LlmSearch::search loop] --> A[LlmRunAccounting]
+  L[LlmSearch::search loop] -->|RunEvent| A[RunAccounting seam]
   A -.-> S[stats]
   A -.-> T[timings]
   A -.-> G[ledger]

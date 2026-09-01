@@ -16,12 +16,13 @@ Persisted candidate memory for the `pm-deepen` refactor-audit routine. Statuses:
 
 ## llm-search-stats-accumulator
 
-- **Status**: proposed
+- **Status**: in-flight
 - **Score**: 22/25 (leverage 4, locality 4, blast radius 1, heat 5)
-- **Files**: ~2 estimated
-- **Modules**: `src/search/llm/mod.rs:95` (`LlmSearch::search`), `src/search/llm/outcome.rs:37` (`classify`)
-- **Summary**: Pull the LLM search-run accounting (stats/timings/ledger updates) out of the `LlmSearch::search` loop into a tested `LlmRunAccounting` seam, so the subtle counting rules are unit-pinnable instead of reachable only through `FakeCodex` end-to-end runs.
+- **Files**: 2 (`src/search/llm/accounting.rs` new, `src/search/llm/mod.rs` edited)
+- **Modules**: `src/search/llm/accounting.rs` (new seam), `src/search/llm/mod.rs:95` (`LlmSearch::search`)
+- **Summary**: Pull the LLM search-run accounting (stats/timings/ledger updates) out of the `LlmSearch::search` loop into a tested `RunAccounting` seam fed one `RunEvent` per loop event, so the subtle counting rules are unit-pinnable instead of reachable only through `FakeCodex` end-to-end runs. (The design pass chose the minimal-surface `RunAccounting::record(RunEvent)` shape over the event-per-method sketch first proposed.)
 - **First seen**: 2026-09-01
+- **PR**: #812 (opened 2026-09-02)
 - **Reason**: — (pick, run 2026-09-02; PR #800 now landed so the one-architecture-PR-at-a-time block from the prior firing is cleared)
 
 ## opt-window-report-seam
@@ -106,11 +107,11 @@ Persisted candidate memory for the `pm-deepen` refactor-audit routine. Statuses:
 - **Evidence**: `gh pr view 800` → state OPEN, mergedAt null, isDraft false, mergeable MERGEABLE, created 2026-08-26; branch `sym/s11/routine/refactor-audit/01M104XQDM`, title "refactor(auto): extract Capstone detail inspection into a pure tested seam".
 - **Next**: A human merges (or closes) PR #800. The next firing then reconciles this backlog against `origin/main`, moves `auto-capstone-detail-seam` to `landed` (or `rejected`), and implements the top surviving candidate — currently `llm-search-stats-accumulator` (runner-up `opt-window-report-seam`, tied).
 
-### Run 2026-09-02 — implementing llm-search-stats-accumulator
+### Run 2026-09-02 — complete (llm-search-stats-accumulator)
 
-- **Outcome**: in-progress → see PR (below) once opened
-- **Stopped at**: n/a — full default run
+- **Outcome**: complete
+- **Stopped at**: n/a — full default run through PR
 - **Branch**: `pm-deepen/llm-search-stats-accumulator` — created from `origin/main` (adoption of the firing branch `sym/s11/routine/refactor-audit/01M1FK9QZX` refused: condition 3 failed — it had an upstream set to `origin/main`), then renamed from `pm-deepen/run-2026-09-02-0102` to the slug at step 2.
-- **Committed**: this backlog and `.architecture/reviews/2026-09-02-llm-search-stats-accumulator.md`; the accounting-seam implementation follows.
-- **Evidence**: PR #800 reconciled to `landed`; no open architecture PRs, so the one-at-a-time block is clear. Backlog recovered from unmerged branch `pm-deepen/run-2026-09-01-0107`.
-- **Next**: implement the `LlmRunAccounting` seam test-first, open the PR, flip this entry to `in-flight` with the PR number.
+- **Committed**: `899a7b3` (report + recovered backlog), `4a65681` (design adjudication), `1cf051b` (accounting seam + CONTEXT.md term), and this commit (in-flight backlog + PR link).
+- **Evidence**: PR #800 reconciled to `landed`; no open architecture PRs at start, so the one-at-a-time block was clear. Backlog recovered from unmerged branch `pm-deepen/run-2026-09-01-0107`. Quality gate green: `cargo fmt --check`, `cargo build`, `cargo test --lib` (1763 passed), `cargo test --bins` (107 passed), all test binaries compile via `cargo test --no-run`, `cargo clippy` (no warnings on changed code), repo CI-policy checks (50 passed). PR #812.
+- **Next**: a human reviews and merges PR #812. The next firing reconciles this entry to `landed` and picks the runner-up `opt-window-report-seam` (tied 22/25).
