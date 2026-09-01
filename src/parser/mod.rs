@@ -4461,7 +4461,7 @@ mod tests {
     }
 
     #[test]
-    fn parse_memory_shift_negative_errors_are_intrinsic_not_width_specific() {
+    fn parse_memory_register_extend_and_lsl_reject_negative_shift_without_width_wording() {
         let extend_err = parse_line("ldrb w0, [x1, w2, uxtw #-1]")
             .expect_err("negative memory extend shift should be rejected");
         assert_eq!(extend_err.to_string(), "memory extend shift -1 is negative");
