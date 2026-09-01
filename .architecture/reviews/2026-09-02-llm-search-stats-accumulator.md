@@ -131,4 +131,75 @@ The prior firing (2026-09-01) already selected this same candidate but could not
 
 ## Design
 
-Filled in at step 4 (design-it-twice + adjudication).
+Three interfaces were produced by parallel design agents (design-it-twice), then
+adjudicated by a separate agent that authored none of them, against the fixed
+criteria in priority order: depth, locality, seam placement, test surface, blast
+radius.
+
+All three agreed on the seam boundary: a new `src/search/llm/accounting.rs` that
+owns the three accumulators; `LlmTimings` moves there and is re-exported from
+`mod.rs` (`pub use`) so `crate::search::llm::LlmTimings` stays valid and
+`report.rs`/`main.rs` are untouched; the 10 `FakeCodex` `#[cfg(unix)]` tests stay
+as the protocol oracle; and `SearchStatistics::record_verification` is **not**
+reused (it folds `smt_elapsed` and bumps `candidates_passed_fast` on a different
+condition, which would break the counts bit-for-bit).
+
+### Design A — minimal surface (WINNER)
+
+`RunAccounting` with `new(target_len)`, one `record(RunEvent)` method, and
+`finish(elapsed) -> RunTotals`. `RunEvent` is a two-variant enum:
+`Codex { elapsed, produced: bool }` and
+`Candidate { outcome: &IterationOutcome, metrics: Option<&EquivalenceMetrics>, elapsed }`.
+All branching (Ok/Err, metrics-present, the five-way outcome, the SMT
+bytes total/max) lives inside `record`. The caller emits two events per
+iteration and keeps its own control flow, `Instant`, and verbose logging.
+
+### Design B — event-per-method (loser)
+
+Six methods (`begin`, `record_codex_attempt`, `record_codex_success`,
+`record_verification(Option<&metrics>, elapsed)`, `record_outcome(&outcome)`,
+`finish`), each mapping ~1:1 to one counting rule. Lost on **depth**: near-zero
+leverage — each method is a thin setter, so the inline code is merely relocated
+behind five call sites, and the orchestration (which method, in what order) stays
+in the loop.
+
+### Design C — common-caller / closure-wrapping (runner-up design)
+
+`RunAccounting` owns the accumulators *and* the run clock; `record_codex(closure)`
+and `record_verification(closure)` wrap the real operations so the seam captures
+timing itself, and `finish() -> RunTotals`. Hides the most behaviour, but lost on
+**seam placement** (criterion 3, the decisive one): it manufactures a
+*hypothetical* seam — a generic error type `E` with exactly one production
+instantiation (`CodexError`) — and *leaks* the run clock via `started()`, which
+the loop still needs for `remaining_until`/timeout math. Its headline advantage
+(closures make timing impossible to order wrongly) targets wall-clock timing, which is
+outside the goal: the subtle, currently-untestable rules are the discrete
+*counters*, which Design A localizes just as completely with a smaller, tighter
+surface and a smaller diff.
+
+### Verdict
+
+**Winner: Design A**, with one adjustment folded in from Design C: `finish`
+returns a named `RunTotals { stats, ledger, timings }` struct rather than a bare
+tuple, removing positional-destructuring risk at the single call site at zero
+extra blast radius. Design C's clock ownership is explicitly **not** folded in —
+`new(target_len)` seeds the accumulators and `finish(elapsed)` accepts the
+caller-measured span, so the `Instant` stays in the loop and C's `started()` leak
+never materializes.
+
+**Runner-up design: Design C.** Decisive criterion: seam placement — A puts the
+seam at the real per-iteration data boundary (the `RunEvent` value is built
+identically by the production loop and by the unit tests, two authentic
+adapters), whereas C adds abstraction without a corresponding variation point.
+
+### Watch-items carried into implementation
+
+- `candidates_evaluated` rides on `Codex { produced: true }` only — not on `Err`,
+  and not on the timeout-break-before-codex path (no event emitted there). This
+  keeps the zero-solver-budget case at `candidates_evaluated = 1, verifications = 0`.
+- SMT counters (`smt_calls`, `smt_queries`, formula bytes) are driven by
+  `metrics.smt_called`, independent of the outcome variant.
+- `RunEvent::Candidate` borrows the outcome (`&IterationOutcome`), so the loop can
+  still move the owned `Success(seq)` into `found` after `record` returns.
+- The start-of-run `self.last_* = default()` reset stays in the caller; the seam
+  replaces only the local accumulators.
