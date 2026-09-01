@@ -22,6 +22,14 @@ use crate::search::config::MutationWeights;
 use rand::RngExt;
 
 const ADDRESS_OFFSET_POOL: [i64; 8] = [0, 8, 16, 24, 32, 64, -8, -256];
+// These are compact, curated heuristic samples rather than exhaustive sets of
+// encodable logical immediates. `random_logical_immediate` samples each pool
+// uniformly, so every addition retunes the proposal probabilities. The pools
+// represent useful shapes such as low single bits, contiguous low/high runs,
+// boundary bits, and repeating patterns, but W32 and X64 deliberately need not
+// contain width-scaled counterparts. Additions should be motivated by search
+// workloads while preserving the tested invariants: values are unique,
+// nonzero, not all ones, and encodable at the pool's register width.
 const LOGICAL_IMM32_POOL: &[i64] = &[
     0x1,
     0x2,
