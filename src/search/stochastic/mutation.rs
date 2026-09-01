@@ -52,7 +52,10 @@ const LOGICAL_IMM64_POOL: &[i64] = &[
     0xffff_ffff,
     0x5555_5555_5555_5555,
     0xaaaa_aaaa_aaaa_aaaa_u64 as i64,
-    0xf0f0_f0f0_f0f0_f0f0_u64 as i64,
+    0xf0f0_f0f0_f0f0_f0f0_u64 as i64, // nibble alternation; no 0xf0f0_f0f0 counterpart in
+    // LOGICAL_IMM32_POOL because W32 already samples bit alternation via
+    // 0x5555_5555/0xaaaa_aaaa, so a third repeating-pattern shape wasn't
+    // judged worth the extra proposal-probability dilution at 32-bit width.
     0x8000_0000_0000_0000_u64 as i64,
     -256, // i64 -256 = 0xFFFF_FFFF_FFFF_FF00 as X64: a 56-bit high run, a valid logical bitmask immediate
 ];
