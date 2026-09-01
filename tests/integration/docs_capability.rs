@@ -260,7 +260,10 @@ fn docs_capability_documents_pair_memory_addressing_restriction() {
         ),
         "docs/capability.md must document pair memory addressing restrictions"
     );
+}
 
+#[test]
+fn parser_rejects_pair_memory_register_index_addressing() {
     for (text, expected) in [
         ("ldp x0, x1, [x2, x3]", "register-offset"),
         ("stp x0, x1, [x2, w3, sxtw]", "register-extend"),
