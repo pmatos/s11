@@ -2835,6 +2835,7 @@ mod tests {
             }
         }
 
+        // TST selects rn or rm 50/50; the 30% shifted-register rate applies only to rm, so 50% × 30% = 15% overall.
         assert!(
             (2_400..=3_600).contains(&x64_shifted),
             "expected X64 TST shifted-register proposals in the 12%-18% band, got {x64_shifted}/{trials}"
