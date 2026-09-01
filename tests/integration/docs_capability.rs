@@ -263,7 +263,7 @@ fn docs_capability_documents_pair_memory_addressing_restriction() {
 }
 
 #[test]
-fn parser_rejects_pair_memory_register_index_addressing() {
+fn parser_rejects_pair_memory_register_offset_and_extend_addressing() {
     for (text, expected) in [
         ("ldp x0, x1, [x2, x3]", "register-offset"),
         ("stp x0, x1, [x2, w3, sxtw]", "register-extend"),
