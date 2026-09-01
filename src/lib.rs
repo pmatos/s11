@@ -5,6 +5,7 @@ pub mod bench_support;
 pub mod candidate_windows;
 pub mod capstone_bridge;
 pub mod capstone_bridge_x86;
+pub mod capstone_detail;
 pub mod disassembly;
 pub mod docs_support;
 pub mod elf_patcher;

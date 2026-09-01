@@ -19,6 +19,7 @@ use s11::candidate_windows::{
 };
 use s11::capstone_bridge::{ConvertOutcome, convert_capstone_op};
 use s11::capstone_bridge_x86::{convert_to_x86_ir, convert_x86_capstone_op_for_optimization};
+use s11::capstone_detail::{CapstoneInstructionFacts, inspect_capstone_instruction_detail};
 use s11::disassembly::{self, DisassembledInstruction};
 use s11::elf_patcher::{AddressWindow, DetectedArch, ElfPatcher, TextSection, parse_hex_address};
 use s11::ir::instructions::split_terminator;
@@ -1176,43 +1177,6 @@ fn find_candidate_windows_with_backend<B: ElfOptimizationBackend>(
     )
 }
 
-/// Owned facts reduced from one borrowed Capstone detail inspection.
-///
-/// Keeping only planning inputs lets the two finder phases share the result
-/// without extending `InsnDetail`'s borrow across section processing.
-#[derive(Debug)]
-struct CapstoneInstructionFacts {
-    direct_branch_targets: Vec<u64>,
-    is_call: bool,
-    has_rip_relative_memory: bool,
-}
-
-fn inspect_capstone_instruction_detail(
-    cs: &Capstone,
-    instruction: &capstone::Insn<'_>,
-    section_name: &str,
-) -> Result<CapstoneInstructionFacts, Box<dyn std::error::Error>> {
-    let detail = cs
-        .insn_detail(instruction)
-        .map_err(|error| instruction_detail_error(section_name, instruction.address(), error))?;
-    Ok(CapstoneInstructionFacts {
-        direct_branch_targets: capstone_detail_direct_branch_targets(&detail),
-        is_call: capstone_detail_is_call(&detail),
-        has_rip_relative_memory: capstone_detail_has_rip_relative_memory(&detail),
-    })
-}
-
-fn instruction_detail_error(
-    section_name: &str,
-    instruction_address: u64,
-    error: capstone::Error,
-) -> String {
-    format!(
-        "failed to inspect instruction detail in executable section '{}' at 0x{:x}: {}",
-        section_name, instruction_address, error
-    )
-}
-
 fn find_candidate_windows_with_detail_provider<B, F>(
     backend: &B,
     patcher: &ElfPatcher,
@@ -1418,78 +1382,6 @@ fn incomplete_executable_section_tail_log(
     format!(
         "Auto candidate discovery: executable section '{section_name}' has raw range 0x{raw_start:x}-0x{raw_end:x}; scanning complete {instruction_alignment}-byte-aligned instruction prefix 0x{raw_start:x}-0x{disassembly_end:x} and ignoring {trailing_bytes} trailing byte(s)."
     )
-}
-
-fn capstone_detail_is_call(detail: &capstone::InsnDetail<'_>) -> bool {
-    let call_group =
-        capstone::InsnGroupId(capstone::InsnGroupType::CS_GRP_CALL as capstone::InsnGroupIdInt);
-    detail.groups().contains(&call_group)
-}
-
-fn capstone_detail_has_rip_relative_memory(detail: &capstone::InsnDetail<'_>) -> bool {
-    let arch_detail = detail.arch_detail();
-    let Some(x86_detail) = arch_detail.x86() else {
-        return false;
-    };
-    let rip = capstone::RegId(capstone::arch::x86::X86Reg::X86_REG_RIP as capstone::RegIdInt);
-    x86_detail.operands().any(|operand| {
-        matches!(
-            operand.op_type,
-            capstone::arch::x86::X86OperandType::Mem(memory) if memory.base() == rip
-        )
-    })
-}
-
-/// Absolute target addresses named by a *direct* branch or call instruction, or
-/// an empty vector for non-branch instructions and indirect control transfers.
-///
-/// Capstone resolves a direct (PC-relative or absolute-immediate) branch/call
-/// target to an absolute address in an immediate operand, so the driver
-/// recovers the whole in-binary direct-target set by a linear scan
-/// (ADR-0009 Decision 4/5). Indirect control flow — register/memory jumps,
-/// jump tables, PLT stubs, computed gotos — carries no immediate here and is
-/// deliberately invisible; it is the separate soundness gate in issue #619.
-///
-/// The group filter accepts jumps, calls, and relative branches
-/// (`CS_GRP_BRANCH_RELATIVE`). The relative-branch group is load-bearing: x86
-/// `loop`/`loope`/`loopne` tag *only* as relative branches — Capstone never
-/// adds `CS_GRP_JUMP` to them (their instruction descriptor's `branch` flag is
-/// unset) — so filtering on jump/call alone would silently drop their targets
-/// and admit an unsound interior. Every immediate on such an instruction is
-/// collected. On x86 the sole immediate is the target; on AArch64 `tbz`/`tbnz`
-/// also expose a small bit-position immediate, which is harmlessly
-/// over-collected: an extra target can only cause an extra window split, never
-/// an unsound admit, and a 0..=63 bit index never coincides with a real
-/// in-section code address.
-fn capstone_detail_direct_branch_targets(detail: &capstone::InsnDetail<'_>) -> Vec<u64> {
-    let jump =
-        capstone::InsnGroupId(capstone::InsnGroupType::CS_GRP_JUMP as capstone::InsnGroupIdInt);
-    let branch_relative = capstone::InsnGroupId(
-        capstone::InsnGroupType::CS_GRP_BRANCH_RELATIVE as capstone::InsnGroupIdInt,
-    );
-    let groups = detail.groups();
-    if !groups.contains(&jump)
-        && !groups.contains(&branch_relative)
-        && !capstone_detail_is_call(detail)
-    {
-        return Vec::new();
-    }
-    detail
-        .arch_detail()
-        .operands()
-        .into_iter()
-        .filter_map(|operand| match operand {
-            capstone::arch::ArchOperand::X86Operand(op) => match op.op_type {
-                capstone::arch::x86::X86OperandType::Imm(value) => Some(value as u64),
-                _ => None,
-            },
-            capstone::arch::ArchOperand::Arm64Operand(op) => match op.op_type {
-                capstone::arch::arm64::Arm64OperandType::Imm(value) => Some(value as u64),
-                _ => None,
-            },
-            _ => None,
-        })
-        .collect()
 }
 
 struct ElfAutoOptimizationAdapter<'a, B> {
@@ -4223,17 +4115,6 @@ mod cli_helper_tests {
                 rm: Operand::Immediate(1),
             },
         ]);
-        let cs = aarch64_test_capstone();
-        let disassembly = cs
-            .disasm_all(&bytes, 0x1000)
-            .expect("fixture should disassemble");
-        let call = disassembly.get(1).expect("fixture should contain BL");
-        let detail = cs.insn_detail(call).expect("BL detail should be available");
-        assert!(
-            capstone_detail_is_call(&detail),
-            "call exclusion must use Capstone's semantic call group"
-        );
-
         let elf_bytes = build_minimal_elf64(&bytes, 0x1000, elf::abi::EM_AARCH64);
         let input = TempFile::new_bytes("s11-candidate-calls", "elf", &elf_bytes);
         let patcher = ElfPatcher::new(input.path()).expect("AArch64 ELF should parse");
@@ -4370,19 +4251,6 @@ mod cli_helper_tests {
 
     #[test]
     fn candidate_windows_exclude_x86_64_rip_relative_memory_operands() {
-        let cs = x86_64_test_capstone();
-        let rip_relative = cs
-            .disasm_all(&[0x48, 0x8d, 0x05, 0x00, 0x00, 0x00, 0x00], 0x1004)
-            .expect("RIP-relative LEA should disassemble");
-        let instruction = rip_relative.iter().next().expect("one LEA");
-        let detail = cs
-            .insn_detail(instruction)
-            .expect("LEA detail should be available");
-        assert!(
-            capstone_detail_has_rip_relative_memory(&detail),
-            "RIP-relative exclusion must inspect the typed memory-base operand"
-        );
-
         // add rax, 1; lea rax, [rip]; sub rbx, 1
         let bytes = [
             0x48, 0x83, 0xc0, 0x01, 0x48, 0x8d, 0x05, 0x00, 0x00, 0x00, 0x00, 0x48, 0x83, 0xeb,
@@ -4435,169 +4303,6 @@ mod cli_helper_tests {
         assert_eq!(sections[0].candidates[0].end, 0x1004);
         assert_eq!(sections[0].candidates[1].start, 0x1010);
         assert_eq!(sections[0].candidates[1].end, 0x1014);
-    }
-
-    #[test]
-    fn direct_branch_targets_extract_absolute_x86_targets_and_skip_indirect() {
-        let cs = x86_64_test_capstone();
-
-        // je 0x1006: 74 04 at 0x1000 (next_ip 0x1002 + rel8 0x04). Capstone must
-        // hand back the *absolute* target, not the relative displacement.
-        let je = cs
-            .disasm_all(&[0x74, 0x04], 0x1000)
-            .expect("je should disassemble");
-        let detail = cs
-            .insn_detail(je.iter().next().expect("one je"))
-            .expect("je detail should be available");
-        assert_eq!(capstone_detail_direct_branch_targets(&detail), vec![0x1006]);
-
-        // call 0x1005: e8 00 00 00 00 at 0x1000 (next_ip 0x1005 + rel32 0).
-        let call = cs
-            .disasm_all(&[0xe8, 0x00, 0x00, 0x00, 0x00], 0x1000)
-            .expect("call should disassemble");
-        let detail = cs
-            .insn_detail(call.iter().next().expect("one call"))
-            .expect("call detail should be available");
-        assert_eq!(capstone_detail_direct_branch_targets(&detail), vec![0x1005]);
-
-        // jmp rax: ff e0 — an indirect branch carries no immediate target here
-        // (that is issue #619's territory, not this slice's).
-        let indirect = cs
-            .disasm_all(&[0xff, 0xe0], 0x1000)
-            .expect("jmp rax should disassemble");
-        let detail = cs
-            .insn_detail(indirect.iter().next().expect("one jmp rax"))
-            .expect("jmp rax detail should be available");
-        assert!(
-            capstone_detail_direct_branch_targets(&detail).is_empty(),
-            "indirect branches expose no direct target"
-        );
-
-        // add rax, 1: 48 83 c0 01 — the group filter must reject a plain
-        // arithmetic immediate so ordinary constants never become targets.
-        let add = cs
-            .disasm_all(&[0x48, 0x83, 0xc0, 0x01], 0x1000)
-            .expect("add should disassemble");
-        let detail = cs
-            .insn_detail(add.iter().next().expect("one add"))
-            .expect("add detail should be available");
-        assert!(
-            capstone_detail_direct_branch_targets(&detail).is_empty(),
-            "non-branch immediate operands must not be collected as targets"
-        );
-    }
-
-    #[test]
-    fn direct_branch_targets_include_relative_only_loop_family() {
-        // x86 `loop`/`loope`/`loopne` are tagged ONLY with CS_GRP_BRANCH_RELATIVE
-        // — Capstone never adds CS_GRP_JUMP to them — so a jump/call-only filter
-        // would drop their targets and admit an unsound interior. Each encodes a
-        // rel8 of 0xfe (-2): at 0x1000 the next IP is 0x1002, so the target is
-        // 0x1000. `jecxz` (0xe3), by contrast, does get CS_GRP_JUMP and is
-        // covered by the general path — pinned here so the two stay distinct.
-        let cs = x86_64_test_capstone();
-        for (label, opcode) in [("loop", 0xe2u8), ("loope", 0xe1), ("loopne", 0xe0)] {
-            let disasm = cs
-                .disasm_all(&[opcode, 0xfe], 0x1000)
-                .unwrap_or_else(|_| panic!("{label} should disassemble"));
-            let detail = cs
-                .insn_detail(
-                    disasm
-                        .iter()
-                        .next()
-                        .unwrap_or_else(|| panic!("one {label}")),
-                )
-                .unwrap_or_else(|_| panic!("{label} detail should be available"));
-            assert_eq!(
-                capstone_detail_direct_branch_targets(&detail),
-                vec![0x1000],
-                "{label} is a relative-only branch whose target must be collected"
-            );
-        }
-
-        // jecxz: 67 e3 fb — assert only that it is caught (it carries
-        // CS_GRP_JUMP), not its exact target; the point is the general jump path
-        // already covers it, unlike the loop family above.
-        let jecxz = cs
-            .disasm_all(&[0x67, 0xe3, 0xfb], 0x1000)
-            .expect("jecxz should disassemble");
-        let detail = cs
-            .insn_detail(jecxz.iter().next().expect("one jecxz"))
-            .expect("jecxz detail should be available");
-        assert!(
-            !capstone_detail_direct_branch_targets(&detail).is_empty(),
-            "jecxz carries CS_GRP_JUMP and its target must still be collected"
-        );
-    }
-
-    #[test]
-    fn direct_branch_targets_extract_absolute_aarch64_targets() {
-        let cs = aarch64_test_capstone();
-        // cbz x0, 0x1000 assembled at 0x1004 resolves to the absolute 0x1000.
-        let bytes = assemble_aarch64_test_bytes(&[
-            Instruction::Add {
-                rd: Register::X0,
-                rn: Register::X0,
-                rm: Operand::Immediate(1),
-            },
-            Instruction::Cbz {
-                rn: Register::X0,
-                target: s11::ir::LabelId(0x1000),
-            },
-        ]);
-        let disassembly = cs
-            .disasm_all(&bytes, 0x1000)
-            .expect("fixture should disassemble");
-        let cbz = disassembly.get(1).expect("fixture should contain CBZ");
-        let detail = cs.insn_detail(cbz).expect("CBZ detail should be available");
-        assert_eq!(
-            capstone_detail_direct_branch_targets(&detail),
-            vec![0x1000],
-            "the register operand is skipped and the branch target resolves absolute"
-        );
-    }
-
-    #[test]
-    fn direct_branch_targets_overcollect_aarch64_tbz_tbnz_bit_positions() {
-        let cs = aarch64_test_capstone();
-        for (mnemonic, instruction, bit) in [
-            (
-                "tbz",
-                Instruction::Tbz {
-                    rt: Register::X0,
-                    bit: 5,
-                    target: s11::ir::LabelId(0x1100),
-                },
-                5,
-            ),
-            (
-                "tbnz",
-                Instruction::Tbnz {
-                    rt: Register::X0,
-                    bit: 40,
-                    target: s11::ir::LabelId(0x1100),
-                },
-                40,
-            ),
-        ] {
-            let bytes = assemble_aarch64_test_bytes(&[instruction]);
-            let disassembly = cs
-                .disasm_all(&bytes, 0x1000)
-                .unwrap_or_else(|_| panic!("{mnemonic} fixture should disassemble"));
-            let instruction = disassembly
-                .iter()
-                .next()
-                .unwrap_or_else(|| panic!("fixture should contain {mnemonic}"));
-            let detail = cs
-                .insn_detail(instruction)
-                .unwrap_or_else(|_| panic!("{mnemonic} detail should be available"));
-
-            assert_eq!(
-                capstone_detail_direct_branch_targets(&detail),
-                vec![bit, 0x1100],
-                "{mnemonic} bit position and absolute branch target must both be collected"
-            );
-        }
     }
 
     #[test]
