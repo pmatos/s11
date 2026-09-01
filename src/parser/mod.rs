@@ -1159,6 +1159,9 @@ fn parse_memory_extend_tail(
         None => 0,
         Some(imm_tok) => parse_immediate(imm_tok)?,
     };
+    if shift < 0 {
+        return Err(format!("memory extend shift {} is negative", shift));
+    }
     let scaled_shift = width.scale_shift();
 
     if shift == 0 || shift == i64::from(scaled_shift) {
@@ -4455,6 +4458,17 @@ mod tests {
                 "{text}: error should mention {expected}, got {msg}"
             );
         }
+    }
+
+    #[test]
+    fn parse_memory_register_extend_and_lsl_reject_negative_shift_without_width_wording() {
+        let extend_err = parse_line("ldrb w0, [x1, w2, uxtw #-1]")
+            .expect_err("negative memory extend shift should be rejected");
+        assert_eq!(extend_err.to_string(), "memory extend shift -1 is negative");
+
+        let lsl_err = parse_line("ldr x0, [x1, x2, lsl #-1]")
+            .expect_err("negative memory LSL amount should be rejected");
+        assert_eq!(lsl_err.to_string(), "LSL amount -1 out of range");
     }
 
     #[test]
