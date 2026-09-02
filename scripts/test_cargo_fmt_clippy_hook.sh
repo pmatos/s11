@@ -52,7 +52,7 @@ cat > "$project_dir/Cargo.toml" << 'EOF'
 name = "stub"
 edition = "2021"
 EOF
-touch "$project_dir/main.rs"
+touch "$project_dir/main.rs" "$project_dir/notes.txt"
 
 run_hook() {
   local file_path=$1
@@ -79,7 +79,9 @@ assert_contains() {
   fi
 }
 
-# Non-.rs files are ignored before any command runs.
+# Non-.rs files are ignored before any command runs. notes.txt must exist
+# (created above) so this exercises the extension filter itself, not the
+# separate existence guard the missing-.rs test below already covers.
 status=$(FAKE_RUSTFMT_EXIT=1 run_hook "$project_dir/notes.txt")
 assert_eq "0" "$status" "non-.rs file should exit 0"
 assert_eq "" "$(cat "$workdir/stdout")" "non-.rs file should produce no stdout"
@@ -106,6 +108,13 @@ assert_contains "$workdir/stderr" "warning: something" "clippy warning missing f
 status=$(FAKE_RUSTFMT_EXIT=1 FAKE_RUSTFMT_OUTPUT="fmt error marker" run_hook "$project_dir/main.rs")
 assert_eq "2" "$status" "rustfmt failure should exit 2"
 assert_contains "$workdir/stderr" "fmt error marker" "rustfmt failure marker missing from stderr"
+
+# A failure report that happens to be exactly "-n" must still surface: echo
+# "$var" treats a value that exactly matches an option string (-n, -e, -E)
+# as that option instead of printing it, silently swallowing the report.
+status=$(FAKE_RUSTFMT_EXIT=1 FAKE_RUSTFMT_OUTPUT="-n" run_hook "$project_dir/main.rs")
+assert_eq "2" "$status" "a -n-shaped failure report should still exit 2"
+assert_contains "$workdir/stderr" "-n" "a -n-shaped failure report was swallowed by echo's option parsing"
 
 # RUSTFMT override is honored instead of the PATH-resolved rustfmt. Use a
 # second stub outside stub_bin, distinct from the PATH-resolved one (which

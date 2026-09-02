@@ -40,13 +40,13 @@ if [ "$clippy_status" -ne 0 ] || [ -n "$clippy_output" ]; then
 fi
 
 combined=$(
-  [ -n "$fmt_report" ] && echo "$fmt_report"
-  [ -n "$clippy_report" ] && echo "$clippy_report"
+  [ -n "$fmt_report" ] && printf '%s\n' "$fmt_report"
+  [ -n "$clippy_report" ] && printf '%s\n' "$clippy_report"
   true # keep this subshell's exit status 0 even when both reports are empty
 )
 
 if [ -n "$combined" ]; then
-  echo "$combined" >&2
+  printf '%s\n' "$combined" >&2
   exit 2
 fi
 
