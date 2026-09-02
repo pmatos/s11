@@ -20,6 +20,10 @@ edition="${edition:-2024}"
 fmt_output=$("${RUSTFMT:-rustfmt}" --edition "$edition" "$file" 2>&1)
 fmt_status=$?
 
+# On a cold target/ (fresh checkout, cargo clean, or a Cargo.lock bump),
+# building this crate's z3/capstone/dynasmrt dependencies can exceed the
+# 60s hook timeout; edits keep timing out until that cold build converges,
+# though the edit and the rustfmt pass above still land either way.
 clippy_output=$(cargo clippy --quiet --no-deps 2>&1)
 
 fmt_report=""
