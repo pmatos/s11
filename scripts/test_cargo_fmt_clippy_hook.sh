@@ -22,6 +22,9 @@ EOF
 cat > "$stub_bin/cargo" << 'EOF'
 #!/usr/bin/env bash
 if [ "${1:-}" = "clippy" ]; then
+  if [ -n "${CARGO_STUB_ARGS_FILE:-}" ]; then
+    printf '%s\n' "$*" > "$CARGO_STUB_ARGS_FILE"
+  fi
   printf '%s' "${FAKE_CARGO_OUTPUT:-}"
   exit "${FAKE_CARGO_EXIT:-0}"
 fi
@@ -108,5 +111,11 @@ long_clippy=$(seq 1 60 | sed 's/^/clippy line /')
 status=$(FAKE_RUSTFMT_EXIT=1 FAKE_RUSTFMT_OUTPUT="FMT_MARKER" FAKE_CARGO_OUTPUT="$long_clippy" run_hook "$project_dir/main.rs")
 assert_eq "2" "$status" "combined fmt+clippy failure should exit 2"
 assert_contains "$workdir/stderr" "FMT_MARKER" "fmt marker dropped by output truncation"
+
+# Clippy must cover tests/ and benches/, not just the default lib+bin
+# targets, since the hook fires on any *.rs file including those.
+cargo_args_file="$workdir/cargo_args"
+CARGO_STUB_ARGS_FILE="$cargo_args_file" run_hook "$project_dir/main.rs" > /dev/null
+assert_contains "$cargo_args_file" "--all-targets" "clippy invocation does not cover tests/benches (missing --all-targets)"
 
 echo "All cargo-fmt-clippy.sh hook tests passed"

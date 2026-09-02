@@ -24,7 +24,7 @@ fmt_status=$?
 # building this crate's z3/capstone/dynasmrt dependencies can exceed the
 # 60s hook timeout; edits keep timing out until that cold build converges,
 # though the edit and the rustfmt pass above still land either way.
-clippy_output=$(cargo clippy --quiet --no-deps 2>&1)
+clippy_output=$(cargo clippy --quiet --no-deps --all-targets 2>&1)
 
 fmt_report=""
 [ "$fmt_status" -ne 0 ] && fmt_report=$(printf '%s\n' "$fmt_output" | tail -n 25)
