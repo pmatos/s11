@@ -19,9 +19,9 @@ Persisted candidate memory for the `pm-deepen` refactor-audit routine. Statuses:
 - **Score**: 22/25 (leverage 4, locality 4, blast radius 1, heat 5)
 - **Files**: 2–3 estimated (`src/report.rs` edited, new lib-visible outcome type, `src/main.rs` edited)
 - **Modules**: `src/main.rs:1654` (`optimize_elf_window_with_backend`), `src/main.rs:1780` (`optimize_elf_binary_with_backend` terminal branch), mirror `src/report.rs:200` (`build_equiv_report`)
-- **Summary**: Give the `opt` single-window path a pure `report::build_window_report` seam mirroring the `equiv` path's `build_equiv_report`, so the untested miss/improve/leave-unchanged classification and its "Created optimized/unchanged binary" messages become unit-pinnable instead of reachable only through the `opt` binary. Requires relocating the bin-local `ElfWindowOptimization` outcome type into the lib so `report.rs` (lib) can consume it.
+- **Summary**: Give the `opt` single-window path a pure `report::build_window_write_plan` seam mirroring the `equiv` path's `build_equiv_report`, so the untested miss/improve/leave-unchanged classification and its "Created optimized/unchanged binary" messages become unit-pinnable instead of reachable only through the `opt` binary. Relocated the bin-local `ElfWindowOptimization` outcome type into the lib (`src/auto_driver.rs`) so `report.rs` (lib) can consume it.
 - **First seen**: 2026-09-01
-- **PR**: #<PR> (opened 2026-09-03)
+- **PR**: #818 (opened 2026-09-03)
 - **Reason**: — (pick, run 2026-09-03; `llm-search-stats-accumulator` PR #812 now landed so the one-architecture-PR-at-a-time block is cleared. Runner-up candidate `elf-optimizer-engine-extraction` tied at 22/25 but lost the tie-break on blast radius 4 vs 1.)
 
 ## elf-optimizer-engine-extraction
@@ -149,6 +149,6 @@ Persisted candidate memory for the `pm-deepen` refactor-audit routine. Statuses:
 - **Outcome**: complete
 - **Stopped at**: n/a — full default run through PR
 - **Branch**: `pm-deepen/opt-window-report-seam` — created from `origin/main` (adoption of the firing branch `sym/s11/routine/refactor-audit/01M1J5Q8CD` refused: condition 3 failed — it had an upstream set to `origin/main`), renamed from `pm-deepen/run-2026-09-03-0103` at step 2.
-- **Committed**: this report (`.architecture/reviews/2026-09-03-opt-window-report-seam.md`) + reconciled backlog; design adjudication; the `build_window_report` seam; in-flight backlog + PR link.
+- **Committed**: this report (`.architecture/reviews/2026-09-03-opt-window-report-seam.md`) + reconciled backlog; design adjudication; the `build_window_write_plan` seam (PR #818); in-flight backlog + PR link.
 - **Evidence**: PR #812 reconciled to `landed` (merged); no open architecture PRs at start, so the one-at-a-time block was clear. Three fresh candidates added (`search-result-optimized-accessor`, `opt-target-arch-mismatch-classifier`, `aarch64-parser-arity-combinators`).
 - **Next**: a human reviews and merges the PR; the next firing reconciles this entry to `landed` and picks the runner-up `elf-optimizer-engine-extraction` (tied 22/25, blast radius 4).

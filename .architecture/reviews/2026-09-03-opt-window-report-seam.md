@@ -1,14 +1,14 @@
 # Architecture review — s11 — 2026-09-03
 
 **Scope**: The `opt` (single-window ELF optimization) driver path in `src/main.rs`, plus a hot-spot sweep of `src/search/llm/`, `src/parser/`, `src/report.rs`, `src/search/result.rs`, and `src/semantics/`. Scoped by heat: `main.rs` and `src/parser/mod.rs` dominate recent commits; the reconciled backlog already tracks the driver seams.
-**Picked**: `opt-window-report-seam` — see the PR and `.architecture/backlog.md`.
+**Picked**: `opt-window-report-seam` (shipped as `report::build_window_write_plan`) — see PR #818 and `.architecture/backlog.md`.
 **Degradations**: none. `gh` authenticated; sub-agent exploration and design-it-twice both available.
 
 In the Mermaid diagrams below, **solid edges are the interface** (a caller reaching a seam) and **dashed edges are inside the implementation** (a seam reaching its private steps).
 
 ## Candidates
 
-### opt-window-report-seam — pure `build_window_report` seam for the `opt` write decision  ·  Strong  ·  score 22/25
+### opt-window-report-seam — pure `build_window_write_plan` seam for the `opt` write decision  ·  Strong  ·  score 22/25
 
 - **Files**: `src/main.rs:1654` (`optimize_elf_window_with_backend`, the ~125-line window orchestrator that builds `ElfWindowOptimization`), `src/main.rs:1780` (`optimize_elf_binary_with_backend`, the terminal `match` at `:1800`–1815 that acts on it), `src/main.rs:563`/`:568` (bin-local `OptimizedWindowBytes`/`ElfWindowOptimization`); mirror model `src/report.rs:200` (`build_equiv_report`). **File-count estimate: 2–3** — `report.rs` is a lib module and `ElfWindowOptimization` is bin-local, so the outcome type must move into the lib (a plausible 3rd file) before `report.rs` can consume it.
 - **Score**: 22/25
@@ -17,8 +17,8 @@ In the Mermaid diagrams below, **solid edges are the interface** (a caller reach
   - **Blast radius 1** — no published interface changes; the CLI stdout contract is preserved byte-for-byte. Estimate 2–3 files.
   - **Heat 5** — `src/main.rs` is the hottest file in the tree (touched in essentially every recent driver-refactor PR, last 2026-09-01).
 - **Problem**: The `opt` path's terminal outcome is a shallow, untested orchestrator. `optimize_elf_window_with_backend` builds an `ElfWindowOptimization` at `:1767`–1777, and `optimize_elf_binary_with_backend` then re-matches the same three cases at `:1800`–1815 to choose a patcher call *and* a stdout message. The decision — which is genuinely branchy (improve vs reassembled-miss vs leave-unchanged, plus the "backend reported an optimization but refused to assemble" error arm) — is reachable only by running the whole binary end-to-end, exactly the shape `build_equiv_report` was extracted to fix for `equiv`. The interface here (a bin-local enum) is nearly as complex as the tiny amount of logic wrapping it, and the logic is split across two functions.
-- **Deletion test**: Deleting the terminal `match` would force each caller to re-derive the write-action-and-message mapping inline — complexity **concentrates** in a `report::build_window_report` seam rather than scattering. Passes.
-- **Solution**: Relocate `ElfWindowOptimization` (and `OptimizedWindowBytes`) into the lib. Add `report::build_window_report(outcome, output_path) -> WindowReport { lines, action }`, where `action` names the write to perform (patch these bytes / leave unchanged) and `lines` are the messages to print on success. `optimize_elf_binary_with_backend` calls the seam, performs the named patcher I/O, then prints the lines — preserving the current "print after successful write" ordering and the exact strings the integration tests assert (`"Created optimized binary"`, `"Created unchanged binary"`). The progress prints interleaved with disassembly/search (`:1663`–1714, `:1741` `no_optimization_message`) stay in place; they are a function of the run, not the outcome.
+- **Deletion test**: Deleting the terminal `match` would force each caller to re-derive the write-action-and-message mapping inline — complexity **concentrates** in a `report::build_window_write_plan` seam rather than scattering. Passes.
+- **Solution** (as shipped): Relocate `ElfWindowOptimization` into the lib (`OptimizedWindowBytes` stays bin-local — it never reaches the write decision). Add `report::build_window_write_plan(outcome, output_path) -> WindowWritePlan { action, line }`, where `action` names the write to perform (`Patch { bytes }` / `CopyUnmodified`) and `line` is the message to print on success. `optimize_elf_binary_with_backend` calls the seam, performs the named patcher I/O, then prints the line — preserving the current "print after successful write" ordering and the exact strings the integration tests assert (`"Created optimized binary"`, `"Created unchanged binary"`). The progress prints interleaved with disassembly/search (`:1663`–1714, `:1741` `no_optimization_message`) stay in place; they are a function of the run, not the outcome.
 - **Benefits**: **Leverage** — the write decision + messages gain a unit test surface, closing the gap the `equiv` path already closed. **Locality** — write-policy and message changes concentrate in `report.rs`. **Test surface** — the previously binary-only miss/improve/unchanged branches (and the assemble-refusal error) become table-testable pure-function cases.
 - **Before / After**:
 
@@ -37,8 +37,8 @@ Above: the outcome classification lives in one function, the write-and-message d
 ```mermaid
 graph LR
   BIN[optimize_elf_binary_with_backend] --> WIN[optimize_elf_window_with_backend]
-  BIN --> RPT[report::build_window_report]
-  RPT -.-> LINES[lines + write action]
+  BIN --> RPT[report::build_window_write_plan]
+  RPT -.-> PLAN[action + line]
   BIN -.-> P1[create_patched_copy]
   BIN -.-> P2[create_unmodified_copy]
   TEST[unit tests] --> RPT
