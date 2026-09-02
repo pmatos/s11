@@ -51,15 +51,16 @@ Standard Cargo commands also work:
 1. Repository CI-policy checks (`python3 -m unittest discover -s scripts -p 'test_*_policy.py'` and `./scripts/test_test_all.sh`)
 2. Mutation-wrapper invocation regression (`./scripts/test_mutants_invocation.sh`)
 3. Mutation-wrapper command regression (`./scripts/test_run_mutants.sh`)
-4. Code formatting check (`cargo fmt -- --check`)
-5. Project build
-6. Test binary builds
-7. Unit and integration tests
-8. Full test suite
+4. cargo-fmt-clippy PostToolUse hook regression (`./scripts/test_cargo_fmt_clippy_hook.sh`)
+5. Code formatting check (`cargo fmt -- --check`)
+6. Project build
+7. Test binary builds
+8. Unit and integration tests
+9. Full test suite
 
 This prevents pushing code that will fail CI checks.
 
-Note: Clippy linting is run separately in the `rust-clippy.yml` workflow which performs security analysis and uploads results to GitHub's security tab.
+Note: Clippy linting also runs separately in the `rust-clippy.yml` workflow, which performs security analysis and uploads results to GitHub's security tab. In addition, a `.claude/hooks/cargo-fmt-clippy.sh` PostToolUse hook runs `rustfmt` + `cargo clippy --all-targets --no-deps` locally on every Claude Code edit to a `*.rs` file (see `scripts/test_cargo_fmt_clippy_hook.sh` for its regression tests).
 
 ### Code Coverage
 

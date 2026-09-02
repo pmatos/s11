@@ -38,6 +38,9 @@ jobs:
       run: |
         ./scripts/test_run_mutants.sh
 
+    - name: Check cargo-fmt-clippy PostToolUse hook
+      run: ./scripts/test_cargo_fmt_clippy_hook.sh
+
     - name: Install dependencies
       run: |
         sudo apt-get update

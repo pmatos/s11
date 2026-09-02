@@ -43,37 +43,43 @@ echo "3. Checking mutation-wrapper command construction..."
 print_status "Mutation-wrapper command construction"
 echo
 
-# 4. Check formatting
-echo "4. Checking code formatting..."
+# 4. Check the cargo-fmt-clippy PostToolUse hook's behavior
+echo "4. Checking cargo-fmt-clippy PostToolUse hook..."
+./scripts/test_cargo_fmt_clippy_hook.sh
+print_status "cargo-fmt-clippy PostToolUse hook"
+echo
+
+# 5. Check formatting
+echo "5. Checking code formatting..."
 cargo fmt -- --check
 print_status "Code formatting"
 echo
 
-# 5. Build project
-echo "5. Building project..."
+# 6. Build project
+echo "6. Building project..."
 cargo build --verbose
 print_status "Build"
 echo
 
-# 6. Build test binaries (if build_tests.sh exists)
+# 7. Build test binaries (if build_tests.sh exists)
 # Must run before `cargo test` because integration tests under tests/integration/
 # load the cross-compiled AArch64 binaries from binaries/.
 if [ -f "./build_tests.sh" ]; then
-    echo "6. Building test binaries..."
+    echo "7. Building test binaries..."
     ./build_tests.sh
     print_status "Test binary build"
     echo
 fi
 
-# 7. Run unit + integration tests
-echo "7. Running tests..."
+# 8. Run unit + integration tests
+echo "8. Running tests..."
 cargo test --verbose
 print_status "Tests"
 echo
 
-# 8. Run all tests (if test_all.sh exists)
+# 9. Run all tests (if test_all.sh exists)
 if [ -f "./test_all.sh" ]; then
-    echo "8. Running all tests..."
+    echo "9. Running all tests..."
     ./test_all.sh
     print_status "All tests"
     echo
