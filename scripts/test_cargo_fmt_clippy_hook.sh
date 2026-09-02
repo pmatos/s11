@@ -94,10 +94,21 @@ status=$(FAKE_RUSTFMT_EXIT=1 FAKE_RUSTFMT_OUTPUT="fmt error marker" run_hook "$p
 assert_eq "2" "$status" "rustfmt failure should exit 2"
 assert_contains "$workdir/stderr" "fmt error marker" "rustfmt failure marker missing from stderr"
 
-# RUSTFMT override is honored instead of the PATH-resolved rustfmt.
-status=$(RUSTFMT="$stub_bin/rustfmt" FAKE_RUSTFMT_EXIT=1 FAKE_RUSTFMT_OUTPUT="override marker" run_hook "$project_dir/main.rs")
+# RUSTFMT override is honored instead of the PATH-resolved rustfmt. Use a
+# second stub outside stub_bin, distinct from the PATH-resolved one (which
+# stays on its default clean-success behavior here), so the two are
+# actually distinguishable rather than both resolving to the same binary.
+override_bin="$workdir/override_bin"
+mkdir -p "$override_bin"
+cat > "$override_bin/rustfmt" << 'EOF'
+#!/usr/bin/env bash
+printf '%s' "override marker"
+exit 1
+EOF
+chmod +x "$override_bin/rustfmt"
+status=$(RUSTFMT="$override_bin/rustfmt" run_hook "$project_dir/main.rs")
 assert_eq "2" "$status" "RUSTFMT override failure should exit 2"
-assert_contains "$workdir/stderr" "override marker" "RUSTFMT override marker missing from stderr"
+assert_contains "$workdir/stderr" "override marker" "RUSTFMT override marker missing from stderr -- override was not honored"
 
 # Edition is parsed from Cargo.toml and passed to rustfmt.
 args_file="$workdir/rustfmt_args"

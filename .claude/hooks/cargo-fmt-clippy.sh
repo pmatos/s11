@@ -25,12 +25,19 @@ fmt_status=$?
 # 60s hook timeout; edits keep timing out until that cold build converges,
 # though the edit and the rustfmt pass above still land either way.
 clippy_output=$(cargo clippy --quiet --no-deps --all-targets 2>&1)
+clippy_status=$?
 
 fmt_report=""
-[ "$fmt_status" -ne 0 ] && fmt_report=$(printf '%s\n' "$fmt_output" | tail -n 25)
+if [ "$fmt_status" -ne 0 ]; then
+  fmt_report=$(printf '%s\n' "$fmt_output" | tail -n 25)
+  [ -z "$fmt_report" ] && fmt_report="rustfmt exited $fmt_status with no output"
+fi
 
 clippy_report=""
-[ -n "$clippy_output" ] && clippy_report=$(printf '%s\n' "$clippy_output" | tail -n 25)
+if [ "$clippy_status" -ne 0 ] || [ -n "$clippy_output" ]; then
+  clippy_report=$(printf '%s\n' "$clippy_output" | tail -n 25)
+  [ -z "$clippy_report" ] && clippy_report="cargo clippy exited $clippy_status with no output"
+fi
 
 combined=$(
   [ -n "$fmt_report" ] && echo "$fmt_report"
