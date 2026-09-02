@@ -51,11 +51,12 @@ Standard Cargo commands also work:
 1. Repository CI-policy checks (`python3 -m unittest discover -s scripts -p 'test_*_policy.py'` and `./scripts/test_test_all.sh`)
 2. Mutation-wrapper invocation regression (`./scripts/test_mutants_invocation.sh`)
 3. Mutation-wrapper command regression (`./scripts/test_run_mutants.sh`)
-4. Code formatting check (`cargo fmt -- --check`)
-5. Project build
-6. Test binary builds
-7. Unit and integration tests
-8. Full test suite
+4. cargo-fmt-clippy PostToolUse hook regression (`./scripts/test_cargo_fmt_clippy_hook.sh`)
+5. Code formatting check (`cargo fmt -- --check`)
+6. Project build
+7. Test binary builds
+8. Unit and integration tests
+9. Full test suite
 
 This prevents pushing code that will fail CI checks.
 
