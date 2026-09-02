@@ -26,6 +26,64 @@ pub enum WindowSearchResult {
     },
 }
 
+/// Outcome of optimizing one window in the single-window `opt` path, carrying
+/// the bytes each terminal case needs to write.
+///
+/// This is the richer sibling of [`WindowSearchResult`]: the auto worklist
+/// discards a search miss (it writes its in-memory image once at the end), but
+/// single-window mode must still materialize a result file for a miss, so the
+/// `NoImprovement` variant here carries the optionally-reassembled bytes the
+/// auto variant drops. `From<ElfWindowOptimization> for WindowSearchResult`
+/// projects onto the leaner type for the auto adapter.
+pub enum ElfWindowOptimization {
+    NoImprovement {
+        /// The window reassembled from its original IR, when the backend
+        /// produced one. Single-window mode writes it so a search miss still
+        /// materializes a copy; auto mode never asks for it and writes its
+        /// in-memory image once at the end.
+        reassembled: Option<Vec<u8>>,
+    },
+    Improved {
+        replacement: Vec<u8>,
+        original_cost: u64,
+        optimized_cost: u64,
+    },
+}
+
+impl ElfWindowOptimization {
+    /// Whether this outcome can actually be written back into a window of
+    /// `window_len` bytes.
+    ///
+    /// A search that lowers the selected cost metric does **not** guarantee a
+    /// shorter encoding: under `instruction-count` or `latency` a
+    /// variable-length x86 replacement can encode to more bytes than the window
+    /// it must occupy. Callers that patch in place must check this rather than
+    /// let `ElfPatcher::apply_patch` reject the replacement.
+    pub fn fits_window(&self, window_len: usize) -> bool {
+        match self {
+            ElfWindowOptimization::Improved { replacement, .. } => replacement.len() <= window_len,
+            ElfWindowOptimization::NoImprovement { .. } => true,
+        }
+    }
+}
+
+impl From<ElfWindowOptimization> for WindowSearchResult {
+    fn from(outcome: ElfWindowOptimization) -> Self {
+        match outcome {
+            ElfWindowOptimization::NoImprovement { .. } => WindowSearchResult::NoImprovement,
+            ElfWindowOptimization::Improved {
+                replacement,
+                original_cost,
+                optimized_cost,
+            } => WindowSearchResult::Improved {
+                replacement,
+                original_cost,
+                optimized_cost,
+            },
+        }
+    }
+}
+
 /// The adapter through which the ISA-agnostic loop discovers, searches, and
 /// eventually patches one concrete image.
 pub trait AutoOptimizationAdapter {
@@ -136,6 +194,25 @@ pub fn drive_auto_optimization<A: AutoOptimizationAdapter>(
 mod tests {
     use super::*;
     use crate::elf_patcher::AddressWindow;
+
+    #[test]
+    fn oversized_replacement_does_not_fit_its_window() {
+        // Lower cost under `instruction-count` does not imply a shorter
+        // encoding on a variable-length ISA. The auto driver must catch that
+        // here rather than let `apply_patch` reject it and abort the whole run.
+        let improved = ElfWindowOptimization::Improved {
+            replacement: vec![0x83, 0xc0, 0x02],
+            original_cost: 2,
+            optimized_cost: 1,
+        };
+        assert!(!improved.fits_window(2));
+        assert!(improved.fits_window(3));
+        assert!(improved.fits_window(4));
+        assert!(
+            ElfWindowOptimization::NoImprovement { reassembled: None }.fits_window(0),
+            "a miss patches nothing and always fits"
+        );
+    }
 
     #[derive(Default)]
     struct MissAdapter {
