@@ -14,16 +14,23 @@ esac
 
 cd "$CLAUDE_PROJECT_DIR" || exit 0
 
-output=$(rustfmt --edition 2024 "$file" 2>&1 && cargo clippy --quiet --no-deps 2>&1)
-status=$?
+fmt_output=$(rustfmt --edition 2024 "$file" 2>&1)
+fmt_status=$?
 
-if [ "$status" -ne 0 ]; then
-  echo "$output" | tail -n 50 >&2
+clippy_output=$(cargo clippy --quiet --no-deps 2>&1)
+clippy_status=$?
+
+if [ "$clippy_status" -ne 0 ]; then
+  {
+    [ "$fmt_status" -ne 0 ] && echo "$fmt_output"
+    echo "$clippy_output"
+  } | tail -n 50 >&2
   exit 2
 fi
 
-if [ -n "$output" ]; then
-  echo "$output" | tail -n 50
-fi
+{
+  [ "$fmt_status" -ne 0 ] && echo "$fmt_output"
+  [ -n "$clippy_output" ] && echo "$clippy_output"
+} | tail -n 50
 
 exit 0
