@@ -1,6 +1,10 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# Hermetic regardless of the caller's own shell: don't let an ambient
+# RUSTFMT leak into test cases that aren't deliberately setting it.
+unset RUSTFMT
+
 repo_root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 hook="$repo_root/.claude/hooks/cargo-fmt-clippy.sh"
 
@@ -31,21 +35,30 @@ fi
 exit 1
 EOF
 
-chmod +x "$stub_bin/rustfmt" "$stub_bin/cargo"
+# Minimal stand-in for `jq -r '.tool_input.file_path // empty'` against the
+# single fixed-shape JSON payload this test constructs, so the suite is
+# hermetic and doesn't depend on jq being installed on the host.
+cat > "$stub_bin/jq" << 'EOF'
+#!/usr/bin/env bash
+sed -n 's/.*"file_path":"\([^"]*\)".*/\1/p'
+EOF
+
+chmod +x "$stub_bin/rustfmt" "$stub_bin/cargo" "$stub_bin/jq"
 
 project_dir="$workdir/project"
 mkdir -p "$project_dir"
 cat > "$project_dir/Cargo.toml" << 'EOF'
 [package]
 name = "stub"
-edition = "2024"
+edition = "2021"
 EOF
 touch "$project_dir/main.rs"
 
 run_hook() {
   local file_path=$1
+  local extra_path="${2:-}"
   printf '{"tool_input":{"file_path":"%s"}}' "$file_path" \
-    | PATH="$stub_bin:$PATH" CLAUDE_PROJECT_DIR="$project_dir" "$hook" \
+    | PATH="${extra_path:+$extra_path:}$stub_bin:$PATH" CLAUDE_PROJECT_DIR="$project_dir" "$hook" \
     > "$workdir/stdout" 2> "$workdir/stderr"
   echo $?
 }
@@ -110,10 +123,13 @@ status=$(RUSTFMT="$override_bin/rustfmt" run_hook "$project_dir/main.rs")
 assert_eq "2" "$status" "RUSTFMT override failure should exit 2"
 assert_contains "$workdir/stderr" "override marker" "RUSTFMT override marker missing from stderr -- override was not honored"
 
-# Edition is parsed from Cargo.toml and passed to rustfmt.
+# Edition is parsed from Cargo.toml and passed to rustfmt. The fixture uses
+# a non-default edition (2021, not the hook's 2024 fallback) so a broken or
+# deleted parser -- which would silently fall back to 2024 -- is caught
+# instead of coincidentally producing the expected value.
 args_file="$workdir/rustfmt_args"
 RUSTFMT_STUB_ARGS_FILE="$args_file" run_hook "$project_dir/main.rs" > /dev/null
-assert_contains "$args_file" "--edition 2024" "edition 2024 (parsed from Cargo.toml) not passed to rustfmt"
+assert_contains "$args_file" "--edition 2021" "edition 2021 (parsed from Cargo.toml) not passed to rustfmt"
 
 # A long clippy dump must not push a short rustfmt diagnostic out of the
 # truncated report (regression: fmt+clippy were previously concatenated
@@ -130,15 +146,17 @@ CARGO_STUB_ARGS_FILE="$cargo_args_file" run_hook "$project_dir/main.rs" > /dev/n
 assert_contains "$cargo_args_file" "--all-targets" "clippy invocation does not cover tests/benches (missing --all-targets)"
 
 # A missing/broken jq falls through to the same silent no-op as a
-# non-.rs file, rather than invoking rustfmt/clippy on a bogus path.
-jq_bin="$stub_bin/jq"
-cat > "$jq_bin" << 'INNER_EOF'
+# non-.rs file, rather than invoking rustfmt/clippy on a bogus path. Use a
+# dedicated PATH entry ahead of stub_bin's own (working) jq, rather than
+# mutating the shared stub, so this test can't leave later tests without jq.
+broken_jq_bin="$workdir/broken_jq_bin"
+mkdir -p "$broken_jq_bin"
+cat > "$broken_jq_bin/jq" << 'EOF'
 #!/usr/bin/env bash
 exit 1
-INNER_EOF
-chmod +x "$jq_bin"
-status=$(FAKE_RUSTFMT_EXIT=1 FAKE_CARGO_EXIT=1 run_hook "$project_dir/main.rs")
+EOF
+chmod +x "$broken_jq_bin/jq"
+status=$(FAKE_RUSTFMT_EXIT=1 FAKE_CARGO_EXIT=1 run_hook "$project_dir/main.rs" "$broken_jq_bin")
 assert_eq "0" "$status" "a failing jq should fall through to exit 0, not invoke rustfmt/clippy"
-rm -f "$jq_bin"
 
 echo "All cargo-fmt-clippy.sh hook tests passed"
