@@ -22,4 +22,8 @@ if [ "$status" -ne 0 ]; then
   exit 2
 fi
 
+if [ -n "$output" ]; then
+  echo "$output" | tail -n 50
+fi
+
 exit 0
