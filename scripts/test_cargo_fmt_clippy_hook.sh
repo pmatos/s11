@@ -118,4 +118,16 @@ cargo_args_file="$workdir/cargo_args"
 CARGO_STUB_ARGS_FILE="$cargo_args_file" run_hook "$project_dir/main.rs" > /dev/null
 assert_contains "$cargo_args_file" "--all-targets" "clippy invocation does not cover tests/benches (missing --all-targets)"
 
+# A missing/broken jq falls through to the same silent no-op as a
+# non-.rs file, rather than invoking rustfmt/clippy on a bogus path.
+jq_bin="$stub_bin/jq"
+cat > "$jq_bin" << 'INNER_EOF'
+#!/usr/bin/env bash
+exit 1
+INNER_EOF
+chmod +x "$jq_bin"
+status=$(FAKE_RUSTFMT_EXIT=1 FAKE_CARGO_EXIT=1 run_hook "$project_dir/main.rs")
+assert_eq "0" "$status" "a failing jq should fall through to exit 0, not invoke rustfmt/clippy"
+rm -f "$jq_bin"
+
 echo "All cargo-fmt-clippy.sh hook tests passed"
