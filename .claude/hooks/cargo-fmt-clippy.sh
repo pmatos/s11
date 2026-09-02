@@ -35,7 +35,7 @@ clippy_report=""
 combined=$(
   [ -n "$fmt_report" ] && echo "$fmt_report"
   [ -n "$clippy_report" ] && echo "$clippy_report"
-  true
+  true # keep this subshell's exit status 0 even when both reports are empty
 )
 
 if [ -n "$combined" ]; then

@@ -60,7 +60,7 @@ Standard Cargo commands also work:
 
 This prevents pushing code that will fail CI checks.
 
-Note: Clippy linting is run separately in the `rust-clippy.yml` workflow which performs security analysis and uploads results to GitHub's security tab.
+Note: Clippy linting also runs separately in the `rust-clippy.yml` workflow, which performs security analysis and uploads results to GitHub's security tab. In addition, a `.claude/hooks/cargo-fmt-clippy.sh` PostToolUse hook runs `rustfmt` + `cargo clippy --all-targets --no-deps` locally on every Claude Code edit to a `*.rs` file (see `scripts/test_cargo_fmt_clippy_hook.sh` for its regression tests).
 
 ### Code Coverage
 
