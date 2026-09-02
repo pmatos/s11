@@ -14,7 +14,12 @@ esac
 
 cd "$CLAUDE_PROJECT_DIR" || exit 0
 
-cargo fmt -- "$file"
-cargo clippy --quiet 2>&1 | tail -n 50
+output=$(cargo fmt -- "$file" 2>&1 && cargo clippy --quiet 2>&1)
+status=$?
+
+if [ "$status" -ne 0 ]; then
+  echo "$output" | tail -n 50 >&2
+  exit 2
+fi
 
 exit 0
