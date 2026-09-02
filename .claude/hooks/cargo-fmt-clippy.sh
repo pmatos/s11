@@ -14,7 +14,10 @@ esac
 
 cd "$CLAUDE_PROJECT_DIR" || exit 0
 
-fmt_output=$("${RUSTFMT:-rustfmt}" --edition 2024 "$file" 2>&1)
+edition=$(sed -n 's/^edition[[:space:]]*=[[:space:]]*"\([^"]*\)".*/\1/p' Cargo.toml | head -n 1)
+edition="${edition:-2024}"
+
+fmt_output=$("${RUSTFMT:-rustfmt}" --edition "$edition" "$file" 2>&1)
 fmt_status=$?
 
 clippy_output=$(cargo clippy --quiet --no-deps 2>&1)
