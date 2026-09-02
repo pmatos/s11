@@ -22,14 +22,20 @@ fmt_status=$?
 
 clippy_output=$(cargo clippy --quiet --no-deps 2>&1)
 
+fmt_report=""
+[ "$fmt_status" -ne 0 ] && fmt_report=$(printf '%s\n' "$fmt_output" | tail -n 25)
+
+clippy_report=""
+[ -n "$clippy_output" ] && clippy_report=$(printf '%s\n' "$clippy_output" | tail -n 25)
+
 combined=$(
-  [ "$fmt_status" -ne 0 ] && echo "$fmt_output"
-  [ -n "$clippy_output" ] && echo "$clippy_output"
+  [ -n "$fmt_report" ] && echo "$fmt_report"
+  [ -n "$clippy_report" ] && echo "$clippy_report"
   true
 )
 
 if [ -n "$combined" ]; then
-  echo "$combined" | tail -n 50 >&2
+  echo "$combined" >&2
   exit 2
 fi
 
