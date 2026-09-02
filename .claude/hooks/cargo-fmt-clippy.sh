@@ -14,7 +14,7 @@ esac
 
 cd "$CLAUDE_PROJECT_DIR" || exit 0
 
-output=$(rustfmt --edition 2024 "$file" 2>&1 && cargo clippy --quiet 2>&1)
+output=$(rustfmt --edition 2024 "$file" 2>&1 && cargo clippy --quiet --no-deps 2>&1)
 status=$?
 
 if [ "$status" -ne 0 ]; then
