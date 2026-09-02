@@ -2,6 +2,7 @@
 //!
 //! See CONTEXT.md and docs/adr/0001-0003 for the design.
 
+mod accounting;
 pub mod codex;
 pub mod ledger;
 pub mod outcome;
@@ -19,6 +20,9 @@ use crate::search::result::{SearchResult, SearchStatistics};
 use crate::semantics::live_out::LiveOut;
 use crate::validation::live_out::compute_live_in_registers;
 
+pub use self::accounting::LlmTimings;
+
+use self::accounting::{RunAccounting, RunEvent, RunTotals};
 use self::codex::invoke_codex;
 use self::ledger::UnsupportedMnemonicLedger;
 use self::outcome::{IterationOutcome, classify};
@@ -30,32 +34,6 @@ use self::prompt::{OUTPUT_SCHEMA, build_prompt};
 /// times, sequentially, with fresh prompts. The first candidate that parses,
 /// is strictly shorter than the target, and is provably equivalent (per the
 /// existing fast + SMT pipeline) is returned.
-/// Per-phase timing breakdown for one `LlmSearch::search` run.
-#[derive(Debug, Default, Clone, Copy)]
-pub struct LlmTimings {
-    /// Number of times `codex exec` was invoked.
-    pub codex_calls: u32,
-    /// Wall-clock time spent inside `codex exec` invocations.
-    pub codex_time: Duration,
-    /// Number of candidate verifications attempted (one per parseable response).
-    pub verifications: u32,
-    /// Wall-clock time spent in the verification pipeline (parse + fast-path
-    /// random testing + Z3 SMT). Dominated by SMT for non-parse-fail outcomes.
-    pub verify_time: Duration,
-    /// Number of times the SMT solver was actually invoked (subset of
-    /// verifications: parse-fail and fast-path-refutations don't reach SMT).
-    pub smt_calls: u32,
-    /// Sum of SMT formula sizes (bytes of SMT-LIB rendering) across all
-    /// solver invocations in this search **whose result was Equivalent**.
-    /// Sat / Unknown SMT outcomes do not contribute (we don't pay
-    /// `solver.to_string()` on those paths). A run that hit SMT many times
-    /// but never proved equivalence will read 0 here even though `smt_calls`
-    /// is positive.
-    pub smt_formula_bytes_total: usize,
-    /// Largest SMT formula size (bytes) seen on an Equivalent SMT outcome.
-    pub smt_formula_bytes_max: usize,
-}
-
 #[derive(Default)]
 pub struct LlmSearch {
     last_stats: SearchStatistics,
@@ -105,11 +83,7 @@ impl SearchAlgorithm<crate::isa::AArch64> for LlmSearch {
         self.last_ledger = UnsupportedMnemonicLedger::new();
         self.last_timings = LlmTimings::default();
 
-        let mut stats = SearchStatistics::new(crate::search::config::Algorithm::Llm);
-        stats.original_cost = target.len() as u64;
-        stats.best_cost_found = target.len() as u64;
-        let mut ledger = UnsupportedMnemonicLedger::new();
-        let mut timings = LlmTimings::default();
+        let mut acct = RunAccounting::new(target.len());
         let started = Instant::now();
 
         // Per ADR-0008: the LLM flow no longer statically refuses flag-live-out
@@ -143,8 +117,12 @@ impl SearchAlgorithm<crate::isa::AArch64> for LlmSearch {
             let call_start = Instant::now();
             let codex_result = invoke_codex(&config.llm, &prompt, OUTPUT_SCHEMA, remaining);
             let codex_elapsed = call_start.elapsed();
-            timings.codex_calls += 1;
-            timings.codex_time += codex_elapsed;
+            // The seam counts a Codex `Ok` as an evaluated candidate; IO errors
+            // count the call but not an evaluation.
+            acct.record(RunEvent::Codex {
+                elapsed: codex_elapsed,
+                produced: codex_result.is_ok(),
+            });
             let raw = match codex_result {
                 Ok(s) => {
                     if config.verbose {
@@ -155,9 +133,6 @@ impl SearchAlgorithm<crate::isa::AArch64> for LlmSearch {
                             codex_elapsed.as_secs_f64()
                         );
                     }
-                    // Codex produced a candidate; this is the moment we count
-                    // it as "evaluated" — Codex IO errors above don't.
-                    stats.candidates_evaluated += 1;
                     s
                 }
                 Err(e) => {
@@ -188,22 +163,13 @@ impl SearchAlgorithm<crate::isa::AArch64> for LlmSearch {
             let verify_start = Instant::now();
             let (outcome, metrics) = classify(target, &raw, live_out, verify_remaining);
             let verify_elapsed = verify_start.elapsed();
-            // Only count as a "verification" when the verifier actually ran.
-            // Parse-fail and not-shorter short-circuit before the verifier.
-            if let Some(m) = metrics {
-                timings.verifications += 1;
-                timings.verify_time += verify_elapsed;
-                if m.smt_called {
-                    timings.smt_calls += 1;
-                    stats.smt_queries += 1;
-                    if let Some(bytes) = m.smt_formula_bytes {
-                        timings.smt_formula_bytes_total += bytes;
-                        if bytes > timings.smt_formula_bytes_max {
-                            timings.smt_formula_bytes_max = bytes;
-                        }
-                    }
-                }
-            }
+            // The seam folds the verification metrics (independent of the
+            // outcome variant) and the outcome itself into the accumulators.
+            acct.record(RunEvent::Candidate {
+                outcome: &outcome,
+                metrics: metrics.as_ref(),
+                elapsed: verify_elapsed,
+            });
             match outcome {
                 IterationOutcome::Success(seq) => {
                     if config.verbose {
@@ -214,19 +180,12 @@ impl SearchAlgorithm<crate::isa::AArch64> for LlmSearch {
                             seq.len()
                         );
                     }
-                    stats.smt_equivalent += 1;
-                    stats.candidates_passed_fast += 1;
-                    stats.improvements_found += 1;
-                    stats.best_cost_found = seq.len() as u64;
                     found = Some(seq);
                     break;
                 }
                 IterationOutcome::ParseFail {
                     unsupported_mnemonics,
                 } => {
-                    for m in &unsupported_mnemonics {
-                        ledger.record(m);
-                    }
                     if config.verbose {
                         if unsupported_mnemonics.is_empty() {
                             eprintln!(
@@ -249,7 +208,6 @@ impl SearchAlgorithm<crate::isa::AArch64> for LlmSearch {
                     }
                 }
                 IterationOutcome::NotShorter { candidate_len } => {
-                    stats.candidates_pruned_by_cost += 1;
                     if config.verbose {
                         eprintln!(
                             "llm-search: not-shorter on call {} (got {} instructions)",
@@ -270,7 +228,11 @@ impl SearchAlgorithm<crate::isa::AArch64> for LlmSearch {
             }
         }
 
-        stats.elapsed_time = started.elapsed();
+        let RunTotals {
+            stats,
+            ledger,
+            timings,
+        } = acct.finish(started.elapsed());
         self.last_stats = stats.clone();
         self.last_ledger = ledger;
         self.last_timings = timings;
