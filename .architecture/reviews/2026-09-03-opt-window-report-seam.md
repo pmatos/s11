@@ -68,4 +68,20 @@ Three fresh candidates surfaced this firing scored below the pick and were added
 
 ## Design
 
-_Written in step 4, after this report was first committed._
+Three interfaces were produced by parallel design-it-twice sub-agents (minimal surface; maximum flexibility; optimised for the one caller), then a fourth sub-agent that authored none of them adjudicated against the fixed criteria (depth → locality → seam placement → test surface → blast radius). **Winner: Design C.** Ranking: **C > A > B.**
+
+**Winner — Design C (optimise for the one caller).** A single pure seam in `report.rs`:
+
+```rust
+pub enum WindowWriteAction { Patch { bytes: Vec<u8> }, CopyUnmodified }
+pub struct WindowWritePlan { pub action: WindowWriteAction, pub line: String }
+pub fn build_window_write_plan(outcome: ElfWindowOptimization, output_path: &Path) -> WindowWritePlan
+```
+
+`ElfWindowOptimization` relocates from bin-local `main.rs` into the lib (`src/auto_driver.rs`, beside its sibling `WindowSearchResult` and the `From` impl that already targets it — so the relocation stays intra-module with no orphan-rule friction). The caller collapses to `match plan.action { Patch{bytes} => create_patched_copy, CopyUnmodified => create_unmodified_copy }?; println!("{}", plan.line)` — one trailing print, so write-before-print is structural, and the write action is a compiler-enforced exhaustive two-variant match. It wins because it is isomorphic to the precedent it must mirror: `build_equiv_report` returns a fully-formed `lines` printed verbatim plus a policy value (`exit_code`) the caller interprets; `WindowWritePlan` returns a fully-formed `line` plus a policy enum (`action`) the caller interprets. Depth (criterion 1), locality (2), and seam placement (3 — one seam on the one thing that varies, no hypothetical adapters) all favour it; it ties the strongest loser on test surface.
+
+**Runner-up design — Design A (minimal surface).** `build_window_report(outcome) -> WindowReport { patch_bytes: Option<Vec<u8>>, success_message: &'static str }`, caller appends `": {path}"`. Structurally almost identical to C (same relocation, error arm left at the construction site), but it returns a message *prefix* and a bare comment-documented `Option<Vec<u8>>`. **Why it lost:** test surface (criterion 4) — the `": {path}"` composition happens in the caller's `println!`, *past* the seam, so the seam's own test cannot pin the full asserted line; that same leak makes it shallower on criterion 1 (caller keeps the format template) and splits verification across two sites on criterion 2. C's named `WindowWriteAction` also reads better than A's convention-over-a-bare-`Option`.
+
+**Weakest — Design B (maximum flexibility).** A new `src/window_outcome.rs` module with *two* seams — a `classify_window_outcome(Option<AcceptedRewrite>, Option<Vec<u8>>) -> Result<_, WindowClassifyError>` that also owns the construction-time truth table and its typed error, plus `build_window_write_plan` — motivated by future dry-run / diff-only / alternate-output policies. **Why it lost:** seam placement (criterion 3) — the second seam and the write-policy abstraction have zero real adapters (one caller, no planned second consumer), the speculative-generality the criterion exists to catch; it is also worst on interface size (1) and blast radius (5). Its one genuine edge — making the `(Some, None)` assemble-refusal error arm unit-testable — is a lower-priority, explicitly out-of-scope win. Its classifier idea is recorded here as the natural follow-on if a second write policy ever materialises.
+
+**Note on the asserted strings.** The adjudicator verified that `tests/integration/opt_test.rs` matches these messages with `.contains(...)` (lines 518, 1357, 1454), not byte-for-byte with the path — so the hard contract is that the substrings `"Created optimized binary"` and `"Created unchanged binary"` survive. Design C preserves the full `"Created …: {path}"` format regardless, which is strictly stronger.
