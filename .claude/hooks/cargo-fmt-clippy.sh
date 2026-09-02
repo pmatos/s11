@@ -21,19 +21,16 @@ fmt_output=$("${RUSTFMT:-rustfmt}" --edition "$edition" "$file" 2>&1)
 fmt_status=$?
 
 clippy_output=$(cargo clippy --quiet --no-deps 2>&1)
-clippy_status=$?
 
-if [ "$clippy_status" -ne 0 ]; then
-  {
-    [ "$fmt_status" -ne 0 ] && echo "$fmt_output"
-    echo "$clippy_output"
-  } | tail -n 50 >&2
-  exit 2
-fi
-
-{
+combined=$(
   [ "$fmt_status" -ne 0 ] && echo "$fmt_output"
   [ -n "$clippy_output" ] && echo "$clippy_output"
-} | tail -n 50
+  true
+)
+
+if [ -n "$combined" ]; then
+  echo "$combined" | tail -n 50 >&2
+  exit 2
+fi
 
 exit 0
