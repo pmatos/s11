@@ -14,7 +14,7 @@ esac
 
 cd "$CLAUDE_PROJECT_DIR" || exit 0
 
-fmt_output=$(rustfmt --edition 2024 "$file" 2>&1)
+fmt_output=$("${RUSTFMT:-rustfmt}" --edition 2024 "$file" 2>&1)
 fmt_status=$?
 
 clippy_output=$(cargo clippy --quiet --no-deps 2>&1)
