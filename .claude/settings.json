@@ -1,5 +1,19 @@
 {
   "includeCoAuthoredBy": false,
+  "hooks": {
+    "PostToolUse": [
+      {
+        "matcher": "Edit|Write",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"$CLAUDE_PROJECT_DIR/.claude/hooks/cargo-fmt-clippy.sh\"",
+            "timeout": 60
+          }
+        ]
+      }
+    ]
+  },
   "permissions": {
     "defaultMode": "plan",
     "allow": [
