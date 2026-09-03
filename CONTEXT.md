@@ -86,6 +86,21 @@ executable is never exposed. Deriving the sibling name is fallible: an empty or
 separator-terminated explicit path, or a stem-less or non-UTF-8 derived name,
 yields an error the driver reports rather than a panic.
 
+### Window write plan
+What a single-window `opt` run writes for one window outcome, and the line it
+prints once that write lands. The pure `report::build_window_write_plan` seam
+turns an `ElfWindowOptimization` into a `WindowWritePlan { action, line }`: an
+accepted rewrite and a reassembled search miss both patch bytes and report
+"Created optimized binary", while a miss with nothing to reassemble leaves the
+input unchanged and reports "Created unchanged binary" (the lossless
+three-into-two collapse — the first two cases were previously duplicated). The
+seam makes no patcher call and no `println!`; `optimize_elf_binary_with_backend`
+performs the chosen write first, then prints the line — so the write decision
+and its message are unit-testable without running the `opt` binary. It is the
+write-side sibling of the `build_equiv_report` result-rendering seam, and the
+`ElfWindowOptimization` outcome type it consumes lives beside `WindowSearchResult`
+in `src/auto_driver.rs`.
+
 ### Auto optimization pass
 One discovery-to-search sweep of the whole-binary `--auto` worklist. Candidate
 windows are ordered by decoded instruction count, then repeated instruction

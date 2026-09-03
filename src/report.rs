@@ -254,6 +254,63 @@ pub fn build_equiv_report(
     }
 }
 
+/// What the single-window `opt` caller must physically do to the output file for
+/// one window outcome. The seam decides *what*; the caller performs the I/O.
+#[derive(Debug, PartialEq, Eq)]
+pub enum WindowWriteAction {
+    /// Write `bytes` into the window: `patcher.create_patched_copy(output, &window, &bytes)`.
+    Patch { bytes: Vec<u8> },
+    /// Copy the input through untouched: `patcher.create_unmodified_copy(output)`.
+    CopyUnmodified,
+}
+
+/// The disk write single-window `opt` must perform for one window outcome, plus
+/// the exact stdout line to print **after** that write succeeds. The sibling of
+/// [`EquivReport`]: [`build_window_write_plan`] renders both with no patcher
+/// call and no `println!`, so the write decision and its message are testable
+/// without running the `opt` binary.
+#[derive(Debug, PartialEq, Eq)]
+pub struct WindowWritePlan {
+    pub action: WindowWriteAction,
+    /// Ready-to-print success line, output path included — mirrors [`EquivReport::lines`].
+    pub line: String,
+}
+
+/// Turn a single-window [`ElfWindowOptimization`] into the write to perform and
+/// the success line to print. Pure: no patcher call, no I/O, no process exit —
+/// the same contract [`build_equiv_report`] keeps for `run_equiv`.
+///
+/// Single-window mode always materializes the result file: an accepted rewrite
+/// and a reassembled search miss both patch bytes and report "Created optimized
+/// binary" (the lossless three-into-two collapse — both previously ran the
+/// identical `create_patched_copy` + message pair); only a miss with nothing to
+/// reassemble leaves the input unchanged and reports "Created unchanged binary".
+///
+/// [`ElfWindowOptimization`]: crate::auto_driver::ElfWindowOptimization
+pub fn build_window_write_plan(
+    outcome: crate::auto_driver::ElfWindowOptimization,
+    output_path: &std::path::Path,
+) -> WindowWritePlan {
+    use crate::auto_driver::ElfWindowOptimization;
+
+    match outcome {
+        ElfWindowOptimization::Improved { replacement, .. } => WindowWritePlan {
+            action: WindowWriteAction::Patch { bytes: replacement },
+            line: format!("Created optimized binary: {}", output_path.display()),
+        },
+        ElfWindowOptimization::NoImprovement {
+            reassembled: Some(bytes),
+        } => WindowWritePlan {
+            action: WindowWriteAction::Patch { bytes },
+            line: format!("Created optimized binary: {}", output_path.display()),
+        },
+        ElfWindowOptimization::NoImprovement { reassembled: None } => WindowWritePlan {
+            action: WindowWriteAction::CopyUnmodified,
+            line: format!("Created unchanged binary: {}", output_path.display()),
+        },
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -527,5 +584,74 @@ mod tests {
                 "    x1 = 0x0000000000000005".to_string(),
             ]
         );
+    }
+
+    // ===== single-window `opt` write-plan builder (extracted seam) =====
+    //
+    // Before this seam the miss/improve/leave-unchanged write decision and its
+    // "Created …" messages lived inline in `optimize_elf_binary_with_backend`,
+    // reachable only by running the `opt` binary end-to-end. `build_window_write_plan`
+    // is the pure sibling of `build_equiv_report` that makes them table-testable.
+
+    use crate::auto_driver::ElfWindowOptimization;
+    use std::path::Path;
+
+    #[test]
+    fn window_plan_improved_patches_replacement_and_reports_optimized() {
+        let plan = build_window_write_plan(
+            ElfWindowOptimization::Improved {
+                replacement: vec![1, 2, 3],
+                original_cost: 9,
+                optimized_cost: 4,
+            },
+            Path::new("/tmp/out"),
+        );
+        assert_eq!(
+            plan.action,
+            WindowWriteAction::Patch {
+                bytes: vec![1, 2, 3]
+            }
+        );
+        assert_eq!(plan.line, "Created optimized binary: /tmp/out");
+    }
+
+    #[test]
+    fn window_plan_reassembled_miss_still_patches_and_reports_optimized() {
+        // The three-into-two collapse: a search miss that reassembled behaves
+        // exactly like an accepted rewrite — same patch action, same message.
+        let plan = build_window_write_plan(
+            ElfWindowOptimization::NoImprovement {
+                reassembled: Some(vec![9, 9]),
+            },
+            Path::new("/tmp/out"),
+        );
+        assert_eq!(plan.action, WindowWriteAction::Patch { bytes: vec![9, 9] });
+        assert_eq!(plan.line, "Created optimized binary: /tmp/out");
+    }
+
+    #[test]
+    fn window_plan_bare_miss_copies_unmodified_and_reports_unchanged() {
+        let plan = build_window_write_plan(
+            ElfWindowOptimization::NoImprovement { reassembled: None },
+            Path::new("/tmp/out"),
+        );
+        assert_eq!(plan.action, WindowWriteAction::CopyUnmodified);
+        assert_eq!(plan.line, "Created unchanged binary: /tmp/out");
+    }
+
+    #[test]
+    fn window_plan_improved_with_empty_replacement_still_patches() {
+        // An all-NOP AArch64 window converts to empty IR; an empty replacement
+        // must route to a patch (Some), not to the unmodified-copy branch.
+        let plan = build_window_write_plan(
+            ElfWindowOptimization::Improved {
+                replacement: vec![],
+                original_cost: 4,
+                optimized_cost: 0,
+            },
+            Path::new("/tmp/out"),
+        );
+        assert_eq!(plan.action, WindowWriteAction::Patch { bytes: vec![] });
+        assert_eq!(plan.line, "Created optimized binary: /tmp/out");
     }
 }

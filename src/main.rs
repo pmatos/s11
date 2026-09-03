@@ -11,8 +11,8 @@ mod test_utils;
 
 use s11::assembler::AArch64Assembler;
 use s11::auto_driver::{
-    AutoOptimizationAdapter, AutoRunSummary, AutoTermination, AutoWindow, WindowSearchResult,
-    drive_auto_optimization,
+    AutoOptimizationAdapter, AutoRunSummary, AutoTermination, AutoWindow, ElfWindowOptimization,
+    WindowSearchResult, drive_auto_optimization,
 };
 use s11::candidate_windows::{
     WindowInstruction, WindowRole, plan_candidate_windows, refuse_windows_with_interior_targets,
@@ -563,55 +563,6 @@ struct OptimizationOptions {
 enum OptimizedWindowBytes {
     Patch(Vec<u8>),
     LeaveInputUnchanged,
-}
-
-enum ElfWindowOptimization {
-    NoImprovement {
-        /// The window reassembled from its original IR, when the backend
-        /// produced one. Single-window mode writes it so a search miss still
-        /// materializes a copy; auto mode never asks for it and writes its
-        /// in-memory image once at the end.
-        reassembled: Option<Vec<u8>>,
-    },
-    Improved {
-        replacement: Vec<u8>,
-        original_cost: u64,
-        optimized_cost: u64,
-    },
-}
-
-impl ElfWindowOptimization {
-    /// Whether this outcome can actually be written back into a window of
-    /// `window_len` bytes.
-    ///
-    /// A search that lowers the selected cost metric does **not** guarantee a
-    /// shorter encoding: under `instruction-count` or `latency` a
-    /// variable-length x86 replacement can encode to more bytes than the window
-    /// it must occupy. Callers that patch in place must check this rather than
-    /// let `ElfPatcher::apply_patch` reject the replacement.
-    fn fits_window(&self, window_len: usize) -> bool {
-        match self {
-            ElfWindowOptimization::Improved { replacement, .. } => replacement.len() <= window_len,
-            ElfWindowOptimization::NoImprovement { .. } => true,
-        }
-    }
-}
-
-impl From<ElfWindowOptimization> for WindowSearchResult {
-    fn from(outcome: ElfWindowOptimization) -> Self {
-        match outcome {
-            ElfWindowOptimization::NoImprovement { .. } => WindowSearchResult::NoImprovement,
-            ElfWindowOptimization::Improved {
-                replacement,
-                original_cost,
-                optimized_cost,
-            } => WindowSearchResult::Improved {
-                replacement,
-                original_cost,
-                optimized_cost,
-            },
-        }
-    }
 }
 
 /// Registers proven live downstream of the window, carried per-arch.
@@ -1796,23 +1747,20 @@ fn optimize_elf_binary_with_backend<B: ElfOptimizationBackend>(
     };
     // Single-window mode always materializes the result file: a reassembled
     // miss is written just like an accepted rewrite, and a window the backend
-    // leaves unchanged is written as an unmodified copy.
-    match optimize_elf_window_with_backend(backend, patcher, start_addr, end_addr, options, true)? {
-        ElfWindowOptimization::Improved { replacement, .. } => {
-            patcher.create_patched_copy(output, &window, &replacement)?;
-            println!("Created optimized binary: {}", output.path().display());
+    // leaves unchanged is written as an unmodified copy. The write decision and
+    // its success message live in the pure `report::build_window_write_plan`
+    // seam; here we perform the chosen I/O first, then print the line it
+    // rendered — preserving the write-before-print ordering.
+    let outcome =
+        optimize_elf_window_with_backend(backend, patcher, start_addr, end_addr, options, true)?;
+    let plan = report::build_window_write_plan(outcome, output.path());
+    match plan.action {
+        report::WindowWriteAction::Patch { bytes } => {
+            patcher.create_patched_copy(output, &window, &bytes)?
         }
-        ElfWindowOptimization::NoImprovement {
-            reassembled: Some(bytes),
-        } => {
-            patcher.create_patched_copy(output, &window, &bytes)?;
-            println!("Created optimized binary: {}", output.path().display());
-        }
-        ElfWindowOptimization::NoImprovement { reassembled: None } => {
-            patcher.create_unmodified_copy(output)?;
-            println!("Created unchanged binary: {}", output.path().display());
-        }
+        report::WindowWriteAction::CopyUnmodified => patcher.create_unmodified_copy(output)?,
     }
+    println!("{}", plan.line);
     Ok(())
 }
 
@@ -3159,25 +3107,6 @@ mod cli_helper_tests {
         assert_eq!(
             incomplete_executable_section_tail_log(".text", 0x1000, 0x100b, 0x1008, 4, 3),
             "Auto candidate discovery: executable section '.text' has raw range 0x1000-0x100b; scanning complete 4-byte-aligned instruction prefix 0x1000-0x1008 and ignoring 3 trailing byte(s)."
-        );
-    }
-
-    #[test]
-    fn oversized_replacement_does_not_fit_its_window() {
-        // Lower cost under `instruction-count` does not imply a shorter
-        // encoding on a variable-length ISA. The auto driver must catch that
-        // here rather than let `apply_patch` reject it and abort the whole run.
-        let improved = ElfWindowOptimization::Improved {
-            replacement: vec![0x83, 0xc0, 0x02],
-            original_cost: 2,
-            optimized_cost: 1,
-        };
-        assert!(!improved.fits_window(2));
-        assert!(improved.fits_window(3));
-        assert!(improved.fits_window(4));
-        assert!(
-            ElfWindowOptimization::NoImprovement { reassembled: None }.fits_window(0),
-            "a miss patches nothing and always fits"
         );
     }
 
