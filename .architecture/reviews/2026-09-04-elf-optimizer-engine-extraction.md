@@ -217,4 +217,79 @@ natural firing-after-next; it still sits 2 points below the pick.
 
 ## Design
 
-Filled in step 4 (design-it-twice + adjudication).
+Design-it-twice: three sub-agents each produced a *radically different* interface
+for `src/elf_optimizer/`; a fourth sub-agent that authored none of them
+adjudicated against the fixed criteria (depth, locality, seam placement, test
+surface, blast radius).
+
+**The relocation itself has no design choice — it is a move.** The only interface
+question the scored candidate raised was the *narrowing* of the two leaky trait
+methods, and primary-source inspection settled that before the design pass:
+`optimization_context(…, cs: &Capstone)` uses `cs` as a **disassembler handle**
+to decode the *downstream* bytes for flags-liveness, and `assemble_window(…,
+capstone_instructions: &Instructions, …)` is **load-bearing for x86** — it peels
+the original Jcc terminator's raw bytes out of Capstone (`last.bytes()`) because
+re-encoding a held-fixed Jcc through dynasm emits a zero-displacement placeholder
+that would clobber the real branch target (the bug PR #819 fixed). The AArch64
+impl ignores both extra params. So the params are **not leaks**; narrowing them
+would move complexity to the caller, not concentrate it. **All three designs
+leave those signatures unchanged**, and this firing does not attempt the
+narrowing — it is recorded here as evaluated-and-declined, not deferred work.
+
+### Design A — minimal-surface facade (3 public items)
+
+Interface: `OptimizationOptions` + `optimize_window` (renamed from
+`optimize_elf_binary`) + `optimize_auto` (renamed from `run_auto_optimization`).
+Hides the three `print_*` by **relocating them into `src/report.rs`**;
+`run_llm_opt` then calls `report::print_*`. Dependency strategy: engine trait +
+both impls fully private. Trade-off: deepest *count*, but touches a second file,
+moves a test, renames two entry points, and — decisively — `report.rs` carries a
+**documented no-`println!` purity contract** ("matching the pure-function
+`capstone_bridge` precedent … so the write decision and its message are
+testable"), which injecting the `print_*` I/O wrappers would violate.
+
+### Design B — faithful single module (6 public items) — WINNER
+
+Interface: exactly the 6 items callers use today — `OptimizationOptions` (+`pub`
+fields, since `main` builds it field-by-field), `run_auto_optimization`,
+`optimize_elf_binary`, and the three `print_*` (exported from `elf_optimizer`;
+`run_llm_opt` imports them from `s11::elf_optimizer`). Bodies move byte-for-byte
+into one `src/elf_optimizer/mod.rs`; the module gains a `use crate::…` header
+(the engine has **zero** inline `s11::` references to rewrite); the 66 engine
+tests move in as one `#[cfg(test)] mod tests`. Dependency strategy: the entire
+`ElfOptimizationBackend` trait machinery becomes module-private. Trade-off:
+smallest diff (~3–4 files: new `mod.rs`, `lib.rs`, `main.rs`, one `CLAUDE.md`
+path line), lowest risk (the 66 moved tests are the regression proof); the one
+wart is a 1875-line file that is less internally navigable and three thin
+`println!` wrappers now living in the lib.
+
+### Design C — layered submodules (`config→run→backend→windows→driver`)
+
+Same 6-item facade as B, but the engine is split across six files by concern,
+tests distributed per-submodule, plus extending `src/test_utils.rs`. Dependency
+strategy: an acyclic submodule DAG, `pub(super)` internally, `pub use` facade in
+`mod.rs`. Trade-off: best internal AI-navigability, but ~9 files and ~5
+cross-submodule visibility seams — and each internal seam has exactly **one**
+consumer, i.e. a hypothetical seam, not a real one. Its own author recommends
+landing B first as the safe intermediate and splitting as a follow-up.
+
+### Verdict
+
+**Winner: Design B.** Depth is a genuine three-way tie: A's "3 vs 6" is interface
+bookkeeping over three `println!` pass-throughs that hide **zero** engine
+behaviour — `run_llm_opt` learns them from `report::` instead of
+`elf_optimizer::` either way, so the caller-facing surface is 6 in every design,
+and the engine behind the real entry points is identical. With depth (1), locality
+(2), seam placement (3), and test surface (4) tied between A and B, the tie-break
+falls to **blast radius (5)**, where B's verbatim, rename-free, ~3-file move is
+the ideal profile for an unattended, test-first, single-PR run under the
+`clippy -D warnings` PostToolUse hook. **C is eliminated at criterion 3** on its
+single-consumer internal seams. The **runner-up design is A**; it lost because its
+only distinguishing advantage — the narrowest item count — is bought by moving
+trivial I/O wrappers into a module whose own contract forbids `println!`, hiding
+no additional behaviour while enlarging and riskier-ising the diff. C is the
+natural follow-up once the seam exists.
+
+Implementation follows B, staged per the advisor into two logical steps within
+one PR: (A) the verbatim relocation, pinned by a public-surface test; the
+trait-method narrowing is **not** performed (declined above).
