@@ -19,7 +19,7 @@ autobenches = false
 elf = "0.8"
 capstone = "0.14"
 clap = { version = "4.6", features = ["derive"] }
-z3 = "0.20"
+z3 = "0.21"
 dynasmrt = "5.0.0"
 dynasm = "5.0.0"
 rand = "0.10"
