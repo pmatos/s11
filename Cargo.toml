@@ -1,6 +1,6 @@
 [package]
 name = "s11"
-version = "0.1.0"
+version = "1.0.0"
 edition = "2024"
 authors = ["Paulo Matos <p@ocmatos.com>"]
 description = "s11: AArch64 optimizer demonstrating IR, SMT-based equivalence checking, and basic enumerative search."
