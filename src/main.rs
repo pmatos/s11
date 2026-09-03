@@ -1071,6 +1071,11 @@ impl ElfOptimizationBackend for X86OptimizationBackend {
                         "peeled x86 Jcc terminator must correspond to the last Capstone instruction"
                     );
                 }
+                // Only read inside the debug_assertions block above; in a
+                // release build that block is compiled out, so keep the
+                // binding used or `-D warnings` rejects it as dead.
+                #[cfg(not(debug_assertions))]
+                let _ = expected_terminator;
                 Some(last.bytes().to_vec())
             } else {
                 None
