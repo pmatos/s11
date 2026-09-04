@@ -26,8 +26,9 @@ Persisted candidate memory for the `pm-deepen` refactor-audit routine. Statuses:
 
 ## elf-optimizer-engine-extraction
 
-- **Status**: proposed
+- **Status**: in-flight
 - **Score**: 22/25 (leverage 5, locality 5, blast radius 4, heat 5)
+- **PR**: #823 (opened 2026-09-04)
 - **Files**: 3 estimated (`src/main.rs`, `src/lib.rs`, new `src/elf_optimizer/`)
 - **Modules**: engine block `src/main.rs:543`–`:2417` (trait `ElfOptimizationBackend` `:606`, both backend impls `:678`/`:847`, `find_candidate_windows*` `:1111`/`:1125`/`:1136`, `run_auto_optimization*` `:1459`/`:1495`, `optimize_elf_binary*` `:1579`/`:1610`/`:1736`, `run_optimization` `:1947`, `run_x86_*` `:2279`/`:2325`/`:2376`, `build_*_search_config` `:1805`–`:2278`, `print_*` `:2110`–`:2131`); `src/lib.rs`; new `src/elf_optimizer/`
 - **Summary**: Relocate the ~1,875-line ELF optimization engine out of `main.rs` into `src/elf_optimizer/` as a deep lib module behind a 6-item interface (`OptimizationOptions`, `run_auto_optimization`, `optimize_elf_binary`, three `print_*`), carrying its 66 engine-only tests into the module. Verified this firing: the engine references **zero** CLI-layer types, all 66 engine tests classify cleanly (0 "both" tests), so the move is clean. A follow-on narrows the two leaky trait methods that still take raw Capstone (`optimization_context(…, cs: &Capstone)` `:643`, `assemble_window(…, capstone_instructions: &Instructions, …)` `:667`).
@@ -172,3 +173,12 @@ Persisted candidate memory for the `pm-deepen` refactor-audit routine. Statuses:
 - **Committed**: this report (`.architecture/reviews/2026-09-03-opt-window-report-seam.md`) + reconciled backlog; design adjudication; the `build_window_write_plan` seam (PR #818); in-flight backlog + PR link.
 - **Evidence**: PR #812 reconciled to `landed` (merged); no open architecture PRs at start, so the one-at-a-time block was clear. Three fresh candidates added (`search-result-optimized-accessor`, `opt-target-arch-mismatch-classifier`, `aarch64-parser-arity-combinators`).
 - **Next**: a human reviews and merges the PR; the next firing reconciles this entry to `landed` and picks the runner-up `elf-optimizer-engine-extraction` (tied 22/25, blast radius 4).
+
+### Run 2026-09-04 — complete (elf-optimizer-engine-extraction)
+
+- **Outcome**: complete
+- **Stopped at**: n/a — full default run through PR
+- **Branch**: `pm-deepen/elf-optimizer-engine-extraction` — created from `origin/main` (adoption of the firing branch `sym/s11/routine/refactor-audit/01M1MR2N0C` refused: condition 3 failed — it had an upstream set to `origin/main`), renamed from `pm-deepen/run-2026-09-04-0102` at step 2.
+- **Committed**: this report (`.architecture/reviews/2026-09-04-elf-optimizer-engine-extraction.md`) + reconciled backlog; design-it-twice adjudication (winner: faithful single-module move); the `src/elf_optimizer/` extraction + `tests/elf_optimizer_public_surface.rs` pin test + `CLAUDE.md` path fix (PR #823); in-flight backlog + PR link.
+- **Evidence**: PR #818 reconciled to `landed` (merged 2026-09-03); no open architecture PRs at start, so the one-at-a-time block was clear. Gate green: fmt, clippy `-D warnings`, 1832 lib + 42 bin + 76 integration + 1 pin test. Two fresh candidates added: `cli-error-exit-seam` (20/25), `x86-parser-mnemonic-dispatch-decomposition` (17/25). The scored candidate's trait-method narrowing was evaluated and **declined** (Capstone params are load-bearing).
+- **Next**: a human reviews and merges PR #823; the next firing reconciles this entry to `landed` and picks the top surviving candidate — `cli-error-exit-seam` (20/25) leads the `proposed` set.
