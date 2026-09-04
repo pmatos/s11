@@ -8,6 +8,7 @@ pub mod capstone_bridge_x86;
 pub mod capstone_detail;
 pub mod disassembly;
 pub mod docs_support;
+pub mod elf_optimizer;
 pub mod elf_patcher;
 pub mod ir;
 pub mod isa;
