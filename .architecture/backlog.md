@@ -15,34 +15,35 @@ Persisted candidate memory for the `pm-deepen` refactor-audit routine. Statuses:
 
 ## opt-window-report-seam
 
-- **Status**: in-flight
+- **Status**: landed
 - **Score**: 22/25 (leverage 4, locality 4, blast radius 1, heat 5)
 - **Files**: 2–3 estimated (`src/report.rs` edited, new lib-visible outcome type, `src/main.rs` edited)
-- **Modules**: `src/main.rs:1654` (`optimize_elf_window_with_backend`), `src/main.rs:1780` (`optimize_elf_binary_with_backend` terminal branch), mirror `src/report.rs:200` (`build_equiv_report`)
+- **Modules**: `report::build_window_write_plan` (`src/report.rs:290`), `WindowWritePlan`/`WindowWriteAction` (`src/report.rs:273`/`:260`), `ElfWindowOptimization` (relocated to `src/auto_driver.rs:38`)
 - **Summary**: Give the `opt` single-window path a pure `report::build_window_write_plan` seam mirroring the `equiv` path's `build_equiv_report`, so the untested miss/improve/leave-unchanged classification and its "Created optimized/unchanged binary" messages become unit-pinnable instead of reachable only through the `opt` binary. Relocated the bin-local `ElfWindowOptimization` outcome type into the lib (`src/auto_driver.rs`) so `report.rs` (lib) can consume it.
 - **First seen**: 2026-09-01
-- **PR**: #818 (opened 2026-09-03)
-- **Reason**: — (pick, run 2026-09-03; `llm-search-stats-accumulator` PR #812 now landed so the one-architecture-PR-at-a-time block is cleared. Runner-up candidate `elf-optimizer-engine-extraction` tied at 22/25 but lost the tie-break on blast radius 4 vs 1.)
+- **PR**: #818 (merged 2026-09-03)
+- **Reason**: Landed — `gh pr view 818` reports state MERGED (mergedAt 2026-09-03T08:18:00Z). Reconciled from `in-flight` to `landed` this firing (2026-09-04).
 
 ## elf-optimizer-engine-extraction
 
-- **Status**: proposed
+- **Status**: in-flight
 - **Score**: 22/25 (leverage 5, locality 5, blast radius 4, heat 5)
-- **Files**: 3–5 estimated
-- **Modules**: `src/main.rs:640`–`2464` (trait + both impls + orchestrators + `run_x86_*`), `src/lib.rs`, new `src/elf_optimizer/`
-- **Summary**: Relocate the ~2,000-line ELF optimization engine (backend trait, both impls, window orchestrator, `optimize_elf_binary_with_backend`, `run_x86_*`) out of `main.rs` into `src/elf_optimizer/` and narrow the leaky `optimization_context`/`assemble_window` trait methods to pass a decoded slice rather than raw Capstone. Best sequenced after the two internal seams above.
+- **PR**: #823 (opened 2026-09-04)
+- **Files**: 3 estimated (`src/main.rs`, `src/lib.rs`, new `src/elf_optimizer/`)
+- **Modules**: engine block `src/main.rs:543`–`:2417` (trait `ElfOptimizationBackend` `:606`, both backend impls `:678`/`:847`, `find_candidate_windows*` `:1111`/`:1125`/`:1136`, `run_auto_optimization*` `:1459`/`:1495`, `optimize_elf_binary*` `:1579`/`:1610`/`:1736`, `run_optimization` `:1947`, `run_x86_*` `:2279`/`:2325`/`:2376`, `build_*_search_config` `:1805`–`:2278`, `print_*` `:2110`–`:2131`); `src/lib.rs`; new `src/elf_optimizer/`
+- **Summary**: Relocate the ~1,875-line ELF optimization engine out of `main.rs` into `src/elf_optimizer/` as a deep lib module behind a 6-item interface (`OptimizationOptions`, `run_auto_optimization`, `optimize_elf_binary`, three `print_*`), carrying its 66 engine-only tests into the module. Verified this firing: the engine references **zero** CLI-layer types, all 66 engine tests classify cleanly (0 "both" tests), so the move is clean. A follow-on narrows the two leaky trait methods that still take raw Capstone (`optimization_context(…, cs: &Capstone)` `:643`, `assemble_window(…, capstone_instructions: &Instructions, …)` `:667`).
 - **First seen**: 2026-09-01
-- **Reason**: — (runner-up candidate to the 2026-09-03 pick; tied at 22/25, loses the blast-radius tie-break; the natural next firing once `opt-window-report-seam` lands)
+- **Reason**: — (pick, run 2026-09-04; `opt-window-report-seam` PR #818 now landed so the one-architecture-PR-at-a-time block is cleared. Runner-up candidate `opt-target-arch-mismatch-classifier` at 19/25, three points below.)
 
 ## x86-width-dispatch-runner
 
 - **Status**: proposed
 - **Score**: 19/25 (leverage 3, locality 4, blast radius 1, heat 4)
 - **Files**: ~1 estimated
-- **Modules**: `src/main.rs:2326` (`run_x86_enumerative`), `src/main.rs:2372` (`run_x86_stochastic`), `src/main.rs:2423` (`run_x86_symbolic`)
+- **Modules**: `src/main.rs:2279` (`run_x86_enumerative`), `src/main.rs:2325` (`run_x86_stochastic`), `src/main.rs:2376` (`run_x86_symbolic`)
 - **Summary**: Collapse the triplicated width-dispatch spine of `run_x86_enumerative/stochastic/symbolic` into one generic `run_x86_width_dispatched<A: SearchAlgorithm>` helper.
 - **First seen**: 2026-09-01
-- **Reason**: — (Note 2026-09-03: the triplication is **already drifting** — `run_x86_stochastic` has an early `if config.x86_available_registers.is_empty() { return None; }` guard at `src/main.rs:2383`–2385 that the enumerative and symbolic siblings lack. Either a latent bug in the other two or an undocumented asymmetry; a shared seam would have prevented the divergence.)
+- **Reason**: — (Note, line refs refreshed 2026-09-04: the triplication is **already drifting** — `run_x86_stochastic` has an early `if config.x86_available_registers.is_empty() { return None; }` guard at `src/main.rs:2336`–2338 that the enumerative and symbolic siblings lack. Either a latent bug in the other two or an undocumented asymmetry; a shared seam would have prevented the divergence.)
 
 ## search-config-builder-module
 
@@ -94,15 +95,35 @@ Persisted candidate memory for the `pm-deepen` refactor-audit routine. Statuses:
 - **First seen**: 2026-09-01
 - **Reason**: —
 
+## cli-error-exit-seam
+
+- **Status**: proposed
+- **Score**: 20/25 (leverage 3, locality 4, blast radius 1, heat 5)
+- **Files**: ~1 estimated (`src/main.rs`)
+- **Modules**: `src/main.rs:2545`–`:2758` (`fn main`: 15 `std::process::exit` + 15 `eprintln!` paired inline across every command arm)
+- **Summary**: The error→exit-code/message policy has no owner: it is scattered across ~15 inline `eprintln!("Error …: {e}"); std::process::exit(1);` sites and is reachable only by running the `s11` binary. Frame command handlers as `Commands::run(self) -> Result<(), CliError>` with a single exit-mapping site in `main`, deepening the dispatch and making the exit/message table pinnable via the repo's integration-test binaries.
+- **First seen**: 2026-09-04
+- **Reason**: — (fresh this firing; strongest new candidate, 2 points below the pick. Partially subsumes `opt-target-arch-mismatch-classifier`'s exit paths at `:2620/:2624/:2629`. Pinnable: current exit-code behaviour is observable through the CI-built integration test binaries, so it survives the "cannot be pinned" filter.)
+
+## x86-parser-mnemonic-dispatch-decomposition
+
+- **Status**: proposed
+- **Score**: 17/25 (leverage 2, locality 4, blast radius 1, heat 4)
+- **Files**: ~1 estimated (`src/parser/x86.rs`)
+- **Modules**: `src/parser/x86.rs:361`–`:731` (`x86_ir_from_mnemonic_impl`, one ~370-line sequential `if mnemonic == …` dispatch)
+- **Summary**: The x86 twin of `aarch64-parser-arity-combinators`, concentrated in one ~370-line mega-function that re-implements arity + register-width checks inline per family (SETcc, CMOVcc, Jcc, NEG/NOT/INC/DEC, IMUL, two-operand families). Extract per-family `parse_x86_*` combinators mirroring the AArch64 `parse_unary_*` idiom so each family is a named, testable unit. Public parse interface unchanged (leverage 2).
+- **First seen**: 2026-09-04
+- **Reason**: — (fresh this firing; internal DRY inside an already-deep module, weighted low despite high raw size because `parse_x86_assembly_string`'s interface is unchanged and behaviour is already pinned end-to-end)
+
 ## resolve-opt-target-relocation
 
 - **Status**: dropped
 - **Score**: not scored (hard-filtered)
 - **Files**: ~2 estimated
-- **Modules**: `src/main.rs:441` (`resolve_opt_target`, approx)
+- **Modules**: `src/main.rs:442` (`resolve_opt_target`)
 - **Summary**: Relocate `resolve_opt_target` out of the driver.
 - **First seen**: 2026-09-01
-- **Reason**: Leverage ~1 — already a clean, fully-pinned pure seam (8 table tests); its only coupling is to CLI-layer enums that legitimately live beside the clap definitions, so moving it is near-zero leverage. Re-check the filter if those enums move. (2026-09-03 re-check: still dropped; the enums have not moved.)
+- **Reason**: Leverage ~1 — already a clean, fully-pinned pure seam (8 table tests); its only coupling is to CLI-layer enums that legitimately live beside the clap definitions, so moving it is near-zero leverage. Re-check the filter if those enums move. (2026-09-04 re-check: still dropped; the enums have not moved.)
 
 ## llm-search-stats-accumulator
 
@@ -152,3 +173,12 @@ Persisted candidate memory for the `pm-deepen` refactor-audit routine. Statuses:
 - **Committed**: this report (`.architecture/reviews/2026-09-03-opt-window-report-seam.md`) + reconciled backlog; design adjudication; the `build_window_write_plan` seam (PR #818); in-flight backlog + PR link.
 - **Evidence**: PR #812 reconciled to `landed` (merged); no open architecture PRs at start, so the one-at-a-time block was clear. Three fresh candidates added (`search-result-optimized-accessor`, `opt-target-arch-mismatch-classifier`, `aarch64-parser-arity-combinators`).
 - **Next**: a human reviews and merges the PR; the next firing reconciles this entry to `landed` and picks the runner-up `elf-optimizer-engine-extraction` (tied 22/25, blast radius 4).
+
+### Run 2026-09-04 — complete (elf-optimizer-engine-extraction)
+
+- **Outcome**: complete
+- **Stopped at**: n/a — full default run through PR
+- **Branch**: `pm-deepen/elf-optimizer-engine-extraction` — created from `origin/main` (adoption of the firing branch `sym/s11/routine/refactor-audit/01M1MR2N0C` refused: condition 3 failed — it had an upstream set to `origin/main`), renamed from `pm-deepen/run-2026-09-04-0102` at step 2.
+- **Committed**: this report (`.architecture/reviews/2026-09-04-elf-optimizer-engine-extraction.md`) + reconciled backlog; design-it-twice adjudication (winner: faithful single-module move); the `src/elf_optimizer/` extraction + `tests/elf_optimizer_public_surface.rs` pin test + `CLAUDE.md` path fix (PR #823); in-flight backlog + PR link.
+- **Evidence**: PR #818 reconciled to `landed` (merged 2026-09-03); no open architecture PRs at start, so the one-at-a-time block was clear. Gate green: fmt, clippy `-D warnings`, 1832 lib + 42 bin + 76 integration + 1 pin test. Two fresh candidates added: `cli-error-exit-seam` (20/25), `x86-parser-mnemonic-dispatch-decomposition` (17/25). The scored candidate's trait-method narrowing was evaluated and **declined** (Capstone params are load-bearing).
+- **Next**: a human reviews and merges PR #823; the next firing reconciles this entry to `landed` and picks the top surviving candidate — `cli-error-exit-seam` (20/25) leads the `proposed` set.

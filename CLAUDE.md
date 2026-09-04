@@ -183,7 +183,7 @@ src/
 There are two text-to-IR entry points and they MUST cover the same mnemonic set:
 
 - `src/parser/mod.rs::parse_line` — GNU assembler syntax (drives `s11 equiv`, `.s` inputs, round-trip tests).
-- `src/main.rs::convert_to_ir` — Capstone disassembly of ELF binaries (drives `s11 opt <elf>`).
+- `src/elf_optimizer/mod.rs::convert_to_ir` — Capstone disassembly of ELF binaries (drives `s11 opt <elf>`).
 
 To prevent drift, `convert_to_ir` does NOT maintain its own supported-mnemonic switch — it delegates each instruction to `src/capstone_bridge.rs::convert_capstone_op`, which formats `"{mnemonic} {op_str}"` and hands it to `parser::parse_line`. The only pre-parser exception is a narrow, tested Capstone-only alias bridge (`src/capstone_bridge.rs`) for spellings that map to one existing IR instruction (currently move-wide `mov Xd, #imm` aliases to `movz`/`movn`, and `cinc`/`cinv`/`cneg` to `csinc`/`csinv`/`csneg`). **Adding a new mnemonic means adding it to the parser only**; the binary path picks it up automatically. If Capstone emits a new alias for an already-supported instruction, add a targeted normalization test and emit canonical parser text rather than growing a second broad mnemonic switch.
 
