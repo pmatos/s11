@@ -290,6 +290,17 @@ trivial I/O wrappers into a module whose own contract forbids `println!`, hiding
 no additional behaviour while enlarging and riskier-ising the diff. C is the
 natural follow-up once the seam exists.
 
-Implementation follows B, staged per the advisor into two logical steps within
-one PR: (A) the verbatim relocation, pinned by a public-surface test; the
-trait-method narrowing is **not** performed (declined above).
+### What landed
+
+One relocation commit implements Design B: the ~1875-line engine moved verbatim
+into `src/elf_optimizer/mod.rs` behind the 6-item facade, its 66 unit tests
+moved in as the module's own `#[cfg(test)] mod tests`, and `main.rs` shrank from
+6020 to ~1847 lines. The trait-method narrowing was **evaluated and declined**
+(not attempted, not deferred): the two Capstone-taking params are load-bearing,
+so narrowing them would move complexity to the caller rather than concentrate
+it. `tests/elf_optimizer_public_surface.rs` pins all six public signatures
+(the two entry points via `type` aliases, the three reporters directly, and
+`OptimizationOptions` as a sized type). `CLAUDE.md`'s `convert_to_ir` pointer was
+updated from `src/main.rs` to `src/elf_optimizer/mod.rs`. No `CONTEXT.md` term
+was added or sharpened — `disassemble_elf_binary` (its only `src/main.rs` driver
+reference) stays in `main.rs`, and the "thin adapter" statements remain accurate.
