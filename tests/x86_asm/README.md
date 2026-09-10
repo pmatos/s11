@@ -8,14 +8,25 @@ supports, and they encode a *known* deterministic shortening.
 
 `build_tests.sh` assembles each `.s` here into `binaries/x86_64/<name>` with
 host gcc (`-no-pie -nostdlib`), giving a fixed-address ELF whose window
-addresses are stable across rebuilds.
+addresses are stable across rebuilds. It also copies each assembled binary
+into `tests/e2e/fixtures/x86_64/<name>` for the e2e outcome-case harness
+(`tests/e2e/cases/outcome_x86_64.rs`).
+
+Both fixtures end with an explicit `exit` syscall (rather than trailing NOP
+padding) so they can actually be run, not just disassembled — needed by the
+e2e harness's behavioral tier (#831 Phase 3). The exit code is derived from
+live-out register state, itself a compile-time constant, so no run depends on
+unseeded RNG (issue #409).
 
 - `dup_mov_imm.s` — two identical `mov rax, 5` instructions. The enumerative
   search collapses the redundant pair to a single `mov rax, 5` (a one
-  instruction shortening), exercised by `test_opt_x86_64_known_shortening`.
+  instruction shortening), exercised by `test_opt_x86_64_known_shortening` and
+  the e2e case `outcome-x86-64-dup-mov-imm`. Exits with RAX's value (5).
 - `auto_two_dup_mov.s` — two duplicate-MOV pairs separated by an unsupported
   `push`, giving `--auto` two deterministic windows for loop, padding, budget,
-  and fixpoint coverage.
+  and fixpoint coverage. The exit sequence uses only `push`/`pop` (outside the
+  liftable x86 mnemonic subset, like the `push rbx` separator) so it cannot
+  perturb candidate-window discovery. Exits with RCX's value (7).
 - `x86_32/dup_mov_imm.s` — the x86-32 mirror of `dup_mov_imm.s`: two identical
   `mov eax, 5` instructions collapse to one, followed by an explicit
   `int 0x80` exit syscall (exit code 5, the live-out EAX value) so the
