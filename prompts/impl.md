@@ -1,6 +1,6 @@
 # Vow implementation stage: issue #{{issue.number}} {{issue.title}}
 
-You are the **implementation** agent. A planning pass has written `{{workspace.path}}/PLAN.md`. Read it first. It is an ignored, workspace-local handoff rather than a PR deliverable. If it is missing or stale, re-derive the slices from the issue body before writing code.
+You are the **implementation** agent. A planning pass has written and committed `{{workspace.path}}/PLAN.md`. Read it first. It is a gitignored, workspace-local handoff rather than a PR deliverable — it must not appear in the pull request; drop it in your final commit (see "Drop the plan before opening the PR" below). If it is missing or stale, re-derive the slices from the issue body before writing code.
 
 ## Issue under work
 
@@ -47,10 +47,31 @@ You are the **implementation** agent. A planning pass has written `{{workspace.p
 
 ## Commit hygiene
 
-- Exclude the repository-root `PLAN.md` from every commit, even if it changes during implementation. Do not stage or force-add it.
-- Commit in small focused units that match the TDD slices. Many small commits beat one large one — they are easier to review, `git bisect`, and revert.
+- Do not amend, rebase over, or otherwise touch the planning stage's `docs(plan): add implementation plan for issue #{{issue.number}}` commit — leave it in place; it is dropped as its own commit later (see "Drop the plan before opening the PR" below), not folded away here.
+- Commit in small focused units that match the TDD slices. Many small commits beat one large one — they are easier to review, `git bisect`, and revert. This repo squash-merges, so these commits never reach `main` individually, but they still matter for local review and for `git bisect`/revert *within* this PR before it merges.
 - Write commit messages that describe the change and the why. Use a conventional prefix (`fix(...)`, `feat(...)`, `refactor(...)`) consistent with recent history (`git log --oneline -20`).
 - Commits in this repo must be authored as `p@ocmatos.com`. If the workspace git config has a different identity, set `user.email` to `p@ocmatos.com` for this repo only (`git config user.email p@ocmatos.com`) before committing.
+
+## Drop the plan before opening the PR
+
+`PLAN.md` was committed by the planning stage purely to hand the plan across the
+stage boundary. It is not part of the change and must not ship. Before you push:
+
+```sh
+git rm PLAN.md
+git commit -m "chore: drop stage-handoff PLAN.md"
+```
+
+Then confirm the branch adds nothing but the real change:
+
+```sh
+git diff --stat main...HEAD   # must not list PLAN.md
+```
+
+This repo squash-merges PRs, so neither this commit nor the planning stage's
+`docs(plan): ...` commit reaches `main` individually — only the squashed PR title
+does. This step exists so `PLAN.md` isn't part of the PR's diff at all, not to
+protect `main`'s commit log.
 
 ## Open the PR
 
@@ -59,7 +80,7 @@ Push `{{branch.name}}` to `origin`, then:
 ```sh
 gh pr create --base main --head {{branch.name}} \
   --title "<conventional title — no agent prefix like [claude] or [codex]>" \
-  --body "<summary>\n\nCloses #{{issue.number}}\n\n**Merge with \`gh pr merge --merge\` (merge commit, not squash) per CLAUDE.md.**"
+  --body "<summary>\n\nCloses #{{issue.number}}"
 ```
 
 The PR must be **non-draft**. Do not use `--web`, `--draft`, or any flag that opens a browser or waits for input. Do not call the GitHub MCP connector tools — use the local `gh` CLI for every mutation.
@@ -68,7 +89,7 @@ The PR must be **non-draft**. Do not use `--web`, `--draft`, or any flag that op
 
 - Remove the readiness label so the orchestrator does not re-schedule: `gh issue edit {{issue.number}} --remove-label agent-ready`.
 - Do **not** apply `needs-human` or any `sym:*` label as an exit strategy. The operator owns those.
-- Do **not** merge the PR. The operator will merge with `gh pr merge --merge` to preserve commit history (a vow project requirement).
+- Do **not** merge the PR. The operator merges it (this repo squash-merges only — `allow_merge_commit: false` on the GitHub repo — so the PR title becomes the sole commit message on `main`; write it accordingly).
 
 ## If you cannot proceed
 

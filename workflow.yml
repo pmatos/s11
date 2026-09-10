@@ -15,16 +15,19 @@ workflow:
         provider: claude
         prompt: prompts/plan.md
       transitions:
-        # artifact_exists probes the Run Workspace for the plan file itself.
-        # No branch_advanced_since_attempt_start gate here (unlike vow's
-        # version of this state): s11's prompts/plan.md explicitly forbids
-        # staging or committing PLAN.md ("Do not stage, commit, or force-add
-        # PLAN.md"), so a correct planning run never advances the branch and
-        # that gate could never pass.
+        # artifact_exists probes the Run Workspace for the plan file itself, so
+        # a planner that commits something other than a plan cannot pass.
+        # branch_advanced_since_attempt_start is false unless this run added a
+        # commit, so a resumed attempt cannot coast on a PLAN.md an earlier
+        # attempt left in the workspace. This repo squash-merges (see
+        # docs/adr and GitHub repo settings: allow_merge_commit=false), so
+        # the throwaway PLAN.md commit prompts/plan.md now requires never
+        # reaches main — mirrors vow's workflow.yml.
         - to: implement
           when:
             provider_success: true
             artifact_exists: PLAN.md
+            branch_advanced_since_attempt_start: true
         - to: failed
 
     implement:
