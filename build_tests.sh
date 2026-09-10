@@ -26,6 +26,21 @@ for test_file in tests/*.c; do
     aarch64-linux-gnu-gcc -O3     -o "binaries/${base_name}_opt3"  "$test_file"
 done
 
+# Hand-written register-only AArch64 assembly fixtures
+# (tests/aarch64_asm/*.s) for the e2e outcome-case suite (issue #834).
+# `-no-pie -nostdlib` gives a fixed-address ELF (entry point == the
+# fixture's first instruction) so e2e window addresses are stable across
+# rebuilds. Output goes to tests/e2e/fixtures/aarch64/, not binaries/, per
+# tests/e2e/fixtures/README.md.
+mkdir -p tests/e2e/fixtures/aarch64
+for asm_file in tests/aarch64_asm/*.s; do
+    [ -e "$asm_file" ] || continue
+    base_name=$(basename "$asm_file" .s)
+    echo "Assembling AArch64 e2e fixture $base_name..."
+    aarch64-linux-gnu-gcc -no-pie -nostdlib \
+        -o "tests/e2e/fixtures/aarch64/${base_name}" "$asm_file"
+done
+
 # --- x86-64 (host gcc) ---
 if command -v gcc >/dev/null && [ "$(gcc -dumpmachine | head -c 6)" = "x86_64" ]; then
     echo "Building x86-64 test binaries with host gcc..."

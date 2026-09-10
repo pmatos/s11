@@ -12,9 +12,6 @@ target/
 # Test binaries
 binaries/
 
-# e2e outcome-case fixtures built by build_tests.sh (gcc -m32)
-tests/e2e/fixtures/x86_32/
-
 # IDE-specific files
 .vscode/
 .claude/settings.local.json
@@ -36,3 +33,8 @@ mutants.out.old/
 
 # criterion benchmark output and JSONL accumulator (issue #70)
 benches/results/
+
+# e2e outcome/behavioral fixtures built by build_tests.sh (issue #834+);
+# the directory's own README stays tracked.
+tests/e2e/fixtures/*
+!tests/e2e/fixtures/README.md
