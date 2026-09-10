@@ -19,10 +19,10 @@ workflow:
         # a planner that commits something other than a plan cannot pass.
         # branch_advanced_since_attempt_start is false unless this run added a
         # commit, so a resumed attempt cannot coast on a PLAN.md an earlier
-        # attempt left in the workspace. This repo squash-merges (see
-        # docs/adr and GitHub repo settings: allow_merge_commit=false), so
-        # the throwaway PLAN.md commit prompts/plan.md now requires never
-        # reaches main — mirrors vow's workflow.yml.
+        # attempt left in the workspace. This repo squash-merges (GitHub
+        # repo settings: allow_merge_commit=false), so the throwaway
+        # PLAN.md commit prompts/plan.md now requires never reaches main —
+        # mirrors vow's workflow.yml.
         - to: implement
           when:
             provider_success: true

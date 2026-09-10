@@ -59,14 +59,17 @@ on the branch, so an uncommitted plan fails the run and no implementation happen
 
 ```
 git add -f PLAN.md
-git commit --no-verify -m "docs(plan): add implementation plan for issue #{{issue.number}}"
+git commit --no-verify --allow-empty -m "docs(plan): add implementation plan for issue #{{issue.number}}"
 ```
 
 `-f` is required: `PLAN.md` is listed in `.gitignore` (it stays there — this is a one-off,
-force-added handoff commit, not a change to the ignore rule).
+force-added handoff commit, not a change to the ignore rule). `--allow-empty` covers a
+resumed attempt whose plan is byte-identical to one already committed on this branch —
+without it, that commit has nothing staged and fails outright instead of advancing the
+branch.
 
-`--no-verify` is deliberate and is **not** a licence to skip hooks elsewhere. This commit is a
-stage-handoff artefact: the implementation stage `git rm`s `PLAN.md` before opening the PR, and
+`--no-verify` is deliberate and is **not** a license to skip hooks elsewhere. This commit is a
+stage-handoff artifact: the implementation stage `git rm`s `PLAN.md` before opening the PR, and
 this repo squash-merges, so this message never reaches `main` and there is nothing for
 `commitlint` to protect.
 
