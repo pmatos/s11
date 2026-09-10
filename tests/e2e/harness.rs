@@ -1,7 +1,8 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-/// An `--start-addr`/`--end-addr` window into a fixture binary.
+/// An `--start-addr`/`--end-addr` window into a fixture binary, consumed by
+/// [`Case::expected_instructions`].
 #[derive(Default)]
 pub(crate) struct Window {
     pub start_addr: &'static str,
@@ -157,7 +158,25 @@ pub(crate) fn run(case: &Case) {
         );
     }
 
-    let argv = build_argv(case);
+    // Cases asserting `expected_instructions` write their optimized output
+    // here rather than relying on `s11 opt`'s default derived-sibling path,
+    // so runs never leave stray files next to the (gitignored) fixture.
+    let output_dir = case
+        .expected_instructions
+        .is_some()
+        .then(|| tempfile::tempdir().expect("create e2e case output tempdir"));
+
+    let mut argv = build_argv(case);
+    if let Some(dir) = &output_dir {
+        argv.push("-o".to_string());
+        argv.push(
+            dir.path()
+                .join(format!("{}-optimized", case.name))
+                .to_string_lossy()
+                .into_owned(),
+        );
+    }
+
     let binary = s11_binary_path();
     let reproducer = reproducer_command(&binary, &argv);
 
