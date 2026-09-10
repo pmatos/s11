@@ -13,5 +13,10 @@ from `tests/x86_asm/x86_32/*.s`; it's gracefully absent when the multilib
 toolchain isn't installed, and consumed via `fixture_exists` preflight
 checks so cases skip rather than fail.
 
+`x86_64/` (issue #835) is populated by `build_tests.sh`'s host-gcc block,
+which copies the assembled binaries from `tests/x86_asm/*.s` (see that
+directory's README).
+
 Every fixture directory here is gitignored (build artifact) apart from
-this README. x86-64 fixtures are pending in #835.
+this README. Run `./build_tests.sh` before `just e2e` / `cargo test --test
+e2e_tests` if a directory is empty or missing an expected fixture.

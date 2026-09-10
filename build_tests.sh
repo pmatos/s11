@@ -57,11 +57,13 @@ if command -v gcc >/dev/null && [ "$(gcc -dumpmachine | head -c 6)" = "x86_64" ]
     # register/immediate subset and encode a known deterministic shortening
     # for the end-to-end opt integration tests. `-no-pie -nostdlib` gives a
     # fixed-address ELF so window addresses are stable across rebuilds.
+    mkdir -p tests/e2e/fixtures/x86_64
     for asm_file in tests/x86_asm/*.s; do
         [ -e "$asm_file" ] || continue
         base_name=$(basename "$asm_file" .s)
         echo "Assembling x86-64 fixture $base_name..."
         gcc -no-pie -nostdlib -o "binaries/x86_64/${base_name}" "$asm_file"
+        cp "binaries/x86_64/${base_name}" "tests/e2e/fixtures/x86_64/${base_name}"
     done
 else
     echo "Skipping x86-64 (no x86_64 host gcc)."

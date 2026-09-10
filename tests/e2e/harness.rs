@@ -1,7 +1,9 @@
+use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-/// An `--start-addr`/`--end-addr` window into a fixture binary.
+/// An `--start-addr`/`--end-addr` window into a fixture binary, consumed by
+/// [`Case::expected_instructions`].
 #[derive(Default)]
 pub(crate) struct Window {
     pub start_addr: &'static str,
@@ -157,7 +159,33 @@ pub(crate) fn run(case: &Case) {
         );
     }
 
-    let argv = build_argv(case);
+    // Cases asserting `expected_instructions` write their optimized output
+    // here rather than relying on `s11 opt`'s default derived-sibling path,
+    // so runs never leave stray files next to the (gitignored) fixture. The
+    // directory is persisted (not auto-cleaned via `TempDir`'s `Drop`) so
+    // that on failure the reproducer command printed below still points at
+    // an on-disk `-o` path a human can inspect or re-run standalone; it is
+    // removed explicitly at the end of this function on the success path.
+    let output_path = case.expected_instructions.is_some().then(|| {
+        assert!(
+            case.subcommand == Some("opt"),
+            "e2e case {:?}: expected_instructions requires subcommand \"opt\" (the only \
+             subcommand accepting -o/--output), got {:?}",
+            case.name,
+            case.subcommand
+        );
+        tempfile::tempdir()
+            .expect("create e2e case output tempdir")
+            .keep()
+            .join(format!("{}-optimized", case.name))
+    });
+
+    let mut argv = build_argv(case);
+    if let Some(path) = &output_path {
+        argv.push("-o".to_string());
+        argv.push(path.to_string_lossy().into_owned());
+    }
+
     let binary = s11_binary_path();
     let reproducer = reproducer_command(&binary, &argv);
 
@@ -208,6 +236,26 @@ pub(crate) fn run(case: &Case) {
              reproducer: {reproducer}\nstdout:\n{stdout}",
             case.name,
         );
+        let path = output_path
+            .as_deref()
+            .expect("expected_instructions implies -o was set");
+        assert!(
+            path.exists(),
+            "e2e case {:?}: reported instructions but never wrote -o output {:?}\n\
+             reproducer: {reproducer}\nstdout:\n{stdout}",
+            case.name,
+            path,
+        );
+    }
+
+    // Only reached on success (every failure path above panics first), so the
+    // tempdir is still on disk for anyone inspecting a panic from this run;
+    // clean it up now that it's no longer needed.
+    if let Some(path) = output_path {
+        let dir = path
+            .parent()
+            .expect("tempdir-derived output path always has a parent");
+        let _ = fs::remove_dir_all(dir);
     }
 }
 
