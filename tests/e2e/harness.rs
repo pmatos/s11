@@ -565,8 +565,8 @@ mod tests {
         assert!(status.success(), "s11 opt did not succeed: {status:?}");
 
         let mut bytes = fs::read(&output_path).expect("read patched output");
-        // `mov rax, 5` (dynasm-encoded, see docs/adr and the fixture README):
-        // REX.W + C7 /0 + imm32.
+        // `mov rax, 5`: REX.W + C7 /0 + imm32, confirmed against this
+        // fixture's actual dynasm-assembled output before writing this test.
         const MOV_RAX_5: [u8; 7] = [0x48, 0xC7, 0xC0, 0x05, 0x00, 0x00, 0x00];
         let occurrences: Vec<usize> = bytes
             .windows(MOV_RAX_5.len())
