@@ -35,6 +35,9 @@ pub(crate) struct Case {
     pub window: Option<Window>,
     /// Remaining CLI arguments, appended after any fixture/arch/window flags.
     pub args: &'static [&'static str],
+    /// Owned, dynamically-computed argv pieces (e.g. `-o <tempdir path>`),
+    /// appended after `args`.
+    pub extra_args: Vec<String>,
     pub expected_exit_code: i32,
     pub expected_stdout_contains: Option<&'static str>,
     /// Instruction count (before, after) a successful optimization must report,
@@ -132,6 +135,7 @@ fn build_argv(case: &Case) -> Vec<String> {
     }
 
     argv.extend(case.args.iter().map(|a| a.to_string()));
+    argv.extend(case.extra_args.iter().cloned());
     argv
 }
 
@@ -230,6 +234,25 @@ mod tests {
             ..Default::default()
         };
         build_argv(&case);
+    }
+
+    #[test]
+    fn build_argv_appends_extra_args_after_static_args() {
+        let case = Case {
+            name: "extra-args-ordering",
+            args: &["--static-flag"],
+            extra_args: vec!["-o".to_string(), "/tmp/out.elf".to_string()],
+            ..Default::default()
+        };
+        let argv = build_argv(&case);
+        assert_eq!(
+            argv,
+            vec![
+                "--static-flag".to_string(),
+                "-o".to_string(),
+                "/tmp/out.elf".to_string(),
+            ]
+        );
     }
 
     #[test]
