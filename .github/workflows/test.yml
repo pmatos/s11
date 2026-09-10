@@ -91,5 +91,10 @@ jobs:
         export RUST_BACKTRACE=1
         cargo test --test integration_tests -- --nocapture
 
+    - name: Run e2e tests
+      run: |
+        export RUST_BACKTRACE=1
+        cargo test --test e2e_tests -- --nocapture
+
     - name: Run all tests
       run: ./test_all.sh

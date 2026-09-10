@@ -9,6 +9,7 @@ TEST_WORKFLOW_PATH = REPOSITORY_ROOT / ".github" / "workflows" / "test.yml"
 COMMITLINT_WORKFLOW_PATH = REPOSITORY_ROOT / ".github" / "workflows" / "commitlint.yml"
 
 INTEGRATION_TEST_COMMAND = "cargo test --test integration_tests -- --nocapture"
+E2E_TEST_COMMAND = "cargo test --test e2e_tests -- --nocapture"
 POLICY_DISCOVERY_COMMAND = (
     "python3 -m unittest discover -s scripts -p 'test_*_policy.py'"
 )
@@ -71,6 +72,14 @@ class TestCiPolicy(unittest.TestCase):
         self.assertTrue(
             has_required_command(workflow, INTEGRATION_TEST_COMMAND),
             f"{INTEGRATION_TEST_COMMAND!r} must be present without failure masking",
+        )
+
+    def test_e2e_tests_are_a_required_gate(self):
+        workflow = TEST_WORKFLOW_PATH.read_text(encoding="utf-8")
+
+        self.assertTrue(
+            has_required_command(workflow, E2E_TEST_COMMAND),
+            f"{E2E_TEST_COMMAND!r} must be present without failure masking",
         )
 
     def test_commitlint_dependencies_are_pinned_exactly(self):
@@ -152,6 +161,7 @@ class TestCiPolicy(unittest.TestCase):
             POLICY_DISCOVERY_COMMAND,
             SHELL_REGRESSION_COMMAND,
             MUTANTS_REGRESSION_COMMAND,
+            E2E_TEST_COMMAND,
         ):
             with self.subTest(command=command):
                 self.assertTrue(
