@@ -26,14 +26,14 @@ Persisted candidate memory for the `pm-deepen` refactor-audit routine. Statuses:
 
 ## elf-optimizer-engine-extraction
 
-- **Status**: in-flight
+- **Status**: landed
 - **Score**: 22/25 (leverage 5, locality 5, blast radius 4, heat 5)
-- **PR**: #823 (opened 2026-09-04)
+- **PR**: #823 (merged 2026-09-04T09:54:56Z)
 - **Files**: 3 estimated (`src/main.rs`, `src/lib.rs`, new `src/elf_optimizer/`)
 - **Modules**: engine block `src/main.rs:543`–`:2417` (trait `ElfOptimizationBackend` `:606`, both backend impls `:678`/`:847`, `find_candidate_windows*` `:1111`/`:1125`/`:1136`, `run_auto_optimization*` `:1459`/`:1495`, `optimize_elf_binary*` `:1579`/`:1610`/`:1736`, `run_optimization` `:1947`, `run_x86_*` `:2279`/`:2325`/`:2376`, `build_*_search_config` `:1805`–`:2278`, `print_*` `:2110`–`:2131`); `src/lib.rs`; new `src/elf_optimizer/`
 - **Summary**: Relocate the ~1,875-line ELF optimization engine out of `main.rs` into `src/elf_optimizer/` as a deep lib module behind a 6-item interface (`OptimizationOptions`, `run_auto_optimization`, `optimize_elf_binary`, three `print_*`), carrying its 66 engine-only tests into the module. Verified this firing: the engine references **zero** CLI-layer types, all 66 engine tests classify cleanly (0 "both" tests), so the move is clean. A follow-on narrows the two leaky trait methods that still take raw Capstone (`optimization_context(…, cs: &Capstone)` `:643`, `assemble_window(…, capstone_instructions: &Instructions, …)` `:667`).
 - **First seen**: 2026-09-01
-- **Reason**: — (pick, run 2026-09-04; `opt-window-report-seam` PR #818 now landed so the one-architecture-PR-at-a-time block is cleared. Runner-up candidate `opt-target-arch-mismatch-classifier` at 19/25, three points below.)
+- **Reason**: Landed — `gh pr view 823` reports state MERGED (mergedAt 2026-09-04T09:54:56Z); on `origin/main` as `844ee0a refactor(opt): extract the ELF optimization engine into a deep elf_optimizer module (#823)`. Reconciled from `in-flight` to `landed` this firing (2026-09-11). The scored trait-method narrowing follow-on was evaluated and declined last firing (Capstone params load-bearing).
 
 ## x86-width-dispatch-runner
 
@@ -100,10 +100,10 @@ Persisted candidate memory for the `pm-deepen` refactor-audit routine. Statuses:
 - **Status**: proposed
 - **Score**: 20/25 (leverage 3, locality 4, blast radius 1, heat 5)
 - **Files**: ~1 estimated (`src/main.rs`)
-- **Modules**: `src/main.rs:2545`–`:2758` (`fn main`: 15 `std::process::exit` + 15 `eprintln!` paired inline across every command arm)
+- **Modules**: `src/main.rs:656`–`:869` post-#823 (`fn main`: 15 `std::process::exit` + 15 `eprintln!` paired inline across every command arm — Disasm 2, Opt 10, LlmOpt 1, Equiv 2 including the quiet `exit(code)` non-equivalent path). Refs re-anchored 2026-09-11 (was `:2545`–`:2758` pre-#823, which moved ~1875 lines out of `main.rs`). The owner pattern to mirror is `report::build_equiv_report` → `EquivReport { exit_code }` consumed thinly at `src/main.rs:648`–`:652`/`:858`–`:861`.
 - **Summary**: The error→exit-code/message policy has no owner: it is scattered across ~15 inline `eprintln!("Error …: {e}"); std::process::exit(1);` sites and is reachable only by running the `s11` binary. Frame command handlers as `Commands::run(self) -> Result<(), CliError>` with a single exit-mapping site in `main`, deepening the dispatch and making the exit/message table pinnable via the repo's integration-test binaries.
 - **First seen**: 2026-09-04
-- **Reason**: — (fresh this firing; strongest new candidate, 2 points below the pick. Partially subsumes `opt-target-arch-mismatch-classifier`'s exit paths at `:2620/:2624/:2629`. Pinnable: current exit-code behaviour is observable through the CI-built integration test binaries, so it survives the "cannot be pinned" filter.)
+- **Reason**: — (top surviving pick this firing, 1 point above the four-way 19/25 cluster. **Blocked from implementation 2026-09-11 by a slug collision**: a crashed sibling firing (`01M246JVCG5…`, 2026-09-10 01:20) left a local, unpushed, PR-less branch `pm-deepen/cli-error-exit-seam` — it renamed at step 2 and committed its step-3 report but never implemented. The skill's slug-collision backstop treats a claimed slug as in-flight → bail. A human must delete that stale branch (or resume it) before a re-fire can land this. Partially subsumes `opt-target-arch-mismatch-classifier`'s exit paths. Pinnable via the CI-built integration test binaries, so it survives the "cannot be pinned" filter.)
 
 ## x86-parser-mnemonic-dispatch-decomposition
 
@@ -182,3 +182,12 @@ Persisted candidate memory for the `pm-deepen` refactor-audit routine. Statuses:
 - **Committed**: this report (`.architecture/reviews/2026-09-04-elf-optimizer-engine-extraction.md`) + reconciled backlog; design-it-twice adjudication (winner: faithful single-module move); the `src/elf_optimizer/` extraction + `tests/elf_optimizer_public_surface.rs` pin test + `CLAUDE.md` path fix (PR #823); in-flight backlog + PR link.
 - **Evidence**: PR #818 reconciled to `landed` (merged 2026-09-03); no open architecture PRs at start, so the one-at-a-time block was clear. Gate green: fmt, clippy `-D warnings`, 1832 lib + 42 bin + 76 integration + 1 pin test. Two fresh candidates added: `cli-error-exit-seam` (20/25), `x86-parser-mnemonic-dispatch-decomposition` (17/25). The scored candidate's trait-method narrowing was evaluated and **declined** (Capstone params are load-bearing).
 - **Next**: a human reviews and merges PR #823; the next firing reconciles this entry to `landed` and picks the top surviving candidate — `cli-error-exit-seam` (20/25) leads the `proposed` set.
+
+### Run 2026-09-11 — bailed (slug collision on the top pick)
+
+- **Outcome**: bailed-preflight — slug-collision backstop (candidates surfaced, reconciled, and scored; the top pick could not be implemented).
+- **Stopped at**: step 2 — the deterministic top pick is `cli-error-exit-seam` (20/25, 1 point above the four-way 19/25 cluster), but `pm-deepen/cli-error-exit-seam` already exists locally, so the skill's slug-collision backstop fires and this run bails rather than duplicate a claimed candidate or override the deterministic pick with a lower-value one.
+- **Branch**: `pm-deepen/run-2026-09-11-0104` — created from `origin/main` (adoption of the firing branch `sym/s11/routine/refactor-audit/01M26RZFX9` refused: condition 3 failed — it had an upstream set to `origin/main`). Kept run-stamped (no rename: the slug the run would have used is the colliding one).
+- **Committed**: reconciled backlog (#823 `in-flight`→`landed`; `cli-error-exit-seam` refs re-anchored post-#823 and annotated with the collision) + this exit report, pushed to the run branch.
+- **Evidence**: PR #823 reconciled to `landed` (merged 2026-09-04T09:54:56Z), clearing the one-architecture-PR-at-a-time block. The colliding branch `pm-deepen/cli-error-exit-seam` is checked out in sibling routine worktree `…/routines/refactor-audit/01M246JVCG580H04M0H7C2GBYX`: a crashed firing from 2026-09-10 01:20 that renamed to the slug at step 2 and committed its step-3 report (`.architecture/reviews/2026-09-10-cli-error-exit-seam.md`) picking the same candidate, then died before implementing — 1 commit ahead of `origin/main`, no upstream, unpublished on origin, no PR, worktree idle 24h. That firing independently reached the same deterministic pick, confirming the rubric converges.
+- **Next**: a human deletes the stale local branch `pm-deepen/cli-error-exit-seam` (a `pm-deepen` run may not delete a branch it did not create) — or resumes/pushes it — after which a re-fire lands `cli-error-exit-seam`. The stale branch also carries a fuller step-1..3 reconciliation (line-ref refreshes, `search-result-optimized-accessor` re-scored blast radius 2→3, a new `terminator-split-arch-divergence` candidate) worth salvaging into `.architecture/` when that branch is resolved.
