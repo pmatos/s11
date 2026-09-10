@@ -141,3 +141,45 @@ fn aarch64_ldr_dead_load_collapses_to_one_instruction() {
         ..Default::default()
     });
 }
+
+/// Dynamically-linked PIE counterpart to `aarch64_dup_mov_imm_...`: same
+/// shortening identity, but exercises qemu's `-L <sysroot>` dynamic-linker
+/// path (issue #838) rather than the other cases' `-no-pie -nostdlib`
+/// fixed-address layout. `main`'s address (0x7a4) was found via
+/// `aarch64-linux-gnu-objdump -d tests/e2e/fixtures/aarch64/dup_mov_pie`
+/// against this session's build; re-run that if a toolchain upgrade ever
+/// shifts glibc's crt startup size and this window goes stale.
+#[test]
+fn aarch64_dup_mov_pie_collapses_to_one_instruction() {
+    if !fixture_exists("aarch64/dup_mov_pie") {
+        eprintln!(
+            "Skipping aarch64_dup_mov_pie_collapses_to_one_instruction: \
+             aarch64/dup_mov_pie fixture not present. Run ./build_tests.sh first."
+        );
+        return;
+    }
+    if !qemu_aarch64_available() {
+        eprintln!(
+            "Skipping aarch64_dup_mov_pie_collapses_to_one_instruction: \
+             qemu-aarch64-static not present. Install qemu-user-static first."
+        );
+        return;
+    }
+    run(&Case {
+        name: "aarch64-outcome-dup-mov-pie",
+        subcommand: Some("opt"),
+        fixture: Some("aarch64/dup_mov_pie"),
+        arch: Some("aarch64"),
+        window: Some(Window {
+            start_addr: "0x7a4",
+            end_addr: "0x7ac",
+        }),
+        args: &["--algorithm", "enumerative", "--timeout", "15", "--force"],
+        expected_exit_code: 0,
+        expected_instructions: Some((2, 1)),
+        execution: Some(ExecutionExpectation {
+            expected_exit_code: 5,
+        }),
+        ..Default::default()
+    });
+}
