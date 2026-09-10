@@ -2,6 +2,7 @@ use std::fs;
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::sync::OnceLock;
 use std::time::Duration;
 use wait_timeout::ChildExt;
 
@@ -81,16 +82,21 @@ pub(crate) fn s11_binary_path() -> PathBuf {
 /// compiler isn't installed or exits non-zero, so callers can skip cleanly
 /// rather than hard-fail on a host without the cross-toolchain.
 pub(crate) fn aarch64_sysroot() -> Option<PathBuf> {
-    let output = Command::new("aarch64-linux-gnu-gcc")
-        .arg("-print-sysroot")
-        .output()
-        .ok()?;
-    if !output.status.success() {
-        return None;
-    }
-    let path = String::from_utf8(output.stdout).ok()?;
-    let path = path.trim();
-    (!path.is_empty()).then(|| PathBuf::from(path))
+    static SYSROOT: OnceLock<Option<PathBuf>> = OnceLock::new();
+    SYSROOT
+        .get_or_init(|| {
+            let output = Command::new("aarch64-linux-gnu-gcc")
+                .arg("-print-sysroot")
+                .output()
+                .ok()?;
+            if !output.status.success() {
+                return None;
+            }
+            let path = String::from_utf8(output.stdout).ok()?;
+            let path = path.trim();
+            (!path.is_empty()).then(|| PathBuf::from(path))
+        })
+        .clone()
 }
 
 /// Whether `qemu-aarch64-static` is installed and runnable, gating AArch64
@@ -100,6 +106,41 @@ pub(crate) fn qemu_aarch64_available() -> bool {
         .arg("--version")
         .output()
         .is_ok_and(|output| output.status.success())
+}
+
+/// Resolve `symbol`'s address in a fixture binary (relative to
+/// `tests/e2e/fixtures/`) via `aarch64-linux-gnu-nm --defined-only`.
+///
+/// Exists so window addresses for dynamically-linked fixtures don't have to
+/// be hardcoded: a symbol like `main`'s address depends on glibc's crt
+/// startup code size, which varies across `gcc-aarch64-linux-gnu`/glibc
+/// builds — a value pinned by inspecting one build (e.g. via
+/// `aarch64-linux-gnu-objdump`) can silently go stale on a different
+/// toolchain build (confirmed: it did, immediately, between one session's
+/// build and the `ubuntu-24.04` CI runner's apt-installed toolchain).
+/// `None` if `nm` is missing, the fixture doesn't exist, or the symbol
+/// isn't found — callers should skip cleanly rather than hard-fail.
+pub(crate) fn aarch64_symbol_address(fixture: &str, symbol: &str) -> Option<u64> {
+    let path = fixture_dir().join(fixture);
+    let output = Command::new("aarch64-linux-gnu-nm")
+        .arg("--defined-only")
+        .arg(&path)
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let stdout = String::from_utf8(output.stdout).ok()?;
+    stdout.lines().find_map(|line| {
+        let mut fields = line.split_whitespace();
+        let addr = fields.next()?;
+        let _kind = fields.next()?;
+        if fields.next()? == symbol {
+            u64::from_str_radix(addr, 16).ok()
+        } else {
+            None
+        }
+    })
 }
 
 fn shell_quote(arg: &str) -> String {
@@ -326,11 +367,17 @@ pub(crate) fn run(case: &Case) {
 const EXECUTION_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Result of running a binary to completion: its exit code and captured
-/// stdout.
+/// stdout/stderr.
 #[derive(Debug)]
 struct ExecutionOutcome {
     exit_code: i32,
     stdout: Vec<u8>,
+    /// Captured so a qemu-level failure (bad `-L` sysroot, missing shared
+    /// library, unemulated syscall) is diagnosable from the panic message
+    /// instead of silently discarded — qemu prints exactly this kind of
+    /// error to stderr, not stdout, and its own failure exit code can
+    /// otherwise be indistinguishable from a fixture's legitimate one.
+    stderr: Vec<u8>,
 }
 
 /// `execve`'s `ETXTBSY` ("text file busy") errno.
@@ -379,7 +426,7 @@ fn spawn_retrying_etxtbsy(binary: &Path, arch: Option<&str>) -> std::process::Ch
         let result = build_execution_command(binary, arch)
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
-            .stderr(Stdio::null())
+            .stderr(Stdio::piped())
             .spawn();
         match result {
             Ok(child) => return child,
@@ -420,9 +467,18 @@ fn run_to_completion(binary: &Path, timeout: Duration, arch: Option<&str>) -> Ex
         .read_to_end(&mut stdout)
         .unwrap_or_else(|err| panic!("failed to read stdout of {binary:?}: {err}"));
 
+    let mut stderr = Vec::new();
+    child
+        .stderr
+        .take()
+        .expect("stderr was piped")
+        .read_to_end(&mut stderr)
+        .unwrap_or_else(|err| panic!("failed to read stderr of {binary:?}: {err}"));
+
     ExecutionOutcome {
         exit_code: status.code().unwrap_or(-1),
         stdout,
+        stderr,
     }
 }
 
@@ -434,10 +490,17 @@ fn run_to_completion(binary: &Path, timeout: Duration, arch: Option<&str>) -> Ex
 /// signal axis). All three panic messages include `reproducer` so a human
 /// can copy-paste the failing case's `s11` invocation.
 ///
-/// Stdout is read only after the child has exited, not concurrently — fine
-/// for these fixtures' empty/few-byte output, well under the pipe buffer,
-/// but not a fully general solution for a binary that emits enough stdout to
-/// fill the pipe before exiting.
+/// Stdout/stderr are read only after the child has exited, not
+/// concurrently — fine for these fixtures' empty/few-byte output, well
+/// under the pipe buffer, but not a fully general solution for a binary
+/// that emits enough output to fill a pipe before exiting.
+///
+/// Stderr is included in the exit-code panic messages (but not compared
+/// between input/output, unlike stdout) so a qemu-level failure — not the
+/// fixture itself — is diagnosable: qemu reports things like a missing
+/// dynamic linker or an unemulated syscall on stderr, and its own failure
+/// exit code isn't otherwise distinguishable from a fixture legitimately
+/// exiting with the same code.
 fn diff_execution(
     case_name: &str,
     input_binary: &Path,
@@ -451,18 +514,21 @@ fn diff_execution(
         input.exit_code == expectation.expected_exit_code,
         "e2e case {case_name:?}: unpatched input {input_binary:?} exited {} (expected {}) — \
          fixture or expectation is misconfigured, not an optimizer bug\n\
-         reproducer: {reproducer}",
+         reproducer: {reproducer}\nstderr:\n{}",
         input.exit_code,
         expectation.expected_exit_code,
+        String::from_utf8_lossy(&input.stderr),
     );
 
     let output = run_to_completion(output_binary, EXECUTION_TIMEOUT, arch);
     assert!(
         output.exit_code == input.exit_code,
         "e2e case {case_name:?}: patched output {output_binary:?} exited {} but input \
-         {input_binary:?} exited {} — likely miscompile\nreproducer: {reproducer}",
+         {input_binary:?} exited {} — likely miscompile\nreproducer: {reproducer}\n\
+         output stderr:\n{}",
         output.exit_code,
         input.exit_code,
+        String::from_utf8_lossy(&output.stderr),
     );
 
     assert!(
