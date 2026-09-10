@@ -311,14 +311,17 @@ const ETXTBSY: i32 = 26;
 
 /// Spawn `binary` with no arguments/stdin, retrying briefly on `ETXTBSY`.
 ///
-/// A file just written and `chmod`'d executable (this harness's shell-script
-/// test fixtures, and `s11 opt -o` output) can transiently fail `execve`
-/// with `ETXTBSY` on some overlay/union filesystems even though no process
-/// holds it open for writing — observed empirically on this repo's sandbox
-/// scratch dir. Real `ETXTBSY` (something else genuinely still writing the
-/// binary) would also clear within this budget, so a bounded retry here
-/// doesn't mask a real hang — a truly stuck busy-file would instead show up
-/// as this loop exhausting its attempts and panicking below.
+/// A file just written and `chmod`'d executable can transiently fail
+/// `execve` with `ETXTBSY` when `cargo test`'s parallel worker threads race:
+/// `fork()` (used internally by `Command::spawn`) duplicates every thread's
+/// open file descriptors into the child, including another thread's
+/// still-open write handle on this exact file, for the brief window before
+/// that child reaches its own `execve` and drops non-inherited descriptors.
+/// The kernel sees the file as still open for writing and refuses to
+/// execute it until that window closes — reproduced empirically under this
+/// suite's parallel test threads, never when a test runs alone. A bounded
+/// retry absorbs the race without masking a real hang: a truly stuck busy
+/// file would instead exhaust the retry budget and panic below.
 fn spawn_retrying_etxtbsy(binary: &Path) -> std::process::Child {
     const MAX_ATTEMPTS: u32 = 20;
     for attempt in 1..=MAX_ATTEMPTS {
