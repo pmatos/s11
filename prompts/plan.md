@@ -78,6 +78,6 @@ would fail `commitlint`'s `subject-case` rule if this commit were ever linted.
 
 Do not push and do not open a PR — the implementation stage works on the same branch
 in the same workspace and will push. Commit `PLAN.md` only; leave every other file
-untouched, since production code and tests belong to the next stage.
+untouched (see Constraints above).
 
 If you cannot produce a coherent plan (issue is ambiguous, contradictory, or already resolved), post `gh issue comment {{issue.number}} --body "<what blocks planning>"`, write the same explanation to `{{workspace.path}}/EVIDENCE.md`, and exit without applying any handoff label — do not commit in that case.

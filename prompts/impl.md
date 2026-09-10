@@ -1,6 +1,6 @@
 # Vow implementation stage: issue #{{issue.number}} {{issue.title}}
 
-You are the **implementation** agent. A planning pass has written and committed `{{workspace.path}}/PLAN.md`. Read it first. It is a gitignored, workspace-local handoff rather than a PR deliverable — it must not appear in the pull request; drop it in your final commit (see "Drop the plan before opening the PR" below). If it is missing or stale, re-derive the slices from the issue body before writing code.
+You are the **implementation** agent. A planning pass has written and committed `{{workspace.path}}/PLAN.md`. Read it first. It is a gitignored, workspace-local handoff, not a PR deliverable — see "Drop the plan before opening the PR" below. If it is missing or stale, re-derive the slices from the issue body before writing code.
 
 ## Issue under work
 
@@ -78,16 +78,15 @@ Then confirm the branch adds nothing but the real change:
 git diff --stat main...HEAD   # must not list PLAN.md
 ```
 
-This repo squash-merges PRs, so neither this commit nor the planning stage's
-`docs(plan): ...` commit reaches `main` individually — only the squashed PR title
-does. This step exists so `PLAN.md` isn't part of the PR's diff at all, not to
-protect `main`'s commit log.
+This confirms `PLAN.md` never leaks into the PR diff. It is not a commit-log
+concern — per the commit hygiene note above, squash-merge means neither this
+commit nor the planning stage's reaches `main` individually anyway.
 
 ## Open the PR
 
-This repo squash-merges PRs (`allow_merge_commit: false` on the GitHub repo), so
-the title you choose below becomes the sole commit message on `main` — write it
-as a real conventional-commit subject, not a placeholder.
+Since this repo squash-merges (noted above), the title you choose below becomes
+the sole commit message on `main` — write it as a real conventional-commit
+subject, not a placeholder.
 
 Push `{{branch.name}}` to `origin`, then:
 
