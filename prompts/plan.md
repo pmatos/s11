@@ -22,7 +22,7 @@ You are the **planning** agent. Do not write code in this stage. Produce a writt
 
 ## Source of truth (read these before planning)
 
-- `CLAUDE.md` — language-design principles, production-quality bar, development discipline, contract-authoring rules, PR policy (merge commits, not squash).
+- `CLAUDE.md` — language-design principles, production-quality bar, development discipline, contract-authoring rules.
 - `docs/spec/` — authoritative spec: `index.md`, `grammar.md`, `cli.md`, `contracts.md`, `errors.md`, `examples.md`. Any change to syntax, semantics, builtins, operators, effects, or CLI flags **must** be reflected here.
 - `docs/adr/` (if present) — accepted architecture decisions.
 - The crate(s) and self-hosted module(s) touched by the issue. The compiler is in `crates/` (Rust stage 0) and `compiler/` (self-hosted). Changes to language semantics **must** land in both compilers in the same session.
@@ -49,9 +49,35 @@ project documentation.
 - **Many small changes beat one large change.** If the issue is broad, split the plan into the minimal first slice that closes the issue, plus a follow-up list. Do not bundle refactors into a bug fix.
 - **Do not run `sudo`.** If a step needs root, plan an alternative.
 - **Do not modify the `symphony/` submodule** (if present) or anything under `build/` (gitignored compiler binary).
-- **Do not stage, commit, or force-add `PLAN.md`.** Preserve durable rationale in the issue or pull request, an ADR, or a deliberately named document instead.
-- **Operator merges with a merge commit (`gh pr merge --merge`).** Plan accordingly — do not plan for squash or rebase merges.
+- **This repo squash-merges PRs only** (`allow_merge_commit: false`, `allow_squash_merge: true` on the GitHub repo; the squash commit subject is taken verbatim from the PR title). Plan accordingly — do not plan for merge commits or rebase merges.
 
 ## Exit
 
-Once `PLAN.md` is written, leave the ignored file in the workspace for the implementation stage to read and exit cleanly. Do not add it to Git. If you cannot produce a coherent plan (issue is ambiguous, contradictory, or already resolved), post `gh issue comment {{issue.number}} --body "<what blocks planning>"`, write the same explanation to `{{workspace.path}}/EVIDENCE.md`, and exit without applying any handoff label.
+**You must commit `PLAN.md` before exiting.** Writing the file is not enough: the
+workflow advances to the implementation stage only if this run leaves a new commit
+on the branch, so an uncommitted plan fails the run and no implementation happens.
+
+```
+git add -f PLAN.md
+git commit --no-verify --allow-empty -m "docs(plan): add implementation plan for issue #{{issue.number}}"
+```
+
+`-f` is required: `PLAN.md` is listed in `.gitignore` (it stays there — this is a one-off,
+force-added handoff commit, not a change to the ignore rule). `--allow-empty` covers a
+resumed attempt whose plan is byte-identical to one already committed on this branch —
+without it, that commit has nothing staged and fails outright instead of advancing the
+branch.
+
+`--no-verify` is deliberate and is **not** a license to skip hooks elsewhere. This commit is a
+stage-handoff artifact: the implementation stage `git rm`s `PLAN.md` before opening the PR, and
+this repo squash-merges, so this message never reaches `main` and there is nothing for
+`commitlint` to protect.
+
+Use the message above verbatim. Do not substitute the issue title: it is sentence-case and
+would fail `commitlint`'s `subject-case` rule if this commit were ever linted.
+
+Do not push and do not open a PR — the implementation stage works on the same branch
+in the same workspace and will push. Commit `PLAN.md` only; leave every other file
+untouched (see Constraints above).
+
+If you cannot produce a coherent plan (issue is ambiguous, contradictory, or already resolved), post `gh issue comment {{issue.number}} --body "<what blocks planning>"`, write the same explanation to `{{workspace.path}}/EVIDENCE.md`, and exit without applying any handoff label — do not commit in that case.

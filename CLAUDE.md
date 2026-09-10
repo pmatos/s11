@@ -19,12 +19,16 @@ See [docs/capability.md](docs/capability.md) for the canonical instruction and I
 
 ## Planning Artifact
 
-The automated planning stage (`prompts/plan.md`) writes or overwrites the
-repository-root `PLAN.md`, and the implementation stage (`prompts/impl.md`)
-reads it from the same workspace. This file is an ignored, workspace-local
-handoff, not durable project documentation. Do not stage, commit, or force-add
-it. Preserve lasting rationale in the issue or pull request, an ADR, or a
-deliberately named document instead.
+The automated planning stage (`prompts/plan.md`) writes `PLAN.md` at the
+repository root and force-commits it as a stage-handoff artifact (see that
+prompt's Exit section); the implementation stage (`prompts/impl.md`) reads
+it, then removes it with its own commit before opening the PR. `PLAN.md`
+stays listed in `.gitignore` throughout — those two commits are a scripted,
+one-off bridge between stages, not a change to the ignore rule — and this
+repo squash-merges, so neither commit reaches `main`. Outside that scripted
+handoff, do not manually stage, commit, or force-add `PLAN.md`; it is not
+durable project documentation. Preserve lasting rationale in the issue or
+pull request, an ADR, or a deliberately named document instead.
 
 ## Development Commands
 

@@ -15,16 +15,27 @@ workflow:
         provider: claude
         prompt: prompts/plan.md
       transitions:
-        # artifact_exists probes the Run Workspace for the plan file itself.
-        # No branch_advanced_since_attempt_start gate here (unlike vow's
-        # version of this state): s11's prompts/plan.md explicitly forbids
-        # staging or committing PLAN.md ("Do not stage, commit, or force-add
-        # PLAN.md"), so a correct planning run never advances the branch and
-        # that gate could never pass.
+        # artifact_exists probes the Run Workspace for PLAN.md's presence —
+        # it does not prevent the planner from also committing unrelated
+        # files alongside it; "leave every other file untouched" is
+        # enforced by prompts/plan.md, not by this gate. Nor does either
+        # predicate confirm PLAN.md itself was committed: a PLAN.md written
+        # but left uncommitted, paired with any unrelated commit, also
+        # satisfies both conditions below. Symphonika (the orchestrator
+        # running this workflow) has no "file committed" predicate, so this
+        # residual gap is accepted and relies on prompts/plan.md's Exit
+        # instructions.
+        # branch_advanced_since_attempt_start is false unless this run added a
+        # commit, so a resumed attempt cannot coast on a PLAN.md an earlier
+        # attempt left in the workspace. This repo squash-merges (GitHub
+        # repo settings: allow_merge_commit=false), so the throwaway PLAN.md
+        # commit that prompts/plan.md now requires never reaches main —
+        # mirrors vow's workflow.yml.
         - to: implement
           when:
             provider_success: true
             artifact_exists: PLAN.md
+            branch_advanced_since_attempt_start: true
         - to: failed
 
     implement:
@@ -42,6 +53,11 @@ workflow:
             branch_advanced_since_attempt_start: true
         - to: failed
 
+    # code_review_fix, simplify, autofix, and resolve_conflicts gate on
+    # provider_success alone, unlike plan/implement's added branch_advanced
+    # check: these stages can legitimately finish with nothing to change (no
+    # review comments, nothing to simplify, no conflicts) and must not be
+    # forced to fabricate a commit just to advance.
     code_review_fix:
       action:
         kind: agent
