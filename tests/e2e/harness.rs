@@ -24,7 +24,9 @@ pub(crate) struct Case {
     /// `None` for top-level flags like `--help`.
     pub subcommand: Option<&'static str>,
     /// Fixture path, relative to `tests/e2e/fixtures/`. Passed as the first
-    /// positional argument after the subcommand, when present.
+    /// positional argument after the subcommand, when present. Check
+    /// [`fixture_exists`] before setting this so a missing toolchain-built
+    /// fixture skips the case instead of hitting `build_argv`'s hard panic.
     pub fixture: Option<&'static str>,
     pub arch: Option<&'static str>,
     pub window: Option<Window>,
@@ -32,13 +34,22 @@ pub(crate) struct Case {
     pub args: &'static [&'static str],
     pub expected_exit_code: i32,
     pub expected_stdout_contains: Option<&'static str>,
-    /// Instruction count (before, after) a successful optimization must report.
+    /// Instruction count (before, after) a successful optimization must report,
+    /// checked against the `Disassembled N instructions:`/`Optimized to N
+    /// instructions:` markers `src/elf_optimizer/mod.rs` prints on success.
     pub expected_instructions: Option<(usize, usize)>,
     pub execution: Option<ExecutionExpectation>,
 }
 
 fn fixture_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/e2e/fixtures")
+}
+
+/// Whether a fixture, relative to `tests/e2e/fixtures/`, exists. Lets a case
+/// check for its fixture and skip cleanly before `build_argv`'s hard
+/// `assert!(path.exists())`, which panics (fails, doesn't skip) instead.
+pub(crate) fn fixture_exists(relative: &str) -> bool {
+    fixture_dir().join(relative).exists()
 }
 
 pub(crate) fn s11_binary_path() -> PathBuf {
@@ -57,23 +68,18 @@ fn shell_quote(arg: &str) -> String {
     }
 }
 
-/// Parses the instruction count following `prefix` (e.g. `"Disassembled "`,
-/// `"Optimized to "`) out of `s11 opt`'s stdout report lines.
-fn extract_reported_count(stdout: &str, prefix: &str) -> Option<usize> {
-    let start = stdout.find(prefix)? + prefix.len();
-    stdout[start..]
-        .chars()
-        .take_while(|c| c.is_ascii_digit())
-        .collect::<String>()
-        .parse()
-        .ok()
-}
-
 /// The exact, copy-pasteable shell command a human can re-run standalone.
 pub(crate) fn reproducer_command(binary: &Path, argv: &[String]) -> String {
     let mut parts = vec![shell_quote(&binary.to_string_lossy())];
     parts.extend(argv.iter().map(|a| shell_quote(a)));
     parts.join(" ")
+}
+
+/// Checks stdout for the exact `println!` markers `src/elf_optimizer/mod.rs`
+/// emits on a successful optimization run.
+fn stdout_reports_instructions(stdout: &str, before: usize, after: usize) -> bool {
+    stdout.contains(&format!("Disassembled {before} instructions:"))
+        && stdout.contains(&format!("Optimized to {after} instructions:"))
 }
 
 fn build_argv(case: &Case) -> Vec<String> {
@@ -118,10 +124,10 @@ fn build_argv(case: &Case) -> Vec<String> {
 
 /// Run a declarative e2e [`Case`] against the real `s11` binary.
 ///
-/// Panics with the exact reproducer command on any exit-code/stdout/instruction-count
-/// mismatch, so a human can copy-paste it to reproduce the failure standalone. A case
-/// using an unimplemented field (`execution`) panics before the reproducer is built,
-/// naming the tracking issue instead.
+/// Panics with the exact reproducer command on any exit-code/stdout mismatch,
+/// so a human can copy-paste it to reproduce the failure standalone. A case
+/// using the still-unimplemented `execution` field panics before the
+/// reproducer is built, naming the tracking issue instead.
 pub(crate) fn run(case: &Case) {
     if let Some(execution) = &case.execution {
         panic!(
@@ -167,27 +173,11 @@ pub(crate) fn run(case: &Case) {
     }
 
     if let Some((before, after)) = case.expected_instructions {
-        let actual_before = extract_reported_count(&stdout, "Disassembled ").unwrap_or_else(|| {
-            panic!(
-                "e2e case {:?}: could not find \"Disassembled N instructions:\" in stdout\n\
-                     reproducer: {reproducer}\nstdout:\n{stdout}",
-                case.name
-            )
-        });
-        let actual_after = extract_reported_count(&stdout, "Optimized to ").unwrap_or_else(|| {
-            panic!(
-                "e2e case {:?}: could not find \"Optimized to N instructions:\" in stdout \
-                 (the search may not have found the expected shortening)\n\
-                 reproducer: {reproducer}\nstdout:\n{stdout}",
-                case.name
-            )
-        });
-        assert_eq!(
-            (actual_before, actual_after),
-            (before, after),
-            "e2e case {:?}: instruction count before->after mismatch\n\
+        assert!(
+            stdout_reports_instructions(&stdout, before, after),
+            "e2e case {:?}: stdout did not report {before} -> {after} instructions\n\
              reproducer: {reproducer}\nstdout:\n{stdout}",
-            case.name
+            case.name,
         );
     }
 }
@@ -197,16 +187,24 @@ mod tests {
     use super::*;
 
     #[test]
-    fn extract_reported_count_parses_before_and_after() {
-        let stdout = "Disassembled 2 instructions:\n...\nOptimized to 1 instructions:\n";
-        assert_eq!(extract_reported_count(stdout, "Disassembled "), Some(2));
-        assert_eq!(extract_reported_count(stdout, "Optimized to "), Some(1));
+    fn stdout_reports_instructions_matches_exact_counts() {
+        let stdout = "Disassembled 2 instructions:\n  mov eax, 5\n  mov eax, 5\n\
+                       Optimized to 1 instructions:\n  mov eax, 5\n";
+        assert!(stdout_reports_instructions(stdout, 2, 1));
     }
 
     #[test]
-    fn extract_reported_count_returns_none_when_prefix_missing() {
-        let stdout = "Disassembled 2 instructions:";
-        assert_eq!(extract_reported_count(stdout, "Optimized to "), None);
+    fn stdout_reports_instructions_rejects_wrong_count() {
+        let stdout = "Disassembled 2 instructions:\n\
+                       Optimized to 1 instructions:\n";
+        assert!(!stdout_reports_instructions(stdout, 2, 2));
+        assert!(!stdout_reports_instructions(stdout, 3, 1));
+    }
+
+    #[test]
+    fn fixture_exists_finds_known_file() {
+        assert!(fixture_exists("README.md"));
+        assert!(!fixture_exists("does-not-exist"));
     }
 
     #[test]

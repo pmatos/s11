@@ -76,6 +76,20 @@ if gcc -m32 -E -x c - </dev/null >/dev/null 2>&1; then
         gcc -m32 -g -O0 -o "binaries/x86_32/${base_name}_debug" "$test_file" \
             || echo "  ... skipped (link or compile failure)"
     done
+
+    # Hand-written register-only x86-32 assembly fixtures
+    # (tests/x86_asm/x86_32/*.s), assembled into the e2e harness's fixture
+    # dir (tests/e2e/fixtures/x86_32/) rather than binaries/x86_32/ — see
+    # tests/e2e/fixtures/README.md. Same rationale as the x86-64 block above:
+    # register/immediate-only IR coverage, fixed-address ELF via
+    # -no-pie -nostdlib.
+    mkdir -p tests/e2e/fixtures/x86_32
+    for asm_file in tests/x86_asm/x86_32/*.s; do
+        [ -e "$asm_file" ] || continue
+        base_name=$(basename "$asm_file" .s)
+        echo "Assembling x86-32 fixture $base_name..."
+        gcc -m32 -no-pie -nostdlib -o "tests/e2e/fixtures/x86_32/${base_name}" "$asm_file"
+    done
 else
     echo "Skipping x86-32 (gcc -m32 not usable; install gcc-multilib to enable)."
 fi
