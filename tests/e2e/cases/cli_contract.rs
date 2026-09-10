@@ -251,3 +251,148 @@ fn opt_rejects_riscv64_target_mismatched_with_elf_machine() {
         ..Default::default()
     });
 }
+
+fn output_policy_window() -> Window {
+    Window {
+        start_addr: "0x0",
+        end_addr: "0x1",
+    }
+}
+
+#[test]
+fn opt_refuses_existing_explicit_output() {
+    let dir = tempfile::tempdir().expect("create fixture directory");
+    let binary = dir.path().join("program.elf");
+    write_bare_elf(&binary, elf::abi::EM_AARCH64, true);
+    let out = dir.path().join("out.bin");
+    let sentinel = b"unrelated file contents";
+    fs::write(&out, sentinel).expect("seed existing output");
+
+    run(&Case {
+        name: "opt-refuses-existing-explicit-output",
+        subcommand: Some("opt"),
+        binary: Some(binary),
+        window: Some(output_policy_window()),
+        extra_args: vec!["-o".to_string(), out.to_string_lossy().into_owned()],
+        expected_exit_code: 1,
+        expected_stderr_contains: &["output path already exists", "--force"],
+        ..Default::default()
+    });
+
+    assert_eq!(
+        fs::read(&out).expect("read refused output"),
+        sentinel,
+        "refused output must remain unchanged"
+    );
+}
+
+#[test]
+fn opt_refuses_existing_derived_output() {
+    let dir = tempfile::tempdir().expect("create fixture directory");
+    let binary = dir.path().join("program.elf");
+    write_bare_elf(&binary, elf::abi::EM_AARCH64, true);
+    let derived_output = dir.path().join("program_optimized.elf");
+    let sentinel = b"previous optimization result";
+    fs::write(&derived_output, sentinel).expect("seed derived output");
+
+    run(&Case {
+        name: "opt-refuses-existing-derived-output",
+        subcommand: Some("opt"),
+        binary: Some(binary),
+        window: Some(output_policy_window()),
+        expected_exit_code: 1,
+        expected_stderr_contains: &["output path already exists", "--force"],
+        ..Default::default()
+    });
+
+    assert_eq!(
+        fs::read(&derived_output).expect("read refused output"),
+        sentinel,
+        "refused derived output must remain unchanged"
+    );
+}
+
+#[test]
+fn opt_rejects_missing_output_parent() {
+    let dir = tempfile::tempdir().expect("create fixture directory");
+    let binary = dir.path().join("program.elf");
+    write_bare_elf(&binary, elf::abi::EM_AARCH64, true);
+    let output_path = dir.path().join("missing").join("output.elf");
+
+    run(&Case {
+        name: "opt-rejects-missing-output-parent",
+        subcommand: Some("opt"),
+        binary: Some(binary),
+        window: Some(output_policy_window()),
+        extra_args: vec!["-o".to_string(), output_path.to_string_lossy().into_owned()],
+        expected_exit_code: 1,
+        expected_stderr_contains: &["output parent directory", "does not exist"],
+        ..Default::default()
+    });
+
+    assert!(!output_path.exists(), "bad output must not be created");
+}
+
+#[test]
+fn opt_rejects_trailing_separator_output() {
+    let dir = tempfile::tempdir().expect("create fixture directory");
+    let binary = dir.path().join("program.elf");
+    write_bare_elf(&binary, elf::abi::EM_AARCH64, true);
+    let mut output_arg = dir.path().join("result").into_os_string();
+    output_arg.push(std::path::MAIN_SEPARATOR_STR);
+    let output_path = PathBuf::from(&output_arg);
+
+    run(&Case {
+        name: "opt-rejects-trailing-separator-output",
+        subcommand: Some("opt"),
+        binary: Some(binary),
+        window: Some(output_policy_window()),
+        extra_args: vec!["-o".to_string(), output_arg.to_string_lossy().into_owned()],
+        expected_exit_code: 1,
+        expected_stderr_contains: &["output path", "must name a file"],
+        ..Default::default()
+    });
+
+    assert!(!output_path.exists(), "bad output must not be created");
+}
+
+#[cfg(unix)]
+#[test]
+fn opt_rejects_unwritable_output_parent() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let dir = tempfile::tempdir().expect("create fixture directory");
+    let binary = dir.path().join("program.elf");
+    write_bare_elf(&binary, elf::abi::EM_AARCH64, true);
+    let read_only_dir = dir.path().join("read-only");
+    fs::create_dir(&read_only_dir).expect("create output parent");
+    fs::set_permissions(&read_only_dir, fs::Permissions::from_mode(0o555))
+        .expect("make output parent read-only");
+
+    // Root ignores the 0o555 mode, so the precondition this test needs does
+    // not hold there (containerized local/CI runs are commonly root). Probe
+    // rather than assert a guard that cannot fire.
+    let probe = read_only_dir.join(".writability-probe");
+    if fs::File::create(&probe).is_ok() {
+        let _ = fs::remove_file(&probe);
+        eprintln!(
+            "Skipping unwritable-parent opt e2e case: read-only mode not enforced (running as root?)"
+        );
+        return;
+    }
+
+    let output_path = read_only_dir.join("output.elf");
+
+    run(&Case {
+        name: "opt-rejects-unwritable-output-parent",
+        subcommand: Some("opt"),
+        binary: Some(binary),
+        window: Some(output_policy_window()),
+        extra_args: vec!["-o".to_string(), output_path.to_string_lossy().into_owned()],
+        expected_exit_code: 1,
+        expected_stderr_contains: &["output parent directory", "not writable"],
+        ..Default::default()
+    });
+
+    assert!(!output_path.exists(), "bad output must not be created");
+}
