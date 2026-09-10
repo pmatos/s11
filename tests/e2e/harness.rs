@@ -76,6 +76,32 @@ pub(crate) fn s11_binary_path() -> PathBuf {
     PathBuf::from(env!("CARGO_BIN_EXE_s11"))
 }
 
+/// Resolve the AArch64 cross-toolchain's sysroot via `aarch64-linux-gnu-gcc
+/// -print-sysroot`, for `qemu-aarch64-static -L <sysroot>`. `None` if the
+/// compiler isn't installed or exits non-zero, so callers can skip cleanly
+/// rather than hard-fail on a host without the cross-toolchain.
+pub(crate) fn aarch64_sysroot() -> Option<PathBuf> {
+    let output = Command::new("aarch64-linux-gnu-gcc")
+        .arg("-print-sysroot")
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let path = String::from_utf8(output.stdout).ok()?;
+    let path = path.trim();
+    (!path.is_empty()).then(|| PathBuf::from(path))
+}
+
+/// Whether `qemu-aarch64-static` is installed and runnable, gating AArch64
+/// execution cases so they skip cleanly on a host without `qemu-user-static`.
+pub(crate) fn qemu_aarch64_available() -> bool {
+    Command::new("qemu-aarch64-static")
+        .arg("--version")
+        .output()
+        .is_ok_and(|output| output.status.success())
+}
+
 fn shell_quote(arg: &str) -> String {
     if !arg.is_empty()
         && arg
@@ -623,6 +649,29 @@ mod tests {
             "panic message did not name both the input's exit code (5) and the corrupted \
              output's exit code (6):\n{message}"
         );
+    }
+
+    /// Consistency check, not a presence assertion: hard-asserting
+    /// `qemu_aarch64_available()` is `true` would fail `just e2e` on any
+    /// contributor machine without the toolchain installed, defeating the
+    /// graceful-skip requirement the AArch64 execution cases rely on.
+    #[test]
+    fn qemu_aarch64_available_matches_which() {
+        let which_found = Command::new("which")
+            .arg("qemu-aarch64-static")
+            .output()
+            .is_ok_and(|output| output.status.success());
+        assert_eq!(qemu_aarch64_available(), which_found);
+    }
+
+    #[test]
+    fn aarch64_sysroot_some_implies_path_exists() {
+        if let Some(path) = aarch64_sysroot() {
+            assert!(
+                path.exists(),
+                "aarch64-linux-gnu-gcc -print-sysroot reported {path:?}, which does not exist"
+            );
+        }
     }
 
     #[test]
