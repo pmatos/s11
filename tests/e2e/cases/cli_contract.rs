@@ -396,3 +396,37 @@ fn opt_rejects_unwritable_output_parent() {
 
     assert!(!output_path.exists(), "bad output must not be created");
 }
+
+#[cfg(unix)]
+#[test]
+fn opt_refuses_symlink_output_even_with_force() {
+    let dir = tempfile::tempdir().expect("create fixture directory");
+    let binary = dir.path().join("program.elf");
+    write_bare_elf(&binary, elf::abi::EM_AARCH64, true);
+    let victim = dir.path().join("unrelated.txt");
+    let victim_bytes = b"unrelated file contents";
+    fs::write(&victim, victim_bytes).expect("seed unrelated file");
+    let link = dir.path().join("out.elf");
+    std::os::unix::fs::symlink(&victim, &link).expect("create symlink output");
+
+    run(&Case {
+        name: "opt-refuses-symlink-output-even-with-force",
+        subcommand: Some("opt"),
+        binary: Some(binary),
+        window: Some(output_policy_window()),
+        extra_args: vec![
+            "-o".to_string(),
+            link.to_string_lossy().into_owned(),
+            "--force".to_string(),
+        ],
+        expected_exit_code: 1,
+        expected_stderr_contains: &["is a symlink", "unrelated.txt"],
+        ..Default::default()
+    });
+
+    assert_eq!(
+        fs::read(&victim).expect("read unrelated file"),
+        victim_bytes,
+        "the symlink target must be untouched"
+    );
+}
