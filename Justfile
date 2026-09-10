@@ -73,11 +73,10 @@ test-all: build-tests build
     ./test_all.sh
 
 # Run the e2e test suite (fast tier: declarative cases under tests/e2e/).
-# Fixture-based cases skip cleanly via fixture_exists when their fixture
-# hasn't been built, so this doesn't need build-tests (which requires the
-# AArch64 cross-toolchain); cargo builds the s11 binary itself via
-# CARGO_BIN_EXE_s11. Run ./build_tests.sh first to exercise fixture-backed
-# cases instead of skipping them.
+# Cases synthesize minimal ELF headers at test time rather than depending on
+# build_tests.sh's cross-compiled binaries, so this doesn't need build-tests
+# (which requires the AArch64 cross-toolchain); cargo builds the s11
+# binary itself via CARGO_BIN_EXE_s11.
 e2e:
     @echo "Running e2e tests..."
     cargo test --test e2e_tests -- --nocapture
