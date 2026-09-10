@@ -26,7 +26,23 @@ fn write_bare_elf(path: &Path, machine: u16, is_64_bit: bool) {
     bytes[header_size_offset..header_size_offset + 2]
         .copy_from_slice(&(header_size as u16).to_le_bytes());
 
+    let parsed = elf::ElfBytes::<elf::endian::AnyEndian>::minimal_parse(&bytes)
+        .expect("generated fixture should be a valid ELF header");
+    assert_eq!(parsed.ehdr.e_machine, machine);
+
     fs::write(path, &bytes).expect("write synthesized bare ELF header");
+}
+
+/// Create a tempdir containing a synthesized AArch64 ELF at `program.elf`,
+/// the fixture most CLI-contract cases in this file need. Returns the
+/// `TempDir` alongside the binary path so callers that also need other
+/// paths inside the same directory (output files, symlinks) can keep using
+/// `dir.path()`.
+fn setup_aarch64_binary() -> (tempfile::TempDir, PathBuf) {
+    let dir = tempfile::tempdir().expect("create fixture directory");
+    let binary = dir.path().join("program.elf");
+    write_bare_elf(&binary, elf::abi::EM_AARCH64, true);
+    (dir, binary)
 }
 
 #[test]
@@ -84,9 +100,7 @@ fn opt_without_end_addr_exits_with_usage_error() {
 
 #[test]
 fn opt_rejects_invalid_start_address_format() {
-    let dir = tempfile::tempdir().expect("create fixture directory");
-    let binary: PathBuf = dir.path().join("program.elf");
-    write_bare_elf(&binary, elf::abi::EM_AARCH64, true);
+    let (_dir, binary) = setup_aarch64_binary();
 
     run(&Case {
         name: "opt-rejects-invalid-start-address-format",
@@ -104,9 +118,7 @@ fn opt_rejects_invalid_start_address_format() {
 
 #[test]
 fn opt_rejects_invalid_end_address_format() {
-    let dir = tempfile::tempdir().expect("create fixture directory");
-    let binary: PathBuf = dir.path().join("program.elf");
-    write_bare_elf(&binary, elf::abi::EM_AARCH64, true);
+    let (_dir, binary) = setup_aarch64_binary();
 
     run(&Case {
         name: "opt-rejects-invalid-end-address-format",
@@ -124,9 +136,7 @@ fn opt_rejects_invalid_end_address_format() {
 
 #[test]
 fn opt_rejects_declared_x86_64_against_aarch64_elf() {
-    let dir = tempfile::tempdir().expect("create fixture directory");
-    let binary: PathBuf = dir.path().join("program.elf");
-    write_bare_elf(&binary, elf::abi::EM_AARCH64, true);
+    let (_dir, binary) = setup_aarch64_binary();
 
     run(&Case {
         name: "opt-rejects-declared-x86-64-against-aarch64-elf",
@@ -208,9 +218,7 @@ fn opt_rejects_riscv64_target_matching_elf_machine() {
 
 #[test]
 fn opt_rejects_riscv32_target_mismatched_with_elf_machine() {
-    let dir = tempfile::tempdir().expect("create fixture directory");
-    let binary: PathBuf = dir.path().join("program.elf");
-    write_bare_elf(&binary, elf::abi::EM_AARCH64, true);
+    let (_dir, binary) = setup_aarch64_binary();
 
     run(&Case {
         name: "opt-rejects-riscv32-target-mismatched-with-elf-machine",
@@ -231,9 +239,7 @@ fn opt_rejects_riscv32_target_mismatched_with_elf_machine() {
 
 #[test]
 fn opt_rejects_riscv64_target_mismatched_with_elf_machine() {
-    let dir = tempfile::tempdir().expect("create fixture directory");
-    let binary: PathBuf = dir.path().join("program.elf");
-    write_bare_elf(&binary, elf::abi::EM_AARCH64, true);
+    let (_dir, binary) = setup_aarch64_binary();
 
     run(&Case {
         name: "opt-rejects-riscv64-target-mismatched-with-elf-machine",
@@ -261,9 +267,7 @@ fn output_policy_window() -> Window {
 
 #[test]
 fn opt_refuses_existing_explicit_output() {
-    let dir = tempfile::tempdir().expect("create fixture directory");
-    let binary = dir.path().join("program.elf");
-    write_bare_elf(&binary, elf::abi::EM_AARCH64, true);
+    let (dir, binary) = setup_aarch64_binary();
     let out = dir.path().join("out.bin");
     let sentinel = b"unrelated file contents";
     fs::write(&out, sentinel).expect("seed existing output");
@@ -288,9 +292,7 @@ fn opt_refuses_existing_explicit_output() {
 
 #[test]
 fn opt_refuses_existing_derived_output() {
-    let dir = tempfile::tempdir().expect("create fixture directory");
-    let binary = dir.path().join("program.elf");
-    write_bare_elf(&binary, elf::abi::EM_AARCH64, true);
+    let (dir, binary) = setup_aarch64_binary();
     let derived_output = dir.path().join("program_optimized.elf");
     let sentinel = b"previous optimization result";
     fs::write(&derived_output, sentinel).expect("seed derived output");
@@ -314,9 +316,7 @@ fn opt_refuses_existing_derived_output() {
 
 #[test]
 fn opt_rejects_missing_output_parent() {
-    let dir = tempfile::tempdir().expect("create fixture directory");
-    let binary = dir.path().join("program.elf");
-    write_bare_elf(&binary, elf::abi::EM_AARCH64, true);
+    let (dir, binary) = setup_aarch64_binary();
     let output_path = dir.path().join("missing").join("output.elf");
 
     run(&Case {
@@ -335,9 +335,7 @@ fn opt_rejects_missing_output_parent() {
 
 #[test]
 fn opt_rejects_trailing_separator_output() {
-    let dir = tempfile::tempdir().expect("create fixture directory");
-    let binary = dir.path().join("program.elf");
-    write_bare_elf(&binary, elf::abi::EM_AARCH64, true);
+    let (dir, binary) = setup_aarch64_binary();
     let mut output_arg = dir.path().join("result").into_os_string();
     output_arg.push(std::path::MAIN_SEPARATOR_STR);
     let output_path = PathBuf::from(&output_arg);
@@ -361,9 +359,7 @@ fn opt_rejects_trailing_separator_output() {
 fn opt_rejects_unwritable_output_parent() {
     use std::os::unix::fs::PermissionsExt;
 
-    let dir = tempfile::tempdir().expect("create fixture directory");
-    let binary = dir.path().join("program.elf");
-    write_bare_elf(&binary, elf::abi::EM_AARCH64, true);
+    let (dir, binary) = setup_aarch64_binary();
     let read_only_dir = dir.path().join("read-only");
     fs::create_dir(&read_only_dir).expect("create output parent");
     fs::set_permissions(&read_only_dir, fs::Permissions::from_mode(0o555))
@@ -400,9 +396,7 @@ fn opt_rejects_unwritable_output_parent() {
 #[cfg(unix)]
 #[test]
 fn opt_refuses_symlink_output_even_with_force() {
-    let dir = tempfile::tempdir().expect("create fixture directory");
-    let binary = dir.path().join("program.elf");
-    write_bare_elf(&binary, elf::abi::EM_AARCH64, true);
+    let (dir, binary) = setup_aarch64_binary();
     let victim = dir.path().join("unrelated.txt");
     let victim_bytes = b"unrelated file contents";
     fs::write(&victim, victim_bytes).expect("seed unrelated file");
