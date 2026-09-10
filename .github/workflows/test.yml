@@ -90,7 +90,7 @@ jobs:
         SYSROOT="$(aarch64-linux-gnu-gcc -print-sysroot)"
         echo "Resolved sysroot: '$SYSROOT'"
         echo "Sysroot lib dir contents:"
-        ls -la "$SYSROOT/lib" 2>&1 | grep -i ld-linux || echo "ld-linux-aarch64.so.1 not found under sysroot/lib"
+        find "$SYSROOT/lib" -iname 'ld-linux-aarch64*' 2>&1 || echo "ld-linux-aarch64.so.1 not found under sysroot/lib"
         echo "dpkg cross-libc packages:"
         dpkg -l | grep -i arm64-cross || echo "no arm64-cross packages found"
         echo "readelf interpreter for dup_mov_pie:"
