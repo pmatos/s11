@@ -499,6 +499,102 @@ mod tests {
         );
     }
 
+    /// Load-bearing acceptance criterion: the execution diff must actually
+    /// catch a miscompile, not just report "equal" no matter what. Runs the
+    /// real `s11 opt` on the x86-64 `dup_mov_imm` fixture (same argv as the
+    /// `outcome-x86-64-dup-mov-imm` e2e case), corrupts the one surviving
+    /// `mov rax, 5` in the patched output into `mov rax, 6`, and asserts
+    /// `diff_execution` panics naming both exit codes.
+    #[test]
+    fn execution_diff_catches_a_corrupted_patch() {
+        let fixture = fixture_dir().join("x86_64/dup_mov_imm");
+        assert!(
+            fixture.exists(),
+            "x86_64/dup_mov_imm fixture not found: {fixture:?}; run ./build_tests.sh first"
+        );
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let output_path = dir.path().join("corrupted-patch-optimized");
+
+        let status = Command::new(s11_binary_path())
+            .args([
+                "opt".as_ref(),
+                fixture.as_os_str(),
+                "--arch".as_ref(),
+                "x86-64".as_ref(),
+                "--start-addr".as_ref(),
+                "0x401000".as_ref(),
+                "--end-addr".as_ref(),
+                "0x40100e".as_ref(),
+                "--algorithm".as_ref(),
+                "enumerative".as_ref(),
+                "--timeout".as_ref(),
+                "30".as_ref(),
+                "-o".as_ref(),
+                output_path.as_os_str(),
+            ])
+            .status()
+            .expect("spawn real s11 opt");
+        assert!(status.success(), "s11 opt did not succeed: {status:?}");
+
+        let mut bytes = fs::read(&output_path).expect("read patched output");
+        // `mov rax, 5` (dynasm-encoded, see docs/adr and the fixture README):
+        // REX.W + C7 /0 + imm32.
+        const MOV_RAX_5: [u8; 7] = [0x48, 0xC7, 0xC0, 0x05, 0x00, 0x00, 0x00];
+        let occurrences: Vec<usize> = bytes
+            .windows(MOV_RAX_5.len())
+            .enumerate()
+            .filter(|(_, window)| *window == MOV_RAX_5)
+            .map(|(offset, _)| offset)
+            .collect();
+        assert_eq!(
+            occurrences.len(),
+            1,
+            "expected exactly one collapsed `mov rax, 5` (48 C7 C0 05 00 00 00) in the patched \
+             output, found {}: {occurrences:?} — the enumerative search's output encoding may \
+             have changed",
+            occurrences.len(),
+        );
+
+        // Corrupt: flip the immediate's low byte so `mov rax, 5` becomes
+        // `mov rax, 6`, a minimal stand-in for a miscompile that corrupts
+        // live-out state.
+        let immediate_offset = occurrences[0] + 3;
+        assert_eq!(bytes[immediate_offset], 0x05);
+        bytes[immediate_offset] = 0x06;
+
+        let corrupted_path = dir.path().join("corrupted-patch-output");
+        fs::write(&corrupted_path, &bytes).expect("write corrupted copy");
+        // production `-o` output already carries the input's exec bit
+        // (`src/output_path.rs::sanitize_output_permissions`); this fresh
+        // copy needs it set explicitly.
+        let mut perms = fs::metadata(&corrupted_path)
+            .expect("stat corrupted copy")
+            .permissions();
+        perms.set_mode(0o755);
+        fs::set_permissions(&corrupted_path, perms).expect("chmod corrupted copy");
+
+        let result = std::panic::catch_unwind(|| {
+            diff_execution(
+                "execution-diff-load-bearing-smoke",
+                &fixture,
+                &corrupted_path,
+                &ExecutionExpectation {
+                    expected_exit_code: 5,
+                },
+                "repro-command",
+            )
+        });
+
+        let payload = result.expect_err("a corrupted patch must fail the behavioral diff");
+        let message = panic_message(&*payload);
+        assert!(
+            message.contains('5') && message.contains('6'),
+            "panic message did not name both the input's exit code (5) and the corrupted \
+             output's exit code (6):\n{message}"
+        );
+    }
+
     #[test]
     fn stdout_reports_instructions_matches_exact_counts() {
         let stdout = "Disassembled 2 instructions:\n  mov eax, 5\n  mov eax, 5\n\
