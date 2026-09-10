@@ -51,7 +51,9 @@ done
 # target binary like binaries/arrays_opt.
 if [ -e tests/aarch64_asm/dup_mov_pie.s ]; then
     echo "Assembling AArch64 e2e fixture dup_mov_pie (dynamically-linked PIE)..."
-    aarch64-linux-gnu-gcc -O0 \
+    # No -O flag: the input is hand-written assembly, so gcc hands it
+    # straight to the assembler and no optimization pass ever runs on it.
+    aarch64-linux-gnu-gcc \
         -o tests/e2e/fixtures/aarch64/dup_mov_pie tests/aarch64_asm/dup_mov_pie.s
 fi
 
