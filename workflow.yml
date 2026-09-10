@@ -26,11 +26,16 @@ workflow:
         # residual gap is accepted and relies on prompts/plan.md's Exit
         # instructions.
         # branch_advanced_since_attempt_start is false unless this run added a
-        # commit, so a resumed attempt cannot coast on a PLAN.md an earlier
-        # attempt left in the workspace. This repo squash-merges (GitHub
-        # repo settings: allow_merge_commit=false), so the throwaway PLAN.md
-        # commit that prompts/plan.md now requires never reaches main —
-        # mirrors vow's workflow.yml.
+        # commit, so a resumed attempt cannot advance without running the
+        # planner and committing again. It proves this run executed the
+        # planning stage and committed, not that the plan content was
+        # reconsidered or changed: prompts/plan.md always commits with
+        # `--allow-empty`, so a resumed attempt with a byte-identical plan
+        # still satisfies this gate, and Symphonika's predicate set has no
+        # way to inspect commit content to tell the two cases apart. This
+        # repo squash-merges (GitHub repo settings: allow_merge_commit=false),
+        # so the throwaway PLAN.md commit that prompts/plan.md now requires
+        # never reaches main — mirrors vow's workflow.yml.
         - to: implement
           when:
             provider_success: true
@@ -46,6 +51,15 @@ workflow:
       transitions:
         # branch_ahead_of_base alone would be satisfied by the plan commit
         # already on the branch, so require this run to advance HEAD too.
+        # That still leaves a residual gap: prompts/impl.md's mandatory
+        # "chore: drop stage-handoff PLAN.md" commit can itself satisfy
+        # branch_advanced_since_attempt_start for an attempt that did no
+        # real implementation work. prompts/impl.md's "never as the only
+        # commit of this attempt" caveat mitigates this at the prompt level,
+        # but Symphonika's fixed predicate set has no way to distinguish a
+        # housekeeping commit from a substantive one, so this gate cannot
+        # enforce it at the FSM level — same residual-gap class as the plan
+        # stage's gate above.
         - to: code_review_fix
           when:
             provider_success: true
