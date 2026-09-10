@@ -85,16 +85,6 @@ jobs:
         echo "Architecture: $(uname -m)"
         echo "Checking if we can run AArch64 binaries:"
         file binaries/simple_debug || echo "simple_debug not found"
-        echo "aarch64-linux-gnu-gcc -print-sysroot:"
-        aarch64-linux-gnu-gcc -print-sysroot || echo "gcc sysroot lookup failed"
-        SYSROOT="$(aarch64-linux-gnu-gcc -print-sysroot)"
-        echo "Resolved sysroot: '$SYSROOT'"
-        echo "Sysroot lib dir contents:"
-        find "$SYSROOT/lib" -iname 'ld-linux-aarch64*' 2>&1 || echo "ld-linux-aarch64.so.1 not found under sysroot/lib"
-        echo "dpkg cross-libc packages:"
-        dpkg -l | grep -i arm64-cross || echo "no arm64-cross packages found"
-        echo "readelf interpreter for dup_mov_pie:"
-        readelf -l tests/e2e/fixtures/aarch64/dup_mov_pie 2>&1 | grep -i interpreter || echo "dup_mov_pie not found or no interpreter"
 
     - name: Run integration tests with debug output
       run: |
