@@ -1,4 +1,6 @@
-use crate::e2e::harness::{Case, Window, fixture_exists, run};
+use crate::e2e::harness::{
+    Case, ExecutionExpectation, Window, fixture_exists, qemu_aarch64_available, run,
+};
 
 #[test]
 fn aarch64_dup_mov_imm_collapses_to_one_instruction() {
@@ -6,6 +8,13 @@ fn aarch64_dup_mov_imm_collapses_to_one_instruction() {
         eprintln!(
             "Skipping aarch64_dup_mov_imm_collapses_to_one_instruction: \
              aarch64/dup_mov_imm fixture not present. Run ./build_tests.sh first."
+        );
+        return;
+    }
+    if !qemu_aarch64_available() {
+        eprintln!(
+            "Skipping aarch64_dup_mov_imm_collapses_to_one_instruction: \
+             qemu-aarch64-static not present. Install qemu-user-static first."
         );
         return;
     }
@@ -21,6 +30,9 @@ fn aarch64_dup_mov_imm_collapses_to_one_instruction() {
         args: &["--algorithm", "enumerative", "--timeout", "15", "--force"],
         expected_exit_code: 0,
         expected_instructions: Some((2, 1)),
+        execution: Some(ExecutionExpectation {
+            expected_exit_code: 5,
+        }),
         ..Default::default()
     });
 }
@@ -31,6 +43,13 @@ fn aarch64_mov_add_fuse_collapses_to_one_instruction() {
         eprintln!(
             "Skipping aarch64_mov_add_fuse_collapses_to_one_instruction: \
              aarch64/mov_add_fuse fixture not present. Run ./build_tests.sh first."
+        );
+        return;
+    }
+    if !qemu_aarch64_available() {
+        eprintln!(
+            "Skipping aarch64_mov_add_fuse_collapses_to_one_instruction: \
+             qemu-aarch64-static not present. Install qemu-user-static first."
         );
         return;
     }
@@ -46,6 +65,9 @@ fn aarch64_mov_add_fuse_collapses_to_one_instruction() {
         args: &["--algorithm", "enumerative", "--timeout", "15", "--force"],
         expected_exit_code: 0,
         expected_instructions: Some((2, 1)),
+        execution: Some(ExecutionExpectation {
+            expected_exit_code: 1,
+        }),
         ..Default::default()
     });
 }
@@ -56,6 +78,13 @@ fn aarch64_sub_via_add_collapses_to_one_instruction() {
         eprintln!(
             "Skipping aarch64_sub_via_add_collapses_to_one_instruction: \
              aarch64/sub_via_add fixture not present. Run ./build_tests.sh first."
+        );
+        return;
+    }
+    if !qemu_aarch64_available() {
+        eprintln!(
+            "Skipping aarch64_sub_via_add_collapses_to_one_instruction: \
+             qemu-aarch64-static not present. Install qemu-user-static first."
         );
         return;
     }
@@ -71,6 +100,9 @@ fn aarch64_sub_via_add_collapses_to_one_instruction() {
         args: &["--algorithm", "enumerative", "--timeout", "15", "--force"],
         expected_exit_code: 0,
         expected_instructions: Some((2, 1)),
+        execution: Some(ExecutionExpectation {
+            expected_exit_code: 255,
+        }),
         ..Default::default()
     });
 }
@@ -81,6 +113,13 @@ fn aarch64_ldr_dead_load_collapses_to_one_instruction() {
         eprintln!(
             "Skipping aarch64_ldr_dead_load_collapses_to_one_instruction: \
              aarch64/ldr_dead_load fixture not present. Run ./build_tests.sh first."
+        );
+        return;
+    }
+    if !qemu_aarch64_available() {
+        eprintln!(
+            "Skipping aarch64_ldr_dead_load_collapses_to_one_instruction: \
+             qemu-aarch64-static not present. Install qemu-user-static first."
         );
         return;
     }
@@ -96,6 +135,9 @@ fn aarch64_ldr_dead_load_collapses_to_one_instruction() {
         args: &["--algorithm", "enumerative", "--timeout", "15", "--force"],
         expected_exit_code: 0,
         expected_instructions: Some((2, 1)),
+        execution: Some(ExecutionExpectation {
+            expected_exit_code: 5,
+        }),
         ..Default::default()
     });
 }
