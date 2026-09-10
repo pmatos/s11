@@ -1,6 +1,9 @@
 use std::fs;
+use std::io::Read;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
+use std::time::Duration;
+use wait_timeout::ChildExt;
 
 /// An `--start-addr`/`--end-addr` window into a fixture binary, consumed by
 /// [`Case::expected_instructions`].
@@ -259,9 +262,109 @@ pub(crate) fn run(case: &Case) {
     }
 }
 
+/// Generous bound for a fixture's native execution: healthy fixtures exit in
+/// milliseconds, but a genuinely miscompiled/looping patched binary must
+/// still be killed rather than hang `cargo test` forever.
+const EXECUTION_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// Result of running a binary to completion: its exit code and captured
+/// stdout.
+#[derive(Debug)]
+struct ExecutionOutcome {
+    exit_code: i32,
+    stdout: Vec<u8>,
+}
+
+/// Spawn `binary` with no arguments/stdin, wait up to `timeout`, and capture
+/// its exit code and stdout. Panics naming `binary` and `timeout` if the
+/// process is still running when the timeout elapses (after killing it, so
+/// no orphan survives the test run).
+fn run_to_completion(binary: &Path, timeout: Duration) -> ExecutionOutcome {
+    let mut child = Command::new(binary)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap_or_else(|err| panic!("failed to execute {binary:?}: {err}"));
+
+    let status = match child
+        .wait_timeout(timeout)
+        .unwrap_or_else(|err| panic!("failed to wait on {binary:?}: {err}"))
+    {
+        Some(status) => status,
+        None => {
+            let _ = child.kill();
+            let _ = child.wait();
+            panic!("execution of {binary:?} did not complete within {timeout:?} (timeout)");
+        }
+    };
+
+    let mut stdout = Vec::new();
+    child
+        .stdout
+        .take()
+        .expect("stdout was piped")
+        .read_to_end(&mut stdout)
+        .unwrap_or_else(|err| panic!("failed to read stdout of {binary:?}: {err}"));
+
+    ExecutionOutcome {
+        exit_code: status.code().unwrap_or(-1),
+        stdout,
+    }
+}
+
+/// Run `input_binary` and `output_binary` and compare exit code + stdout,
+/// per `expectation`. Three separate assertions, each carrying distinct
+/// debugging value: the input's own exit code (fixture/expectation
+/// misconfigured, not the optimizer's fault), the output's exit code versus
+/// the input's (a miscompile signal), and stdout (a second miscompile
+/// signal axis). All three panic messages include `reproducer` so a human
+/// can copy-paste the failing case's `s11` invocation.
+///
+/// Stdout is read only after the child has exited, not concurrently — fine
+/// for these fixtures' empty/few-byte output, well under the pipe buffer,
+/// but not a fully general solution for a binary that emits enough stdout to
+/// fill the pipe before exiting.
+fn diff_execution(
+    case_name: &str,
+    input_binary: &Path,
+    output_binary: &Path,
+    expectation: &ExecutionExpectation,
+    reproducer: &str,
+) {
+    let input = run_to_completion(input_binary, EXECUTION_TIMEOUT);
+    assert!(
+        input.exit_code == expectation.expected_exit_code,
+        "e2e case {case_name:?}: unpatched input {input_binary:?} exited {} (expected {}) — \
+         fixture or expectation is misconfigured, not an optimizer bug\n\
+         reproducer: {reproducer}",
+        input.exit_code,
+        expectation.expected_exit_code,
+    );
+
+    let output = run_to_completion(output_binary, EXECUTION_TIMEOUT);
+    assert!(
+        output.exit_code == input.exit_code,
+        "e2e case {case_name:?}: patched output {output_binary:?} exited {} but input \
+         {input_binary:?} exited {} — likely miscompile\nreproducer: {reproducer}",
+        output.exit_code,
+        input.exit_code,
+    );
+
+    assert!(
+        output.stdout == input.stdout,
+        "e2e case {case_name:?}: patched output {output_binary:?} stdout {:?} diverged from \
+         input {input_binary:?} stdout {:?} — likely miscompile\nreproducer: {reproducer}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&input.stdout),
+    );
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::os::unix::fs::PermissionsExt;
+    use std::time::Duration;
 
     /// Extract the human-readable message from a `catch_unwind` panic
     /// payload, which is a `String` or `&str` depending on how the panic
@@ -272,6 +375,97 @@ mod tests {
             .map(String::as_str)
             .or_else(|| payload.downcast_ref::<&str>().copied())
             .expect("panic payload should be a string message")
+    }
+
+    /// Write an executable `#!/bin/sh` script to `dir/name`, for cheaply
+    /// exercising [`run_to_completion`]/[`diff_execution`] without a real
+    /// fixture or toolchain.
+    fn write_script(dir: &Path, name: &str, body: &str) -> PathBuf {
+        let path = dir.join(name);
+        fs::write(&path, format!("#!/bin/sh\n{body}\n")).expect("write script");
+        let mut perms = fs::metadata(&path).expect("stat script").permissions();
+        perms.set_mode(0o755);
+        fs::set_permissions(&path, perms).expect("chmod script");
+        path
+    }
+
+    #[test]
+    fn stdout_diff_panics_on_divergent_output() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let input = write_script(dir.path(), "input.sh", "exit 0");
+        let output = write_script(dir.path(), "output.sh", "echo foo\nexit 0");
+
+        let result = std::panic::catch_unwind(|| {
+            diff_execution(
+                "stdout-diff-smoke",
+                &input,
+                &output,
+                &ExecutionExpectation {
+                    expected_exit_code: 0,
+                },
+                "repro-command",
+            )
+        });
+
+        let payload = result.expect_err("divergent stdout must panic");
+        let message = panic_message(&*payload);
+        assert!(
+            message.contains(&input.to_string_lossy().into_owned())
+                && message.contains(&output.to_string_lossy().into_owned()),
+            "panic message did not name both binaries:\n{message}"
+        );
+        assert!(
+            message.contains("foo"),
+            "panic message did not quote the differing stdout:\n{message}"
+        );
+    }
+
+    #[test]
+    fn exit_code_diff_panics_when_input_and_output_diverge() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let input = write_script(dir.path(), "input.sh", "exit 5");
+        let output = write_script(dir.path(), "output.sh", "exit 6");
+
+        let result = std::panic::catch_unwind(|| {
+            diff_execution(
+                "exit-code-diff-smoke",
+                &input,
+                &output,
+                &ExecutionExpectation {
+                    expected_exit_code: 5,
+                },
+                "repro-command",
+            )
+        });
+
+        let payload = result.expect_err("divergent exit codes must panic");
+        let message = panic_message(&*payload);
+        assert!(
+            message.contains('5') && message.contains('6'),
+            "panic message did not name both exit codes:\n{message}"
+        );
+    }
+
+    #[test]
+    fn run_to_completion_kills_a_hung_process_after_timeout() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let hung = write_script(dir.path(), "hung.sh", "sleep 5");
+
+        let start = std::time::Instant::now();
+        let result =
+            std::panic::catch_unwind(|| run_to_completion(&hung, Duration::from_millis(200)));
+        let elapsed = start.elapsed();
+
+        let payload = result.expect_err("a hung process must panic on timeout");
+        let message = panic_message(&*payload);
+        assert!(
+            message.contains("timeout") || message.contains("did not complete"),
+            "panic message did not describe a timeout:\n{message}"
+        );
+        assert!(
+            elapsed < Duration::from_secs(5),
+            "run_to_completion did not honor the timeout; took {elapsed:?}"
+        );
     }
 
     #[test]
