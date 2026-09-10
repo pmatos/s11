@@ -31,15 +31,29 @@ done
 # `-no-pie -nostdlib` gives a fixed-address ELF (entry point == the
 # fixture's first instruction) so e2e window addresses are stable across
 # rebuilds. Output goes to tests/e2e/fixtures/aarch64/, not binaries/, per
-# tests/e2e/fixtures/README.md.
+# tests/e2e/fixtures/README.md. dup_mov_pie.s is excluded here and built
+# separately below as a dynamically-linked PIE executable (issue #838) —
+# it needs libc's `exit`, which -nostdlib would leave unresolved.
 mkdir -p tests/e2e/fixtures/aarch64
 for asm_file in tests/aarch64_asm/*.s; do
     [ -e "$asm_file" ] || continue
     base_name=$(basename "$asm_file" .s)
+    [ "$base_name" = "dup_mov_pie" ] && continue
     echo "Assembling AArch64 e2e fixture $base_name..."
     aarch64-linux-gnu-gcc -no-pie -nostdlib \
         -o "tests/e2e/fixtures/aarch64/${base_name}" "$asm_file"
 done
+
+# Dynamically-linked PIE AArch64 fixture (issue #838): default gcc PIE +
+# dynamic linking against the cross sysroot's real glibc, so it exercises
+# qemu-aarch64-static's `-L <sysroot>` dynamic-linker-resolution path,
+# unlike the -no-pie -nostdlib fixtures above. Representative of a real
+# target binary like binaries/arrays_opt.
+if [ -e tests/aarch64_asm/dup_mov_pie.s ]; then
+    echo "Assembling AArch64 e2e fixture dup_mov_pie (dynamically-linked PIE)..."
+    aarch64-linux-gnu-gcc -O0 \
+        -o tests/e2e/fixtures/aarch64/dup_mov_pie tests/aarch64_asm/dup_mov_pie.s
+fi
 
 # --- x86-64 (host gcc) ---
 if command -v gcc >/dev/null && [ "$(gcc -dumpmachine | head -c 6)" = "x86_64" ]; then
