@@ -102,10 +102,13 @@ pub(crate) fn aarch64_sysroot() -> Option<PathBuf> {
 /// Whether `qemu-aarch64-static` is installed and runnable, gating AArch64
 /// execution cases so they skip cleanly on a host without `qemu-user-static`.
 pub(crate) fn qemu_aarch64_available() -> bool {
-    Command::new("qemu-aarch64-static")
-        .arg("--version")
-        .output()
-        .is_ok_and(|output| output.status.success())
+    static AVAILABLE: OnceLock<bool> = OnceLock::new();
+    *AVAILABLE.get_or_init(|| {
+        Command::new("qemu-aarch64-static")
+            .arg("--version")
+            .output()
+            .is_ok_and(|output| output.status.success())
+    })
 }
 
 /// Resolve `symbol`'s address in a fixture binary (relative to
@@ -336,18 +339,31 @@ pub(crate) fn run(case: &Case) {
         );
     }
 
+    // AArch64 needs qemu-aarch64-static to execute at all; gated here (not an
+    // early return before this point) so a host without it still runs the
+    // rest of the case — expected_instructions in particular needs no
+    // execution — instead of skipping the whole test.
     if let Some(execution) = &case.execution {
-        let path = output_path
-            .as_deref()
-            .expect("execution implies -o was set");
-        diff_execution(
-            case.name,
-            &resolve_input_path(case),
-            path,
-            execution,
-            &reproducer,
-            case.arch,
-        );
+        if case.arch == Some("aarch64") && !qemu_aarch64_available() {
+            eprintln!(
+                "Note: qemu-aarch64-static not present, skipping the behavioral execution check \
+                 for {:?} (the static instruction-count check still runs). Install \
+                 qemu-user-static to enable it.",
+                case.name,
+            );
+        } else {
+            let path = output_path
+                .as_deref()
+                .expect("execution implies -o was set");
+            diff_execution(
+                case.name,
+                &resolve_input_path(case),
+                path,
+                execution,
+                &reproducer,
+                case.arch,
+            );
+        }
     }
 
     // Only reached on success (every failure path above panics first), so the

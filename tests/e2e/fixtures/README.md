@@ -10,7 +10,8 @@ fixture and the `s11 opt`-patched output and diffs exit code + stdout
 x86-64 and x86-32. AArch64 (#838) can't run natively on the x86-64 CI host,
 so `diff_execution` instead wraps both binaries in `qemu-aarch64-static -L
 <sysroot>`, with the sysroot resolved dynamically via
-`aarch64-linux-gnu-gcc -print-sysroot`; cases gate on `qemu_aarch64_available()`
+`aarch64-linux-gnu-gcc -print-sysroot`; `run()` in `tests/e2e/harness.rs`
+gates the behavioral check on `qemu_aarch64_available()` for AArch64 cases,
 alongside the usual `fixture_exists` skip, so they skip cleanly rather than
 fail when either the AArch64 cross-toolchain or `qemu-user-static` is
 absent. See `outcome-x86-64-dup-mov-imm`

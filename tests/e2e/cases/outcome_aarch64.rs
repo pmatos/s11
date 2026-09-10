@@ -1,26 +1,6 @@
 use crate::e2e::harness::{
-    Case, ExecutionExpectation, Window, aarch64_symbol_address, fixture_exists,
-    qemu_aarch64_available, run,
+    Case, ExecutionExpectation, Window, aarch64_symbol_address, fixture_exists, run,
 };
-
-/// The behavioral (execute-and-diff) check for an AArch64 case, gated on
-/// `qemu-aarch64-static` alone: `None` (with a note, not a full test skip)
-/// when qemu is absent, so a host without qemu still runs the rest of the
-/// case — in particular `expected_instructions`, which needs no execution at
-/// all — instead of skipping the whole test the way an early `return` before
-/// `run()` would.
-fn qemu_gated_execution(case_name: &str, expected_exit_code: i32) -> Option<ExecutionExpectation> {
-    if qemu_aarch64_available() {
-        Some(ExecutionExpectation { expected_exit_code })
-    } else {
-        eprintln!(
-            "Note: qemu-aarch64-static not present, skipping the behavioral execution check \
-             for {case_name} (the static instruction-count check still runs). Install \
-             qemu-user-static to enable it."
-        );
-        None
-    }
-}
 
 #[test]
 fn aarch64_dup_mov_imm_collapses_to_one_instruction() {
@@ -43,7 +23,9 @@ fn aarch64_dup_mov_imm_collapses_to_one_instruction() {
         args: &["--algorithm", "enumerative", "--timeout", "15", "--force"],
         expected_exit_code: 0,
         expected_instructions: Some((2, 1)),
-        execution: qemu_gated_execution("aarch64-outcome-dup-mov-imm", 5),
+        execution: Some(ExecutionExpectation {
+            expected_exit_code: 5,
+        }),
         ..Default::default()
     });
 }
@@ -69,7 +51,9 @@ fn aarch64_mov_add_fuse_collapses_to_one_instruction() {
         args: &["--algorithm", "enumerative", "--timeout", "15", "--force"],
         expected_exit_code: 0,
         expected_instructions: Some((2, 1)),
-        execution: qemu_gated_execution("aarch64-outcome-mov-add-fuse", 1),
+        execution: Some(ExecutionExpectation {
+            expected_exit_code: 1,
+        }),
         ..Default::default()
     });
 }
@@ -95,7 +79,9 @@ fn aarch64_sub_via_add_collapses_to_one_instruction() {
         args: &["--algorithm", "enumerative", "--timeout", "15", "--force"],
         expected_exit_code: 0,
         expected_instructions: Some((2, 1)),
-        execution: qemu_gated_execution("aarch64-outcome-sub-via-add", 255),
+        execution: Some(ExecutionExpectation {
+            expected_exit_code: 255,
+        }),
         ..Default::default()
     });
 }
@@ -121,7 +107,9 @@ fn aarch64_ldr_dead_load_collapses_to_one_instruction() {
         args: &["--algorithm", "enumerative", "--timeout", "15", "--force"],
         expected_exit_code: 0,
         expected_instructions: Some((2, 1)),
-        execution: qemu_gated_execution("aarch64-outcome-ldr-dead-load", 5),
+        execution: Some(ExecutionExpectation {
+            expected_exit_code: 5,
+        }),
         ..Default::default()
     });
 }
@@ -167,7 +155,9 @@ fn aarch64_dup_mov_pie_collapses_to_one_instruction() {
         args: &["--algorithm", "enumerative", "--timeout", "15", "--force"],
         expected_exit_code: 0,
         expected_instructions: Some((2, 1)),
-        execution: qemu_gated_execution("aarch64-outcome-dup-mov-pie", 5),
+        execution: Some(ExecutionExpectation {
+            expected_exit_code: 5,
+        }),
         ..Default::default()
     });
 }
