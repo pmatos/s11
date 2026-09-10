@@ -39,7 +39,8 @@ pub(crate) struct Case {
     /// appended after `args`.
     pub extra_args: Vec<String>,
     pub expected_exit_code: i32,
-    pub expected_stdout_contains: Option<&'static str>,
+    /// Substring checks against stdout; every entry must be present.
+    pub expected_stdout_contains: &'static [&'static str],
     /// Substring checks against stderr; every entry must be present.
     pub expected_stderr_contains: &'static [&'static str],
     /// Instruction count (before, after) a successful optimization must report,
@@ -182,7 +183,7 @@ pub(crate) fn run(case: &Case) {
         case.expected_exit_code,
     );
 
-    if let Some(expected) = case.expected_stdout_contains {
+    for expected in case.expected_stdout_contains {
         assert!(
             stdout.contains(expected),
             "e2e case {:?}: stdout did not contain {expected:?}\n\
@@ -213,6 +214,17 @@ pub(crate) fn run(case: &Case) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Extract the human-readable message from a `catch_unwind` panic
+    /// payload, which is a `String` or `&str` depending on how the panic
+    /// was raised.
+    fn panic_message(payload: &(dyn std::any::Any + Send)) -> &str {
+        payload
+            .downcast_ref::<String>()
+            .map(String::as_str)
+            .or_else(|| payload.downcast_ref::<&str>().copied())
+            .expect("panic payload should be a string message")
+    }
 
     #[test]
     fn stdout_reports_instructions_matches_exact_counts() {
@@ -279,11 +291,7 @@ mod tests {
         let result = std::panic::catch_unwind(|| run(&case));
 
         let payload = result.expect_err("a missing stderr needle must panic");
-        let message = payload
-            .downcast_ref::<String>()
-            .map(String::as_str)
-            .or_else(|| payload.downcast_ref::<&str>().copied())
-            .expect("panic payload should be a string message");
+        let message = panic_message(&*payload);
 
         assert!(
             message.contains("this substring never appears in --help output"),
@@ -324,11 +332,7 @@ mod tests {
         let result = std::panic::catch_unwind(|| run(&case));
 
         let payload = result.expect_err("a case with a wrong expected_exit_code must panic");
-        let message = payload
-            .downcast_ref::<String>()
-            .map(String::as_str)
-            .or_else(|| payload.downcast_ref::<&str>().copied())
-            .expect("panic payload should be a string message");
+        let message = panic_message(&*payload);
 
         let expected_reproducer = reproducer_command(&s11_binary_path(), &["--help".to_string()]);
         assert!(
