@@ -163,3 +163,91 @@ fn opt_rejects_declared_aarch64_against_x86_64_elf() {
         ..Default::default()
     });
 }
+
+#[test]
+fn opt_rejects_riscv32_target_matching_elf_machine() {
+    let dir = tempfile::tempdir().expect("create fixture directory");
+    let binary: PathBuf = dir.path().join("program.elf");
+    write_bare_elf(&binary, elf::abi::EM_RISCV, false);
+
+    run(&Case {
+        name: "opt-rejects-riscv32-target-matching-elf-machine",
+        subcommand: Some("opt"),
+        binary: Some(binary),
+        arch: Some("riscv32"),
+        window: Some(Window {
+            start_addr: "0x0",
+            end_addr: "0x4",
+        }),
+        expected_exit_code: 1,
+        expected_stderr_contains: &["RISC-V optimization is not yet supported"],
+        ..Default::default()
+    });
+}
+
+#[test]
+fn opt_rejects_riscv64_target_matching_elf_machine() {
+    let dir = tempfile::tempdir().expect("create fixture directory");
+    let binary: PathBuf = dir.path().join("program.elf");
+    write_bare_elf(&binary, elf::abi::EM_RISCV, true);
+
+    run(&Case {
+        name: "opt-rejects-riscv64-target-matching-elf-machine",
+        subcommand: Some("opt"),
+        binary: Some(binary),
+        arch: Some("riscv64"),
+        window: Some(Window {
+            start_addr: "0x0",
+            end_addr: "0x4",
+        }),
+        expected_exit_code: 1,
+        expected_stderr_contains: &["RISC-V optimization is not yet supported"],
+        ..Default::default()
+    });
+}
+
+#[test]
+fn opt_rejects_riscv32_target_mismatched_with_elf_machine() {
+    let dir = tempfile::tempdir().expect("create fixture directory");
+    let binary: PathBuf = dir.path().join("program.elf");
+    write_bare_elf(&binary, elf::abi::EM_AARCH64, true);
+
+    run(&Case {
+        name: "opt-rejects-riscv32-target-mismatched-with-elf-machine",
+        subcommand: Some("opt"),
+        binary: Some(binary),
+        arch: Some("riscv32"),
+        window: Some(Window {
+            start_addr: "0x0",
+            end_addr: "0x4",
+        }),
+        expected_exit_code: 1,
+        expected_stderr_contains: &[
+            "Architecture mismatch: --arch riscv32 but ELF reports aarch64",
+        ],
+        ..Default::default()
+    });
+}
+
+#[test]
+fn opt_rejects_riscv64_target_mismatched_with_elf_machine() {
+    let dir = tempfile::tempdir().expect("create fixture directory");
+    let binary: PathBuf = dir.path().join("program.elf");
+    write_bare_elf(&binary, elf::abi::EM_AARCH64, true);
+
+    run(&Case {
+        name: "opt-rejects-riscv64-target-mismatched-with-elf-machine",
+        subcommand: Some("opt"),
+        binary: Some(binary),
+        arch: Some("riscv64"),
+        window: Some(Window {
+            start_addr: "0x0",
+            end_addr: "0x4",
+        }),
+        expected_exit_code: 1,
+        expected_stderr_contains: &[
+            "Architecture mismatch: --arch riscv64 but ELF reports aarch64",
+        ],
+        ..Default::default()
+    });
+}
