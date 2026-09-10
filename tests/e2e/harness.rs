@@ -28,12 +28,21 @@ pub(crate) struct Case {
     /// [`fixture_exists`] before setting this so a missing toolchain-built
     /// fixture skips the case instead of hitting `build_argv`'s hard panic.
     pub fixture: Option<&'static str>,
+    /// A positional input path computed at test time (e.g. a synthesized
+    /// ELF written to a tempdir). Mutually exclusive with `fixture`.
+    pub binary: Option<PathBuf>,
     pub arch: Option<&'static str>,
     pub window: Option<Window>,
     /// Remaining CLI arguments, appended after any fixture/arch/window flags.
     pub args: &'static [&'static str],
+    /// Owned, dynamically-computed argv pieces (e.g. `-o <tempdir path>`),
+    /// appended after `args`.
+    pub extra_args: Vec<String>,
     pub expected_exit_code: i32,
-    pub expected_stdout_contains: Option<&'static str>,
+    /// Substring checks against stdout; every entry must be present.
+    pub expected_stdout_contains: &'static [&'static str],
+    /// Substring checks against stderr; every entry must be present.
+    pub expected_stderr_contains: &'static [&'static str],
     /// Instruction count (before, after) a successful optimization must report,
     /// checked against the `Disassembled N instructions:`/`Optimized to N
     /// instructions:` markers `src/elf_optimizer/mod.rs` prints on success.
@@ -89,6 +98,12 @@ fn build_argv(case: &Case) -> Vec<String> {
         argv.push(subcommand.to_string());
     }
 
+    assert!(
+        case.fixture.is_none() || case.binary.is_none(),
+        "e2e case {:?}: fixture and binary are mutually exclusive positional inputs, got both",
+        case.name
+    );
+
     if let Some(fixture) = case.fixture {
         assert!(
             !Path::new(fixture).is_absolute(),
@@ -106,6 +121,10 @@ fn build_argv(case: &Case) -> Vec<String> {
         argv.push(path.to_string_lossy().into_owned());
     }
 
+    if let Some(binary) = &case.binary {
+        argv.push(binary.to_string_lossy().into_owned());
+    }
+
     if let Some(arch) = case.arch {
         argv.push("--arch".to_string());
         argv.push(arch.to_string());
@@ -119,6 +138,7 @@ fn build_argv(case: &Case) -> Vec<String> {
     }
 
     argv.extend(case.args.iter().map(|a| a.to_string()));
+    argv.extend(case.extra_args.iter().cloned());
     argv
 }
 
@@ -163,11 +183,20 @@ pub(crate) fn run(case: &Case) {
         case.expected_exit_code,
     );
 
-    if let Some(expected) = case.expected_stdout_contains {
+    for expected in case.expected_stdout_contains {
         assert!(
             stdout.contains(expected),
             "e2e case {:?}: stdout did not contain {expected:?}\n\
              reproducer: {reproducer}\nstdout:\n{stdout}",
+            case.name,
+        );
+    }
+
+    for expected in case.expected_stderr_contains {
+        assert!(
+            stderr.contains(expected),
+            "e2e case {:?}: stderr did not contain {expected:?}\n\
+             reproducer: {reproducer}\nstderr:\n{stderr}",
             case.name,
         );
     }
@@ -185,6 +214,17 @@ pub(crate) fn run(case: &Case) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Extract the human-readable message from a `catch_unwind` panic
+    /// payload, which is a `String` or `&str` depending on how the panic
+    /// was raised.
+    fn panic_message(payload: &(dyn std::any::Any + Send)) -> &str {
+        payload
+            .downcast_ref::<String>()
+            .map(String::as_str)
+            .or_else(|| payload.downcast_ref::<&str>().copied())
+            .expect("panic payload should be a string message")
+    }
 
     #[test]
     fn stdout_reports_instructions_matches_exact_counts() {
@@ -205,6 +245,58 @@ mod tests {
     fn fixture_exists_finds_known_file() {
         assert!(fixture_exists("README.md"));
         assert!(!fixture_exists("does-not-exist"));
+    }
+
+    #[test]
+    #[should_panic(expected = "mutually exclusive")]
+    fn build_argv_rejects_fixture_and_binary_both_set() {
+        let case = Case {
+            name: "fixture-and-binary-both-set",
+            fixture: Some("some-fixture.elf"),
+            binary: Some(PathBuf::from("/tmp/some-binary.elf")),
+            ..Default::default()
+        };
+        build_argv(&case);
+    }
+
+    #[test]
+    fn build_argv_appends_extra_args_after_static_args() {
+        let case = Case {
+            name: "extra-args-ordering",
+            args: &["--static-flag"],
+            extra_args: vec!["-o".to_string(), "/tmp/out.elf".to_string()],
+            ..Default::default()
+        };
+        let argv = build_argv(&case);
+        assert_eq!(
+            argv,
+            vec![
+                "--static-flag".to_string(),
+                "-o".to_string(),
+                "/tmp/out.elf".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn deliberately_missing_stderr_needle_panics_naming_it() {
+        let case = Case {
+            name: "stderr-needle-smoke",
+            args: &["--help"],
+            expected_exit_code: 0,
+            expected_stderr_contains: &["this substring never appears in --help output"],
+            ..Default::default()
+        };
+
+        let result = std::panic::catch_unwind(|| run(&case));
+
+        let payload = result.expect_err("a missing stderr needle must panic");
+        let message = panic_message(&*payload);
+
+        assert!(
+            message.contains("this substring never appears in --help output"),
+            "panic message did not name the missing needle:\n{message}"
+        );
     }
 
     #[test]
@@ -240,11 +332,7 @@ mod tests {
         let result = std::panic::catch_unwind(|| run(&case));
 
         let payload = result.expect_err("a case with a wrong expected_exit_code must panic");
-        let message = payload
-            .downcast_ref::<String>()
-            .map(String::as_str)
-            .or_else(|| payload.downcast_ref::<&str>().copied())
-            .expect("panic payload should be a string message");
+        let message = panic_message(&*payload);
 
         let expected_reproducer = reproducer_command(&s11_binary_path(), &["--help".to_string()]);
         assert!(
