@@ -28,6 +28,9 @@ pub(crate) struct Case {
     /// [`fixture_exists`] before setting this so a missing toolchain-built
     /// fixture skips the case instead of hitting `build_argv`'s hard panic.
     pub fixture: Option<&'static str>,
+    /// A positional input path computed at test time (e.g. a synthesized
+    /// ELF written to a tempdir). Mutually exclusive with `fixture`.
+    pub binary: Option<PathBuf>,
     pub arch: Option<&'static str>,
     pub window: Option<Window>,
     /// Remaining CLI arguments, appended after any fixture/arch/window flags.
@@ -89,6 +92,12 @@ fn build_argv(case: &Case) -> Vec<String> {
         argv.push(subcommand.to_string());
     }
 
+    assert!(
+        case.fixture.is_none() || case.binary.is_none(),
+        "e2e case {:?}: fixture and binary are mutually exclusive positional inputs, got both",
+        case.name
+    );
+
     if let Some(fixture) = case.fixture {
         assert!(
             !Path::new(fixture).is_absolute(),
@@ -104,6 +113,10 @@ fn build_argv(case: &Case) -> Vec<String> {
             path
         );
         argv.push(path.to_string_lossy().into_owned());
+    }
+
+    if let Some(binary) = &case.binary {
+        argv.push(binary.to_string_lossy().into_owned());
     }
 
     if let Some(arch) = case.arch {
@@ -205,6 +218,18 @@ mod tests {
     fn fixture_exists_finds_known_file() {
         assert!(fixture_exists("README.md"));
         assert!(!fixture_exists("does-not-exist"));
+    }
+
+    #[test]
+    #[should_panic(expected = "mutually exclusive")]
+    fn build_argv_rejects_fixture_and_binary_both_set() {
+        let case = Case {
+            name: "fixture-and-binary-both-set",
+            fixture: Some("some-fixture.elf"),
+            binary: Some(PathBuf::from("/tmp/some-binary.elf")),
+            ..Default::default()
+        };
+        build_argv(&case);
     }
 
     #[test]
