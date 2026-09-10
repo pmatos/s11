@@ -40,6 +40,8 @@ pub(crate) struct Case {
     pub extra_args: Vec<String>,
     pub expected_exit_code: i32,
     pub expected_stdout_contains: Option<&'static str>,
+    /// Substring checks against stderr; every entry must be present.
+    pub expected_stderr_contains: &'static [&'static str],
     /// Instruction count (before, after) a successful optimization must report,
     /// checked against the `Disassembled N instructions:`/`Optimized to N
     /// instructions:` markers `src/elf_optimizer/mod.rs` prints on success.
@@ -189,6 +191,15 @@ pub(crate) fn run(case: &Case) {
         );
     }
 
+    for expected in case.expected_stderr_contains {
+        assert!(
+            stderr.contains(expected),
+            "e2e case {:?}: stderr did not contain {expected:?}\n\
+             reproducer: {reproducer}\nstderr:\n{stderr}",
+            case.name,
+        );
+    }
+
     if let Some((before, after)) = case.expected_instructions {
         assert!(
             stdout_reports_instructions(&stdout, before, after),
@@ -252,6 +263,31 @@ mod tests {
                 "-o".to_string(),
                 "/tmp/out.elf".to_string(),
             ]
+        );
+    }
+
+    #[test]
+    fn deliberately_missing_stderr_needle_panics_naming_it() {
+        let case = Case {
+            name: "stderr-needle-smoke",
+            args: &["--help"],
+            expected_exit_code: 0,
+            expected_stderr_contains: &["this substring never appears in --help output"],
+            ..Default::default()
+        };
+
+        let result = std::panic::catch_unwind(|| run(&case));
+
+        let payload = result.expect_err("a missing stderr needle must panic");
+        let message = payload
+            .downcast_ref::<String>()
+            .map(String::as_str)
+            .or_else(|| payload.downcast_ref::<&str>().copied())
+            .expect("panic payload should be a string message");
+
+        assert!(
+            message.contains("this substring never appears in --help output"),
+            "panic message did not name the missing needle:\n{message}"
         );
     }
 
