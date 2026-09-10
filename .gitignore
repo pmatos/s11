@@ -12,6 +12,9 @@ target/
 # Test binaries
 binaries/
 
+# e2e outcome-case fixtures built by build_tests.sh (gcc -m32)
+tests/e2e/fixtures/x86_32/
+
 # IDE-specific files
 .vscode/
 .claude/settings.local.json
