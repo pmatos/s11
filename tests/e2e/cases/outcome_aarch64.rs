@@ -1,5 +1,6 @@
 use crate::e2e::harness::{
-    Case, ExecutionExpectation, Window, aarch64_symbol_address, fixture_exists, run,
+    Case, ExecutionExpectation, Window, aarch64_symbol_address, aarch64_sysroot, fixture_exists,
+    run,
 };
 
 #[test]
@@ -141,6 +142,21 @@ fn aarch64_dup_mov_pie_collapses_to_one_instruction() {
         );
         return;
     };
+    // Unlike the four -no-pie -nostdlib fixtures, this one is dynamically
+    // linked and its execution genuinely requires qemu's `-L <sysroot>` to
+    // resolve `ld-linux-aarch64.so.1` — `build_execution_command` treats a
+    // missing sysroot as best-effort and silently omits `-L`, so without this
+    // gate a host with `qemu-aarch64-static` but no working cross-toolchain
+    // sysroot would hard-fail here under qemu's "could not open dynamic
+    // linker" error instead of skipping cleanly.
+    if aarch64_sysroot().is_none() {
+        eprintln!(
+            "Skipping aarch64_dup_mov_pie_collapses_to_one_instruction: \
+             no AArch64 cross-toolchain sysroot with a usable ld-linux-aarch64.so.1 \
+             found; qemu can't resolve this dynamically-linked fixture's dynamic linker."
+        );
+        return;
+    }
     run(&Case {
         name: "aarch64-outcome-dup-mov-pie",
         subcommand: Some("opt"),

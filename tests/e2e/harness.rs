@@ -14,10 +14,11 @@ pub(crate) struct Window {
     pub end_addr: &'static str,
 }
 
-/// Post-optimization behavioral check: `run()` natively executes both the
-/// unpatched input and the `-o`-patched output and compares exit code +
-/// stdout via [`diff_execution`], catching a miscompile the SMT model
-/// misses because it observes real execution rather than static bytes.
+/// Post-optimization behavioral check: `run()` executes both the unpatched
+/// input and the `-o`-patched output (natively, or under
+/// `qemu-aarch64-static` for AArch64) and compares exit code + stdout via
+/// [`diff_execution`], catching a miscompile the SMT model misses because it
+/// observes real execution rather than static bytes.
 #[derive(Default)]
 pub(crate) struct ExecutionExpectation {
     /// The exit code both the input fixture and the patched output must
@@ -77,26 +78,59 @@ pub(crate) fn s11_binary_path() -> PathBuf {
     PathBuf::from(env!("CARGO_BIN_EXE_s11"))
 }
 
-/// Resolve the AArch64 cross-toolchain's sysroot via `aarch64-linux-gnu-gcc
-/// -print-sysroot`, for `qemu-aarch64-static -L <sysroot>`. `None` if the
-/// compiler isn't installed or exits non-zero, so callers can skip cleanly
-/// rather than hard-fail on a host without the cross-toolchain.
+/// Resolve a usable AArch64 cross-toolchain sysroot for `qemu-aarch64-static
+/// -L <sysroot>` — a directory that actually contains the target's dynamic
+/// linker at `<sysroot>/lib/ld-linux-aarch64.so.1`. Tries
+/// `aarch64-linux-gnu-gcc -print-sysroot` first, then falls back to the
+/// Debian/Ubuntu multiarch convention `/usr/<aarch64-linux-gnu-gcc
+/// -dumpmachine>` (the target triplet doubles as the multiarch directory
+/// name on those distros). Debian/Ubuntu's packaged cross-gcc doesn't
+/// configure an explicit `--with-sysroot` and reports `-print-sysroot` as
+/// bare `/` (confirmed on the `ubuntu-24.04` GitHub Actions runner: `-L /`
+/// sends qemu looking for the *host's* `/lib/ld-linux-aarch64.so.1`, which
+/// doesn't exist on an x86-64 host, even though `libc6-arm64-cross` had
+/// already installed the real one under the multiarch path) — unlike some
+/// standalone cross toolchains (e.g. Arch's `aarch64-linux-gnu-gcc` AUR
+/// package), which do report a correct `--with-sysroot` value.
+/// `-print-multiarch` was tried first and dropped: it's empty on at least
+/// one real cross-gcc build (confirmed locally) even though `-dumpmachine`
+/// on the same binary correctly reports the triplet. Neither candidate is
+/// trusted blindly; both are checked for the interpreter file before use.
+/// `None` if neither resolves, so callers can skip cleanly rather than
+/// hard-fail.
 pub(crate) fn aarch64_sysroot() -> Option<PathBuf> {
     static SYSROOT: OnceLock<Option<PathBuf>> = OnceLock::new();
-    SYSROOT
-        .get_or_init(|| {
-            let output = Command::new("aarch64-linux-gnu-gcc")
-                .arg("-print-sysroot")
-                .output()
-                .ok()?;
-            if !output.status.success() {
-                return None;
-            }
-            let path = String::from_utf8(output.stdout).ok()?;
-            let path = path.trim();
-            (!path.is_empty()).then(|| PathBuf::from(path))
-        })
-        .clone()
+    SYSROOT.get_or_init(resolve_aarch64_sysroot).clone()
+}
+
+/// Runs `aarch64-linux-gnu-gcc <flag>`, returning trimmed stdout if the
+/// command succeeds and produced non-empty output.
+fn aarch64_gcc_query(flag: &str) -> Option<String> {
+    let output = Command::new("aarch64-linux-gnu-gcc")
+        .arg(flag)
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let text = String::from_utf8(output.stdout).ok()?;
+    let text = text.trim();
+    (!text.is_empty()).then(|| text.to_string())
+}
+
+fn resolve_aarch64_sysroot() -> Option<PathBuf> {
+    let has_interpreter = |candidate: &Path| candidate.join("lib/ld-linux-aarch64.so.1").exists();
+
+    if let Some(path) = aarch64_gcc_query("-print-sysroot") {
+        let candidate = PathBuf::from(path);
+        if has_interpreter(&candidate) {
+            return Some(candidate);
+        }
+    }
+
+    let triplet = aarch64_gcc_query("-dumpmachine")?;
+    let candidate = PathBuf::from("/usr").join(triplet);
+    has_interpreter(&candidate).then_some(candidate)
 }
 
 /// Whether `qemu-aarch64-static` is installed and runnable, gating AArch64
@@ -244,9 +278,10 @@ fn build_argv(case: &Case) -> Vec<String> {
 ///
 /// Panics with the exact reproducer command on any exit-code/stdout mismatch,
 /// so a human can copy-paste it to reproduce the failure standalone. A case
-/// setting `execution` additionally runs the behavioral tier: natively
-/// executing the unpatched input and the `-o`-patched output and diffing
-/// them via [`diff_execution`].
+/// setting `execution` additionally runs the behavioral tier: executing the
+/// unpatched input and the `-o`-patched output (natively, or under
+/// `qemu-aarch64-static` for AArch64) and diffing them via
+/// [`diff_execution`].
 pub(crate) fn run(case: &Case) {
     // Cases asserting `expected_instructions` and/or `execution` write their
     // optimized output here rather than relying on `s11 opt`'s default
