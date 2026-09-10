@@ -306,17 +306,44 @@ struct ExecutionOutcome {
     stdout: Vec<u8>,
 }
 
+/// `execve`'s `ETXTBSY` ("text file busy") errno.
+const ETXTBSY: i32 = 26;
+
+/// Spawn `binary` with no arguments/stdin, retrying briefly on `ETXTBSY`.
+///
+/// A file just written and `chmod`'d executable (this harness's shell-script
+/// test fixtures, and `s11 opt -o` output) can transiently fail `execve`
+/// with `ETXTBSY` on some overlay/union filesystems even though no process
+/// holds it open for writing — observed empirically on this repo's sandbox
+/// scratch dir. Real `ETXTBSY` (something else genuinely still writing the
+/// binary) would also clear within this budget, so a bounded retry here
+/// doesn't mask a real hang — a truly stuck busy-file would instead show up
+/// as this loop exhausting its attempts and panicking below.
+fn spawn_retrying_etxtbsy(binary: &Path) -> std::process::Child {
+    const MAX_ATTEMPTS: u32 = 20;
+    for attempt in 1..=MAX_ATTEMPTS {
+        let result = Command::new(binary)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn();
+        match result {
+            Ok(child) => return child,
+            Err(err) if err.raw_os_error() == Some(ETXTBSY) && attempt < MAX_ATTEMPTS => {
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            Err(err) => panic!("failed to execute {binary:?}: {err}"),
+        }
+    }
+    unreachable!("loop always returns or panics on its last attempt");
+}
+
 /// Spawn `binary` with no arguments/stdin, wait up to `timeout`, and capture
 /// its exit code and stdout. Panics naming `binary` and `timeout` if the
 /// process is still running when the timeout elapses (after killing it, so
 /// no orphan survives the test run).
 fn run_to_completion(binary: &Path, timeout: Duration) -> ExecutionOutcome {
-    let mut child = Command::new(binary)
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .spawn()
-        .unwrap_or_else(|err| panic!("failed to execute {binary:?}: {err}"));
+    let mut child = spawn_retrying_etxtbsy(binary);
 
     let status = match child
         .wait_timeout(timeout)
