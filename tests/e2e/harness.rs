@@ -24,9 +24,9 @@ pub(crate) struct Case {
     /// `None` for top-level flags like `--help`.
     pub subcommand: Option<&'static str>,
     /// Fixture path, relative to `tests/e2e/fixtures/`. Passed as the first
-    /// positional argument after the subcommand, when present. Wired into
-    /// argv today; no case uses one yet since `tests/e2e/fixtures/` is still
-    /// empty (Phase 2, #834-#836).
+    /// positional argument after the subcommand, when present. Check
+    /// [`fixture_exists`] before setting this so a missing toolchain-built
+    /// fixture skips the case instead of hitting `build_argv`'s hard panic.
     pub fixture: Option<&'static str>,
     pub arch: Option<&'static str>,
     pub window: Option<Window>,
@@ -43,6 +43,13 @@ pub(crate) struct Case {
 
 fn fixture_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/e2e/fixtures")
+}
+
+/// Whether a fixture, relative to `tests/e2e/fixtures/`, exists. Lets a case
+/// check for its fixture and skip cleanly before `build_argv`'s hard
+/// `assert!(path.exists())`, which panics (fails, doesn't skip) instead.
+pub(crate) fn fixture_exists(relative: &str) -> bool {
+    fixture_dir().join(relative).exists()
 }
 
 pub(crate) fn s11_binary_path() -> PathBuf {
@@ -192,6 +199,12 @@ mod tests {
                        Optimized to 1 instructions:\n";
         assert!(!stdout_reports_instructions(stdout, 2, 2));
         assert!(!stdout_reports_instructions(stdout, 3, 1));
+    }
+
+    #[test]
+    fn fixture_exists_finds_known_file() {
+        assert!(fixture_exists("README.md"));
+        assert!(!fixture_exists("does-not-exist"));
     }
 
     #[test]
