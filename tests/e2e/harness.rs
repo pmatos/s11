@@ -1,3 +1,4 @@
+use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -158,23 +159,36 @@ pub(crate) fn run(case: &Case) {
         );
     }
 
+    if case.expected_instructions.is_some() {
+        assert!(
+            case.subcommand == Some("opt"),
+            "e2e case {:?}: expected_instructions requires subcommand \"opt\" (the only \
+             subcommand accepting -o/--output), got {:?}",
+            case.name,
+            case.subcommand
+        );
+    }
+
     // Cases asserting `expected_instructions` write their optimized output
     // here rather than relying on `s11 opt`'s default derived-sibling path,
-    // so runs never leave stray files next to the (gitignored) fixture.
-    let output_dir = case
-        .expected_instructions
-        .is_some()
-        .then(|| tempfile::tempdir().expect("create e2e case output tempdir"));
+    // so runs never leave stray files next to the (gitignored) fixture. The
+    // directory is persisted (not auto-cleaned via `TempDir`'s `Drop`) so
+    // that on failure the reproducer command printed below still points at
+    // an on-disk `-o` path a human can inspect or re-run standalone; it is
+    // removed explicitly at the end of this function on the success path.
+    let output_dir = case.expected_instructions.is_some().then(|| {
+        tempfile::tempdir()
+            .expect("create e2e case output tempdir")
+            .keep()
+    });
 
     let mut argv = build_argv(case);
+    let mut output_path = None;
     if let Some(dir) = &output_dir {
+        let path = dir.join(format!("{}-optimized", case.name));
         argv.push("-o".to_string());
-        argv.push(
-            dir.path()
-                .join(format!("{}-optimized", case.name))
-                .to_string_lossy()
-                .into_owned(),
-        );
+        argv.push(path.to_string_lossy().into_owned());
+        output_path = Some(path);
     }
 
     let binary = s11_binary_path();
@@ -227,6 +241,23 @@ pub(crate) fn run(case: &Case) {
              reproducer: {reproducer}\nstdout:\n{stdout}",
             case.name,
         );
+        let output_path = output_path
+            .as_ref()
+            .expect("expected_instructions implies -o was set");
+        assert!(
+            output_path.exists(),
+            "e2e case {:?}: reported instructions but never wrote -o output {:?}\n\
+             reproducer: {reproducer}\nstdout:\n{stdout}",
+            case.name,
+            output_path,
+        );
+    }
+
+    // Only reached on success (every failure path above panics first), so the
+    // reproducer's `-o` directory is still on disk for anyone inspecting a
+    // panic from this run; clean it up now that it's no longer needed.
+    if let Some(dir) = output_dir {
+        let _ = fs::remove_dir_all(dir);
     }
 }
 
