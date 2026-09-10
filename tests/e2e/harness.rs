@@ -305,6 +305,7 @@ pub(crate) fn run(case: &Case) {
             path,
             execution,
             &reproducer,
+            case.arch,
         );
     }
 
@@ -335,6 +336,27 @@ struct ExecutionOutcome {
 /// `execve`'s `ETXTBSY` ("text file busy") errno.
 const ETXTBSY: i32 = 26;
 
+/// Build the `Command` used to execute `binary` for the behavioral diff.
+/// AArch64 binaries can't run natively on the x86-64 CI host, so they're
+/// wrapped in `qemu-aarch64-static -L <sysroot>`; every other arch (and
+/// `None`) runs `binary` directly, as before qemu support was added.
+/// `-L <sysroot>` is passed unconditionally when the sysroot resolves — it's
+/// a no-op for statically-linked fixtures, confirmed empirically, so there's
+/// exactly one AArch64 code path to keep correct rather than one per
+/// linkage type.
+fn build_execution_command(binary: &Path, arch: Option<&str>) -> Command {
+    if arch == Some("aarch64") {
+        let mut command = Command::new("qemu-aarch64-static");
+        if let Some(sysroot) = aarch64_sysroot() {
+            command.arg("-L").arg(sysroot);
+        }
+        command.arg(binary);
+        command
+    } else {
+        Command::new(binary)
+    }
+}
+
 /// Spawn `binary` with no arguments/stdin, retrying briefly on `ETXTBSY`.
 ///
 /// A file just written and `chmod`'d executable can transiently fail
@@ -347,11 +369,14 @@ const ETXTBSY: i32 = 26;
 /// execute it until that window closes — reproduced empirically under this
 /// suite's parallel test threads, never when a test runs alone. A bounded
 /// retry absorbs the race without masking a real hang: a truly stuck busy
-/// file would instead exhaust the retry budget and panic below.
-fn spawn_retrying_etxtbsy(binary: &Path) -> std::process::Child {
+/// file would instead exhaust the retry budget and panic below. This race is
+/// specific to `execve`-ing a freshly-written file directly; it stays a
+/// no-op for the qemu path (qemu itself is a stable, already-open binary),
+/// but costs nothing to leave unified.
+fn spawn_retrying_etxtbsy(binary: &Path, arch: Option<&str>) -> std::process::Child {
     const MAX_ATTEMPTS: u32 = 20;
     for attempt in 1..=MAX_ATTEMPTS {
-        let result = Command::new(binary)
+        let result = build_execution_command(binary, arch)
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::null())
@@ -370,9 +395,10 @@ fn spawn_retrying_etxtbsy(binary: &Path) -> std::process::Child {
 /// Spawn `binary` with no arguments/stdin, wait up to `timeout`, and capture
 /// its exit code and stdout. Panics naming `binary` and `timeout` if the
 /// process is still running when the timeout elapses (after killing it, so
-/// no orphan survives the test run).
-fn run_to_completion(binary: &Path, timeout: Duration) -> ExecutionOutcome {
-    let mut child = spawn_retrying_etxtbsy(binary);
+/// no orphan survives the test run). `arch` selects qemu wrapping per
+/// [`build_execution_command`].
+fn run_to_completion(binary: &Path, timeout: Duration, arch: Option<&str>) -> ExecutionOutcome {
+    let mut child = spawn_retrying_etxtbsy(binary, arch);
 
     let status = match child
         .wait_timeout(timeout)
@@ -418,8 +444,9 @@ fn diff_execution(
     output_binary: &Path,
     expectation: &ExecutionExpectation,
     reproducer: &str,
+    arch: Option<&str>,
 ) {
-    let input = run_to_completion(input_binary, EXECUTION_TIMEOUT);
+    let input = run_to_completion(input_binary, EXECUTION_TIMEOUT, arch);
     assert!(
         input.exit_code == expectation.expected_exit_code,
         "e2e case {case_name:?}: unpatched input {input_binary:?} exited {} (expected {}) — \
@@ -429,7 +456,7 @@ fn diff_execution(
         expectation.expected_exit_code,
     );
 
-    let output = run_to_completion(output_binary, EXECUTION_TIMEOUT);
+    let output = run_to_completion(output_binary, EXECUTION_TIMEOUT, arch);
     assert!(
         output.exit_code == input.exit_code,
         "e2e case {case_name:?}: patched output {output_binary:?} exited {} but input \
@@ -491,6 +518,7 @@ mod tests {
                     expected_exit_code: 0,
                 },
                 "repro-command",
+                None,
             )
         });
 
@@ -522,6 +550,7 @@ mod tests {
                     expected_exit_code: 5,
                 },
                 "repro-command",
+                None,
             )
         });
 
@@ -540,7 +569,7 @@ mod tests {
 
         let start = std::time::Instant::now();
         let result =
-            std::panic::catch_unwind(|| run_to_completion(&hung, Duration::from_millis(200)));
+            std::panic::catch_unwind(|| run_to_completion(&hung, Duration::from_millis(200), None));
         let elapsed = start.elapsed();
 
         let payload = result.expect_err("a hung process must panic on timeout");
@@ -552,6 +581,24 @@ mod tests {
         assert!(
             elapsed < Duration::from_secs(5),
             "run_to_completion did not honor the timeout; took {elapsed:?}"
+        );
+    }
+
+    #[test]
+    fn run_to_completion_wraps_aarch64_binaries_in_qemu() {
+        if !fixture_exists("aarch64/dup_mov_imm") || !qemu_aarch64_available() {
+            eprintln!(
+                "Skipping run_to_completion_wraps_aarch64_binaries_in_qemu: \
+                 aarch64/dup_mov_imm fixture or qemu-aarch64-static not present. \
+                 Run ./build_tests.sh and install qemu-user-static first."
+            );
+            return;
+        }
+        let fixture = fixture_dir().join("aarch64/dup_mov_imm");
+        let outcome = run_to_completion(&fixture, EXECUTION_TIMEOUT, Some("aarch64"));
+        assert_eq!(
+            outcome.exit_code, 5,
+            "aarch64/dup_mov_imm run under qemu-aarch64-static did not report exit code 5"
         );
     }
 
@@ -639,6 +686,7 @@ mod tests {
                     expected_exit_code: 5,
                 },
                 "repro-command",
+                None,
             )
         });
 
