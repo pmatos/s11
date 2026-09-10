@@ -121,3 +121,45 @@ fn opt_rejects_invalid_end_address_format() {
         ..Default::default()
     });
 }
+
+#[test]
+fn opt_rejects_declared_x86_64_against_aarch64_elf() {
+    let dir = tempfile::tempdir().expect("create fixture directory");
+    let binary: PathBuf = dir.path().join("program.elf");
+    write_bare_elf(&binary, elf::abi::EM_AARCH64, true);
+
+    run(&Case {
+        name: "opt-rejects-declared-x86-64-against-aarch64-elf",
+        subcommand: Some("opt"),
+        binary: Some(binary),
+        arch: Some("x86-64"),
+        window: Some(Window {
+            start_addr: "0x0",
+            end_addr: "0x4",
+        }),
+        expected_exit_code: 1,
+        expected_stderr_contains: &["Architecture mismatch: --arch x86-64 but ELF reports aarch64"],
+        ..Default::default()
+    });
+}
+
+#[test]
+fn opt_rejects_declared_aarch64_against_x86_64_elf() {
+    let dir = tempfile::tempdir().expect("create fixture directory");
+    let binary: PathBuf = dir.path().join("program.elf");
+    write_bare_elf(&binary, elf::abi::EM_X86_64, true);
+
+    run(&Case {
+        name: "opt-rejects-declared-aarch64-against-x86-64-elf",
+        subcommand: Some("opt"),
+        binary: Some(binary),
+        arch: Some("aarch64"),
+        window: Some(Window {
+            start_addr: "0x0",
+            end_addr: "0x4",
+        }),
+        expected_exit_code: 1,
+        expected_stderr_contains: &["Architecture mismatch: --arch aarch64 but ELF reports x86-64"],
+        ..Default::default()
+    });
+}
