@@ -4,6 +4,7 @@ use crate::e2e::harness::{Case, run};
 fn help_exits_zero_with_usage() {
     run(&Case {
         name: "cli-contract-help",
+        subcommand: None,
         fixture: None,
         arch: None,
         window: None,

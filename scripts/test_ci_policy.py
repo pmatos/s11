@@ -161,7 +161,6 @@ class TestCiPolicy(unittest.TestCase):
             POLICY_DISCOVERY_COMMAND,
             SHELL_REGRESSION_COMMAND,
             MUTANTS_REGRESSION_COMMAND,
-            E2E_TEST_COMMAND,
         ):
             with self.subTest(command=command):
                 self.assertTrue(

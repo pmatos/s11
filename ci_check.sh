@@ -71,22 +71,15 @@ if [ -f "./build_tests.sh" ]; then
     echo
 fi
 
-# 8. Run unit + integration tests
+# 8. Run unit + integration + e2e tests
 echo "8. Running tests..."
 cargo test --verbose
 print_status "Tests"
 echo
 
-# 9. Run the e2e test suite as an explicit, named gate (mirrors the
-# integration-test invocation asserted by scripts/test_ci_policy.py).
-echo "9. Running e2e tests..."
-cargo test --test e2e_tests -- --nocapture
-print_status "e2e tests"
-echo
-
-# 10. Run all tests (if test_all.sh exists)
+# 9. Run all tests (if test_all.sh exists)
 if [ -f "./test_all.sh" ]; then
-    echo "10. Running all tests..."
+    echo "9. Running all tests..."
     ./test_all.sh
     print_status "All tests"
     echo

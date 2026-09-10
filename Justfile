@@ -73,7 +73,7 @@ test-all: build-tests build
     ./test_all.sh
 
 # Run the e2e test suite (fast tier: declarative cases under tests/e2e/).
-e2e: build
+e2e: build-tests build
     @echo "Running e2e tests..."
     cargo test --test e2e_tests -- --nocapture
 

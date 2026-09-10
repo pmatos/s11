@@ -15,8 +15,11 @@ pub(crate) struct ExecutionExpectation {
 /// A declarative e2e test case. Construct one and hand it to [`run`].
 pub(crate) struct Case {
     pub name: &'static str,
+    /// Subcommand token (e.g. `"opt"`, `"disasm"`), placed first in argv.
+    /// `None` for top-level flags like `--help`.
+    pub subcommand: Option<&'static str>,
     /// Fixture path, relative to `tests/e2e/fixtures/`. Passed as the first
-    /// positional argument when present.
+    /// positional argument after the subcommand, when present.
     pub fixture: Option<&'static str>,
     pub arch: Option<&'static str>,
     pub window: Option<Window>,
@@ -59,7 +62,17 @@ pub(crate) fn reproducer_command(binary: &Path, argv: &[String]) -> String {
 fn build_argv(case: &Case) -> Vec<String> {
     let mut argv = Vec::new();
 
+    if let Some(subcommand) = case.subcommand {
+        argv.push(subcommand.to_string());
+    }
+
     if let Some(fixture) = case.fixture {
+        assert!(
+            !Path::new(fixture).is_absolute(),
+            "e2e case {:?}: fixture must be relative to tests/e2e/fixtures/, got absolute path {:?}",
+            case.name,
+            fixture
+        );
         let path = fixture_dir().join(fixture);
         assert!(
             path.exists(),
@@ -88,8 +101,10 @@ fn build_argv(case: &Case) -> Vec<String> {
 
 /// Run a declarative e2e [`Case`] against the real `s11` binary.
 ///
-/// Panics with the exact reproducer command on any mismatch, so a human can
-/// copy-paste it to reproduce the failure standalone.
+/// Panics with the exact reproducer command on any exit-code/stdout mismatch,
+/// so a human can copy-paste it to reproduce the failure standalone. A case
+/// using an unimplemented field (`expected_instructions`, `execution`) panics
+/// before the reproducer is built, naming the tracking issue instead.
 pub(crate) fn run(case: &Case) {
     if case.expected_instructions.is_some() {
         panic!(
@@ -166,6 +181,7 @@ mod tests {
     fn deliberately_failing_case_prints_a_reproducer() {
         let case = Case {
             name: "reproducer-smoke",
+            subcommand: None,
             fixture: None,
             arch: None,
             window: None,
@@ -176,10 +192,12 @@ mod tests {
             execution: None,
         };
 
-        let previous_hook = std::panic::take_hook();
-        std::panic::set_hook(Box::new(|_| {}));
+        // Deliberately does not touch the global panic hook: cargo test runs
+        // tests within this binary concurrently by default, and a process-wide
+        // hook swap would risk swallowing a genuinely-panicking sibling test's
+        // message. The default hook printing to stderr during this expected
+        // failure is harmless.
         let result = std::panic::catch_unwind(|| run(&case));
-        std::panic::set_hook(previous_hook);
 
         let payload = result.expect_err("a case with a wrong expected_exit_code must panic");
         let message = payload
