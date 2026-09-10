@@ -1,9 +1,7 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-/// An `--start-addr`/`--end-addr` window into a fixture binary. Wired into
-/// argv today; only the outcome assertion that would consume it
-/// (`Case::expected_instructions`) is still unimplemented (Phase 2, #834-#836).
+/// An `--start-addr`/`--end-addr` window into a fixture binary.
 #[derive(Default)]
 pub(crate) struct Window {
     pub start_addr: &'static str,
@@ -26,9 +24,7 @@ pub(crate) struct Case {
     /// `None` for top-level flags like `--help`.
     pub subcommand: Option<&'static str>,
     /// Fixture path, relative to `tests/e2e/fixtures/`. Passed as the first
-    /// positional argument after the subcommand, when present. Wired into
-    /// argv today; no case uses one yet since `tests/e2e/fixtures/` is still
-    /// empty (Phase 2, #834-#836).
+    /// positional argument after the subcommand, when present.
     pub fixture: Option<&'static str>,
     pub arch: Option<&'static str>,
     pub window: Option<Window>,
@@ -59,6 +55,18 @@ fn shell_quote(arg: &str) -> String {
     } else {
         format!("'{}'", arg.replace('\'', "'\\''"))
     }
+}
+
+/// Parses the instruction count following `prefix` (e.g. `"Disassembled "`,
+/// `"Optimized to "`) out of `s11 opt`'s stdout report lines.
+fn extract_reported_count(stdout: &str, prefix: &str) -> Option<usize> {
+    let start = stdout.find(prefix)? + prefix.len();
+    stdout[start..]
+        .chars()
+        .take_while(|c| c.is_ascii_digit())
+        .collect::<String>()
+        .parse()
+        .ok()
 }
 
 /// The exact, copy-pasteable shell command a human can re-run standalone.
@@ -110,18 +118,11 @@ fn build_argv(case: &Case) -> Vec<String> {
 
 /// Run a declarative e2e [`Case`] against the real `s11` binary.
 ///
-/// Panics with the exact reproducer command on any exit-code/stdout mismatch,
-/// so a human can copy-paste it to reproduce the failure standalone. A case
-/// using an unimplemented field (`expected_instructions`, `execution`) panics
-/// before the reproducer is built, naming the tracking issue instead.
+/// Panics with the exact reproducer command on any exit-code/stdout/instruction-count
+/// mismatch, so a human can copy-paste it to reproduce the failure standalone. A case
+/// using an unimplemented field (`execution`) panics before the reproducer is built,
+/// naming the tracking issue instead.
 pub(crate) fn run(case: &Case) {
-    if case.expected_instructions.is_some() {
-        panic!(
-            "e2e case {:?}: expected_instructions is not implemented by this harness yet \
-             (Phase 2, see issues #834-#836)",
-            case.name
-        );
-    }
     if let Some(execution) = &case.execution {
         panic!(
             "e2e case {:?}: execution expectations are not implemented by this harness yet \
@@ -164,11 +165,49 @@ pub(crate) fn run(case: &Case) {
             case.name,
         );
     }
+
+    if let Some((before, after)) = case.expected_instructions {
+        let actual_before = extract_reported_count(&stdout, "Disassembled ").unwrap_or_else(|| {
+            panic!(
+                "e2e case {:?}: could not find \"Disassembled N instructions:\" in stdout\n\
+                     reproducer: {reproducer}\nstdout:\n{stdout}",
+                case.name
+            )
+        });
+        let actual_after = extract_reported_count(&stdout, "Optimized to ").unwrap_or_else(|| {
+            panic!(
+                "e2e case {:?}: could not find \"Optimized to N instructions:\" in stdout \
+                 (the search may not have found the expected shortening)\n\
+                 reproducer: {reproducer}\nstdout:\n{stdout}",
+                case.name
+            )
+        });
+        assert_eq!(
+            (actual_before, actual_after),
+            (before, after),
+            "e2e case {:?}: instruction count before->after mismatch\n\
+             reproducer: {reproducer}\nstdout:\n{stdout}",
+            case.name
+        );
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn extract_reported_count_parses_before_and_after() {
+        let stdout = "Disassembled 2 instructions:\n...\nOptimized to 1 instructions:\n";
+        assert_eq!(extract_reported_count(stdout, "Disassembled "), Some(2));
+        assert_eq!(extract_reported_count(stdout, "Optimized to "), Some(1));
+    }
+
+    #[test]
+    fn extract_reported_count_returns_none_when_prefix_missing() {
+        let stdout = "Disassembled 2 instructions:";
+        assert_eq!(extract_reported_count(stdout, "Optimized to "), None);
+    }
 
     #[test]
     fn reproducer_command_is_pasteable() {
