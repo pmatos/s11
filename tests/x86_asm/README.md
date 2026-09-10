@@ -16,3 +16,10 @@ addresses are stable across rebuilds.
 - `auto_two_dup_mov.s` — two duplicate-MOV pairs separated by an unsupported
   `push`, giving `--auto` two deterministic windows for loop, padding, budget,
   and fixpoint coverage.
+- `x86_32/dup_mov_imm.s` — the x86-32 mirror of `dup_mov_imm.s`: two identical
+  `mov eax, 5` instructions collapse to one, followed by an explicit
+  `int 0x80` exit syscall (exit code 5, the live-out EAX value) so the
+  fixture is execution-ready for a future e2e execution-tier case.
+  `build_tests.sh`'s `gcc -m32` block assembles it into
+  `tests/e2e/fixtures/x86_32/dup_mov_imm`, consumed by the e2e harness
+  (`tests/e2e/cases/outcome_x86_32.rs`), not `binaries/x86_32/`.

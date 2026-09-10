@@ -1,9 +1,7 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-/// An `--start-addr`/`--end-addr` window into a fixture binary. Wired into
-/// argv today; only the outcome assertion that would consume it
-/// (`Case::expected_instructions`) is still unimplemented (Phase 2, #834-#836).
+/// An `--start-addr`/`--end-addr` window into a fixture binary.
 #[derive(Default)]
 pub(crate) struct Window {
     pub start_addr: &'static str,
@@ -26,9 +24,9 @@ pub(crate) struct Case {
     /// `None` for top-level flags like `--help`.
     pub subcommand: Option<&'static str>,
     /// Fixture path, relative to `tests/e2e/fixtures/`. Passed as the first
-    /// positional argument after the subcommand, when present. Wired into
-    /// argv today; no case uses one yet since `tests/e2e/fixtures/` is still
-    /// empty (Phase 2, #834-#836).
+    /// positional argument after the subcommand, when present. Check
+    /// [`fixture_exists`] before setting this so a missing toolchain-built
+    /// fixture skips the case instead of hitting `build_argv`'s hard panic.
     pub fixture: Option<&'static str>,
     pub arch: Option<&'static str>,
     pub window: Option<Window>,
@@ -36,13 +34,22 @@ pub(crate) struct Case {
     pub args: &'static [&'static str],
     pub expected_exit_code: i32,
     pub expected_stdout_contains: Option<&'static str>,
-    /// Instruction count (before, after) a successful optimization must report.
+    /// Instruction count (before, after) a successful optimization must report,
+    /// checked against the `Disassembled N instructions:`/`Optimized to N
+    /// instructions:` markers `src/elf_optimizer/mod.rs` prints on success.
     pub expected_instructions: Option<(usize, usize)>,
     pub execution: Option<ExecutionExpectation>,
 }
 
 fn fixture_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/e2e/fixtures")
+}
+
+/// Whether a fixture, relative to `tests/e2e/fixtures/`, exists. Lets a case
+/// check for its fixture and skip cleanly before `build_argv`'s hard
+/// `assert!(path.exists())`, which panics (fails, doesn't skip) instead.
+pub(crate) fn fixture_exists(relative: &str) -> bool {
+    fixture_dir().join(relative).exists()
 }
 
 pub(crate) fn s11_binary_path() -> PathBuf {
@@ -66,6 +73,13 @@ pub(crate) fn reproducer_command(binary: &Path, argv: &[String]) -> String {
     let mut parts = vec![shell_quote(&binary.to_string_lossy())];
     parts.extend(argv.iter().map(|a| shell_quote(a)));
     parts.join(" ")
+}
+
+/// Checks stdout for the exact `println!` markers `src/elf_optimizer/mod.rs`
+/// emits on a successful optimization run.
+fn stdout_reports_instructions(stdout: &str, before: usize, after: usize) -> bool {
+    stdout.contains(&format!("Disassembled {before} instructions:"))
+        && stdout.contains(&format!("Optimized to {after} instructions:"))
 }
 
 fn build_argv(case: &Case) -> Vec<String> {
@@ -112,16 +126,9 @@ fn build_argv(case: &Case) -> Vec<String> {
 ///
 /// Panics with the exact reproducer command on any exit-code/stdout mismatch,
 /// so a human can copy-paste it to reproduce the failure standalone. A case
-/// using an unimplemented field (`expected_instructions`, `execution`) panics
-/// before the reproducer is built, naming the tracking issue instead.
+/// using the still-unimplemented `execution` field panics before the
+/// reproducer is built, naming the tracking issue instead.
 pub(crate) fn run(case: &Case) {
-    if case.expected_instructions.is_some() {
-        panic!(
-            "e2e case {:?}: expected_instructions is not implemented by this harness yet \
-             (Phase 2, see issues #834-#836)",
-            case.name
-        );
-    }
     if let Some(execution) = &case.execution {
         panic!(
             "e2e case {:?}: execution expectations are not implemented by this harness yet \
@@ -164,11 +171,41 @@ pub(crate) fn run(case: &Case) {
             case.name,
         );
     }
+
+    if let Some((before, after)) = case.expected_instructions {
+        assert!(
+            stdout_reports_instructions(&stdout, before, after),
+            "e2e case {:?}: stdout did not report {before} -> {after} instructions\n\
+             reproducer: {reproducer}\nstdout:\n{stdout}",
+            case.name,
+        );
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn stdout_reports_instructions_matches_exact_counts() {
+        let stdout = "Disassembled 2 instructions:\n  mov eax, 5\n  mov eax, 5\n\
+                       Optimized to 1 instructions:\n  mov eax, 5\n";
+        assert!(stdout_reports_instructions(stdout, 2, 1));
+    }
+
+    #[test]
+    fn stdout_reports_instructions_rejects_wrong_count() {
+        let stdout = "Disassembled 2 instructions:\n\
+                       Optimized to 1 instructions:\n";
+        assert!(!stdout_reports_instructions(stdout, 2, 2));
+        assert!(!stdout_reports_instructions(stdout, 3, 1));
+    }
+
+    #[test]
+    fn fixture_exists_finds_known_file() {
+        assert!(fixture_exists("README.md"));
+        assert!(!fixture_exists("does-not-exist"));
+    }
 
     #[test]
     fn reproducer_command_is_pasteable() {
