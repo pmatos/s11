@@ -71,7 +71,7 @@ if [ -f "./build_tests.sh" ]; then
     echo
 fi
 
-# 8. Run unit + integration tests
+# 8. Run unit + integration + e2e tests
 echo "8. Running tests..."
 cargo test --verbose
 print_status "Tests"

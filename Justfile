@@ -72,6 +72,14 @@ test-all: build-tests build
     @echo "Running complete test suite..."
     ./test_all.sh
 
+# Run the e2e test suite (fast tier: declarative cases under tests/e2e/).
+# No fixture-based cases exist yet, so this doesn't need build-tests
+# (which requires the AArch64 cross-toolchain); cargo builds the s11
+# binary itself via CARGO_BIN_EXE_s11.
+e2e:
+    @echo "Running e2e tests..."
+    cargo test --test e2e_tests -- --nocapture
+
 # Run the LLM-assisted superoptimizer demo against the local corpus.
 # Requires `codex` CLI installed and authenticated (subscription).
 llm-demo: build
@@ -128,6 +136,7 @@ help:
     @echo "  test          - Run tests"
     @echo "  build-tests   - Build AArch64 test binaries"
     @echo "  test-all      - Run complete test suite"
+    @echo "  e2e           - Run the e2e test suite (fast tier)"
     @echo "  bench-smt-clz - Time direct CLZ/CLS SMT equivalence queries"
     @echo "  mutants       - Run cargo-mutants locally (slow; informational)"
     @echo "  coverage      - Generate HTML coverage report via cargo-llvm-cov"
