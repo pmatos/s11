@@ -21,9 +21,10 @@ workflow:
         # enforced by prompts/plan.md, not by this gate. Nor does either
         # predicate confirm PLAN.md itself was committed: a PLAN.md written
         # but left uncommitted, paired with any unrelated commit, also
-        # satisfies both conditions below. The workflow engine has no
-        # "file committed" predicate (docs/workflows.md), so this residual
-        # gap is accepted and relies on prompts/plan.md's Exit instructions.
+        # satisfies both conditions below. Symphonika (the orchestrator
+        # running this workflow) has no "file committed" predicate, so this
+        # residual gap is accepted and relies on prompts/plan.md's Exit
+        # instructions.
         # branch_advanced_since_attempt_start is false unless this run added a
         # commit, so a resumed attempt cannot coast on a PLAN.md an earlier
         # attempt left in the workspace. This repo squash-merges (GitHub
