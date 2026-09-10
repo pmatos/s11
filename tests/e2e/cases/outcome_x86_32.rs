@@ -1,4 +1,4 @@
-use crate::e2e::harness::{Case, Window, fixture_exists, run};
+use crate::e2e::harness::{Case, ExecutionExpectation, Window, fixture_exists, run};
 
 #[test]
 fn dup_mov_collapses_to_one_x86_32() {
@@ -22,6 +22,9 @@ fn dup_mov_collapses_to_one_x86_32() {
         args: &["--algorithm", "enumerative", "--timeout", "30", "--force"],
         expected_exit_code: 0,
         expected_instructions: Some((2, 1)),
+        execution: Some(ExecutionExpectation {
+            expected_exit_code: 5,
+        }),
         ..Default::default()
     });
 }

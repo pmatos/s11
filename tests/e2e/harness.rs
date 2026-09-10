@@ -1,6 +1,9 @@
 use std::fs;
+use std::io::Read;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
+use std::time::Duration;
+use wait_timeout::ChildExt;
 
 /// An `--start-addr`/`--end-addr` window into a fixture binary, consumed by
 /// [`Case::expected_instructions`].
@@ -10,10 +13,14 @@ pub(crate) struct Window {
     pub end_addr: &'static str,
 }
 
-/// Post-optimization behavioral check: run input and output and compare.
-/// Unimplemented — `run()` panics if a case sets this (Phase 3, #834-#836).
+/// Post-optimization behavioral check: `run()` natively executes both the
+/// unpatched input and the `-o`-patched output and compares exit code +
+/// stdout via [`diff_execution`], catching a miscompile the SMT model
+/// misses because it observes real execution rather than static bytes.
 #[derive(Default)]
 pub(crate) struct ExecutionExpectation {
+    /// The exit code both the input fixture and the patched output must
+    /// produce when run with no arguments/stdin.
     pub expected_exit_code: i32,
 }
 
@@ -49,6 +56,8 @@ pub(crate) struct Case {
     /// checked against the `Disassembled N instructions:`/`Optimized to N
     /// instructions:` markers `src/elf_optimizer/mod.rs` prints on success.
     pub expected_instructions: Option<(usize, usize)>,
+    /// Behavioral (execute-and-diff) check, requires subcommand `"opt"`.
+    /// See [`ExecutionExpectation`].
     pub execution: Option<ExecutionExpectation>,
 }
 
@@ -93,6 +102,23 @@ fn stdout_reports_instructions(stdout: &str, before: usize, after: usize) -> boo
         && stdout.contains(&format!("Optimized to {after} instructions:"))
 }
 
+/// Resolve a case's positional input path: `fixture`, joined against the
+/// fixtures dir, or an explicit `binary` computed at test time. Shared by
+/// [`build_argv`] (which validates and passes it as `s11`'s argv) and the
+/// execution-diff step in [`run`], so the two can't silently resolve
+/// different paths for what is meant to be the same input.
+fn resolve_input_path(case: &Case) -> PathBuf {
+    match case.fixture {
+        Some(fixture) => fixture_dir().join(fixture),
+        None => case.binary.clone().unwrap_or_else(|| {
+            panic!(
+                "e2e case {:?}: needs a fixture or binary as its positional input",
+                case.name
+            )
+        }),
+    }
+}
+
 fn build_argv(case: &Case) -> Vec<String> {
     let mut argv = Vec::new();
 
@@ -113,7 +139,7 @@ fn build_argv(case: &Case) -> Vec<String> {
             case.name,
             fixture
         );
-        let path = fixture_dir().join(fixture);
+        let path = resolve_input_path(case);
         assert!(
             path.exists(),
             "e2e case {:?}: fixture not found: {:?}",
@@ -148,37 +174,32 @@ fn build_argv(case: &Case) -> Vec<String> {
 ///
 /// Panics with the exact reproducer command on any exit-code/stdout mismatch,
 /// so a human can copy-paste it to reproduce the failure standalone. A case
-/// using the still-unimplemented `execution` field panics before the
-/// reproducer is built, naming the tracking issue instead.
+/// setting `execution` additionally runs the behavioral tier: natively
+/// executing the unpatched input and the `-o`-patched output and diffing
+/// them via [`diff_execution`].
 pub(crate) fn run(case: &Case) {
-    if let Some(execution) = &case.execution {
-        panic!(
-            "e2e case {:?}: execution expectations are not implemented by this harness yet \
-             (Phase 3, see issues #834-#836); wanted post-execution exit code {}",
-            case.name, execution.expected_exit_code
-        );
-    }
-
-    // Cases asserting `expected_instructions` write their optimized output
-    // here rather than relying on `s11 opt`'s default derived-sibling path,
-    // so runs never leave stray files next to the (gitignored) fixture. The
-    // directory is persisted (not auto-cleaned via `TempDir`'s `Drop`) so
-    // that on failure the reproducer command printed below still points at
-    // an on-disk `-o` path a human can inspect or re-run standalone; it is
-    // removed explicitly at the end of this function on the success path.
-    let output_path = case.expected_instructions.is_some().then(|| {
-        assert!(
-            case.subcommand == Some("opt"),
-            "e2e case {:?}: expected_instructions requires subcommand \"opt\" (the only \
-             subcommand accepting -o/--output), got {:?}",
-            case.name,
-            case.subcommand
-        );
-        tempfile::tempdir()
-            .expect("create e2e case output tempdir")
-            .keep()
-            .join(format!("{}-optimized", case.name))
-    });
+    // Cases asserting `expected_instructions` and/or `execution` write their
+    // optimized output here rather than relying on `s11 opt`'s default
+    // derived-sibling path, so runs never leave stray files next to the
+    // (gitignored) fixture. The directory is persisted (not auto-cleaned via
+    // `TempDir`'s `Drop`) so that on failure the reproducer command printed
+    // below still points at an on-disk `-o` path a human can inspect or
+    // re-run standalone; it is removed explicitly at the end of this
+    // function on the success path.
+    let output_path =
+        (case.expected_instructions.is_some() || case.execution.is_some()).then(|| {
+            assert!(
+                case.subcommand == Some("opt"),
+                "e2e case {:?}: expected_instructions/execution requires subcommand \"opt\" \
+                 (the only subcommand accepting -o/--output), got {:?}",
+                case.name,
+                case.subcommand
+            );
+            tempfile::tempdir()
+                .expect("create e2e case output tempdir")
+                .keep()
+                .join(format!("{}-optimized", case.name))
+        });
 
     let mut argv = build_argv(case);
     if let Some(path) = &output_path {
@@ -248,6 +269,19 @@ pub(crate) fn run(case: &Case) {
         );
     }
 
+    if let Some(execution) = &case.execution {
+        let path = output_path
+            .as_deref()
+            .expect("execution implies -o was set");
+        diff_execution(
+            case.name,
+            &resolve_input_path(case),
+            path,
+            execution,
+            &reproducer,
+        );
+    }
+
     // Only reached on success (every failure path above panics first), so the
     // tempdir is still on disk for anyone inspecting a panic from this run;
     // clean it up now that it's no longer needed.
@@ -259,9 +293,139 @@ pub(crate) fn run(case: &Case) {
     }
 }
 
+/// Generous bound for a fixture's native execution: healthy fixtures exit in
+/// milliseconds, but a genuinely miscompiled/looping patched binary must
+/// still be killed rather than hang `cargo test` forever.
+const EXECUTION_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// Result of running a binary to completion: its exit code and captured
+/// stdout.
+#[derive(Debug)]
+struct ExecutionOutcome {
+    exit_code: i32,
+    stdout: Vec<u8>,
+}
+
+/// `execve`'s `ETXTBSY` ("text file busy") errno.
+const ETXTBSY: i32 = 26;
+
+/// Spawn `binary` with no arguments/stdin, retrying briefly on `ETXTBSY`.
+///
+/// A file just written and `chmod`'d executable can transiently fail
+/// `execve` with `ETXTBSY` when `cargo test`'s parallel worker threads race:
+/// `fork()` (used internally by `Command::spawn`) duplicates every thread's
+/// open file descriptors into the child, including another thread's
+/// still-open write handle on this exact file, for the brief window before
+/// that child reaches its own `execve` and drops non-inherited descriptors.
+/// The kernel sees the file as still open for writing and refuses to
+/// execute it until that window closes — reproduced empirically under this
+/// suite's parallel test threads, never when a test runs alone. A bounded
+/// retry absorbs the race without masking a real hang: a truly stuck busy
+/// file would instead exhaust the retry budget and panic below.
+fn spawn_retrying_etxtbsy(binary: &Path) -> std::process::Child {
+    const MAX_ATTEMPTS: u32 = 20;
+    for attempt in 1..=MAX_ATTEMPTS {
+        let result = Command::new(binary)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn();
+        match result {
+            Ok(child) => return child,
+            Err(err) if err.raw_os_error() == Some(ETXTBSY) && attempt < MAX_ATTEMPTS => {
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            Err(err) => panic!("failed to execute {binary:?}: {err}"),
+        }
+    }
+    unreachable!("loop always returns or panics on its last attempt");
+}
+
+/// Spawn `binary` with no arguments/stdin, wait up to `timeout`, and capture
+/// its exit code and stdout. Panics naming `binary` and `timeout` if the
+/// process is still running when the timeout elapses (after killing it, so
+/// no orphan survives the test run).
+fn run_to_completion(binary: &Path, timeout: Duration) -> ExecutionOutcome {
+    let mut child = spawn_retrying_etxtbsy(binary);
+
+    let status = match child
+        .wait_timeout(timeout)
+        .unwrap_or_else(|err| panic!("failed to wait on {binary:?}: {err}"))
+    {
+        Some(status) => status,
+        None => {
+            let _ = child.kill();
+            let _ = child.wait();
+            panic!("execution of {binary:?} did not complete within {timeout:?} (timeout)");
+        }
+    };
+
+    let mut stdout = Vec::new();
+    child
+        .stdout
+        .take()
+        .expect("stdout was piped")
+        .read_to_end(&mut stdout)
+        .unwrap_or_else(|err| panic!("failed to read stdout of {binary:?}: {err}"));
+
+    ExecutionOutcome {
+        exit_code: status.code().unwrap_or(-1),
+        stdout,
+    }
+}
+
+/// Run `input_binary` and `output_binary` and compare exit code + stdout,
+/// per `expectation`. Three separate assertions, each carrying distinct
+/// debugging value: the input's own exit code (fixture/expectation
+/// misconfigured, not the optimizer's fault), the output's exit code versus
+/// the input's (a miscompile signal), and stdout (a second miscompile
+/// signal axis). All three panic messages include `reproducer` so a human
+/// can copy-paste the failing case's `s11` invocation.
+///
+/// Stdout is read only after the child has exited, not concurrently — fine
+/// for these fixtures' empty/few-byte output, well under the pipe buffer,
+/// but not a fully general solution for a binary that emits enough stdout to
+/// fill the pipe before exiting.
+fn diff_execution(
+    case_name: &str,
+    input_binary: &Path,
+    output_binary: &Path,
+    expectation: &ExecutionExpectation,
+    reproducer: &str,
+) {
+    let input = run_to_completion(input_binary, EXECUTION_TIMEOUT);
+    assert!(
+        input.exit_code == expectation.expected_exit_code,
+        "e2e case {case_name:?}: unpatched input {input_binary:?} exited {} (expected {}) — \
+         fixture or expectation is misconfigured, not an optimizer bug\n\
+         reproducer: {reproducer}",
+        input.exit_code,
+        expectation.expected_exit_code,
+    );
+
+    let output = run_to_completion(output_binary, EXECUTION_TIMEOUT);
+    assert!(
+        output.exit_code == input.exit_code,
+        "e2e case {case_name:?}: patched output {output_binary:?} exited {} but input \
+         {input_binary:?} exited {} — likely miscompile\nreproducer: {reproducer}",
+        output.exit_code,
+        input.exit_code,
+    );
+
+    assert!(
+        output.stdout == input.stdout,
+        "e2e case {case_name:?}: patched output {output_binary:?} stdout {:?} diverged from \
+         input {input_binary:?} stdout {:?} — likely miscompile\nreproducer: {reproducer}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&input.stdout),
+    );
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::os::unix::fs::PermissionsExt;
+    use std::time::Duration;
 
     /// Extract the human-readable message from a `catch_unwind` panic
     /// payload, which is a `String` or `&str` depending on how the panic
@@ -272,6 +436,193 @@ mod tests {
             .map(String::as_str)
             .or_else(|| payload.downcast_ref::<&str>().copied())
             .expect("panic payload should be a string message")
+    }
+
+    /// Write an executable `#!/bin/sh` script to `dir/name`, for cheaply
+    /// exercising [`run_to_completion`]/[`diff_execution`] without a real
+    /// fixture or toolchain.
+    fn write_script(dir: &Path, name: &str, body: &str) -> PathBuf {
+        let path = dir.join(name);
+        fs::write(&path, format!("#!/bin/sh\n{body}\n")).expect("write script");
+        let mut perms = fs::metadata(&path).expect("stat script").permissions();
+        perms.set_mode(0o755);
+        fs::set_permissions(&path, perms).expect("chmod script");
+        path
+    }
+
+    #[test]
+    fn stdout_diff_panics_on_divergent_output() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let input = write_script(dir.path(), "input.sh", "exit 0");
+        let output = write_script(dir.path(), "output.sh", "echo foo\nexit 0");
+
+        let result = std::panic::catch_unwind(|| {
+            diff_execution(
+                "stdout-diff-smoke",
+                &input,
+                &output,
+                &ExecutionExpectation {
+                    expected_exit_code: 0,
+                },
+                "repro-command",
+            )
+        });
+
+        let payload = result.expect_err("divergent stdout must panic");
+        let message = panic_message(&*payload);
+        assert!(
+            message.contains(&input.to_string_lossy().into_owned())
+                && message.contains(&output.to_string_lossy().into_owned()),
+            "panic message did not name both binaries:\n{message}"
+        );
+        assert!(
+            message.contains("foo"),
+            "panic message did not quote the differing stdout:\n{message}"
+        );
+    }
+
+    #[test]
+    fn exit_code_diff_panics_when_input_and_output_diverge() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let input = write_script(dir.path(), "input.sh", "exit 5");
+        let output = write_script(dir.path(), "output.sh", "exit 6");
+
+        let result = std::panic::catch_unwind(|| {
+            diff_execution(
+                "exit-code-diff-smoke",
+                &input,
+                &output,
+                &ExecutionExpectation {
+                    expected_exit_code: 5,
+                },
+                "repro-command",
+            )
+        });
+
+        let payload = result.expect_err("divergent exit codes must panic");
+        let message = panic_message(&*payload);
+        assert!(
+            message.contains('5') && message.contains('6'),
+            "panic message did not name both exit codes:\n{message}"
+        );
+    }
+
+    #[test]
+    fn run_to_completion_kills_a_hung_process_after_timeout() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let hung = write_script(dir.path(), "hung.sh", "sleep 5");
+
+        let start = std::time::Instant::now();
+        let result =
+            std::panic::catch_unwind(|| run_to_completion(&hung, Duration::from_millis(200)));
+        let elapsed = start.elapsed();
+
+        let payload = result.expect_err("a hung process must panic on timeout");
+        let message = panic_message(&*payload);
+        assert!(
+            message.contains("timeout") || message.contains("did not complete"),
+            "panic message did not describe a timeout:\n{message}"
+        );
+        assert!(
+            elapsed < Duration::from_secs(5),
+            "run_to_completion did not honor the timeout; took {elapsed:?}"
+        );
+    }
+
+    /// Load-bearing acceptance criterion: the execution diff must actually
+    /// catch a miscompile, not just report "equal" no matter what. Runs the
+    /// real `s11 opt` on the x86-64 `dup_mov_imm` fixture (same argv as the
+    /// `outcome-x86-64-dup-mov-imm` e2e case), corrupts the one surviving
+    /// `mov rax, 5` in the patched output into `mov rax, 6`, and asserts
+    /// `diff_execution` panics naming both exit codes.
+    #[test]
+    fn execution_diff_catches_a_corrupted_patch() {
+        let fixture = fixture_dir().join("x86_64/dup_mov_imm");
+        assert!(
+            fixture.exists(),
+            "x86_64/dup_mov_imm fixture not found: {fixture:?}; run ./build_tests.sh first"
+        );
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let output_path = dir.path().join("corrupted-patch-optimized");
+
+        let status = Command::new(s11_binary_path())
+            .args([
+                "opt".as_ref(),
+                fixture.as_os_str(),
+                "--arch".as_ref(),
+                "x86-64".as_ref(),
+                "--start-addr".as_ref(),
+                "0x401000".as_ref(),
+                "--end-addr".as_ref(),
+                "0x40100e".as_ref(),
+                "--algorithm".as_ref(),
+                "enumerative".as_ref(),
+                "--timeout".as_ref(),
+                "30".as_ref(),
+                "-o".as_ref(),
+                output_path.as_os_str(),
+            ])
+            .status()
+            .expect("spawn real s11 opt");
+        assert!(status.success(), "s11 opt did not succeed: {status:?}");
+
+        let mut bytes = fs::read(&output_path).expect("read patched output");
+        // `mov rax, 5`: REX.W + C7 /0 + imm32, confirmed against this
+        // fixture's actual dynasm-assembled output before writing this test.
+        const MOV_RAX_5: [u8; 7] = [0x48, 0xC7, 0xC0, 0x05, 0x00, 0x00, 0x00];
+        let occurrences: Vec<usize> = bytes
+            .windows(MOV_RAX_5.len())
+            .enumerate()
+            .filter(|(_, window)| *window == MOV_RAX_5)
+            .map(|(offset, _)| offset)
+            .collect();
+        assert_eq!(
+            occurrences.len(),
+            1,
+            "expected exactly one collapsed `mov rax, 5` (48 C7 C0 05 00 00 00) in the patched \
+             output, found {}: {occurrences:?} — the enumerative search's output encoding may \
+             have changed",
+            occurrences.len(),
+        );
+
+        // Corrupt: flip the immediate's low byte so `mov rax, 5` becomes
+        // `mov rax, 6`, a minimal stand-in for a miscompile that corrupts
+        // live-out state.
+        let immediate_offset = occurrences[0] + 3;
+        assert_eq!(bytes[immediate_offset], 0x05);
+        bytes[immediate_offset] = 0x06;
+
+        let corrupted_path = dir.path().join("corrupted-patch-output");
+        fs::write(&corrupted_path, &bytes).expect("write corrupted copy");
+        // production `-o` output already carries the input's exec bit
+        // (`src/output_path.rs::sanitize_output_permissions`); this fresh
+        // copy needs it set explicitly.
+        let mut perms = fs::metadata(&corrupted_path)
+            .expect("stat corrupted copy")
+            .permissions();
+        perms.set_mode(0o755);
+        fs::set_permissions(&corrupted_path, perms).expect("chmod corrupted copy");
+
+        let result = std::panic::catch_unwind(|| {
+            diff_execution(
+                "execution-diff-load-bearing-smoke",
+                &fixture,
+                &corrupted_path,
+                &ExecutionExpectation {
+                    expected_exit_code: 5,
+                },
+                "repro-command",
+            )
+        });
+
+        let payload = result.expect_err("a corrupted patch must fail the behavioral diff");
+        let message = panic_message(&*payload);
+        assert!(
+            message.contains('5') && message.contains('6'),
+            "panic message did not name both the input's exit code (5) and the corrupted \
+             output's exit code (6):\n{message}"
+        );
     }
 
     #[test]

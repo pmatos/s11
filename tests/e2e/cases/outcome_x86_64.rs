@@ -1,4 +1,4 @@
-use crate::e2e::harness::{Case, Window, run};
+use crate::e2e::harness::{Case, ExecutionExpectation, Window, run};
 
 /// Known one-instruction shortening: two identical `mov rax, 5` collapse to
 /// one (see `tests/x86_asm/dup_mov_imm.s` and
@@ -17,6 +17,9 @@ fn dup_mov_imm_collapses_to_one_instruction() {
         args: &["--algorithm", "enumerative", "--timeout", "30"],
         expected_exit_code: 0,
         expected_instructions: Some((2, 1)),
+        execution: Some(ExecutionExpectation {
+            expected_exit_code: 5,
+        }),
         ..Default::default()
     });
 }

@@ -1,8 +1,16 @@
 # e2e fixtures
 
 Outcome/behavioral fixtures (Phase 2/3 of the e2e harness PRD, see issues
-#834, #835, #836). CLI-contract cases (#833 and the initial case in #832)
-need no fixture and pass `fixture: None`.
+#834, #835, #836, #837). CLI-contract cases (#833 and the initial case in
+#832) need no fixture and pass `fixture: None`.
+
+The behavioral tier (#837) natively executes both the unpatched input
+fixture and the `s11 opt`-patched output and diffs exit code + stdout
+(`ExecutionExpectation`/`diff_execution` in `tests/e2e/harness.rs`), for
+x86-64 and x86-32 — AArch64 needs `qemu-user-static` instead of native
+`Command::new` and is tracked separately (#838). See
+`outcome-x86-64-dup-mov-imm` (`tests/e2e/cases/outcome_x86_64.rs`) and
+`outcome-x86-32-dup-mov-collapse` (`tests/e2e/cases/outcome_x86_32.rs`).
 
 AArch64 fixtures (#834) live under `aarch64/`, assembled unconditionally by
 `build_tests.sh` from `tests/aarch64_asm/*.s` (the AArch64 cross-toolchain
