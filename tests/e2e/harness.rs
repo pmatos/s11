@@ -1,25 +1,34 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-/// An `--start-addr`/`--end-addr` window into a fixture binary (Phase 2/3, #834-#836).
+/// An `--start-addr`/`--end-addr` window into a fixture binary. Wired into
+/// argv today; only the outcome assertion that would consume it
+/// (`Case::expected_instructions`) is still unimplemented (Phase 2, #834-#836).
+#[derive(Default)]
 pub(crate) struct Window {
     pub start_addr: &'static str,
     pub end_addr: &'static str,
 }
 
-/// Post-optimization behavioral check: run input and output and compare (Phase 3, #834-#836).
+/// Post-optimization behavioral check: run input and output and compare.
+/// Unimplemented — `run()` panics if a case sets this (Phase 3, #834-#836).
+#[derive(Default)]
 pub(crate) struct ExecutionExpectation {
     pub expected_exit_code: i32,
 }
 
-/// A declarative e2e test case. Construct one and hand it to [`run`].
+/// A declarative e2e test case. Construct with `Case { name: ..., ..Default::default() }`
+/// and hand it to [`run`].
+#[derive(Default)]
 pub(crate) struct Case {
     pub name: &'static str,
     /// Subcommand token (e.g. `"opt"`, `"disasm"`), placed first in argv.
     /// `None` for top-level flags like `--help`.
     pub subcommand: Option<&'static str>,
     /// Fixture path, relative to `tests/e2e/fixtures/`. Passed as the first
-    /// positional argument after the subcommand, when present.
+    /// positional argument after the subcommand, when present. Wired into
+    /// argv today; no case uses one yet since `tests/e2e/fixtures/` is still
+    /// empty (Phase 2, #834-#836).
     pub fixture: Option<&'static str>,
     pub arch: Option<&'static str>,
     pub window: Option<Window>,
@@ -181,15 +190,9 @@ mod tests {
     fn deliberately_failing_case_prints_a_reproducer() {
         let case = Case {
             name: "reproducer-smoke",
-            subcommand: None,
-            fixture: None,
-            arch: None,
-            window: None,
             args: &["--help"],
             expected_exit_code: 42, // s11 --help actually exits 0; this must fail.
-            expected_stdout_contains: None,
-            expected_instructions: None,
-            execution: None,
+            ..Default::default()
         };
 
         // Deliberately does not touch the global panic hook: cargo test runs

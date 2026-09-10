@@ -73,7 +73,10 @@ test-all: build-tests build
     ./test_all.sh
 
 # Run the e2e test suite (fast tier: declarative cases under tests/e2e/).
-e2e: build-tests build
+# No fixture-based cases exist yet, so this doesn't need build-tests
+# (which requires the AArch64 cross-toolchain); cargo builds the s11
+# binary itself via CARGO_BIN_EXE_s11.
+e2e:
     @echo "Running e2e tests..."
     cargo test --test e2e_tests -- --nocapture
 

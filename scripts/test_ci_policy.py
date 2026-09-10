@@ -66,21 +66,15 @@ class TestCiPolicy(unittest.TestCase):
             has_required_command(masked_workflow, INTEGRATION_TEST_COMMAND)
         )
 
-    def test_integration_tests_are_a_required_gate(self):
+    def test_test_suites_are_required_gates(self):
         workflow = TEST_WORKFLOW_PATH.read_text(encoding="utf-8")
 
-        self.assertTrue(
-            has_required_command(workflow, INTEGRATION_TEST_COMMAND),
-            f"{INTEGRATION_TEST_COMMAND!r} must be present without failure masking",
-        )
-
-    def test_e2e_tests_are_a_required_gate(self):
-        workflow = TEST_WORKFLOW_PATH.read_text(encoding="utf-8")
-
-        self.assertTrue(
-            has_required_command(workflow, E2E_TEST_COMMAND),
-            f"{E2E_TEST_COMMAND!r} must be present without failure masking",
-        )
+        for command in (INTEGRATION_TEST_COMMAND, E2E_TEST_COMMAND):
+            with self.subTest(command=command):
+                self.assertTrue(
+                    has_required_command(workflow, command),
+                    f"{command!r} must be present without failure masking",
+                )
 
     def test_commitlint_dependencies_are_pinned_exactly(self):
         workflow = COMMITLINT_WORKFLOW_PATH.read_text(encoding="utf-8")
