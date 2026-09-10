@@ -33,3 +33,8 @@ mutants.out.old/
 
 # criterion benchmark output and JSONL accumulator (issue #70)
 benches/results/
+
+# e2e outcome/behavioral fixtures built by build_tests.sh (issue #834+);
+# the directory's own README stays tracked.
+tests/e2e/fixtures/*
+!tests/e2e/fixtures/README.md
