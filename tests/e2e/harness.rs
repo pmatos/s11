@@ -2,6 +2,7 @@ use std::fs;
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::sync::OnceLock;
 use std::time::Duration;
 use wait_timeout::ChildExt;
 
@@ -13,10 +14,11 @@ pub(crate) struct Window {
     pub end_addr: &'static str,
 }
 
-/// Post-optimization behavioral check: `run()` natively executes both the
-/// unpatched input and the `-o`-patched output and compares exit code +
-/// stdout via [`diff_execution`], catching a miscompile the SMT model
-/// misses because it observes real execution rather than static bytes.
+/// Post-optimization behavioral check: `run()` executes both the unpatched
+/// input and the `-o`-patched output (natively, or under
+/// `qemu-aarch64-static` for AArch64) and compares exit code + stdout via
+/// [`diff_execution`], catching a miscompile the SMT model misses because it
+/// observes real execution rather than static bytes.
 #[derive(Default)]
 pub(crate) struct ExecutionExpectation {
     /// The exit code both the input fixture and the patched output must
@@ -74,6 +76,108 @@ pub(crate) fn fixture_exists(relative: &str) -> bool {
 
 pub(crate) fn s11_binary_path() -> PathBuf {
     PathBuf::from(env!("CARGO_BIN_EXE_s11"))
+}
+
+/// Resolve a usable AArch64 cross-toolchain sysroot for `qemu-aarch64-static
+/// -L <sysroot>` — a directory that actually contains the target's dynamic
+/// linker at `<sysroot>/lib/ld-linux-aarch64.so.1`. Tries
+/// `aarch64-linux-gnu-gcc -print-sysroot` first, then falls back to the
+/// Debian/Ubuntu multiarch convention `/usr/<aarch64-linux-gnu-gcc
+/// -dumpmachine>` (the target triplet doubles as the multiarch directory
+/// name on those distros). Debian/Ubuntu's packaged cross-gcc doesn't
+/// configure an explicit `--with-sysroot` and reports `-print-sysroot` as
+/// bare `/` (confirmed on the `ubuntu-24.04` GitHub Actions runner: `-L /`
+/// sends qemu looking for the *host's* `/lib/ld-linux-aarch64.so.1`, which
+/// doesn't exist on an x86-64 host, even though `libc6-arm64-cross` had
+/// already installed the real one under the multiarch path) — unlike some
+/// standalone cross toolchains (e.g. Arch's `aarch64-linux-gnu-gcc` AUR
+/// package), which do report a correct `--with-sysroot` value.
+/// `-print-multiarch` was tried first and dropped: it's empty on at least
+/// one real cross-gcc build (confirmed locally) even though `-dumpmachine`
+/// on the same binary correctly reports the triplet. Neither candidate is
+/// trusted blindly; both are checked for the interpreter file before use.
+/// `None` if neither resolves, so callers can skip cleanly rather than
+/// hard-fail.
+pub(crate) fn aarch64_sysroot() -> Option<PathBuf> {
+    static SYSROOT: OnceLock<Option<PathBuf>> = OnceLock::new();
+    SYSROOT.get_or_init(resolve_aarch64_sysroot).clone()
+}
+
+/// Runs `aarch64-linux-gnu-gcc <flag>`, returning trimmed stdout if the
+/// command succeeds and produced non-empty output.
+fn aarch64_gcc_query(flag: &str) -> Option<String> {
+    let output = Command::new("aarch64-linux-gnu-gcc")
+        .arg(flag)
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let text = String::from_utf8(output.stdout).ok()?;
+    let text = text.trim();
+    (!text.is_empty()).then(|| text.to_string())
+}
+
+fn resolve_aarch64_sysroot() -> Option<PathBuf> {
+    let has_interpreter = |candidate: &Path| candidate.join("lib/ld-linux-aarch64.so.1").exists();
+
+    if let Some(path) = aarch64_gcc_query("-print-sysroot") {
+        let candidate = PathBuf::from(path);
+        if has_interpreter(&candidate) {
+            return Some(candidate);
+        }
+    }
+
+    let triplet = aarch64_gcc_query("-dumpmachine")?;
+    let candidate = PathBuf::from("/usr").join(triplet);
+    has_interpreter(&candidate).then_some(candidate)
+}
+
+/// Whether `qemu-aarch64-static` is installed and runnable, gating AArch64
+/// execution cases so they skip cleanly on a host without `qemu-user-static`.
+pub(crate) fn qemu_aarch64_available() -> bool {
+    static AVAILABLE: OnceLock<bool> = OnceLock::new();
+    *AVAILABLE.get_or_init(|| {
+        Command::new("qemu-aarch64-static")
+            .arg("--version")
+            .output()
+            .is_ok_and(|output| output.status.success())
+    })
+}
+
+/// Resolve `symbol`'s address in a fixture binary (relative to
+/// `tests/e2e/fixtures/`) via `aarch64-linux-gnu-nm --defined-only`.
+///
+/// Exists so window addresses for dynamically-linked fixtures don't have to
+/// be hardcoded: a symbol like `main`'s address depends on glibc's crt
+/// startup code size, which varies across `gcc-aarch64-linux-gnu`/glibc
+/// builds — a value pinned by inspecting one build (e.g. via
+/// `aarch64-linux-gnu-objdump`) can silently go stale on a different
+/// toolchain build (confirmed: it did, immediately, between one session's
+/// build and the `ubuntu-24.04` CI runner's apt-installed toolchain).
+/// `None` if `nm` is missing, the fixture doesn't exist, or the symbol
+/// isn't found — callers should skip cleanly rather than hard-fail.
+pub(crate) fn aarch64_symbol_address(fixture: &str, symbol: &str) -> Option<u64> {
+    let path = fixture_dir().join(fixture);
+    let output = Command::new("aarch64-linux-gnu-nm")
+        .arg("--defined-only")
+        .arg(&path)
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let stdout = String::from_utf8(output.stdout).ok()?;
+    stdout.lines().find_map(|line| {
+        let mut fields = line.split_whitespace();
+        let addr = fields.next()?;
+        let _kind = fields.next()?;
+        if fields.next()? == symbol {
+            u64::from_str_radix(addr, 16).ok()
+        } else {
+            None
+        }
+    })
 }
 
 fn shell_quote(arg: &str) -> String {
@@ -174,9 +278,10 @@ fn build_argv(case: &Case) -> Vec<String> {
 ///
 /// Panics with the exact reproducer command on any exit-code/stdout mismatch,
 /// so a human can copy-paste it to reproduce the failure standalone. A case
-/// setting `execution` additionally runs the behavioral tier: natively
-/// executing the unpatched input and the `-o`-patched output and diffing
-/// them via [`diff_execution`].
+/// setting `execution` additionally runs the behavioral tier: executing the
+/// unpatched input and the `-o`-patched output (natively, or under
+/// `qemu-aarch64-static` for AArch64) and diffing them via
+/// [`diff_execution`].
 pub(crate) fn run(case: &Case) {
     // Cases asserting `expected_instructions` and/or `execution` write their
     // optimized output here rather than relying on `s11 opt`'s default
@@ -269,17 +374,31 @@ pub(crate) fn run(case: &Case) {
         );
     }
 
+    // AArch64 needs qemu-aarch64-static to execute at all; gated here (not an
+    // early return before this point) so a host without it still runs the
+    // rest of the case — expected_instructions in particular needs no
+    // execution — instead of skipping the whole test.
     if let Some(execution) = &case.execution {
-        let path = output_path
-            .as_deref()
-            .expect("execution implies -o was set");
-        diff_execution(
-            case.name,
-            &resolve_input_path(case),
-            path,
-            execution,
-            &reproducer,
-        );
+        if case.arch == Some("aarch64") && !qemu_aarch64_available() {
+            eprintln!(
+                "Note: qemu-aarch64-static not present, skipping the behavioral execution check \
+                 for {:?} (the static instruction-count check still runs). Install \
+                 qemu-user-static to enable it.",
+                case.name,
+            );
+        } else {
+            let path = output_path
+                .as_deref()
+                .expect("execution implies -o was set");
+            diff_execution(
+                case.name,
+                &resolve_input_path(case),
+                path,
+                execution,
+                &reproducer,
+                case.arch,
+            );
+        }
     }
 
     // Only reached on success (every failure path above panics first), so the
@@ -299,15 +418,42 @@ pub(crate) fn run(case: &Case) {
 const EXECUTION_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Result of running a binary to completion: its exit code and captured
-/// stdout.
+/// stdout/stderr.
 #[derive(Debug)]
 struct ExecutionOutcome {
     exit_code: i32,
     stdout: Vec<u8>,
+    /// Captured so a qemu-level failure (bad `-L` sysroot, missing shared
+    /// library, unemulated syscall) is diagnosable from the panic message
+    /// instead of silently discarded — qemu prints exactly this kind of
+    /// error to stderr, not stdout, and its own failure exit code can
+    /// otherwise be indistinguishable from a fixture's legitimate one.
+    stderr: Vec<u8>,
 }
 
 /// `execve`'s `ETXTBSY` ("text file busy") errno.
 const ETXTBSY: i32 = 26;
+
+/// Build the `Command` used to execute `binary` for the behavioral diff.
+/// AArch64 binaries can't run natively on the x86-64 CI host, so they're
+/// wrapped in `qemu-aarch64-static -L <sysroot>`; every other arch (and
+/// `None`) runs `binary` directly, as before qemu support was added.
+/// `-L <sysroot>` is passed unconditionally when the sysroot resolves — it's
+/// a no-op for statically-linked fixtures, confirmed empirically, so there's
+/// exactly one AArch64 code path to keep correct rather than one per
+/// linkage type.
+fn build_execution_command(binary: &Path, arch: Option<&str>) -> Command {
+    if arch == Some("aarch64") {
+        let mut command = Command::new("qemu-aarch64-static");
+        if let Some(sysroot) = aarch64_sysroot() {
+            command.arg("-L").arg(sysroot);
+        }
+        command.arg(binary);
+        command
+    } else {
+        Command::new(binary)
+    }
+}
 
 /// Spawn `binary` with no arguments/stdin, retrying briefly on `ETXTBSY`.
 ///
@@ -321,14 +467,17 @@ const ETXTBSY: i32 = 26;
 /// execute it until that window closes — reproduced empirically under this
 /// suite's parallel test threads, never when a test runs alone. A bounded
 /// retry absorbs the race without masking a real hang: a truly stuck busy
-/// file would instead exhaust the retry budget and panic below.
-fn spawn_retrying_etxtbsy(binary: &Path) -> std::process::Child {
+/// file would instead exhaust the retry budget and panic below. This race is
+/// specific to `execve`-ing a freshly-written file directly; it stays a
+/// no-op for the qemu path (qemu itself is a stable, already-open binary),
+/// but costs nothing to leave unified.
+fn spawn_retrying_etxtbsy(binary: &Path, arch: Option<&str>) -> std::process::Child {
     const MAX_ATTEMPTS: u32 = 20;
     for attempt in 1..=MAX_ATTEMPTS {
-        let result = Command::new(binary)
+        let result = build_execution_command(binary, arch)
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
-            .stderr(Stdio::null())
+            .stderr(Stdio::piped())
             .spawn();
         match result {
             Ok(child) => return child,
@@ -344,9 +493,10 @@ fn spawn_retrying_etxtbsy(binary: &Path) -> std::process::Child {
 /// Spawn `binary` with no arguments/stdin, wait up to `timeout`, and capture
 /// its exit code and stdout. Panics naming `binary` and `timeout` if the
 /// process is still running when the timeout elapses (after killing it, so
-/// no orphan survives the test run).
-fn run_to_completion(binary: &Path, timeout: Duration) -> ExecutionOutcome {
-    let mut child = spawn_retrying_etxtbsy(binary);
+/// no orphan survives the test run). `arch` selects qemu wrapping per
+/// [`build_execution_command`].
+fn run_to_completion(binary: &Path, timeout: Duration, arch: Option<&str>) -> ExecutionOutcome {
+    let mut child = spawn_retrying_etxtbsy(binary, arch);
 
     let status = match child
         .wait_timeout(timeout)
@@ -368,9 +518,18 @@ fn run_to_completion(binary: &Path, timeout: Duration) -> ExecutionOutcome {
         .read_to_end(&mut stdout)
         .unwrap_or_else(|err| panic!("failed to read stdout of {binary:?}: {err}"));
 
+    let mut stderr = Vec::new();
+    child
+        .stderr
+        .take()
+        .expect("stderr was piped")
+        .read_to_end(&mut stderr)
+        .unwrap_or_else(|err| panic!("failed to read stderr of {binary:?}: {err}"));
+
     ExecutionOutcome {
         exit_code: status.code().unwrap_or(-1),
         stdout,
+        stderr,
     }
 }
 
@@ -382,34 +541,45 @@ fn run_to_completion(binary: &Path, timeout: Duration) -> ExecutionOutcome {
 /// signal axis). All three panic messages include `reproducer` so a human
 /// can copy-paste the failing case's `s11` invocation.
 ///
-/// Stdout is read only after the child has exited, not concurrently — fine
-/// for these fixtures' empty/few-byte output, well under the pipe buffer,
-/// but not a fully general solution for a binary that emits enough stdout to
-/// fill the pipe before exiting.
+/// Stdout/stderr are read only after the child has exited, not
+/// concurrently — fine for these fixtures' empty/few-byte output, well
+/// under the pipe buffer, but not a fully general solution for a binary
+/// that emits enough output to fill a pipe before exiting.
+///
+/// Stderr is included in the exit-code panic messages (but not compared
+/// between input/output, unlike stdout) so a qemu-level failure — not the
+/// fixture itself — is diagnosable: qemu reports things like a missing
+/// dynamic linker or an unemulated syscall on stderr, and its own failure
+/// exit code isn't otherwise distinguishable from a fixture legitimately
+/// exiting with the same code.
 fn diff_execution(
     case_name: &str,
     input_binary: &Path,
     output_binary: &Path,
     expectation: &ExecutionExpectation,
     reproducer: &str,
+    arch: Option<&str>,
 ) {
-    let input = run_to_completion(input_binary, EXECUTION_TIMEOUT);
+    let input = run_to_completion(input_binary, EXECUTION_TIMEOUT, arch);
     assert!(
         input.exit_code == expectation.expected_exit_code,
         "e2e case {case_name:?}: unpatched input {input_binary:?} exited {} (expected {}) — \
          fixture or expectation is misconfigured, not an optimizer bug\n\
-         reproducer: {reproducer}",
+         reproducer: {reproducer}\nstderr:\n{}",
         input.exit_code,
         expectation.expected_exit_code,
+        String::from_utf8_lossy(&input.stderr),
     );
 
-    let output = run_to_completion(output_binary, EXECUTION_TIMEOUT);
+    let output = run_to_completion(output_binary, EXECUTION_TIMEOUT, arch);
     assert!(
         output.exit_code == input.exit_code,
         "e2e case {case_name:?}: patched output {output_binary:?} exited {} but input \
-         {input_binary:?} exited {} — likely miscompile\nreproducer: {reproducer}",
+         {input_binary:?} exited {} — likely miscompile\nreproducer: {reproducer}\n\
+         output stderr:\n{}",
         output.exit_code,
         input.exit_code,
+        String::from_utf8_lossy(&output.stderr),
     );
 
     assert!(
@@ -465,6 +635,7 @@ mod tests {
                     expected_exit_code: 0,
                 },
                 "repro-command",
+                None,
             )
         });
 
@@ -496,6 +667,7 @@ mod tests {
                     expected_exit_code: 5,
                 },
                 "repro-command",
+                None,
             )
         });
 
@@ -514,7 +686,7 @@ mod tests {
 
         let start = std::time::Instant::now();
         let result =
-            std::panic::catch_unwind(|| run_to_completion(&hung, Duration::from_millis(200)));
+            std::panic::catch_unwind(|| run_to_completion(&hung, Duration::from_millis(200), None));
         let elapsed = start.elapsed();
 
         let payload = result.expect_err("a hung process must panic on timeout");
@@ -526,6 +698,24 @@ mod tests {
         assert!(
             elapsed < Duration::from_secs(5),
             "run_to_completion did not honor the timeout; took {elapsed:?}"
+        );
+    }
+
+    #[test]
+    fn run_to_completion_wraps_aarch64_binaries_in_qemu() {
+        if !fixture_exists("aarch64/dup_mov_imm") || !qemu_aarch64_available() {
+            eprintln!(
+                "Skipping run_to_completion_wraps_aarch64_binaries_in_qemu: \
+                 aarch64/dup_mov_imm fixture or qemu-aarch64-static not present. \
+                 Run ./build_tests.sh and install qemu-user-static first."
+            );
+            return;
+        }
+        let fixture = fixture_dir().join("aarch64/dup_mov_imm");
+        let outcome = run_to_completion(&fixture, EXECUTION_TIMEOUT, Some("aarch64"));
+        assert_eq!(
+            outcome.exit_code, 5,
+            "aarch64/dup_mov_imm run under qemu-aarch64-static did not report exit code 5"
         );
     }
 
@@ -613,6 +803,7 @@ mod tests {
                     expected_exit_code: 5,
                 },
                 "repro-command",
+                None,
             )
         });
 
@@ -623,6 +814,29 @@ mod tests {
             "panic message did not name both the input's exit code (5) and the corrupted \
              output's exit code (6):\n{message}"
         );
+    }
+
+    /// Consistency check, not a presence assertion: hard-asserting
+    /// `qemu_aarch64_available()` is `true` would fail `just e2e` on any
+    /// contributor machine without the toolchain installed, defeating the
+    /// graceful-skip requirement the AArch64 execution cases rely on.
+    #[test]
+    fn qemu_aarch64_available_matches_which() {
+        let which_found = Command::new("which")
+            .arg("qemu-aarch64-static")
+            .output()
+            .is_ok_and(|output| output.status.success());
+        assert_eq!(qemu_aarch64_available(), which_found);
+    }
+
+    #[test]
+    fn aarch64_sysroot_some_implies_path_exists() {
+        if let Some(path) = aarch64_sysroot() {
+            assert!(
+                path.exists(),
+                "aarch64-linux-gnu-gcc -print-sysroot reported {path:?}, which does not exist"
+            );
+        }
     }
 
     #[test]

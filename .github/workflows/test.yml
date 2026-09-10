@@ -44,7 +44,7 @@ jobs:
     - name: Install dependencies
       run: |
         sudo apt-get update
-        sudo apt-get install -y libcapstone-dev gcc-aarch64-linux-gnu z3 libz3-dev
+        sudo apt-get install -y libcapstone-dev gcc-aarch64-linux-gnu z3 libz3-dev qemu-user-static
         curl --proto '=https' --tlsv1.2 -sSf https://just.systems/install.sh | sudo bash -s -- --to /usr/local/bin
 
     - name: Check mutation-test wrapper invocations
