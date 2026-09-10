@@ -13,10 +13,14 @@ pub(crate) struct Window {
     pub end_addr: &'static str,
 }
 
-/// Post-optimization behavioral check: run input and output and compare.
-/// Unimplemented — `run()` panics if a case sets this (Phase 3, #834-#836).
+/// Post-optimization behavioral check: `run()` natively executes both the
+/// unpatched input and the `-o`-patched output and compares exit code +
+/// stdout via [`diff_execution`], catching a miscompile the SMT model
+/// misses because it observes real execution rather than static bytes.
 #[derive(Default)]
 pub(crate) struct ExecutionExpectation {
+    /// The exit code both the input fixture and the patched output must
+    /// produce when run with no arguments/stdin.
     pub expected_exit_code: i32,
 }
 
@@ -52,6 +56,8 @@ pub(crate) struct Case {
     /// checked against the `Disassembled N instructions:`/`Optimized to N
     /// instructions:` markers `src/elf_optimizer/mod.rs` prints on success.
     pub expected_instructions: Option<(usize, usize)>,
+    /// Behavioral (execute-and-diff) check, requires subcommand `"opt"`.
+    /// See [`ExecutionExpectation`].
     pub execution: Option<ExecutionExpectation>,
 }
 
@@ -96,6 +102,23 @@ fn stdout_reports_instructions(stdout: &str, before: usize, after: usize) -> boo
         && stdout.contains(&format!("Optimized to {after} instructions:"))
 }
 
+/// Resolve a case's positional input path: `fixture`, joined against the
+/// fixtures dir, or an explicit `binary` computed at test time. Shared by
+/// [`build_argv`] (which validates and passes it as `s11`'s argv) and the
+/// execution-diff step in [`run`], so the two can't silently resolve
+/// different paths for what is meant to be the same input.
+fn resolve_input_path(case: &Case) -> PathBuf {
+    match case.fixture {
+        Some(fixture) => fixture_dir().join(fixture),
+        None => case.binary.clone().unwrap_or_else(|| {
+            panic!(
+                "e2e case {:?}: needs a fixture or binary as its positional input",
+                case.name
+            )
+        }),
+    }
+}
+
 fn build_argv(case: &Case) -> Vec<String> {
     let mut argv = Vec::new();
 
@@ -116,7 +139,7 @@ fn build_argv(case: &Case) -> Vec<String> {
             case.name,
             fixture
         );
-        let path = fixture_dir().join(fixture);
+        let path = resolve_input_path(case);
         assert!(
             path.exists(),
             "e2e case {:?}: fixture not found: {:?}",
@@ -151,37 +174,32 @@ fn build_argv(case: &Case) -> Vec<String> {
 ///
 /// Panics with the exact reproducer command on any exit-code/stdout mismatch,
 /// so a human can copy-paste it to reproduce the failure standalone. A case
-/// using the still-unimplemented `execution` field panics before the
-/// reproducer is built, naming the tracking issue instead.
+/// setting `execution` additionally runs the behavioral tier: natively
+/// executing the unpatched input and the `-o`-patched output and diffing
+/// them via [`diff_execution`].
 pub(crate) fn run(case: &Case) {
-    if let Some(execution) = &case.execution {
-        panic!(
-            "e2e case {:?}: execution expectations are not implemented by this harness yet \
-             (Phase 3, see issues #834-#836); wanted post-execution exit code {}",
-            case.name, execution.expected_exit_code
-        );
-    }
-
-    // Cases asserting `expected_instructions` write their optimized output
-    // here rather than relying on `s11 opt`'s default derived-sibling path,
-    // so runs never leave stray files next to the (gitignored) fixture. The
-    // directory is persisted (not auto-cleaned via `TempDir`'s `Drop`) so
-    // that on failure the reproducer command printed below still points at
-    // an on-disk `-o` path a human can inspect or re-run standalone; it is
-    // removed explicitly at the end of this function on the success path.
-    let output_path = case.expected_instructions.is_some().then(|| {
-        assert!(
-            case.subcommand == Some("opt"),
-            "e2e case {:?}: expected_instructions requires subcommand \"opt\" (the only \
-             subcommand accepting -o/--output), got {:?}",
-            case.name,
-            case.subcommand
-        );
-        tempfile::tempdir()
-            .expect("create e2e case output tempdir")
-            .keep()
-            .join(format!("{}-optimized", case.name))
-    });
+    // Cases asserting `expected_instructions` and/or `execution` write their
+    // optimized output here rather than relying on `s11 opt`'s default
+    // derived-sibling path, so runs never leave stray files next to the
+    // (gitignored) fixture. The directory is persisted (not auto-cleaned via
+    // `TempDir`'s `Drop`) so that on failure the reproducer command printed
+    // below still points at an on-disk `-o` path a human can inspect or
+    // re-run standalone; it is removed explicitly at the end of this
+    // function on the success path.
+    let output_path =
+        (case.expected_instructions.is_some() || case.execution.is_some()).then(|| {
+            assert!(
+                case.subcommand == Some("opt"),
+                "e2e case {:?}: expected_instructions/execution requires subcommand \"opt\" \
+                 (the only subcommand accepting -o/--output), got {:?}",
+                case.name,
+                case.subcommand
+            );
+            tempfile::tempdir()
+                .expect("create e2e case output tempdir")
+                .keep()
+                .join(format!("{}-optimized", case.name))
+        });
 
     let mut argv = build_argv(case);
     if let Some(path) = &output_path {
@@ -248,6 +266,19 @@ pub(crate) fn run(case: &Case) {
              reproducer: {reproducer}\nstdout:\n{stdout}",
             case.name,
             path,
+        );
+    }
+
+    if let Some(execution) = &case.execution {
+        let path = output_path
+            .as_deref()
+            .expect("execution implies -o was set");
+        diff_execution(
+            case.name,
+            &resolve_input_path(case),
+            path,
+            execution,
+            &reproducer,
         );
     }
 
