@@ -38,16 +38,18 @@ if you need the PR number — do not assume one. Stay on branch
 - If `/code-review --fix` genuinely cannot proceed (e.g. no open PR found
   for this branch), post `gh issue comment {{issue.number}}` explaining
   what blocked you, write the same explanation to
-  `{{workspace.path}}/EVIDENCE.md`, and **exit non-zero (e.g. `exit 1`)**.
+  `{{workspace.path}}/EVIDENCE.md`, then **write `BLOCKED.md` in the
+  workspace root** (uncommitted) with the same explanation and exit 0.
   Comment on the **issue**, not the PR: the blocking case named above is
   that no PR exists, and `gh pr comment` resolves its target from the
   branch's PR — it would fail and post nothing, losing the only record of
-  why the run stopped. A non-zero exit routes the FSM through
-  `provider_success: false` to the `to: failed` catch-all and terminates
-  the run as blocked.
+  why the run stopped. A Bash tool call's `exit 1` only ends that subshell,
+  not the provider session, so it cannot make `provider_success` false.
+  The FSM instead gates this state's advance on `BLOCKED.md` not existing;
+  writing that file is what routes the run to its blocked exit.
 
 ## Exit
 
 Exit 0 once `/code-review --fix` has run and any fixes it made are pushed
-(or it found nothing to fix). The orchestrator will advance to the next
-state on success.
+(or it found nothing to fix), and no `BLOCKED.md` exists in the workspace.
+The orchestrator will advance to the next state on success.
